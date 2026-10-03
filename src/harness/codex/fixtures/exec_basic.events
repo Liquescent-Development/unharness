@@ -1,0 +1,5 @@
+SessionStarted id=01a10023-adff-7f22-b30a-fe6d43132ed2 model=-
+TurnStarted
+TextDelta "pong"
+Usage in=16229 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

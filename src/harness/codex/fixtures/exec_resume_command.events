@@ -1,0 +1,8 @@
+SessionStarted id=01a10023-adff-7f22-b30a-fe6d43132ed2 model=-
+TurnStarted
+TextDelta "I’ll run the command now.\\n"
+ToolCallStarted id=item_1 name=shell input={"command":"/usr/bin/zsh -lc 'echo codex-spike-ok'"}
+ToolCallResult id=item_1 error=false "codex-spike-ok\\n"
+TextDelta "done"
+Usage in=50329 out=102 cache_read=41088 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

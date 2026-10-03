@@ -69,7 +69,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         }
     }
 
-    let registry = Arc::new(Registry::new());
+    let registry = Arc::new(Registry::from_config(config));
     let overrides = binary_overrides(&registry, config);
     let (harness, binary) = registry.resolve(
         args.harness.as_deref(),

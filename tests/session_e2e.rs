@@ -90,6 +90,9 @@ async fn run_turn(
     let mut events = Vec::new();
     loop {
         let ev = next_event(handle).await;
+        if std::env::var("UNHARNESS_E2E_DEBUG").is_ok() {
+            eprintln!("[e2e] {}", ev.summary());
+        }
         if let Some(decision) = decide(&ev)
             && let AgentEvent::PermissionRequest(req) = &ev
         {
@@ -299,4 +302,197 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     // No assertion possible on the pid from here; the test passing without a
     // hang (tokio runtime shutdown would wait on nothing) is the signal.
+}
+
+#[tokio::test]
+async fn pi_rpc_session_streams_tool_and_text() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/basic_and_bash.jsonl");
+    let harness = unharness::harness::pi::PiHarness;
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    // The driver sends get_state first; the fixture then replays the catalog
+    // responses before the first prompt.
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "pong?".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "run bash".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "bash"))
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "pi-spike-ok\n")
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "done"))
+    );
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[0]["type"], "get_state");
+    assert!(
+        sent.iter()
+            .any(|v| v["type"] == "prompt" && v["message"] == "run bash")
+    );
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn codex_app_server_handshake_turns_and_approval() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_two_turns.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "pong?".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a10023-e1c2"))));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "run it".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |ev| match ev {
+        AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Allow {
+            updated_input: None,
+        }),
+        _ => None,
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(r) if r.id == "0"))
+    );
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "codex-app-ok\n")
+    ));
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[0]["method"], "initialize");
+    assert_eq!(sent[1]["method"], "initialized");
+    assert_eq!(sent[2]["method"], "thread/start");
+    assert_eq!(sent[2]["params"]["approvalPolicy"], "untrusted");
+    assert_eq!(sent[3]["method"], "turn/start");
+    assert_eq!(sent[3]["params"]["input"][0]["text"], "pong?");
+    let approval = sent
+        .iter()
+        .find(|v| v["id"] == 0 && v.get("result").is_some())
+        .expect("approval response");
+    assert_eq!(approval["result"]["decision"], "accept");
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn codex_exec_per_turn_resumes_by_thread() {
+    if !python_available() {
+        return;
+    }
+    // The fake replays one fixture per spawned child; use the resume fixture
+    // for both turns (its thread.started carries the id either way).
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/exec_resume_command.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::Exec,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
+        .unwrap();
+
+    handle
+        .send(SessionCommand::SendTurn { text: "one".into() })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "shell"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    handle
+        .send(SessionCommand::SendTurn { text: "two".into() })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    // Each turn wrote its prompt to the child's stdin.
+    let log = std::fs::read_to_string(&fake.log).unwrap();
+    assert!(log.contains("one") && log.contains("two"));
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
 }

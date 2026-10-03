@@ -1,7 +1,7 @@
-//! Exposes the not-yet-ported v1 adapters (Antigravity, Codex) through the
-//! v2 `Harness` trait using the spawn-per-turn driver. Behaviour matches the
-//! v1 TUI (one child per turn, `--continue` for Antigravity, raw text for
-//! Codex) and is replaced harness by harness in plan phases 4 and 5.
+//! Exposes the not-yet-ported v1 Antigravity adapter through the v2 `Harness`
+//! trait using the spawn-per-turn driver. Behaviour matches the v1 TUI (one
+//! child per turn, `--continue` between turns). Antigravity has not been
+//! verified against a live account; its stdin stream-json shape is unknown.
 
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -33,22 +33,9 @@ pub static AGY_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     providers: ProviderSource::Static(&[("google", "Google")]),
 };
 
-pub static CODEX_DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Codex,
-    display_name: "Codex (codex)",
-    binary_names: &["codex"],
-    providers: ProviderSource::Static(&[("openai", "OpenAI")]),
-};
-
 impl LegacyHarness {
     pub fn agy() -> Self {
         LegacyHarness { id: HarnessId::Agy }
-    }
-
-    pub fn codex() -> Self {
-        LegacyHarness {
-            id: HarnessId::Codex,
-        }
     }
 
     fn kind(&self) -> HarnessKind {
@@ -72,65 +59,34 @@ impl LegacyHarness {
 
 impl Harness for LegacyHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
-        match self.id {
-            HarnessId::Agy => &AGY_DESCRIPTOR,
-            _ => &CODEX_DESCRIPTOR,
-        }
+        &AGY_DESCRIPTOR
     }
 
     fn capabilities(&self) -> Capabilities {
-        match self.id {
-            HarnessId::Agy => Capabilities {
-                streaming_input: false,
-                text_deltas: true,
-                thinking: true,
-                tool_events: true,
-                interactive_permissions: false,
-                permission_policies: vec![
-                    PolicySupport::degraded(
-                        PermissionPolicy::Ask,
-                        "headless agy auto-denies tools that need a prompt",
-                    ),
-                    PolicySupport::full(PermissionPolicy::AcceptEdits),
-                    PolicySupport::full(PermissionPolicy::Bypass),
-                ],
-                effort_levels: ["low", "medium", "high"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                resume_by_id: false,
-                live_model_list: true,
-                multi_provider: false,
-                ask_user_question: false,
-                interrupt: true,
-                usage_reporting: false,
-            },
-            _ => Capabilities {
-                streaming_input: false,
-                text_deltas: false,
-                thinking: false,
-                tool_events: false,
-                interactive_permissions: false,
-                permission_policies: vec![
-                    PolicySupport::degraded(
-                        PermissionPolicy::Ask,
-                        "codex exec cannot prompt; running read-only",
-                    ),
-                    PolicySupport::full(PermissionPolicy::AcceptEdits),
-                    PolicySupport::full(PermissionPolicy::Auto),
-                    PolicySupport::full(PermissionPolicy::Bypass),
-                ],
-                effort_levels: ["minimal", "low", "medium", "high", "xhigh"]
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-                resume_by_id: false,
-                live_model_list: false,
-                multi_provider: false,
-                ask_user_question: false,
-                interrupt: true,
-                usage_reporting: false,
-            },
+        Capabilities {
+            streaming_input: false,
+            text_deltas: true,
+            thinking: true,
+            tool_events: true,
+            interactive_permissions: false,
+            permission_policies: vec![
+                PolicySupport::degraded(
+                    PermissionPolicy::Ask,
+                    "headless agy auto-denies tools that need a prompt",
+                ),
+                PolicySupport::full(PermissionPolicy::AcceptEdits),
+                PolicySupport::full(PermissionPolicy::Bypass),
+            ],
+            effort_levels: ["low", "medium", "high"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            resume_by_id: false,
+            live_model_list: true,
+            multi_provider: false,
+            ask_user_question: false,
+            interrupt: true,
+            usage_reporting: false,
         }
     }
 
@@ -173,10 +129,7 @@ impl Harness for LegacyHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        let protocol: Arc<dyn PerTurnProtocol> = match self.id {
-            HarnessId::Agy => Arc::new(AgyPerTurn),
-            _ => Arc::new(CodexPerTurn),
-        };
+        let protocol: Arc<dyn PerTurnProtocol> = Arc::new(AgyPerTurn);
         per_turn::start(cfg, protocol)
     }
 
@@ -309,71 +262,6 @@ impl TurnParser for AgyLineParser {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Codex: `codex [policy] [-m M] [-c model_reasoning_effort=E] exec <prompt>`
-
-struct CodexPerTurn;
-
-pub fn codex_policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
-    match policy {
-        PermissionPolicy::Ask => vec!["-s", "read-only"],
-        PermissionPolicy::AcceptEdits => vec!["-s", "workspace-write"],
-        PermissionPolicy::Auto => vec!["--approve-for-me"],
-        PermissionPolicy::Bypass => vec!["--dangerously-bypass-approvals-and-sandbox"],
-    }
-}
-
-impl PerTurnProtocol for CodexPerTurn {
-    fn harness(&self) -> HarnessId {
-        HarnessId::Codex
-    }
-
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
-        let mut command = Command::new(&state.binary);
-        command.current_dir(&state.cwd);
-        command.arg("exec").arg("--skip-git-repo-check");
-        command.args(codex_policy_args(state.policy));
-        if let Some(m) = &state.model {
-            command.arg("-m").arg(&m.model);
-        }
-        if let Some(e) = &state.effort {
-            command
-                .arg("-c")
-                .arg(format!("model_reasoning_effort=\"{e}\""));
-        }
-        command.args(&state.extra_args);
-        command.arg("-");
-        for (k, v) in &state.env {
-            command.env(k, v);
-        }
-        Ok(TurnSpec {
-            command,
-            stdin: Some(text.to_string()),
-        })
-    }
-
-    fn new_parser(&self) -> Box<dyn TurnParser> {
-        Box::new(CodexTextParser)
-    }
-}
-
-struct CodexTextParser;
-
-impl TurnParser for CodexTextParser {
-    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        vec![AgentEvent::TextDelta(format!("{line}\n"))]
-    }
-
-    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-        let t = line.trim();
-        if t.is_empty() {
-            vec![]
-        } else {
-            vec![AgentEvent::Notice(t.to_string())]
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,20 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn codex_turn_args_use_config_effort_not_flag() {
-        let spec = CodexPerTurn
-            .build_turn(&state(PermissionPolicy::Auto, 0), "do it")
-            .unwrap();
-        let a = argv(&spec.command).join(" ");
-        assert_eq!(
-            a,
-            "exec --skip-git-repo-check --approve-for-me -m gemini-x -c model_reasoning_effort=\"high\" -"
-        );
-        assert!(!a.contains("--effort"));
-        assert_eq!(spec.stdin.as_deref(), Some("do it"));
-    }
-
-    #[test]
     fn agy_parser_maps_steps_and_errors() {
         let mut p = AgyLineParser::default();
         assert_eq!(
@@ -459,21 +333,20 @@ mod tests {
         let agy = LegacyHarness::agy();
         assert!(!agy.capabilities().interactive_permissions);
         assert_eq!(agy.descriptor().id, HarnessId::Agy);
-        let codex = LegacyHarness::codex();
         let cfg = PrintConfig {
-            binary: PathBuf::from("/bin/codex"),
+            binary: PathBuf::from("/bin/agy"),
             cwd: PathBuf::from("/tmp"),
             prompt: Some("p".into()),
             print_mode: true,
             policy: Some(PermissionPolicy::Bypass),
             ..Default::default()
         };
-        let cmd = codex.build_print_command(&cfg).unwrap();
+        let cmd = agy.build_print_command(&cfg).unwrap();
         let a: Vec<String> = cmd
             .get_args()
             .map(|s| s.to_string_lossy().to_string())
             .collect();
-        assert!(a.contains(&"--full-auto".to_string()));
-        assert!(a.contains(&"exec".to_string()));
+        assert!(a.contains(&"--dangerously-skip-permissions".to_string()));
+        assert!(a.contains(&"-p".to_string()));
     }
 }

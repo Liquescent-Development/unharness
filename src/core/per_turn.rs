@@ -104,8 +104,18 @@ async fn drive(
                 match cmd {
                     SessionCommand::SendTurn { text } => {
                         if current.is_some() {
-                            let _ = events.send(AgentEvent::Error("a turn is already running".into())).await;
-                            continue;
+                            if turn_completed {
+                                // The parser saw the turn end but the child has
+                                // not been reaped yet; finish it off.
+                                if let Some(mut p) = current.take() {
+                                    p.kill().await;
+                                }
+                            } else {
+                                let _ = events
+                                    .send(AgentEvent::Error("a turn is already running".into()))
+                                    .await;
+                                continue;
+                            }
                         }
                         match protocol.build_turn(&state, &text) {
                             Ok(spec) => match LineProcess::spawn(spec.command) {
@@ -186,6 +196,8 @@ async fn drive(
                             state.session_id = Some(session_id.clone());
                         }
                         AgentEvent::TurnCompleted { .. } => turn_completed = true,
+                        // The driver already announced the turn when it spawned the child.
+                        AgentEvent::TurnStarted => continue,
                         _ => {}
                     }
                     if events.send(ev).await.is_err() {

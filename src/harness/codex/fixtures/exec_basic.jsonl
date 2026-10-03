@@ -1,0 +1,6 @@
+>> Reply with exactly the word: pong
+{"type":"thread.started","thread_id":"01a10023-adff-7f22-b30a-fe6d43132ed2"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong"}}
+{"type":"turn.completed","usage":{"input_tokens":16229,"cached_input_tokens":12160,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}
+# exit=0

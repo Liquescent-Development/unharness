@@ -16,10 +16,22 @@ impl Registry {
     /// All ported harnesses in default priority order. Harnesses not yet
     /// ported to the `Harness` trait are absent (see `harness::legacy`).
     pub fn new() -> Self {
+        Self::from_config(&crate::config::Config::default())
+    }
+
+    /// Build the registry, honouring per-harness transport settings.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        use crate::harness::codex::{CodexHarness, CodexTransport};
+        let codex_transport = config
+            .harness("codex")
+            .and_then(|h| h.transport.as_deref())
+            .and_then(CodexTransport::parse)
+            .unwrap_or_default();
         let harnesses: Vec<Box<dyn Harness>> = vec![
             Box::new(crate::harness::legacy::shim::LegacyHarness::agy()),
             Box::new(crate::harness::claude::ClaudeHarness),
-            Box::new(crate::harness::legacy::shim::LegacyHarness::codex()),
+            Box::new(CodexHarness::new(codex_transport)),
+            Box::new(crate::harness::pi::PiHarness),
         ];
         Registry { harnesses }
     }

@@ -1295,7 +1295,10 @@ pub(crate) mod tests {
         let registry = Registry::empty()
             .with(Box::new(LegacyHarness::agy()))
             .with(Box::new(ClaudeHarness))
-            .with(Box::new(LegacyHarness::codex()));
+            .with(Box::new(crate::harness::codex::CodexHarness::new(
+                crate::harness::codex::CodexTransport::Exec,
+            )))
+            .with(Box::new(crate::harness::pi::PiHarness));
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.keep();
         App::new(AppInit {

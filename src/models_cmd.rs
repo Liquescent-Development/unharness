@@ -13,7 +13,7 @@ use crate::core::registry::Registry;
 use crate::harness::resolve_binary;
 
 pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str>) -> Result<()> {
-    let registry = Registry::new();
+    let registry = Registry::from_config(config);
     let overrides: HashMap<HarnessId, std::path::PathBuf> = registry
         .ids()
         .into_iter()

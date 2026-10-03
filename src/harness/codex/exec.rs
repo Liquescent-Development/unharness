@@ -1,0 +1,152 @@
+//! Codex `exec --json` transport: one child per turn, resumed by thread id.
+
+use anyhow::Result;
+use tokio::process::Command;
+
+use super::exec_parse::CodexExecParser;
+use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
+use crate::core::{AgentEvent, HarnessId, PermissionPolicy};
+
+pub struct CodexExec;
+
+/// Flags for a fresh `codex exec` (not accepted by `exec resume`).
+pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
+    match policy {
+        PermissionPolicy::Ask => vec!["-s", "read-only"],
+        PermissionPolicy::AcceptEdits => vec!["-s", "workspace-write"],
+        PermissionPolicy::Auto => vec!["--approve-for-me"],
+        PermissionPolicy::Bypass => vec!["--dangerously-bypass-approvals-and-sandbox"],
+    }
+}
+
+/// Equivalent `-c key=value` overrides, usable on `exec resume`.
+pub fn policy_config_overrides(policy: PermissionPolicy) -> Vec<String> {
+    match policy {
+        PermissionPolicy::Ask => vec![
+            "sandbox_mode=\"read-only\"".into(),
+            "approval_policy=\"never\"".into(),
+        ],
+        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => vec![
+            "sandbox_mode=\"workspace-write\"".into(),
+            "approval_policy=\"never\"".into(),
+        ],
+        PermissionPolicy::Bypass => vec![
+            "sandbox_mode=\"danger-full-access\"".into(),
+            "approval_policy=\"never\"".into(),
+        ],
+    }
+}
+
+impl PerTurnProtocol for CodexExec {
+    fn harness(&self) -> HarnessId {
+        HarnessId::Codex
+    }
+
+    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+        let mut command = Command::new(&state.binary);
+        command.current_dir(&state.cwd);
+        command.arg("exec");
+        match &state.session_id {
+            Some(id) => {
+                command.arg("resume").arg(id);
+                command.arg("--json").arg("--skip-git-repo-check");
+                for o in policy_config_overrides(state.policy) {
+                    command.arg("-c").arg(o);
+                }
+                if state.policy == PermissionPolicy::Bypass {
+                    command.arg("--dangerously-bypass-approvals-and-sandbox");
+                }
+            }
+            None => {
+                command.arg("--json").arg("--skip-git-repo-check");
+                command.arg("-C").arg(&state.cwd);
+                command.args(policy_args(state.policy));
+            }
+        }
+        if let Some(m) = &state.model {
+            command.arg("-m").arg(&m.model);
+        }
+        if let Some(e) = &state.effort {
+            command
+                .arg("-c")
+                .arg(format!("model_reasoning_effort=\"{e}\""));
+        }
+        command.args(&state.extra_args);
+        command.arg("-");
+        for (k, v) in &state.env {
+            command.env(k, v);
+        }
+        Ok(TurnSpec {
+            command,
+            stdin: Some(text.to_string()),
+        })
+    }
+
+    fn new_parser(&self) -> Box<dyn TurnParser> {
+        Box::new(ExecTurnParser(CodexExecParser::new()))
+    }
+}
+
+struct ExecTurnParser(CodexExecParser);
+
+impl TurnParser for ExecTurnParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        self.0.feed(line)
+    }
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+        self.0.feed_stderr(line)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::ModelRef;
+    use std::path::PathBuf;
+
+    fn state(policy: PermissionPolicy, session_id: Option<&str>) -> TurnState {
+        TurnState {
+            binary: PathBuf::from("/bin/codex"),
+            cwd: PathBuf::from("/work"),
+            model: Some(ModelRef::new(HarnessId::Codex, "openai", "gpt-5.5")),
+            effort: Some("high".into()),
+            policy,
+            session_id: session_id.map(str::to_string),
+            extra_args: vec![],
+            env: vec![],
+            turn_index: 0,
+        }
+    }
+
+    fn argv(spec: &TurnSpec) -> String {
+        spec.command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn first_turn_uses_sandbox_flags() {
+        let spec = CodexExec
+            .build_turn(&state(PermissionPolicy::Auto, None), "p")
+            .unwrap();
+        assert_eq!(
+            argv(&spec),
+            "exec --json --skip-git-repo-check -C /work --approve-for-me -m gpt-5.5 -c model_reasoning_effort=\"high\" -"
+        );
+        assert_eq!(spec.stdin.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn resume_uses_config_overrides() {
+        let spec = CodexExec
+            .build_turn(&state(PermissionPolicy::Bypass, Some("t1")), "p")
+            .unwrap();
+        let a = argv(&spec);
+        assert!(a.starts_with("exec resume t1 --json --skip-git-repo-check -c sandbox_mode=\"danger-full-access\" -c approval_policy=\"never\" --dangerously-bypass-approvals-and-sandbox"));
+        assert!(!a.contains("-s "));
+        assert!(!a.contains("--effort"));
+    }
+}

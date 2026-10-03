@@ -1,0 +1,9 @@
+>> Run the shell command: echo codex-spike-ok   Then reply with exactly: done
+{"type":"thread.started","thread_id":"01a10023-adff-7f22-b30a-fe6d43132ed2"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll run the command now.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/zsh -lc 'echo codex-spike-ok'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/zsh -lc 'echo codex-spike-ok'","aggregated_output":"codex-spike-ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"done"}}
+{"type":"turn.completed","usage":{"input_tokens":50329,"cached_input_tokens":41088,"cache_write_input_tokens":0,"output_tokens":102,"reasoning_output_tokens":45}}
+# exit=0

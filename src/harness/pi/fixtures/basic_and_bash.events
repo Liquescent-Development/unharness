@@ -1,0 +1,16 @@
+Error "Herdr A2A unavailable: client session readiness timed out"
+SessionStarted id=01a10023-7cca-745a-b3a2-0bdc78039637 model=gpt-5.6-sol
+CapabilitiesChanged efforts=off,minimal,low,medium,high,xhigh,max
+TurnStarted
+TextDelta "pong"
+Usage in=5097 out=5 cache_read=0 cache_write=0 cost=0.0205 cumulative=false
+TurnCompleted Done
+TurnStarted
+ThinkingDelta "**Executing exact Bash command**"
+ThinkingDelta "\\n\\n"
+ToolCallStarted id=call_naviXxjj5Pgj5KP8B1h9DWZY|fc_0a6a3d76dcc44ad8016ac08c31a91887d098d13944c4b59469 name=bash input={"command":"echo pi-spike-ok","timeout":30}
+ToolCallResult id=call_naviXxjj5Pgj5KP8B1h9DWZY|fc_0a6a3d76dcc44ad8016ac08c31a91887d098d13944c4b59469 error=false "pi-spike-ok\\n"
+Usage in=4060 out=63 cache_read=0 cache_write=0 cost=0.0175 cumulative=false
+TextDelta "done"
+Usage in=299 out=5 cache_read=3840 cache_write=0 cost=0.0028 cumulative=false
+TurnCompleted Done

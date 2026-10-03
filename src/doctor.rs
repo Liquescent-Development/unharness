@@ -16,7 +16,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     println!("{}", "=== unharness doctor ===".bold().cyan());
     println!();
 
-    let registry = Registry::new();
+    let registry = Registry::from_config(config);
     let overrides = binary_overrides(&registry, config);
 
     // 1. Harnesses

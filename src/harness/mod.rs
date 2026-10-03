@@ -7,7 +7,9 @@
 //! until each harness is ported to the `Harness` trait below (plan phases 1–5).
 
 pub mod claude;
+pub mod codex;
 pub mod legacy;
+pub mod pi;
 
 pub use legacy::{
     HarnessAdapter, HarnessKind, ModelInfo as LegacyModelInfo, RunOptions, get_adapter,
