@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::code::sanitize;
+use crate::core::conversations::BlockRecord;
 
 #[derive(Debug, Clone)]
 pub enum Block {
@@ -68,6 +69,90 @@ impl Transcript {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.thought_start = None;
+    }
+
+    /// Serializable form for conversation persistence.
+    pub fn to_records(&self) -> Vec<BlockRecord> {
+        self.blocks
+            .iter()
+            .map(|b| match b {
+                Block::User { text } => BlockRecord::User { text: text.clone() },
+                Block::Assistant {
+                    text,
+                    sender,
+                    duration,
+                } => BlockRecord::Assistant {
+                    text: text.clone(),
+                    sender: sender.clone(),
+                    secs: duration.map(|d| d.as_secs_f32()),
+                },
+                Block::Thought { text, duration } => BlockRecord::Thought {
+                    text: text.clone(),
+                    secs: duration.map(|d| d.as_secs_f32()),
+                },
+                Block::Tool {
+                    id,
+                    name,
+                    input,
+                    output,
+                    is_error,
+                    ..
+                } => BlockRecord::Tool {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    output: output.clone(),
+                    is_error: *is_error,
+                },
+                Block::System(t) => BlockRecord::System { text: t.clone() },
+                Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
+                Block::Error(t) => BlockRecord::Error { text: t.clone() },
+            })
+            .collect()
+    }
+
+    /// Rebuild from persisted records; everything comes back finished and
+    /// collapsed.
+    pub fn from_records(records: &[BlockRecord]) -> Self {
+        let blocks = records
+            .iter()
+            .map(|r| match r {
+                BlockRecord::User { text } => Block::User { text: text.clone() },
+                BlockRecord::Assistant { text, sender, secs } => Block::Assistant {
+                    text: text.clone(),
+                    sender: sender.clone(),
+                    duration: Some(Duration::from_secs_f32(secs.unwrap_or(0.0))),
+                },
+                BlockRecord::Thought { text, secs } => Block::Thought {
+                    text: text.clone(),
+                    duration: Some(Duration::from_secs_f32(secs.unwrap_or(0.0))),
+                },
+                BlockRecord::Tool {
+                    id,
+                    name,
+                    input,
+                    output,
+                    is_error,
+                } => Block::Tool {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                    output: output.clone(),
+                    is_error: *is_error,
+                    done: true,
+                    collapsed: true,
+                    started: Instant::now(),
+                    duration: Some(Duration::ZERO),
+                },
+                BlockRecord::System { text } => Block::System(text.clone()),
+                BlockRecord::Notice { text } => Block::Notice(text.clone()),
+                BlockRecord::Error { text } => Block::Error(text.clone()),
+            })
+            .collect();
+        Transcript {
+            blocks,
+            thought_start: None,
+        }
     }
 
     pub fn append_assistant(&mut self, sender: &str, delta: &str) {
@@ -432,6 +517,30 @@ mod tests {
         assert!(t.bridge_text(t.blocks.len(), 1000).is_none());
         let from_mid = t.bridge_text(18, 1000).unwrap();
         assert!(from_mid.starts_with("User: question 9"));
+    }
+
+    #[test]
+    fn records_roundtrip() {
+        let mut t = Transcript::default();
+        t.push_user("q");
+        t.append_thought("think");
+        t.tool_started("t1", "Bash", json!({"command":"ls"}));
+        t.tool_result("t1", "a\nb", false);
+        t.append_assistant("Claude", "answer");
+        t.finish_turn(Duration::from_millis(1500));
+        t.push_notice("n");
+        let records = t.to_records();
+        assert_eq!(records.len(), 5);
+        let back = Transcript::from_records(&records);
+        assert_eq!(back.blocks.len(), 5);
+        assert!(
+            matches!(&back.blocks[2], Block::Tool { output, done: true, .. } if output == "a\nb")
+        );
+        assert!(
+            matches!(&back.blocks[3], Block::Assistant { text, duration: Some(d), .. } if text == "answer" && d.as_millis() == 1500)
+        );
+        assert_eq!(back.to_records(), records);
+        assert!(!back.is_thinking());
     }
 
     #[test]

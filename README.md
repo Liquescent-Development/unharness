@@ -40,7 +40,8 @@ unharness                                   # TUI with the default harness
 unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
 unharness --policy accept-edits             # ask | accept-edits | auto | bypass
 unharness -y                                # alias for --policy bypass
-unharness --resume                          # resume the last session of the default harness
+unharness --resume                          # resume the latest conversation (all harnesses in it)
+unharness --resume 01a1                     # by id prefix; -H overrides which harness continues
 unharness -p "Summarise src/"               # headless print mode
 unharness --no-tui                          # drop into the vendor's own TUI
 unharness models                            # providers and models per harness
@@ -63,7 +64,7 @@ capability caveat, and the key hints.
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
 | `Ctrl+E` | Reasoning effort picker (levels come from the harness) |
 | `Ctrl+P` | Permission policy picker |
-| `Ctrl+R` | Resume a recorded session |
+| `Ctrl+R` | Resume a saved conversation |
 | `Ctrl+O` | Expand or collapse the last tool call's output |
 | `Esc` | Interrupt the running turn, else clear the prompt (never quits) |
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
@@ -133,8 +134,16 @@ default_provider = "openai-codex"
 default_model    = "gpt-5.5"
 ```
 
-Session ids are recorded in `<workspace>/.unharness/sessions.json` (added to
-`.gitignore` by `unharness init`).
+### Conversations
+
+A conversation is the unit of resume. unharness saves it under
+`<workspace>/.unharness/conversations/` (ignored by `unharness init`): the
+merged transcript, the vendor session id of every harness that took part, the
+bridging bookmarks, and which harness was active. `unharness --resume`,
+`/resume`, and Ctrl+R restore the transcript into the pane and reattach each
+harness to its own vendor session when you `/harness` to it, bridging only
+what that harness has not seen. `unharness sessions` lists saved
+conversations; `--clear` removes them.
 
 ## Rules and skills
 

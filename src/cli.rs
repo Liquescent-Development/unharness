@@ -55,7 +55,7 @@ pub struct CommonRunArgs {
     #[arg(short = 'e', long)]
     pub effort: Option<String>,
 
-    /// Resume a session by id, or the most recent one when no id is given
+    /// Resume a saved conversation by id (prefix ok), or the most recent one when no id is given
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
@@ -101,9 +101,10 @@ pub enum Commands {
         provider: Option<String>,
     },
 
-    /// List or clear recorded sessions for this workspace
+    /// List or clear saved conversations for this workspace
+    #[command(alias = "conversations")]
     Sessions {
-        /// Remove all recorded sessions
+        /// Remove all saved conversations
         #[arg(long)]
         clear: bool,
     },

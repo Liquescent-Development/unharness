@@ -39,6 +39,7 @@ pub struct TuiLaunch {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub resume: Option<String>,
+    pub harness_explicit: bool,
     pub initial_prompt: Option<String>,
 }
 
@@ -69,6 +70,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         model: launch.model,
         effort: launch.effort,
         resume: launch.resume,
+        harness_explicit: launch.harness_explicit,
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;

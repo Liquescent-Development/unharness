@@ -479,8 +479,19 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     let right2 = Line::from(Span::styled(
         app.session_ids
             .get(&app.active)
-            .map(|id| format!("session {}", truncate_chars(id, 12)))
-            .unwrap_or_else(|| "no session yet".into()),
+            .map(|id| {
+                format!(
+                    "conv {} · session {}",
+                    &app.conversation.id[..8.min(app.conversation.id.len())],
+                    truncate_chars(id, 12)
+                )
+            })
+            .unwrap_or_else(|| {
+                format!(
+                    "conv {}",
+                    &app.conversation.id[..8.min(app.conversation.id.len())]
+                )
+            }),
         Style::default().fg(Color::DarkGray),
     ));
     render_split(frame, rows[4], left2, right2);
@@ -540,6 +551,25 @@ fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'
     if lw + 2 + rw <= width {
         let mut spans = left.spans;
         spans.push(Span::raw(" ".repeat(width - lw - rw)));
+        spans.extend(right.spans);
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+    } else if rw + 12 <= width {
+        // Keep the right side; show the tail of the left (paths end in the
+        // interesting part).
+        let room = width - rw - 2;
+        let text: String = left.spans.iter().map(|s| s.content.as_ref()).collect();
+        let tail: String = text
+            .chars()
+            .rev()
+            .take(room.saturating_sub(1))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let style = left.spans.first().map(|s| s.style).unwrap_or_default();
+        let mut spans = vec![Span::styled(format!("…{tail}"), style)];
+        let used = unicode_width::UnicodeWidthStr::width(tail.as_str()) + 1;
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + rw))));
         spans.extend(right.spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     } else {
@@ -727,15 +757,20 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         }
         Modal::Resume(p) => (
             centered_rect(85, 60, area),
-            modal_block(
-                format!(" Resume {} session ({NAV}) ", app.active.short_name()),
-                Color::Blue,
-            ),
+            modal_block(format!(" Resume conversation ({NAV}) "), Color::Blue),
             picker_lines(p, Color::Blue, |r| {
                 (
-                    truncate_chars(&r.id, 26),
-                    format!("{}  {}", r.last_used, truncate_chars(&r.title, 50)),
-                    app.session_ids.get(&app.active) == Some(&r.id),
+                    format!("{}  {}", &r.id[..8.min(r.id.len())], r.updated_at),
+                    format!(
+                        "[{}]  {}",
+                        r.harnesses
+                            .iter()
+                            .map(|h| h.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        truncate_chars(&r.title, 50)
+                    ),
+                    r.id == app.conversation.id,
                 )
             }),
         ),
@@ -1049,7 +1084,9 @@ mod tests {
             rows[n - 1]
         );
         assert!(
-            rows[n - 2].starts_with("↑1.2k ↓40") && rows[n - 2].contains("$0.12"),
+            rows[n - 2].starts_with("↑1.2k ↓40")
+                && rows[n - 2].contains("$0.12")
+                && rows[n - 2].contains("conv "),
             "usage: {}",
             rows[n - 2]
         );

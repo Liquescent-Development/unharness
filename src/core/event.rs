@@ -114,7 +114,7 @@ pub enum PermissionDecision {
     Answer(Value),
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,

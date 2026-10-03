@@ -39,6 +39,14 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
   bare `tokio::process::Command::spawn` in a transport.
 
+## Conversations
+
+`core/conversations.rs` persists the merged transcript (`BlockRecord`), the
+harness → vendor session map, bridging bookmarks, per-harness usage, and the
+active harness, one JSON file per conversation plus an index. `App::persist`
+runs on session start, turn end, harness switch, `/clear`, and quit. Resume
+restores all of it; vendor sessions themselves live with the vendor.
+
 ## Testing conventions
 
 - Unit tests sit in-module under `#[cfg(test)]`.

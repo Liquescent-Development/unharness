@@ -12,8 +12,8 @@ use serde_json::Value;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
+use crate::core::conversations::{Conversation, ConversationStore, now_rfc3339, truncate_title};
 use crate::core::registry::Registry;
-use crate::core::sessions_store::SessionsStore;
 use crate::core::{
     AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionPolicy, PermissionRequest,
     ProviderId, SessionCommand, StopReason, Usage, resolve_policy,
@@ -46,8 +46,14 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/effort", "Open the reasoning effort picker"),
     ("/think", "Alias for /effort"),
     ("/policy", "Open the permission policy picker"),
-    ("/resume", "Resume a previous session of the active harness"),
-    ("/sessions", "List recent sessions of the active harness"),
+    (
+        "/resume",
+        "Resume a saved conversation (all harnesses in it)",
+    ),
+    (
+        "/conversations",
+        "List saved conversations in this workspace",
+    ),
     ("/usage", "Show token usage and cost"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/clear", "Clear the transcript"),
@@ -78,7 +84,9 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
-    pub sessions_store: SessionsStore,
+    pub store: ConversationStore,
+    pub conversation: Conversation,
+    persist_failed: bool,
     first_prompt: Option<String>,
 
     pub input: String,
@@ -113,7 +121,10 @@ pub struct AppInit {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Conversation id or prefix; empty string = most recent.
     pub resume: Option<String>,
+    /// The harness came from the CLI, so it overrides a resumed conversation's.
+    pub harness_explicit: bool,
 }
 
 impl App {
@@ -173,11 +184,40 @@ impl App {
             efforts.insert(init.harness, e);
         }
 
-        let sessions_store = SessionsStore::open(init.workspace_root.as_deref(), &init.cwd);
-        let mut session_ids = HashMap::new();
-        if let Some(r) = init.resume {
-            session_ids.insert(init.harness, r);
+        let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
+        let mut resume_error: Option<String> = None;
+        let mut loaded: Option<Conversation> = None;
+        if let Some(r) = init.resume.as_deref() {
+            let target = if r.is_empty() {
+                store.last().map(|c| c.id)
+            } else {
+                Some(r.to_string())
+            };
+            match target {
+                None => {
+                    resume_error = Some("no saved conversation to resume in this workspace".into())
+                }
+                Some(id) => match store.load(&id) {
+                    Ok(c) => loaded = Some(c),
+                    Err(e) => resume_error = Some(format!("could not resume: {e}")),
+                },
+            }
         }
+        let resumed = loaded.is_some();
+        let conversation = loaded.unwrap_or_else(|| Conversation::new(init.harness));
+        let active = if resumed
+            && !init.harness_explicit
+            && registry.get(conversation.active_harness).is_some()
+        {
+            conversation.active_harness
+        } else {
+            init.harness
+        };
+        let session_ids = conversation.sessions.clone();
+        let last_active_index = conversation.bookmarks.clone();
+        let transcript = Transcript::from_records(&conversation.blocks);
+        let session_usage = conversation.usage.get(&active).cloned().unwrap_or_default();
+        let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
@@ -187,19 +227,21 @@ impl App {
             registry,
             bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
             config,
-            active: init.harness,
+            active,
             harness_options,
             policy_requested: init.policy,
             providers,
             models,
             efforts,
             model_cache: HashMap::new(),
-            transcript: Transcript::default(),
-            last_active_index: HashMap::new(),
+            transcript,
+            last_active_index,
             session_ids,
             session_alive: false,
-            sessions_store,
-            first_prompt: None,
+            store,
+            conversation,
+            persist_failed: false,
+            first_prompt,
             input: String::new(),
             cursor: 0,
             scroll: 0,
@@ -209,7 +251,7 @@ impl App {
             generation_duration: None,
             spinner_frame: 0,
             turn_usage: Usage::default(),
-            session_usage: Usage::default(),
+            session_usage,
             modal: None,
             pending_prompts: VecDeque::new(),
             suggestions: Vec::new(),
@@ -227,12 +269,56 @@ impl App {
         if let Some(w) = res.warning {
             app.transcript.push_notice(w);
         }
-        if let Some(id) = app.session_ids.get(&app.active).cloned() {
+        if let Some(e) = resume_error {
+            app.transcript.push_error(e);
+        }
+        if resumed {
+            let summary = app.conversation.summary();
             app.transcript.push_notice(format!(
-                "resuming session {id}; prior transcript not replayed"
+                "resumed conversation {} ({}); continuing on {}",
+                &summary.id[..8.min(summary.id.len())],
+                summary
+                    .harnesses
+                    .iter()
+                    .map(|h| h.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                app.active.short_name()
             ));
         }
         app
+    }
+
+    // ---------------------------------------------------------------- persistence
+
+    fn sync_conversation(&mut self) {
+        let c = &mut self.conversation;
+        c.active_harness = self.active;
+        c.sessions = self.session_ids.clone();
+        c.bookmarks = self.last_active_index.clone();
+        c.blocks = self.transcript.to_records();
+        c.usage.insert(self.active, self.session_usage.clone());
+        if c.title.is_empty()
+            && let Some(p) = &self.first_prompt
+        {
+            c.title = truncate_title(p);
+        }
+        c.updated_at = now_rfc3339();
+    }
+
+    /// Write the conversation to disk. Failures are reported once per run.
+    pub fn persist(&mut self) {
+        self.sync_conversation();
+        if !self.conversation.has_content() {
+            return;
+        }
+        if let Err(e) = self.store.save(&self.conversation)
+            && !self.persist_failed
+        {
+            self.persist_failed = true;
+            self.transcript
+                .push_error(format!("could not save the conversation: {e:#}"));
+        }
     }
 
     // ----------------------------------------------------------------- accessors
@@ -421,14 +507,7 @@ impl App {
             AgentEvent::SessionStarted { session_id, model } => {
                 let is_new = self.session_ids.get(&self.active) != Some(&session_id);
                 self.session_ids.insert(self.active, session_id.clone());
-                let title = self.first_prompt.clone().unwrap_or_default();
-                self.sessions_store.record_started(
-                    self.active,
-                    &session_id,
-                    model.as_deref(),
-                    &title,
-                );
-                let _ = self.sessions_store.save();
+                self.persist();
                 if is_new {
                     self.transcript.push_notice(format!(
                         "session {} ({})",
@@ -475,11 +554,7 @@ impl App {
                     StopReason::Error(e) => self.transcript.push_error(e),
                 }
                 self.finish_generation();
-                if let Some(id) = self.session_ids.get(&self.active).cloned() {
-                    let title = self.first_prompt.clone().unwrap_or_default();
-                    self.sessions_store.touch(self.active, &id, &title);
-                    let _ = self.sessions_store.save();
-                }
+                self.persist();
             }
             AgentEvent::Notice(n) => self.transcript.push_notice(n),
             AgentEvent::Error(e) => self.transcript.push_error(e),
@@ -541,9 +616,16 @@ impl App {
         }
         self.last_active_index
             .insert(self.active, self.transcript.blocks.len());
+        self.sync_conversation();
         self.active = next;
-        self.session_usage = Usage::default();
+        self.session_usage = self
+            .conversation
+            .usage
+            .get(&next)
+            .cloned()
+            .unwrap_or_default();
         self.turn_usage = Usage::default();
+        self.persist();
         self.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {})",
             next.display_name(),
@@ -620,36 +702,60 @@ impl App {
         }
     }
 
-    pub fn resume_session(&mut self, id: String) {
+    /// Replace the current state with a saved conversation.
+    pub fn resume_conversation(&mut self, id_or_prefix: String) {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before resuming");
             return;
         }
-        if !self.harness().capabilities().resume_by_id {
-            self.transcript.push_error(format!(
-                "{} cannot resume sessions by id",
-                self.active.display_name()
-            ));
-            return;
-        }
+        let conv = match self.store.load(&id_or_prefix) {
+            Ok(c) => c,
+            Err(e) => {
+                self.transcript.push_error(format!("could not resume: {e}"));
+                return;
+            }
+        };
         if self.session_alive {
             self.actions.push_back(Action::Shutdown);
         }
-        self.session_ids.insert(self.active, id.clone());
-        self.last_active_index
-            .insert(self.active, self.transcript.blocks.len());
+        self.persist();
+        let active = if self.registry.get(conv.active_harness).is_some() {
+            conv.active_harness
+        } else {
+            self.active
+        };
+        self.session_ids = conv.sessions.clone();
+        self.last_active_index = conv.bookmarks.clone();
+        self.transcript = Transcript::from_records(&conv.blocks);
+        self.session_usage = conv.usage.get(&active).cloned().unwrap_or_default();
+        self.turn_usage = Usage::default();
+        self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
+        self.generation_duration = None;
+        self.modal = None;
+        self.pending_prompts.clear();
+        self.active = active;
+        let summary = conv.summary();
+        self.conversation = conv;
         self.transcript.push_notice(format!(
-            "resuming session {id}; prior transcript not replayed"
+            "resumed conversation {} ({}); continuing on {}",
+            &summary.id[..8.min(summary.id.len())],
+            summary
+                .harnesses
+                .iter()
+                .map(|h| h.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.active.short_name()
         ));
-        self.actions
-            .push_back(Action::StartSession { resume: Some(id) });
+        self.auto_scroll = true;
     }
 
     pub fn quit(&mut self) {
         if self.session_alive {
             self.actions.push_back(Action::Shutdown);
         }
+        self.persist();
         self.should_quit = true;
     }
 
@@ -768,15 +874,14 @@ impl App {
     }
 
     pub fn open_resume_picker(&mut self) {
-        let recent = self.sessions_store.recent(self.active).to_vec();
-        if recent.is_empty() {
-            self.transcript.push_notice(format!(
-                "no recorded sessions for {}",
-                self.active.short_name()
-            ));
+        let rows = self.store.list();
+        if rows.is_empty() {
+            self.transcript
+                .push_notice("no saved conversations in this workspace");
             return;
         }
-        self.modal = Some(Modal::Resume(ListPicker::new(recent)));
+        let idx = rows.iter().position(|r| r.id == self.conversation.id);
+        self.modal = Some(Modal::Resume(ListPicker::new(rows).with_selected(idx)));
     }
 
     pub fn close_modal(&mut self) {
@@ -1002,7 +1107,7 @@ impl App {
                     }
                     ModalChoice::Resume(id) => {
                         self.modal = None;
-                        self.resume_session(id);
+                        self.resume_conversation(id);
                     }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
                     ModalChoice::Dismiss => self.close_modal(),
@@ -1047,21 +1152,33 @@ impl App {
                 None => self.open_policy_picker(),
             },
             "/resume" => match arg {
-                Some(a) => self.resume_session(a),
+                Some(a) => self.resume_conversation(a),
                 None => self.open_resume_picker(),
             },
-            "/sessions" => {
-                let recent = self.sessions_store.recent(self.active);
-                if recent.is_empty() {
-                    self.transcript.push_notice("no recorded sessions");
+            "/conversations" | "/sessions" => {
+                let rows = self.store.list();
+                if rows.is_empty() {
+                    self.transcript.push_notice("no saved conversations");
                 } else {
-                    let lines: Vec<String> = recent
+                    let lines: Vec<String> = rows
                         .iter()
-                        .map(|r| format!("• {}  {}  {}", r.id, r.last_used, r.title))
+                        .map(|r| {
+                            format!(
+                                "• {}  {}  [{}]  {}",
+                                &r.id[..8.min(r.id.len())],
+                                r.updated_at,
+                                r.harnesses
+                                    .iter()
+                                    .map(|h| h.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", "),
+                                r.title
+                            )
+                        })
                         .collect();
                     self.transcript.push_system(format!(
-                        "Recent {} sessions:\n{}",
-                        self.active.short_name(),
+                        "Saved conversations ({}):\n{}",
+                        rows.len(),
                         lines.join("\n")
                     ));
                 }
@@ -1108,6 +1225,7 @@ impl App {
             "/clear" => {
                 self.transcript.clear();
                 self.transcript.push_system("Transcript cleared.");
+                self.persist();
             }
             "/help" => {
                 let mut help = String::from("Commands:\n");
@@ -1179,9 +1297,12 @@ impl App {
                 }
             }
             ("/resume", Some(s)) => {
-                for r in self.sessions_store.recent(self.active) {
-                    if r.id.starts_with(s) {
-                        out.push((format!("/resume {}", r.id), r.title.clone()));
+                for r in self.store.list() {
+                    if r.id.starts_with(s) || r.title.to_lowercase().contains(s) {
+                        out.push((
+                            format!("/resume {}", &r.id[..8.min(r.id.len())]),
+                            format!("{}  {}", r.updated_at, r.title),
+                        ));
                     }
                 }
             }
@@ -1356,28 +1477,164 @@ pub(crate) mod tests {
     use crate::harness::claude::ClaudeHarness;
     use crossterm::event::KeyEventKind;
 
-    pub(crate) fn test_app(harness: HarnessId) -> App {
-        let registry = Registry::empty()
-            .with(Box::new(AgyHarness::default()))
-            .with(Box::new(ClaudeHarness))
-            .with(Box::new(crate::harness::codex::CodexHarness::new(
-                crate::harness::codex::CodexTransport::Exec,
-            )))
-            .with(Box::new(crate::harness::pi::PiHarness));
-        let tmp = tempfile::tempdir().unwrap();
-        let cwd = tmp.keep();
+    fn test_registry() -> Arc<Registry> {
+        Arc::new(
+            Registry::empty()
+                .with(Box::new(AgyHarness::default()))
+                .with(Box::new(ClaudeHarness))
+                .with(Box::new(crate::harness::codex::CodexHarness::new(
+                    crate::harness::codex::CodexTransport::Exec,
+                )))
+                .with(Box::new(crate::harness::pi::PiHarness)),
+        )
+    }
+
+    pub(crate) fn test_app_in(
+        cwd: PathBuf,
+        harness: HarnessId,
+        resume: Option<String>,
+        harness_explicit: bool,
+    ) -> App {
         App::new(AppInit {
             cwd: cwd.clone(),
             workspace_root: Some(cwd),
-            registry: Arc::new(registry),
+            registry: test_registry(),
             config: Config::default(),
             harness,
             policy: PermissionPolicy::Ask,
             provider: None,
             model: None,
             effort: None,
-            resume: None,
+            resume,
+            harness_explicit,
         })
+    }
+
+    pub(crate) fn test_app(harness: HarnessId) -> App {
+        let tmp = tempfile::tempdir().unwrap();
+        test_app_in(tmp.keep(), harness, None, false)
+    }
+
+    #[test]
+    fn conversation_persists_across_harness_switch_and_resumes() {
+        use super::super::transcript::Block;
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        let mut app = test_app_in(cwd.clone(), HarnessId::Claude, None, false);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::Codex);
+        app.take_actions();
+        app.session_alive = false;
+        app.submit_prompt("second question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("second answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        let conv_id = app.conversation.id.clone();
+        app.quit();
+
+        let rows = app.store.list();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, conv_id);
+        assert_eq!(rows[0].harnesses, vec![HarnessId::Claude, HarnessId::Codex]);
+        assert_eq!(rows[0].title, "first question");
+
+        let mut again = test_app_in(cwd.clone(), HarnessId::Claude, Some(String::new()), false);
+        assert_eq!(again.active, HarnessId::Codex);
+        assert_eq!(again.conversation.id, conv_id);
+        assert_eq!(
+            again
+                .session_ids
+                .get(&HarnessId::Claude)
+                .map(String::as_str),
+            Some("claude-1")
+        );
+        assert_eq!(
+            again.session_ids.get(&HarnessId::Codex).map(String::as_str),
+            Some("codex-1")
+        );
+        assert!(
+            again
+                .transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Assistant { text, .. } if text == "second answer"))
+        );
+        assert!(
+            again
+                .transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Notice(n) if n.contains("resumed conversation")))
+        );
+
+        again.submit_prompt("third".into());
+        assert_eq!(
+            again.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("codex-1".into())
+                },
+                Action::SendTurn("third".into())
+            ]
+        );
+        again.session_alive = true;
+        again.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        again.switch_harness(HarnessId::Claude);
+        again.take_actions();
+        again.session_alive = false;
+        again.submit_prompt("fourth".into());
+        let actions = again.take_actions();
+        assert_eq!(
+            actions[0],
+            Action::StartSession {
+                resume: Some("claude-1".into())
+            }
+        );
+        match &actions[1] {
+            Action::SendTurn(t) => {
+                assert!(t.contains("second question") && t.contains("third"), "{t}");
+                assert!(!t.contains("first question"), "{t}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let forced = test_app_in(cwd, HarnessId::Pi, Some(conv_id[..8].to_string()), true);
+        assert_eq!(forced.active, HarnessId::Pi);
+        assert_eq!(forced.session_ids.len(), 2);
+    }
+
+    #[test]
+    fn resume_errors_are_reported_not_fatal() {
+        use super::super::transcript::Block;
+        let tmp = tempfile::tempdir().unwrap();
+        let app = test_app_in(tmp.keep(), HarnessId::Claude, Some("nope".into()), false);
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Error(e) if e.contains("could not resume")))
+        );
+        assert_eq!(app.active, HarnessId::Claude);
     }
 
     fn key(code: KeyCode) -> KeyEvent {

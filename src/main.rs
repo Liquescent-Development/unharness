@@ -6,7 +6,7 @@ use colored::*;
 
 use unharness::cli::{Cli, Commands};
 use unharness::config::Config;
-use unharness::core::sessions_store::SessionsStore;
+use unharness::core::conversations::ConversationStore;
 use unharness::sync::find_workspace_root;
 use unharness::{doctor, init, models_cmd, runner, skills_cmd, switch, sync};
 
@@ -75,35 +75,41 @@ fn handle_sessions(
     cwd: &std::path::Path,
     clear: bool,
 ) -> Result<()> {
-    let mut store = SessionsStore::open(ws_root, cwd);
+    let store = ConversationStore::open(ws_root, cwd);
     if clear {
-        store.harnesses.clear();
-        store.save()?;
-        println!("Cleared recorded sessions in {}", store.path().display());
+        store.clear()?;
+        println!("Cleared saved conversations in {}", store.root().display());
         return Ok(());
     }
+    let rows = store.list();
     println!(
-        "Sessions recorded in {}",
-        store.path().display().to_string().dimmed()
+        "Conversations saved in {}",
+        store.root().display().to_string().dimmed()
     );
-    let mut any = false;
-    for (harness, sessions) in &store.harnesses {
-        if sessions.recent.is_empty() {
-            continue;
-        }
-        any = true;
-        println!("{}", harness.bold().cyan());
-        for r in &sessions.recent {
-            let last = if sessions.last.as_deref() == Some(&r.id) {
-                " (last)".green().to_string()
+    if rows.is_empty() {
+        println!("  none");
+        return Ok(());
+    }
+    for (i, r) in rows.iter().enumerate() {
+        let harnesses = r
+            .harnesses
+            .iter()
+            .map(|h| h.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {}  {}  [{}]  {}{}",
+            r.id[..8].bold(),
+            r.updated_at.dimmed(),
+            harnesses.cyan(),
+            r.title,
+            if i == 0 {
+                " (latest)".green().to_string()
             } else {
                 String::new()
-            };
-            println!("  {}  {}  {}{}", r.id, r.last_used.dimmed(), r.title, last);
-        }
+            }
+        );
     }
-    if !any {
-        println!("  none");
-    }
+    println!("Resume with 'unharness --resume [id]' or /resume inside the TUI.");
     Ok(())
 }

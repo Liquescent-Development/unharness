@@ -2,6 +2,7 @@
 //! session/process plumbing every harness transport is built on.
 
 pub mod caps;
+pub mod conversations;
 pub mod event;
 pub mod ids;
 pub mod jsonrpc;
@@ -9,7 +10,6 @@ pub mod per_turn;
 pub mod process;
 pub mod registry;
 pub mod session;
-pub mod sessions_store;
 pub mod testing;
 
 pub use caps::{Capabilities, PermissionPolicy, PolicyResolution, PolicySupport, resolve_policy};

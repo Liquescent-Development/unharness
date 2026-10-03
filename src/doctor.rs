@@ -4,8 +4,8 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::Config;
+use crate::core::conversations::ConversationStore;
 use crate::core::registry::Registry;
-use crate::core::sessions_store::SessionsStore;
 use crate::core::{HarnessId, PermissionPolicy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
@@ -141,28 +141,29 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     report_skills("", &global);
     println!();
 
-    // 5. Sessions
-    let store = SessionsStore::open(ws_root.as_deref(), cwd);
-    println!("{}", "Sessions:".bold());
-    let mut any = false;
-    for id in registry.ids() {
-        let n = store.recent(id).len();
-        if n > 0 {
-            any = true;
-            println!(
-                "  {} {}: {} recorded, last {}",
-                "[✓]".green().bold(),
-                id.short_name(),
-                n,
-                store.last(id).unwrap_or("-").dimmed()
-            );
-        }
-    }
-    if !any {
+    // 5. Conversations
+    let store = ConversationStore::open(ws_root.as_deref(), cwd);
+    let rows = store.list();
+    println!("{}", "Conversations:".bold());
+    if rows.is_empty() {
         println!(
-            "  {} none recorded in {}",
+            "  {} none saved in {}",
             "[-]".dimmed(),
-            store.path().display()
+            store.root().display()
+        );
+    } else {
+        println!(
+            "  {} {} saved in {} (latest: {} [{}])",
+            "[✓]".green().bold(),
+            rows.len(),
+            store.root().display().to_string().dimmed(),
+            &rows[0].id[..8],
+            rows[0]
+                .harnesses
+                .iter()
+                .map(|h| h.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 

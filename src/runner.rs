@@ -9,6 +9,7 @@ use colored::*;
 
 use crate::cli::CommonRunArgs;
 use crate::config::Config;
+use crate::core::conversations::ConversationStore;
 use crate::core::registry::Registry;
 use crate::core::{HarnessId, ModelRef, PermissionPolicy, ProviderId, resolve_policy};
 use crate::harness::{PrintConfig, ProviderSource};
@@ -102,18 +103,8 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         Some(args.prompt.join(" "))
     };
 
-    // `--resume` with no id means the last session of this harness.
-    let resume = match &args.resume {
-        Some(r) if r.is_empty() => {
-            let store = crate::core::sessions_store::SessionsStore::open(ws_root.as_deref(), cwd);
-            match store.last(id) {
-                Some(last) => Some(last.to_string()),
-                None => bail!("no recorded {} session to resume", id.short_name()),
-            }
-        }
-        Some(r) => Some(r.clone()),
-        None => None,
-    };
+    let store = ConversationStore::open(ws_root.as_deref(), cwd);
+    let (resume, print_resume) = resolve_resume(&store, args.resume.as_deref(), id)?;
 
     if args.print || args.no_tui {
         let res = resolve_policy(&harness.capabilities(), policy);
@@ -136,7 +127,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             effort,
             policy: Some(res.effective),
             format: args.format.clone(),
-            resume,
+            resume: print_resume,
             extra_args: config.extra_args(id.as_str()).to_vec(),
         };
         let mut cmd = harness.build_print_command(&cfg)?;
@@ -175,14 +166,67 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         model,
         effort,
         resume,
+        harness_explicit: args.harness.is_some(),
         initial_prompt: prompt,
     })
     .await
 }
 
+/// `--resume [id]` → (conversation id for the TUI, vendor session id for
+/// print mode). An empty id means the most recent conversation. An id that
+/// matches no conversation is passed to print mode as a raw vendor id.
+pub fn resolve_resume(
+    store: &ConversationStore,
+    arg: Option<&str>,
+    harness: HarnessId,
+) -> Result<(Option<String>, Option<String>)> {
+    let Some(r) = arg else {
+        return Ok((None, None));
+    };
+    let row = if r.is_empty() {
+        match store.last() {
+            Some(row) => row,
+            None => bail!("no saved conversation to resume in this workspace"),
+        }
+    } else {
+        match store.resolve(r) {
+            Ok(row) => row,
+            Err(_) => return Ok((Some(r.to_string()), Some(r.to_string()))),
+        }
+    };
+    let vendor = store
+        .load(&row.id)
+        .ok()
+        .and_then(|c| c.sessions.get(&harness).cloned());
+    Ok((Some(row.id), vendor))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resume_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(Some(dir.path()), dir.path());
+        assert_eq!(
+            resolve_resume(&store, None, HarnessId::Claude).unwrap(),
+            (None, None)
+        );
+        assert!(resolve_resume(&store, Some(""), HarnessId::Claude).is_err());
+        assert_eq!(
+            resolve_resume(&store, Some("raw-vendor"), HarnessId::Claude).unwrap(),
+            (Some("raw-vendor".into()), Some("raw-vendor".into()))
+        );
+        let mut c = crate::core::conversations::Conversation::new(HarnessId::Claude);
+        c.sessions.insert(HarnessId::Claude, "claude-9".into());
+        store.save(&c).unwrap();
+        let (conv, vendor) = resolve_resume(&store, Some(""), HarnessId::Claude).unwrap();
+        assert_eq!(conv.as_deref(), Some(c.id.as_str()));
+        assert_eq!(vendor.as_deref(), Some("claude-9"));
+        let (_, vendor) = resolve_resume(&store, Some(&c.id[..8]), HarnessId::Codex).unwrap();
+        assert!(vendor.is_none());
+    }
 
     #[test]
     fn policy_precedence() {

@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::core::sessions_store::SessionRecord;
+use crate::core::conversations::ConversationSummary;
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
@@ -232,7 +232,7 @@ pub enum Modal {
     Model(ListPicker<ModelInfo>),
     Effort(ListPicker<String>),
     Policy(ListPicker<PermissionPolicy>),
-    Resume(ListPicker<SessionRecord>),
+    Resume(ListPicker<ConversationSummary>),
     Permission(PermissionModal),
     Question(QuestionModal),
     Confirm(ConfirmModal),
