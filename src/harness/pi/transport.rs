@@ -110,8 +110,12 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text } => {
+                    SessionCommand::SendTurn { text, .. } => {
                         Some(json!({"id": next_id(), "type":"prompt","message": text}).to_string())
+                    }
+                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                        let _ = events.send(AgentEvent::Error("not supported by pi yet".into())).await;
+                        None
                     }
                     SessionCommand::Interrupt => Some(json!({"id": next_id(), "type":"abort"}).to_string()),
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+pub use crate::core::ModelInfo;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
 };
@@ -42,15 +43,6 @@ pub struct Probe {
     pub binary: Option<PathBuf>,
     pub version: Option<String>,
     pub auth: AuthInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelInfo {
-    pub model_ref: ModelRef,
-    pub display_name: String,
-    pub description: Option<String>,
-    /// Per-model effort levels when the harness reports them.
-    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Options for the non-TUI paths (`-p` print mode and `--no-tui` passthrough).

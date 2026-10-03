@@ -735,7 +735,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ),
         Modal::Policy(p) => {
-            let caps = app.harness().capabilities();
+            let caps = app.caps();
             (
                 centered_rect(80, 50, area),
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),

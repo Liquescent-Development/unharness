@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, StopReason, Usage};
+use crate::core::{AgentEvent, CapsUpdate, PermissionKind, PermissionRequest, StopReason, Usage};
 
 #[derive(Debug, Default)]
 pub struct PiParser {
@@ -283,13 +283,13 @@ impl PiParser {
             }
             "get_available_thinking_levels" => {
                 if let Some(levels) = v.pointer("/data/levels").and_then(Value::as_array) {
-                    out.push(AgentEvent::CapabilitiesChanged {
-                        effort_levels: levels
+                    out.push(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(
+                        levels
                             .iter()
                             .filter_map(Value::as_str)
                             .map(str::to_string)
                             .collect(),
-                    });
+                    )));
                 }
             }
             "set_model" => {

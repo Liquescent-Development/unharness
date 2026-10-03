@@ -199,7 +199,11 @@ async fn drive(
                     return;
                 };
                 let res: Result<()> = match cmd {
-                    SessionCommand::SendTurn { text } => d.start_turn(text).await,
+                    SessionCommand::SendTurn { text, .. } => d.start_turn(text).await,
+                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                        let _ = events.send(AgentEvent::Error("not supported by codex yet".into())).await;
+                        Ok(())
+                    }
                     SessionCommand::Interrupt => {
                         match (&d.thread_id, &d.turn_id) {
                             (Some(t), Some(turn)) => {

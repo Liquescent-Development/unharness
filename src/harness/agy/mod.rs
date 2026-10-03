@@ -18,8 +18,8 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 pub use transport::AgyTransport;
 
@@ -103,6 +103,15 @@ impl Harness for AgyHarness {
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
+            image_input: false,
+            plan_updates: false,
+            subagents: false,
+            steer: false,
+            compaction: false,
+            context_usage: false,
+            rate_limits: false,
+            rewind: RewindSupport::default(),
+            fork: false,
         }
     }
 

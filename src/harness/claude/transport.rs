@@ -210,7 +210,11 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text } => Some(user_message(&text)),
+                    SessionCommand::SendTurn { text, .. } => Some(user_message(&text)),
+                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                        let _ = events.send(AgentEvent::Error("not supported by claude yet".into())).await;
+                        None
+                    }
                     SessionCommand::Interrupt => Some(control_request("interrupt", json!({})).1),
                     SessionCommand::RespondPermission { id, decision } => {
                         match pending.remove(&id) {

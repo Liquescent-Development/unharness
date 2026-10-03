@@ -145,6 +145,16 @@ impl fmt::Display for ModelRef {
     }
 }
 
+/// A model a harness offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub model_ref: ModelRef,
+    pub display_name: String,
+    pub description: Option<String>,
+    /// Per-model effort levels when the harness reports them.
+    pub effort_levels: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,8 +21,8 @@ use super::{
 };
 use crate::core::jsonrpc;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,6 +146,15 @@ impl Harness for CodexHarness {
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
+            image_input: false,
+            plan_updates: false,
+            subagents: false,
+            steer: false,
+            compaction: false,
+            context_usage: false,
+            rate_limits: false,
+            rewind: RewindSupport::default(),
+            fork: false,
         }
     }
 

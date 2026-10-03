@@ -160,7 +160,12 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::SendTurn { text } => {
+                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                        let _ = events.send(AgentEvent::Error(
+                            "agy cannot steer or compact a session".into(),
+                        )).await;
+                    }
+                    SessionCommand::SendTurn { text, .. } => {
                         if restart_needed {
                             restart_needed = false;
                             proc.kill().await;

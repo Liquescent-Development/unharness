@@ -5,6 +5,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use super::event::CapsUpdate;
+
 /// How tool permissions are handled, ordered least → most permissive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -121,9 +123,45 @@ pub struct Capabilities {
     pub ask_user_question: bool,
     pub interrupt: bool,
     pub usage_reporting: bool,
+    /// Turns can carry image attachments.
+    pub image_input: bool,
+    /// The agent's plan / todo list arrives as `PlanUpdated`.
+    pub plan_updates: bool,
+    /// Subagent activity is attributed to its parent tool call (`Sub`).
+    pub subagents: bool,
+    /// A message can be injected into the running turn.
+    pub steer: bool,
+    /// Context can be compacted on request.
+    pub compaction: bool,
+    /// Context-window usage is reported (`Context`).
+    pub context_usage: bool,
+    /// Account rate-limit windows are reported (`RateLimit`).
+    pub rate_limits: bool,
+    pub rewind: RewindSupport,
+    pub fork: bool,
+}
+
+/// What a harness can roll back to an earlier turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RewindSupport {
+    pub conversation: bool,
+    pub files: bool,
 }
 
 impl Capabilities {
+    /// Overlay what a live session reported on the static declaration.
+    pub fn apply(&mut self, update: &CapsUpdate) {
+        if let Some(e) = &update.effort_levels {
+            self.effort_levels = e.clone();
+        }
+        if let Some(i) = update.image_input {
+            self.image_input = i;
+        }
+        if let Some(r) = update.resume_by_id {
+            self.resume_by_id = r;
+        }
+    }
+
     pub fn supports_policy(&self, policy: PermissionPolicy) -> Option<&PolicySupport> {
         self.permission_policies.iter().find(|p| p.policy == policy)
     }

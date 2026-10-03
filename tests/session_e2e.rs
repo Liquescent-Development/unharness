@@ -129,12 +129,7 @@ async fn claude_basic_turn_streams_tool_and_text() {
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run echo".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run echo")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
 
     assert!(matches!(
@@ -193,9 +188,7 @@ async fn claude_permission_round_trip_and_question() {
 
     // Turn 1: Write needs permission; allow it.
     handle
-        .send(SessionCommand::SendTurn {
-            text: "create spike3.txt".into(),
-        })
+        .send(SessionCommand::turn("create spike3.txt"))
         .await
         .unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
@@ -218,9 +211,7 @@ async fn claude_permission_round_trip_and_question() {
 
     // Turn 2: AskUserQuestion; answer "Red".
     handle
-        .send(SessionCommand::SendTurn {
-            text: "ask me a question".into(),
-        })
+        .send(SessionCommand::turn("ask me a question"))
         .await
         .unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
@@ -275,10 +266,7 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Bypass, false))
         .unwrap();
-    handle
-        .send(SessionCommand::SendTurn { text: "x".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -318,12 +306,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
 
     // The driver sends get_state first; the fixture then replays the catalog
     // responses before the first prompt.
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong?".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -336,12 +319,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
             .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
     );
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run bash".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run bash")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -385,12 +363,7 @@ async fn codex_app_server_handshake_turns_and_approval() {
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong?".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a10023-e1c2"))));
     assert!(
@@ -399,12 +372,7 @@ async fn codex_app_server_handshake_turns_and_approval() {
             .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
     );
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run it".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run it")).await.unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
         AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Allow {
             updated_input: None,
@@ -457,10 +425,7 @@ async fn codex_exec_per_turn_resumes_by_thread() {
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn { text: "one".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("one")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -474,10 +439,7 @@ async fn codex_exec_per_turn_resumes_by_thread() {
         })
     ));
 
-    handle
-        .send(SessionCommand::SendTurn { text: "two".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("two")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(matches!(
         events.last(),
@@ -511,12 +473,7 @@ async fn agy_stream_session_against_synthetic_fixture() {
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "echo hi".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "conv-synthetic-1")));
     assert!(
@@ -531,12 +488,7 @@ async fn agy_stream_session_against_synthetic_fixture() {
         })
     ));
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "delete".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("delete")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -567,12 +519,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, false))
         .unwrap();
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { stop_reason: StopReason::Error(m) } if m.contains("authentication"))));
     // The stderr explanation and the exit arrive after the result line.

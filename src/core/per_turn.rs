@@ -102,7 +102,12 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::SendTurn { text } => {
+                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                        let _ = events.send(AgentEvent::Error(
+                            "this harness cannot steer or compact a session".into(),
+                        )).await;
+                    }
+                    SessionCommand::SendTurn { text, .. } => {
                         if current.is_some() {
                             if turn_completed {
                                 // The parser saw the turn end but the child has
@@ -287,9 +292,7 @@ mod tests {
     #[tokio::test]
     async fn two_turns_resume_by_captured_session_id() {
         let mut h = start(cfg(), Arc::new(Echo)).unwrap();
-        h.send(SessionCommand::SendTurn { text: "one".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("one")).await.unwrap();
         let t1 = collect_turn(&mut h).await;
         assert_eq!(t1[0], AgentEvent::TurnStarted);
         assert!(t1.contains(&AgentEvent::SessionStarted {
@@ -304,9 +307,7 @@ mod tests {
             })
         ));
 
-        h.send(SessionCommand::SendTurn { text: "two".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("two")).await.unwrap();
         let t2 = collect_turn(&mut h).await;
         assert!(t2.contains(&AgentEvent::TextDelta("resumed s1".into())));
 
@@ -335,9 +336,7 @@ mod tests {
             }
         }
         let mut h = start(cfg(), Arc::new(Sleeper)).unwrap();
-        h.send(SessionCommand::SendTurn { text: "x".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("x")).await.unwrap();
         assert_eq!(h.events.recv().await.unwrap(), AgentEvent::TurnStarted);
         h.send(SessionCommand::Interrupt).await.unwrap();
         let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())

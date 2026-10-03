@@ -15,8 +15,9 @@ use crate::config::Config;
 use crate::core::conversations::{Conversation, ConversationStore, now_rfc3339, truncate_title};
 use crate::core::registry::Registry;
 use crate::core::{
-    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionPolicy, PermissionRequest,
-    ProviderId, SessionCommand, StopReason, Usage, resolve_policy,
+    AgentEvent, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef, PermissionDecision,
+    PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, SessionCommand,
+    StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
 
@@ -101,6 +102,12 @@ pub struct App {
     pub spinner_frame: usize,
     pub turn_usage: Usage,
     pub session_usage: Usage,
+    /// Context-window fill of the active harness's session.
+    pub context: ContextUsage,
+    pub rate_limit: Option<RateLimitInfo>,
+    pub plan: Vec<PlanEntry>,
+    /// What live sessions reported on top of the declared capabilities.
+    live_caps: HashMap<HarnessId, CapsUpdate>,
 
     pub modal: Option<Modal>,
     pending_prompts: VecDeque<PermissionRequest>,
@@ -252,6 +259,10 @@ impl App {
             spinner_frame: 0,
             turn_usage: Usage::default(),
             session_usage,
+            context: ContextUsage::default(),
+            rate_limit: None,
+            plan: Vec::new(),
+            live_caps: HashMap::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
             suggestions: Vec::new(),
@@ -260,7 +271,7 @@ impl App {
             actions: VecDeque::new(),
         };
 
-        let res = resolve_policy(&app.harness().capabilities(), app.policy_requested);
+        let res = resolve_policy(&app.caps(), app.policy_requested);
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
             app.active.display_name(),
@@ -348,17 +359,26 @@ impl App {
             .expect("active harness is registered")
     }
 
+    /// Declared capabilities of the active harness plus what its session reported.
+    pub fn caps(&self) -> Capabilities {
+        let mut caps = self.harness().capabilities();
+        if let Some(update) = self.live_caps.get(&self.active) {
+            caps.apply(update);
+        }
+        caps
+    }
+
     pub fn harness_binary(&self) -> Option<PathBuf> {
         let d = self.harness().descriptor();
         resolve_binary(d, self.config.binary_override(d.id.as_str()))
     }
 
     pub fn effective_policy(&self) -> PermissionPolicy {
-        resolve_policy(&self.harness().capabilities(), self.policy_requested).effective
+        resolve_policy(&self.caps(), self.policy_requested).effective
     }
 
     pub fn policy_warning(&self) -> Option<String> {
-        resolve_policy(&self.harness().capabilities(), self.policy_requested).warning
+        resolve_policy(&self.caps(), self.policy_requested).warning
     }
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
@@ -562,9 +582,38 @@ impl App {
                     self.turn_usage = u;
                 }
             }
-            AgentEvent::CapabilitiesChanged { effort_levels } => {
-                self.transcript
-                    .push_notice(format!("effort levels now: {}", effort_levels.join(", ")));
+            AgentEvent::PlanUpdated { entries, .. } => self.plan = entries,
+            AgentEvent::Sub { event, .. } => {
+                // Subagent tool activity is shown inline; its prose is not.
+                if matches!(
+                    *event,
+                    AgentEvent::ToolCallStarted { .. }
+                        | AgentEvent::ToolCallDelta { .. }
+                        | AgentEvent::ToolCallResult { .. }
+                        | AgentEvent::PermissionRequest(_)
+                ) {
+                    self.on_event(*event);
+                }
+            }
+            AgentEvent::Context(c) => self.context.merge(c),
+            AgentEvent::RateLimit(r) => self.rate_limit = Some(r),
+            AgentEvent::TurnAnchor { .. } => {}
+            AgentEvent::CapabilitiesChanged(update) => {
+                if let Some(levels) = &update.effort_levels
+                    && self.caps().effort_levels != *levels
+                {
+                    self.transcript
+                        .push_notice(format!("effort levels now: {}", levels.join(", ")));
+                }
+                if let Some(models) = &update.models {
+                    let provider = self
+                        .current_provider()
+                        .map(|p| p.0.clone())
+                        .unwrap_or_else(|| "default".into());
+                    self.model_cache
+                        .insert((self.active, provider), models.clone());
+                }
+                self.live_caps.entry(self.active).or_default().merge(update);
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 match stop_reason {
@@ -644,6 +693,7 @@ impl App {
             .cloned()
             .unwrap_or_default();
         self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
         self.persist();
         self.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {})",
@@ -659,7 +709,7 @@ impl App {
 
     pub fn set_policy(&mut self, p: PermissionPolicy) {
         self.policy_requested = p;
-        let res = resolve_policy(&self.harness().capabilities(), p);
+        let res = resolve_policy(&self.caps(), p);
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
@@ -695,7 +745,7 @@ impl App {
     }
 
     pub fn set_effort(&mut self, effort: String) {
-        let caps = self.harness().capabilities();
+        let caps = self.caps();
         if caps.effort_levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
@@ -749,6 +799,8 @@ impl App {
         self.transcript = Transcript::from_records(&conv.blocks);
         self.session_usage = conv.usage.get(&active).cloned().unwrap_or_default();
         self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
+        self.plan.clear();
         self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
         self.generation_duration = None;
         self.modal = None;
@@ -791,7 +843,7 @@ impl App {
     }
 
     pub fn open_provider_picker(&mut self) {
-        if !self.harness().capabilities().multi_provider {
+        if !self.caps().multi_provider {
             self.transcript.push_notice(format!(
                 "{} has a single provider ({}); use /harness to change agents or /model to change models",
                 self.active.short_name(),
@@ -846,7 +898,7 @@ impl App {
 
     pub fn open_model_picker(&mut self) {
         let Some(provider) = self.current_provider().cloned() else {
-            if self.harness().capabilities().multi_provider {
+            if self.caps().multi_provider {
                 self.open_provider_picker();
             } else {
                 self.transcript
@@ -869,7 +921,7 @@ impl App {
     }
 
     pub fn open_effort_picker(&mut self) {
-        let levels = self.harness().capabilities().effort_levels;
+        let levels = self.caps().effort_levels;
         if levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
@@ -1294,7 +1346,7 @@ impl App {
                 }
             }
             ("/effort" | "/think", Some(s)) => {
-                for l in self.harness().capabilities().effort_levels {
+                for l in self.caps().effort_levels {
                     if l.starts_with(s) {
                         out.push((format!("{cmd} {l}"), "Reasoning effort".to_string()));
                     }
@@ -1640,6 +1692,51 @@ pub(crate) mod tests {
         let forced = test_app_in(cwd, HarnessId::Pi, Some(conv_id[..8].to_string()), true);
         assert_eq!(forced.active, HarnessId::Pi);
         assert_eq!(forced.session_ids.len(), 2);
+    }
+
+    #[test]
+    fn live_capabilities_and_status_events_apply() {
+        use crate::core::{CapsUpdate, ContextUsage, PlanEntry, PlanStatus};
+        let mut app = test_app(HarnessId::Claude);
+        assert!(app.caps().supports_effort("xhigh"));
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            effort_levels: Some(vec!["low".into()]),
+            image_input: Some(true),
+            ..Default::default()
+        }));
+        let caps = app.caps();
+        assert!(caps.image_input && !caps.supports_effort("xhigh"));
+
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(10),
+            window: Some(100),
+        }));
+        assert_eq!(app.context.percent(), Some(10));
+        app.on_event(AgentEvent::PlanUpdated {
+            entries: vec![PlanEntry {
+                text: "step".into(),
+                status: PlanStatus::InProgress,
+            }],
+            explanation: None,
+        });
+        assert_eq!(app.plan.len(), 1);
+
+        // Subagent tool calls land in the transcript; subagent prose does not.
+        let before = app.transcript.blocks.len();
+        app.on_event(AgentEvent::Sub {
+            parent: "p".into(),
+            event: Box::new(AgentEvent::TextDelta("inner".into())),
+        });
+        assert_eq!(app.transcript.blocks.len(), before);
+        app.on_event(AgentEvent::Sub {
+            parent: "p".into(),
+            event: Box::new(AgentEvent::ToolCallStarted {
+                id: "c".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            }),
+        });
+        assert_eq!(app.transcript.blocks.len(), before + 1);
     }
 
     #[test]

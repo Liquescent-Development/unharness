@@ -3,6 +3,8 @@
 
 use serde_json::Value;
 
+use super::ids::ModelInfo;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     SessionStarted {
@@ -31,10 +33,24 @@ pub enum AgentEvent {
     },
     PermissionRequest(PermissionRequest),
     Usage(Usage),
-    /// Effort levels changed (e.g. after a model switch in pi or codex).
-    CapabilitiesChanged {
-        effort_levels: Vec<String>,
+    /// The agent's plan / todo list. Each event replaces the previous plan.
+    PlanUpdated {
+        entries: Vec<PlanEntry>,
+        explanation: Option<String>,
     },
+    /// An event produced inside a subagent; `parent` is the tool call that spawned it.
+    Sub {
+        parent: String,
+        event: Box<AgentEvent>,
+    },
+    Context(ContextUsage),
+    RateLimit(RateLimitInfo),
+    /// Vendor id of the user turn the harness just accepted (rewind / fork target).
+    TurnAnchor {
+        id: String,
+    },
+    /// What the harness can do changed (model switch, handshake result...).
+    CapabilitiesChanged(CapsUpdate),
     TurnCompleted {
         stop_reason: StopReason,
     },
@@ -44,6 +60,116 @@ pub enum AgentEvent {
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+impl PlanStatus {
+    /// Vendors spell these `inProgress`, `in_progress`, `in-progress`, `done`...
+    pub fn parse(s: &str) -> Self {
+        match s.to_lowercase().replace(['_', '-'], "").as_str() {
+            "inprogress" | "active" | "running" => PlanStatus::InProgress,
+            "completed" | "complete" | "done" => PlanStatus::Completed,
+            _ => PlanStatus::Pending,
+        }
+    }
+
+    pub fn marker(&self) -> &'static str {
+        match self {
+            PlanStatus::Pending => "[ ]",
+            PlanStatus::InProgress => "[~]",
+            PlanStatus::Completed => "[x]",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlanEntry {
+    pub text: String,
+    pub status: PlanStatus,
+}
+
+/// How full the model's context window is. Either side may be unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ContextUsage {
+    pub used: Option<u64>,
+    pub window: Option<u64>,
+}
+
+impl ContextUsage {
+    /// Keep the known halves of `self`, take the rest from `newer`.
+    pub fn merge(&mut self, newer: ContextUsage) {
+        if newer.used.is_some() {
+            self.used = newer.used;
+        }
+        if newer.window.is_some() {
+            self.window = newer.window;
+        }
+    }
+
+    pub fn percent(&self) -> Option<u8> {
+        match (self.used, self.window) {
+            (Some(u), Some(w)) if w > 0 => Some((u.saturating_mul(100) / w).min(100) as u8),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimitWindow {
+    /// e.g. `five_hour`, `seven_day`, `primary`.
+    pub label: String,
+    pub used_percent: Option<f32>,
+    /// Unix seconds.
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RateLimitInfo {
+    /// Vendor status string when one is reported (`allowed`, `rejected`...).
+    pub status: Option<String>,
+    pub windows: Vec<RateLimitWindow>,
+}
+
+/// A partial capability update; `None` leaves the declared value alone.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapsUpdate {
+    pub effort_levels: Option<Vec<String>>,
+    pub image_input: Option<bool>,
+    pub resume_by_id: Option<bool>,
+    /// Models the live session offers (harnesses that only know after a handshake).
+    pub models: Option<Vec<ModelInfo>>,
+}
+
+impl CapsUpdate {
+    pub fn efforts(levels: Vec<String>) -> Self {
+        CapsUpdate {
+            effort_levels: Some(levels),
+            ..Default::default()
+        }
+    }
+
+    /// Layer `newer` over `self`.
+    pub fn merge(&mut self, newer: CapsUpdate) {
+        if newer.effort_levels.is_some() {
+            self.effort_levels = newer.effort_levels;
+        }
+        if newer.image_input.is_some() {
+            self.image_input = newer.image_input;
+        }
+        if newer.resume_by_id.is_some() {
+            self.resume_by_id = newer.resume_by_id;
+        }
+        if newer.models.is_some() {
+            self.models = newer.models;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,8 +335,57 @@ impl AgentEvent {
                     .unwrap_or_else(|| "-".into()),
                 u.cumulative
             ),
-            AgentEvent::CapabilitiesChanged { effort_levels } => {
-                format!("CapabilitiesChanged efforts={}", effort_levels.join(","))
+            AgentEvent::PlanUpdated { entries, .. } => format!(
+                "PlanUpdated {}",
+                short(
+                    &entries
+                        .iter()
+                        .map(|e| format!("{} {}", e.status.marker(), e.text))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            ),
+            AgentEvent::Sub { parent, event } => {
+                format!("Sub parent={} {}", parent, event.summary())
+            }
+            AgentEvent::Context(c) => format!(
+                "Context used={} window={}",
+                c.used.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                c.window
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".into())
+            ),
+            AgentEvent::RateLimit(r) => format!(
+                "RateLimit status={} {}",
+                r.status.as_deref().unwrap_or("-"),
+                r.windows
+                    .iter()
+                    .map(|w| format!(
+                        "{}={}",
+                        w.label,
+                        w.used_percent
+                            .map(|p| format!("{p:.0}%"))
+                            .unwrap_or_else(|| "?".into())
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),
+            AgentEvent::CapabilitiesChanged(u) => {
+                let mut parts = Vec::new();
+                if let Some(e) = &u.effort_levels {
+                    parts.push(format!("efforts={}", e.join(",")));
+                }
+                if let Some(i) = u.image_input {
+                    parts.push(format!("image_input={i}"));
+                }
+                if let Some(r) = u.resume_by_id {
+                    parts.push(format!("resume_by_id={r}"));
+                }
+                if let Some(m) = &u.models {
+                    parts.push(format!("models={}", m.len()));
+                }
+                format!("CapabilitiesChanged {}", parts.join(" "))
             }
             AgentEvent::TurnCompleted { stop_reason } => match stop_reason {
                 StopReason::Done => "TurnCompleted Done".to_string(),
@@ -240,6 +415,50 @@ mod tests {
         assert!(!s.contains('\n'));
         assert!(s.len() < 90);
         assert!(s.starts_with("TextDelta \"a\\\\nb"));
+    }
+
+    #[test]
+    fn plan_status_spellings() {
+        assert_eq!(PlanStatus::parse("inProgress"), PlanStatus::InProgress);
+        assert_eq!(PlanStatus::parse("in_progress"), PlanStatus::InProgress);
+        assert_eq!(PlanStatus::parse("completed"), PlanStatus::Completed);
+        assert_eq!(PlanStatus::parse("whatever"), PlanStatus::Pending);
+    }
+
+    #[test]
+    fn context_merge_and_percent() {
+        let mut c = ContextUsage::default();
+        assert_eq!(c.percent(), None);
+        c.merge(ContextUsage {
+            used: Some(50_000),
+            window: None,
+        });
+        c.merge(ContextUsage {
+            used: None,
+            window: Some(200_000),
+        });
+        assert_eq!(c.percent(), Some(25));
+    }
+
+    #[test]
+    fn new_event_summaries() {
+        let sub = AgentEvent::Sub {
+            parent: "t1".into(),
+            event: Box::new(AgentEvent::TextDelta("hi".into())),
+        };
+        assert_eq!(sub.summary(), "Sub parent=t1 TextDelta \"hi\"");
+        let plan = AgentEvent::PlanUpdated {
+            entries: vec![PlanEntry {
+                text: "a".into(),
+                status: PlanStatus::Completed,
+            }],
+            explanation: None,
+        };
+        assert_eq!(plan.summary(), "PlanUpdated [x] a");
+        assert_eq!(
+            AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec!["low".into()])).summary(),
+            "CapabilitiesChanged efforts=low"
+        );
     }
 
     #[test]

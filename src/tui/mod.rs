@@ -274,7 +274,7 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
             }
             Action::SendTurn(text) => {
                 if let Some(s) = session.as_ref() {
-                    if let Err(e) = s.send(SessionCommand::SendTurn { text }).await {
+                    if let Err(e) = s.send(SessionCommand::turn(text)).await {
                         app.on_event(crate::core::AgentEvent::TurnCompleted {
                             stop_reason: crate::core::StopReason::Error(e.to_string()),
                         });
@@ -313,7 +313,7 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         model: app.current_model().cloned(),
         effort: app.current_effort().map(str::to_string),
         policy: app.effective_policy(),
-        resume: if harness.capabilities().resume_by_id {
+        resume: if app.caps().resume_by_id {
             resume
         } else {
             None
