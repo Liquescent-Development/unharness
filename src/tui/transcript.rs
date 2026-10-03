@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::code::sanitize;
+
 #[derive(Debug, Clone)]
 pub enum Block {
     User {
@@ -46,19 +48,21 @@ pub const DEFAULT_BRIDGE_MAX_CHARS: usize = 24_000;
 
 impl Transcript {
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.blocks.push(Block::User { text: text.into() });
+        self.blocks.push(Block::User {
+            text: sanitize(&text.into()),
+        });
     }
 
     pub fn push_system(&mut self, text: impl Into<String>) {
-        self.blocks.push(Block::System(text.into()));
+        self.blocks.push(Block::System(sanitize(&text.into())));
     }
 
     pub fn push_notice(&mut self, text: impl Into<String>) {
-        self.blocks.push(Block::Notice(text.into()));
+        self.blocks.push(Block::Notice(sanitize(&text.into())));
     }
 
     pub fn push_error(&mut self, text: impl Into<String>) {
-        self.blocks.push(Block::Error(text.into()));
+        self.blocks.push(Block::Error(sanitize(&text.into())));
     }
 
     pub fn clear(&mut self) {
@@ -67,6 +71,7 @@ impl Transcript {
     }
 
     pub fn append_assistant(&mut self, sender: &str, delta: &str) {
+        let delta = &sanitize(delta);
         self.close_thought();
         if let Some(Block::Assistant {
             text,
@@ -86,6 +91,7 @@ impl Transcript {
     }
 
     pub fn append_thought(&mut self, delta: &str) {
+        let delta = &sanitize(delta);
         if let Some(Block::Thought {
             text,
             duration: None,
@@ -142,6 +148,7 @@ impl Transcript {
     /// Live output (or streaming args before the call is announced; those are
     /// ignored because `tool_started` carries the final input).
     pub fn tool_delta(&mut self, id: &str, delta: &str) {
+        let delta = &sanitize(delta);
         if let Some(Block::Tool { output, done, .. }) = self.find_tool(id)
             && !*done
         {
@@ -150,6 +157,7 @@ impl Transcript {
     }
 
     pub fn tool_result(&mut self, id: &str, result: &str, is_error: bool) {
+        let result = &sanitize(result);
         match self.find_tool(id) {
             Some(Block::Tool {
                 output,
@@ -319,10 +327,11 @@ pub fn tool_summary_full(name: &str, input: &Value) -> String {
             "prompt",
         ]),
     };
-    s.unwrap_or_else(|| match input {
+    let s = s.unwrap_or_else(|| match input {
         Value::Null => String::new(),
         v => v.to_string(),
-    })
+    });
+    sanitize(&s).replace('\n', " ⏎ ")
 }
 
 pub fn truncate_chars(s: &str, max: usize) -> String {

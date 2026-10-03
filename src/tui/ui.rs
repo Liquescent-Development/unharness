@@ -10,7 +10,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::app::App;
-use super::code::{code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines};
+use super::code::{
+    clamp_lines, code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines, sanitize,
+    wrap_words,
+};
 use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
@@ -261,7 +264,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                     )
                 };
                 let summary = tool_summary_full(name, input);
-                let head_width = width.saturating_sub(name.len() + 8).max(10);
+                let head_width = width.saturating_sub(name.len() + 18).max(10);
                 let mut summary_lines = wrap_words(&summary, head_width).into_iter();
                 let mut first = vec![
                     Span::styled("  ⚡ ", Style::default().fg(Color::Yellow)),
@@ -338,6 +341,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
+    clamp_lines(&mut lines, inner.width as usize);
     let total = lines.len() as u16;
     let max_scroll = total.saturating_sub(inner.height);
     if app.auto_scroll || app.scroll >= max_scroll {
@@ -421,49 +425,6 @@ pub fn wrap_prefixed_text(
     lines
 }
 
-pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_len = 0;
-    for word in text.split(' ') {
-        let word_len = UnicodeWidthStr::width(word);
-        if word_len > max_width {
-            if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
-            }
-            let mut chunk = String::new();
-            let mut chunk_len = 0;
-            for c in word.chars() {
-                let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-                if chunk_len + cw > max_width {
-                    lines.push(std::mem::take(&mut chunk));
-                    chunk_len = 0;
-                }
-                chunk.push(c);
-                chunk_len += cw;
-            }
-            current = chunk;
-            current_len = chunk_len;
-            continue;
-        }
-        if current_len == 0 {
-            current.push_str(word);
-            current_len = word_len;
-        } else if current_len + 1 + word_len <= max_width {
-            current.push(' ');
-            current.push_str(word);
-            current_len += 1 + word_len;
-        } else {
-            lines.push(std::mem::replace(&mut current, word.to_string()));
-            current_len = word_len;
-        }
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
-}
-
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -477,7 +438,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             " Prompt (type / for commands) "
         });
-    frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
+    frame.render_widget(Paragraph::new(sanitize(&app.input)).block(block), area);
     if app.modal.is_none() {
         let before: String = app.input.chars().take(app.cursor).collect();
         let x = area.x + 1 + UnicodeWidthStr::width(before.as_str()) as u16;

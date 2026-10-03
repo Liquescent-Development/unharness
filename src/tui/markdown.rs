@@ -6,11 +6,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use unicode_width::UnicodeWidthStr;
 
-use super::code::{code_lines, diff_lines, is_diff_line};
+use super::code::{code_lines, diff_lines, is_diff_line, sanitize, wrap_words};
 
 pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'static>> {
+    let text = sanitize(text);
+    let text = text.as_str();
     let mut lines = Vec::new();
     let mut code_lang: Option<String> = None;
     let mut code_buf = String::new();
@@ -265,27 +266,7 @@ fn italic_spans(text: &str) -> Vec<Span<'static>> {
 }
 
 fn wrap_text_preserving(text: &str, max_width: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0;
-    for word in text.split(' ') {
-        let w = UnicodeWidthStr::width(word);
-        if current_width == 0 {
-            current.push_str(word);
-            current_width = w;
-        } else if current_width + 1 + w <= max_width {
-            current.push(' ');
-            current.push_str(word);
-            current_width += 1 + w;
-        } else {
-            lines.push(std::mem::replace(&mut current, word.to_string()));
-            current_width = w;
-        }
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
+    wrap_words(text, max_width)
 }
 
 #[cfg(test)]

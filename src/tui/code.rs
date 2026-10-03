@@ -25,6 +25,144 @@ static THEME: LazyLock<Theme> = LazyLock::new(|| {
 const GUTTER: &str = "  │ ";
 const CONT: &str = "  │ ↪ ";
 
+/// Make text safe to put in a terminal cell grid: strip ANSI/OSC escape
+/// sequences, expand tabs, drop carriage returns and other control characters
+/// (newlines are kept). Anything that moves the cursor on its own corrupts
+/// ratatui's diff and leaves artifacts on screen.
+pub fn sanitize(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut col = 0usize;
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => {
+                // CSI: ESC [ ... final byte 0x40..=0x7E ; OSC: ESC ] ... BEL or ESC \
+                match chars.peek() {
+                    Some('[') => {
+                        chars.next();
+                        for n in chars.by_ref() {
+                            if ('\x40'..='\x7e').contains(&n) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\x07' {
+                                break;
+                            }
+                            if n == '\x1b' && chars.peek() == Some(&'\\') {
+                                chars.next();
+                                break;
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        chars.next();
+                    }
+                    None => {}
+                }
+            }
+            '\n' => {
+                out.push('\n');
+                col = 0;
+            }
+            '\t' => {
+                let pad = 4 - (col % 4);
+                out.extend(std::iter::repeat_n(' ', pad));
+                col += pad;
+            }
+            '\r' => {}
+            c if c.is_control() => {}
+            c => {
+                out.push(c);
+                col += UnicodeWidthChar::width(c).unwrap_or(1);
+            }
+        }
+    }
+    out
+}
+
+/// Word wrap that also breaks tokens wider than `max_width` by character.
+pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0;
+    for word in text.split(' ') {
+        let word_len = unicode_width::UnicodeWidthStr::width(word);
+        if word_len > max_width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let mut chunk = String::new();
+            let mut chunk_len = 0;
+            for c in word.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+                if chunk_len + cw > max_width {
+                    lines.push(std::mem::take(&mut chunk));
+                    chunk_len = 0;
+                }
+                chunk.push(c);
+                chunk_len += cw;
+            }
+            current = chunk;
+            current_len = chunk_len;
+            continue;
+        }
+        if current_len == 0 {
+            current.push_str(word);
+            current_len = word_len;
+        } else if current_len + 1 + word_len <= max_width {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + word_len;
+        } else {
+            lines.push(std::mem::replace(&mut current, word.to_string()));
+            current_len = word_len;
+        }
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Safety net: no rendered line may exceed `width` cells, whatever the
+/// wrapping code did. Cuts the offending span and appends `…`.
+pub fn clamp_lines(lines: &mut [Line<'static>], width: usize) {
+    for line in lines.iter_mut() {
+        let mut used = 0usize;
+        let mut cut_at: Option<(usize, String)> = None;
+        for (i, span) in line.spans.iter().enumerate() {
+            let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
+            if used + w > width {
+                let room = width.saturating_sub(used).saturating_sub(1);
+                let mut kept = String::new();
+                let mut kw = 0;
+                for c in span.content.chars() {
+                    let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+                    if kw + cw > room {
+                        break;
+                    }
+                    kept.push(c);
+                    kw += cw;
+                }
+                kept.push('…');
+                cut_at = Some((i, kept));
+                break;
+            }
+            used += w;
+        }
+        if let Some((i, kept)) = cut_at {
+            let style = line.spans[i].style;
+            line.spans.truncate(i);
+            line.spans.push(Span::styled(kept, style));
+        }
+    }
+}
+
 /// Pick a syntax from a language token (`rust`, `py`) or a file path.
 pub fn syntax_for(hint: &str) -> Option<&'static SyntaxReference> {
     let hint = hint.trim();
@@ -131,6 +269,7 @@ pub fn code_lines(text: &str, hint: &str, width: usize) -> Vec<Line<'static>> {
     if hint.eq_ignore_ascii_case("diff") || hint.eq_ignore_ascii_case("patch") {
         return diff_lines(text, width);
     }
+    let text = sanitize(text);
     let mut hl = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
     let mut out = Vec::new();
     for line in text.lines() {
@@ -142,6 +281,7 @@ pub fn code_lines(text: &str, hint: &str, width: usize) -> Vec<Line<'static>> {
 
 /// Plain (unhighlighted) wrapped lines with a gutter, e.g. command output.
 pub fn plain_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let text = sanitize(text);
     let mut out = Vec::new();
     for line in text.lines() {
         out.extend(wrap_spans(
@@ -185,6 +325,7 @@ pub fn looks_like_diff(text: &str) -> bool {
 
 /// Red/green diff rendering, wrapped.
 pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+    let text = sanitize(text);
     let mut out = Vec::new();
     for line in text.lines() {
         let (marker, style) = if line.starts_with("+++")
@@ -235,6 +376,7 @@ pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 /// Render an old→new replacement as a diff with syntax colouring under the
 /// red/green tint. `hint` is the file path for syntax selection.
 pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<Line<'static>> {
+    let (old, new) = (sanitize(old), sanitize(new));
     let mut out = Vec::new();
     let mut hl_old = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
     let mut hl_new = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
@@ -318,6 +460,28 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert!(line_text(&lines[0]).contains("- "));
         assert!(line_text(&lines[1]).contains("+ "));
+    }
+
+    #[test]
+    fn sanitize_strips_escapes_and_expands_tabs() {
+        assert_eq!(sanitize("a\x1b[31mred\x1b[0m b"), "ared b");
+        assert_eq!(sanitize("\x1b]0;title\x07x"), "x");
+        assert_eq!(sanitize("x\ty\n\tz"), "x   y\n    z");
+        assert_eq!(sanitize("line\r\nnext\x07"), "line\nnext");
+    }
+
+    #[test]
+    fn wrap_words_breaks_long_tokens_and_clamp_guards() {
+        let w = wrap_words(&"x".repeat(25), 10);
+        assert_eq!(w.len(), 3);
+        assert_eq!(wrap_words("", 10), vec![String::new()]);
+        let mut lines = vec![Line::from(vec![Span::raw("ab"), Span::raw("cdefgh")])];
+        clamp_lines(&mut lines, 5);
+        assert_eq!(line_text(&lines[0]), "abcd…");
+        assert_eq!(
+            unicode_width::UnicodeWidthStr::width(line_text(&lines[0]).as_str()),
+            5
+        );
     }
 
     #[test]
