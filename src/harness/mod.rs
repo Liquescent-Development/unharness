@@ -1,5 +1,6 @@
 //! Harness adapters: one module per vendor CLI implementing [`Harness`].
 
+pub mod acp;
 pub mod agy;
 pub mod claude;
 pub mod codex;

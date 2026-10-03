@@ -1,0 +1,11 @@
+CapabilitiesChanged image_input=true resume_by_id=true
+SessionStarted id=201664ad-6914-49da-8f50-0e36f73b8d3b model=claude-fable-5-1[1m]
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max models=12
+CapabilitiesChanged efforts= models=12
+Context used=17065 window=200000
+TextDelta "hello"
+Context used=17137 window=200000
+Context used=17137 window=200000
+Context used=17137 window=200000
+Usage in=10 out=78 cache_read=0 cache_write=17049 cost=0.4121 cumulative=false
+TurnCompleted Done

@@ -118,8 +118,14 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                 "Workspace Skills",
                 &discover_skills_in_dir(&workspace_skills_dir(root)),
             );
-            for k in config.harnesses.keys() {
-                if registry.parse(k).is_none() {
+            for (k, settings) in &config.harnesses {
+                if settings.protocol.as_deref() == Some("acp") && settings.command.is_empty() {
+                    println!(
+                        "  {} harness '{}' has protocol = \"acp\" but no command in unharness.toml",
+                        "[!]".yellow(),
+                        k
+                    );
+                } else if registry.parse(k).is_none() {
                     println!(
                         "  {} unknown harness '{}' in unharness.toml",
                         "[!]".yellow(),

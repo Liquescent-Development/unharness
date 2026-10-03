@@ -700,3 +700,167 @@ async fn agy_auth_failure_ends_turn_with_error() {
         "{tail:?}"
     );
 }
+
+fn acp_harness() -> unharness::harness::acp::AcpHarness {
+    unharness::harness::acp::AcpHarness::new(
+        "fake-acp",
+        None,
+        &[fake_harness().to_string_lossy().into_owned()],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn acp_handshake_turns_and_permission_round_trip() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    // Sent before the handshake finishes: the driver holds it until the
+    // session exists.
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("201664ad"))
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    handle.send(SessionCommand::turn("write it")).await.unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallStarted { name, input, .. } if name == "Write" && input["content"] == "hello\n")
+    ));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult {
+            is_error: false,
+            ..
+        }
+    )));
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[0]["method"], "initialize");
+    assert_eq!(sent[0]["params"]["protocolVersion"], 1);
+    assert_eq!(sent[1]["method"], "session/new");
+    assert_eq!(sent[1]["params"]["mcpServers"], serde_json::json!([]));
+    assert_eq!(sent[2]["method"], "session/prompt");
+    assert_eq!(sent[2]["params"]["prompt"][0]["text"], "pong?");
+    assert!(
+        sent[2]["params"]["sessionId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("201664ad"))
+    );
+    let answer = sent
+        .iter()
+        .find(|v| v.get("result").is_some())
+        .expect("permission answer");
+    assert_eq!(answer["id"], 0);
+    assert_eq!(answer["result"]["outcome"]["optionId"], "allow-once");
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn acp_bypass_answers_permission_requests_itself() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle.send(SessionCommand::turn("write it")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    // The tool call is shown, the question is not.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "Write"))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+    );
+    let sent = fake.sent_lines();
+    assert!(
+        sent.iter()
+            .any(|v| v["result"]["outcome"]["optionId"] == "allow-once")
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn acp_resumes_a_session_and_applies_the_configured_model() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_resume.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.resume = Some("201664ad-6914-49da-8f50-0e36f73b8d3b".into());
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle
+        .send(SessionCommand::turn("what was it?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "hello"))
+    );
+    // The model switch drops the effort option: the capability update says so.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::CapabilitiesChanged(u) if u.effort_levels.as_deref() == Some(&[][..])
+    )));
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[1]["method"], "session/resume");
+    assert_eq!(
+        sent[1]["params"]["sessionId"],
+        "201664ad-6914-49da-8f50-0e36f73b8d3b"
+    );
+    assert_eq!(sent[2]["method"], "session/set_config_option");
+    assert_eq!(sent[2]["params"]["configId"], "model");
+    assert_eq!(sent[2]["params"]["value"], "haiku");
+    assert_eq!(sent[3]["method"], "session/prompt");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}

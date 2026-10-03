@@ -40,6 +40,14 @@ pub struct HarnessSettings {
     pub persist_sessions: Option<bool>,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// `"acp"` defines a harness for an Agent Client Protocol agent under
+    /// this table's name; `command` is then required.
+    pub protocol: Option<String>,
+    /// The agent's command line for an ACP harness, e.g. `["gemini", "--acp"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// Name shown in the TUI for a config-defined harness.
+    pub display_name: Option<String>,
 }
 
 impl Config {
@@ -149,6 +157,13 @@ impl Config {
             } else {
                 global.extra_args
             },
+            protocol: local.protocol.or(global.protocol),
+            command: if !local.command.is_empty() {
+                local.command
+            } else {
+                global.command
+            },
+            display_name: local.display_name.or(global.display_name),
         }
     }
 }
