@@ -496,3 +496,105 @@ async fn codex_exec_per_turn_resumes_by_thread() {
         AgentEvent::ProcessExited { .. }
     ));
 }
+
+#[tokio::test]
+async fn agy_stream_session_against_synthetic_fixture() {
+    if !python_available() {
+        return;
+    }
+    // The fixture is synthetic (no agy account yet); this exercises the
+    // transport plumbing, not the vendor protocol.
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/agy/fixtures/synthetic_turn.jsonl");
+    let harness = unharness::harness::agy::AgyHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, true))
+        .unwrap();
+
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "echo hi".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "conv-synthetic-1")));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "hi\n"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "delete".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("denied")))
+    );
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[0]["type"], "user");
+    assert_eq!(sent[0]["message"]["content"], "echo hi");
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn agy_auth_failure_ends_turn_with_error() {
+    if !python_available() {
+        return;
+    }
+    // Real recording: agy exits after a `result` with status ERROR.
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/agy/fixtures/auth_required.jsonl");
+    let harness = unharness::harness::agy::AgyHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, false))
+        .unwrap();
+    handle
+        .send(SessionCommand::SendTurn {
+            text: "pong".into(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { stop_reason: StopReason::Error(m) } if m.contains("authentication"))));
+    // The stderr explanation and the exit arrive after the result line.
+    let mut tail = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        let exited = matches!(ev, AgentEvent::ProcessExited { .. });
+        tail.push(ev);
+        if exited {
+            break;
+        }
+    }
+    assert!(
+        tail.iter()
+            .any(|e| matches!(e, AgentEvent::Error(m) if m.contains("log in"))),
+        "{tail:?}"
+    );
+    assert!(
+        matches!(
+            tail.last(),
+            Some(AgentEvent::ProcessExited { code: Some(1) })
+        ),
+        "{tail:?}"
+    );
+}

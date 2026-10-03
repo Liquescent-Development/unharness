@@ -15,7 +15,8 @@ Every stdin line is appended to the file named by $UNHARNESS_FAKE_LOG so the
 test can assert on what the driver sent. All command-line arguments are
 ignored (the driver passes vendor flags). The fixture path comes from
 $UNHARNESS_FAKE_FIXTURE. Set $UNHARNESS_FAKE_EXIT_CODE to control the exit
-status after the fixture is exhausted (default 0). Set $UNHARNESS_FAKE_HANG=1
+status after the fixture is exhausted (default 0; a `# exit=N` line in the
+fixture overrides it). Set $UNHARNESS_FAKE_HANG=1
 to keep running after the fixture until stdin closes (long-lived protocols).
 """
 import os
@@ -44,7 +45,12 @@ def main() -> int:
     with open(fixture) as f:
         for raw in f:
             line = raw.rstrip("\n")
-            if not line.strip() or line.startswith("#"):
+            if line.startswith("#"):
+                # A recorder's trailing `# exit=N` sets our exit status too.
+                if line.startswith("# exit=") and line[7:].strip().isdigit():
+                    exit_code = int(line[7:].strip())
+                continue
+            if not line.strip():
                 continue
             if line.startswith(">>"):
                 if read_stdin_line() is None:

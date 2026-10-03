@@ -48,7 +48,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cwd = os.getcwd()
-    cmd = ["agy", "-p", "--input-format", "stream-json", "--output-format", "stream-json"]
+    # `--print=` (empty value) enables print mode while the prompts arrive on stdin;
+    # agy 1.2.x treats `-p --input-format` as a prompt named "--input-format".
+    cmd = ["agy", "--print=", "--input-format", "stream-json", "--output-format", "stream-json",
+           "--print-timeout", "0"]
     cmd += args.extra.split() if args.extra else []
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

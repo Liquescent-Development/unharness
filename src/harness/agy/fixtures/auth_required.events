@@ -1,0 +1,4 @@
+Usage in=0 out=0 cache_read=0 cache_write=0 cost=- cumulative=false
+TurnCompleted Error "authentication failed or timed out"
+Error "Error: authentication required. Run 'agy' to log in, then..."
+Error "error: authentication failed or timed out"

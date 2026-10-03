@@ -17,7 +17,7 @@ speaks a streaming JSON protocol with a permission channel:
 | Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | static list |
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list` |
 | pi | `pi --mode rpc` (long-lived) | extension dialogs | `--session-id` | `get_available_models`, many providers |
-| Antigravity | per-turn `agy -p` (unverified, no account) | no | no | `agy models` |
+| Antigravity | `agy --print= --input-format stream-json` (long-lived, unverified: no account yet) | no | `--conversation` | `agy models` |
 
 unharness normalises those into one event model and one capability set, so
 the TUI never assumes what a harness can do. Anything a harness lacks is shown
@@ -72,12 +72,12 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 
 ### Permission policy
 
-| Policy | Claude Code | Codex (app-server) | Codex (exec) | pi |
-|---|---|---|---|---|
-| `ask` | default mode, prompts in the TUI | `untrusted` + read-only sandbox, prompts in the TUI | read-only sandbox, cannot prompt* | only extension dialogs prompt* |
-| `accept-edits` | `acceptEdits` | `on-request` + workspace-write | workspace-write | falls back to ask* |
-| `auto` | `auto` (classifier) | `on-request` + workspace-write | `--approve-for-me` | falls back to ask* |
-| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | dialogs auto-accepted* |
+| Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
+|---|---|---|---|---|---|
+| `ask` | default mode, prompts in the TUI | `untrusted` + read-only sandbox, prompts in the TUI | read-only sandbox, cannot prompt* | only extension dialogs prompt* | soft-denies tools that would prompt* |
+| `accept-edits` | `acceptEdits` | `on-request` + workspace-write | workspace-write | falls back to ask* | `--mode accept-edits` |
+| `auto` | `auto` (classifier) | `on-request` + workspace-write | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
+| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | dialogs auto-accepted* | `--dangerously-skip-permissions` |
 
 `*` shown as a warning in the header. A requested policy a harness cannot
 honour falls back to the nearest *less* permissive one it supports.
@@ -109,6 +109,9 @@ extra_args     = []
 [harnesses.codex]
 transport = "auto"               # auto | app-server | exec
 
+[harnesses.agy]
+transport = "stream"             # stream | stream-prompt | per-turn (see AGENTS.md)
+
 [harnesses.pi]
 default_provider = "openai-codex"
 default_model    = "gpt-5.5"
@@ -138,7 +141,7 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   claude/      stream-json transport + parser + fixtures/
   codex/       app-server + exec transports + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/
-  legacy/      v1 Antigravity adapter behind the per-turn shim
+  agy/         stream-json transport (best effort, unverified) + per-turn fallback
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
                them for tests/session_e2e.rs

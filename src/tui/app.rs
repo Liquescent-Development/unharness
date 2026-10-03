@@ -1287,13 +1287,13 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
 pub(crate) mod tests {
     use super::*;
     use crate::core::{PermissionKind, Question};
+    use crate::harness::agy::AgyHarness;
     use crate::harness::claude::ClaudeHarness;
-    use crate::harness::legacy::shim::LegacyHarness;
     use crossterm::event::KeyEventKind;
 
     pub(crate) fn test_app(harness: HarnessId) -> App {
         let registry = Registry::empty()
-            .with(Box::new(LegacyHarness::agy()))
+            .with(Box::new(AgyHarness::default()))
             .with(Box::new(ClaudeHarness))
             .with(Box::new(crate::harness::codex::CodexHarness::new(
                 crate::harness::codex::CodexTransport::Exec,

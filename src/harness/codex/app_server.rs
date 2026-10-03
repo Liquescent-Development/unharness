@@ -78,7 +78,6 @@ enum Outstanding {
     ThreadStart,
     TurnStart,
     Interrupt,
-    Other,
 }
 
 struct Driver {

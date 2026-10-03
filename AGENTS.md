@@ -60,10 +60,16 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
 
 ## Status notes
 
-- Antigravity (`agy`) is unverified: there is no account to record against.
-  It runs through `harness/legacy/shim.rs` (one child per turn, `--continue`).
-  Its stdin stream-json message shape is unknown; `-p` cannot be combined with
-  `--input-format` on agy 1.2.x, so a port needs `--print=<prompt>` style flags.
+- Antigravity (`agy`, `src/harness/agy/`) is best effort: no account was
+  available. Verified on agy 1.2.15 without credentials: `--print=` (empty)
+  with `--input-format stream-json --output-format stream-json` parses, the
+  `result` event shape (`fixtures/auth_required.jsonl`), and the `AGY_ERROR:`
+  stderr marker. Unverified: the stdin message shape (Claude-compatible by
+  default, `transport = "stream-prompt"` sends `{"prompt": …}`), the `init`
+  and `step_update` field names (`fixtures/synthetic_turn.jsonl` is
+  hand-written and says so), and `agy --output-format json models`. First
+  thing to do with an account: `scripts/record-agy.py` from a scratch dir,
+  replace the synthetic fixture, regenerate `.events`, fix the parser.
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
   in `[harnesses.codex]` forces the fallback.
 

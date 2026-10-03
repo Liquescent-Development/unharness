@@ -1,20 +1,9 @@
-// Dead-code warnings are expected until the TUI cutover (plan phase 2).
-#![allow(dead_code)]
+//! Harness adapters: one module per vendor CLI implementing [`Harness`].
 
-//! Harness adapters.
-//!
-//! `legacy` holds the v1 adapters still used by print/raw mode and the v1 TUI
-//! until each harness is ported to the `Harness` trait below (plan phases 1–5).
-
+pub mod agy;
 pub mod claude;
 pub mod codex;
-pub mod legacy;
 pub mod pi;
-
-pub use legacy::{
-    HarnessAdapter, HarnessKind, ModelInfo as LegacyModelInfo, RunOptions, get_adapter,
-    resolve_active_harness, which,
-};
 
 use std::path::{Path, PathBuf};
 
@@ -135,4 +124,28 @@ pub fn probe_version(binary: &Path) -> Option<String> {
     }
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// Find an executable on `PATH`.
+pub fn which(name: &str) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if !candidate.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if candidate
+                .metadata()
+                .is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
+            {
+                return Some(candidate);
+            }
+        }
+        #[cfg(not(unix))]
+        return Some(candidate);
+    }
+    None
 }

@@ -1,6 +1,3 @@
-// Dead-code warnings are expected until the TUI cutover (plan phase 2).
-#![allow(dead_code, unused_imports)]
-
 //! Harness-agnostic core: identifiers, capabilities, the event model, and the
 //! session/process plumbing every harness transport is built on.
 

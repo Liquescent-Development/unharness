@@ -1,0 +1,14 @@
+TurnStarted
+SessionStarted id=conv-synthetic-1 model=gemini-3.8-flash-high
+ThinkingDelta "I should run the command, then answer."
+ToolCallStarted id=tool-1 name=run_command input={"command":"echo hi"}
+ToolCallResult id=tool-1 error=false "hi\\n"
+TextDelta "do"
+TextDelta "ne"
+Usage in=120 out=6 cache_read=40 cache_write=0 cost=- cumulative=false
+TurnCompleted Done
+TurnStarted
+TextDelta "I was not allowed to run that."
+Usage in=200 out=8 cache_read=150 cache_write=0 cost=- cumulative=false
+Notice "1 action(s) denied by permission rules: run_command(rm -r..."
+TurnCompleted Done
