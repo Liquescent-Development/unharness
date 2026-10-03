@@ -571,6 +571,11 @@ mod tests {
     }
 
     #[test]
+    fn fixture_image_turn() {
+        fixture("image_turn");
+    }
+
+    #[test]
     fn fixture_task_list() {
         fixture("task_list");
     }

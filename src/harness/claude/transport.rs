@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
+    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -89,6 +89,21 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
 
 pub fn user_message(text: &str) -> String {
     json!({"type":"user","message":{"role":"user","content":text}}).to_string()
+}
+
+/// A user turn; images ride along as base64 content blocks.
+pub fn user_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
+    if attachments.is_empty() {
+        return Ok(user_message(text));
+    }
+    let mut content = vec![json!({"type":"text","text":text})];
+    for a in attachments {
+        content.push(json!({
+            "type": "image",
+            "source": {"type":"base64","media_type": a.mime(),"data": a.read_base64()?},
+        }));
+    }
+    Ok(json!({"type":"user","message":{"role":"user","content":content}}).to_string())
 }
 
 pub fn control_request(subtype: &str, extra: Value) -> (String, String) {
@@ -210,7 +225,15 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text, .. } => Some(user_message(&text)),
+                    SessionCommand::SendTurn { text, attachments } => match user_turn(&text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error(e.to_string()),
+                            }).await;
+                            None
+                        }
+                    },
                     SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
                         let _ = events.send(AgentEvent::Error("not supported by claude yet".into())).await;
                         None
@@ -393,6 +416,26 @@ mod tests {
         assert_eq!(v["type"], "control_response");
         assert_eq!(v["response"]["subtype"], "success");
         assert_eq!(v["response"]["request_id"], "r1");
+    }
+
+    #[test]
+    fn user_turn_inlines_images() {
+        // Shape confirmed by fixtures/image_turn.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, b"abc").unwrap();
+        let a = Attachment::image(&path).unwrap();
+        let v: Value = serde_json::from_str(&user_turn("hi", &[a]).unwrap()).unwrap();
+        assert_eq!(
+            v["message"]["content"],
+            json!([
+                {"type":"text","text":"hi"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}}
+            ])
+        );
+        assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
+        let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
+        assert!(user_turn("hi", &[gone]).is_err());
     }
 
     #[test]

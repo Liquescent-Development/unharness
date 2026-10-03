@@ -15,9 +15,9 @@ use crate::config::Config;
 use crate::core::conversations::{Conversation, ConversationStore, now_rfc3339, truncate_title};
 use crate::core::registry::Registry;
 use crate::core::{
-    AgentEvent, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef, PermissionDecision,
-    PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, SessionCommand,
-    StopReason, Usage, resolve_policy,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
+    PermissionDecision, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo,
+    SessionCommand, StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
 
@@ -28,10 +28,23 @@ pub enum Action {
     StartSession {
         resume: Option<String>,
     },
-    SendTurn(String),
+    SendTurn {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
     Command(SessionCommand),
     /// Shut the active session down (harness switch, resume, quit).
     Shutdown,
+}
+
+impl Action {
+    /// A text-only turn.
+    pub fn turn(text: impl Into<String>) -> Self {
+        Action::SendTurn {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -57,6 +70,11 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/usage", "Show token usage and cost"),
     ("/plan", "Show or hide the agent's plan"),
+    (
+        "/attach",
+        "Attach an image to the next prompt: /attach <path>",
+    ),
+    ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/clear", "Clear the transcript"),
     ("/help", "Show commands and shortcuts"),
@@ -108,6 +126,8 @@ pub struct App {
     pub rate_limit: Option<RateLimitInfo>,
     pub plan: Vec<PlanEntry>,
     pub show_plan: bool,
+    /// Images that go out with the next prompt.
+    pub attachments: Vec<Attachment>,
     /// What live sessions reported on top of the declared capabilities.
     live_caps: HashMap<HarnessId, CapsUpdate>,
 
@@ -266,6 +286,7 @@ impl App {
             rate_limit: None,
             plan,
             show_plan: true,
+            attachments: Vec::new(),
             live_caps: HashMap::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
@@ -517,7 +538,12 @@ impl App {
         };
         self.last_active_index.remove(&self.active);
 
-        self.transcript.push_user(text.clone());
+        let attachments = std::mem::take(&mut self.attachments);
+        let mut shown = text.clone();
+        for a in &attachments {
+            shown.push_str(&format!("\n[image: {}]", a.label()));
+        }
+        self.transcript.push_user(shown);
         self.start_generation();
 
         let outgoing = match bridge {
@@ -532,7 +558,41 @@ impl App {
             let resume = self.session_ids.get(&self.active).cloned();
             self.actions.push_back(Action::StartSession { resume });
         }
-        self.actions.push_back(Action::SendTurn(outgoing));
+        self.actions.push_back(Action::SendTurn {
+            text: outgoing,
+            attachments,
+        });
+    }
+
+    /// Queue an image for the next prompt.
+    pub fn attach(&mut self, path: &str) {
+        if !self.caps().image_input {
+            self.transcript.push_error(format!(
+                "{} does not accept images with the current model",
+                self.active.short_name()
+            ));
+            return;
+        }
+        let path = path.trim().trim_matches(['"', '\'']);
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+            None => self.cwd.join(path),
+        };
+        if !path.is_file() {
+            self.transcript
+                .push_error(format!("no such file: {}", path.display()));
+            return;
+        }
+        match Attachment::image(&path) {
+            Some(a) => {
+                self.transcript
+                    .push_system(format!("Attached {} to the next prompt.", a.label()));
+                self.attachments.push(a);
+            }
+            None => self
+                .transcript
+                .push_error("only png, jpg, gif and webp images can be attached"),
+        }
     }
 
     pub fn interrupt(&mut self) {
@@ -1291,6 +1351,22 @@ impl App {
                         .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
                 }
             }
+            // The whole rest of the line is the path (it may contain spaces).
+            "/attach" => match cmd.trim_start().strip_prefix(name).map(str::trim) {
+                Some(path) if !path.is_empty() => self.attach(path),
+                _ if self.attachments.is_empty() => {
+                    self.transcript.push_notice("usage: /attach <image path>")
+                }
+                _ => {
+                    let names: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
+                    self.transcript
+                        .push_system(format!("Attached: {}", names.join(", ")));
+                }
+            },
+            "/detach" => {
+                self.attachments.clear();
+                self.transcript.push_system("Attachments cleared.");
+            }
             "/plan" => {
                 self.show_plan = !self.show_plan;
                 if self.plan.is_empty() {
@@ -1721,7 +1797,7 @@ pub(crate) mod tests {
                 Action::StartSession {
                     resume: Some("codex-1".into())
                 },
-                Action::SendTurn("third".into())
+                Action::turn("third")
             ]
         );
         again.session_alive = true;
@@ -1741,7 +1817,7 @@ pub(crate) mod tests {
             }
         );
         match &actions[1] {
-            Action::SendTurn(t) => {
+            Action::SendTurn { text: t, .. } => {
                 assert!(t.contains("second question") && t.contains("third"), "{t}");
                 assert!(!t.contains("first question"), "{t}");
             }
@@ -1825,6 +1901,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn attachments_go_out_with_the_next_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("my shot.png"), b"png").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::Claude, None, false);
+        app.handle_slash_command("/attach notes.txt");
+        app.handle_slash_command("/attach missing.png");
+        assert!(app.attachments.is_empty());
+        app.handle_slash_command("/attach my shot.png");
+        assert_eq!(app.attachments.len(), 1);
+
+        app.submit_prompt("what is this?".into());
+        assert!(app.attachments.is_empty());
+        let sent = app.take_actions().into_iter().find_map(|a| match a {
+            Action::SendTurn { attachments, .. } => Some(attachments),
+            _ => None,
+        });
+        assert_eq!(sent.unwrap()[0].label(), "my shot.png");
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(super::super::transcript::Block::User { text }) if text.ends_with("[image: my shot.png]")
+        ));
+
+        // A harness that takes no images refuses the attachment.
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::Agy, None, false);
+        app.handle_slash_command("/attach my shot.png");
+        assert!(app.attachments.is_empty());
+    }
+
+    #[test]
     fn exit_summary_only_when_saved() {
         let mut app = test_app(HarnessId::Claude);
         assert!(app.exit_summary().is_none());
@@ -1871,10 +1977,7 @@ pub(crate) mod tests {
         assert!(app.is_generating);
         assert_eq!(
             app.take_actions(),
-            vec![
-                Action::StartSession { resume: None },
-                Action::SendTurn("hello".into())
-            ]
+            vec![Action::StartSession { resume: None }, Action::turn("hello")]
         );
         app.session_alive = true;
         app.on_event(AgentEvent::TurnCompleted {
@@ -1882,7 +1985,7 @@ pub(crate) mod tests {
         });
         assert!(!app.is_generating);
         app.submit_prompt("again".into());
-        assert_eq!(app.take_actions(), vec![Action::SendTurn("again".into())]);
+        assert_eq!(app.take_actions(), vec![Action::turn("again")]);
     }
 
     #[test]
@@ -1904,7 +2007,7 @@ pub(crate) mod tests {
         let actions = app.take_actions();
         assert!(matches!(actions[0], Action::StartSession { resume: None }));
         match &actions[1] {
-            Action::SendTurn(t) => {
+            Action::SendTurn { text: t, .. } => {
                 assert!(t.contains("first question"));
                 assert!(t.contains("Claude: first answer"));
                 assert!(t.ends_with("second question"));
@@ -1918,7 +2021,7 @@ pub(crate) mod tests {
 
         // A second turn on the same harness is not bridged.
         app.submit_prompt("third".into());
-        assert_eq!(app.take_actions(), vec![Action::SendTurn("third".into())]);
+        assert_eq!(app.take_actions(), vec![Action::turn("third")]);
     }
 
     #[test]

@@ -18,8 +18,8 @@ use super::parse::AgyParser;
 use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, PermissionPolicy, ProcessModel, SessionCommand,
+    SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -278,7 +278,12 @@ impl PerTurnProtocol for AgyPerTurn {
         HarnessId::Agy
     }
 
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+    fn build_turn(
+        &self,
+        state: &TurnState,
+        text: &str,
+        _attachments: &[Attachment],
+    ) -> Result<TurnSpec> {
         let mut command = Command::new(&state.binary);
         command.current_dir(&state.cwd);
         command.arg(format!("--print={text}"));
@@ -374,7 +379,7 @@ mod tests {
     #[test]
     fn per_turn_args() {
         let argv = |state: &TurnState| -> String {
-            let spec = AgyPerTurn.build_turn(state, "do it").unwrap();
+            let spec = AgyPerTurn.build_turn(state, "do it", &[]).unwrap();
             spec.command
                 .as_std()
                 .get_args()

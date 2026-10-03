@@ -33,6 +33,7 @@ def main() -> int:
     ap.add_argument("--thinking")
     ap.add_argument("--no-models", action="store_true", help="skip get_available_models")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -80,7 +81,18 @@ def main() -> int:
     send({"id": next_id(), "type": "get_available_thinking_levels"})
 
     prompts = list(args.prompts)
-    send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
+    first = {"id": next_id(), "type": "prompt", "message": prompts.pop(0)}
+    if args.image:
+        import base64
+        import mimetypes
+        with open(args.image, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        first["images"] = [{
+            "type": "image",
+            "data": data,
+            "mimeType": mimetypes.guess_type(args.image)[0] or "image/png",
+        }]
+    send(first)
 
     done = False
     last = time.time()

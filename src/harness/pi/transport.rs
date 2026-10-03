@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 use super::parse::PiParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
+    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -47,6 +47,19 @@ pub enum PendingKind {
     Confirm,
     Select,
     Input,
+}
+
+/// A `prompt` command; images are inlined as base64.
+pub fn encode_prompt(id: &str, text: &str, attachments: &[Attachment]) -> Result<String> {
+    let mut cmd = json!({"id": id, "type":"prompt","message": text});
+    if !attachments.is_empty() {
+        let images = attachments
+            .iter()
+            .map(|a| Ok(json!({"type":"image","data": a.read_base64()?,"mimeType": a.mime()})))
+            .collect::<Result<Vec<Value>>>()?;
+        cmd["images"] = Value::Array(images);
+    }
+    Ok(cmd.to_string())
 }
 
 pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDecision) -> String {
@@ -110,9 +123,15 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text, .. } => {
-                        Some(json!({"id": next_id(), "type":"prompt","message": text}).to_string())
-                    }
+                    SessionCommand::SendTurn { text, attachments } => match encode_prompt(&next_id(), &text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error(e.to_string()),
+                            }).await;
+                            None
+                        }
+                    },
                     SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
                         let _ = events.send(AgentEvent::Error("not supported by pi yet".into())).await;
                         None
@@ -130,6 +149,9 @@ async fn drive(
                             "id": next_id(), "type":"set_model",
                             "provider": m.provider.as_str(), "modelId": m.model
                         }).to_string()).await;
+                        // The new model may differ in thinking levels, context
+                        // window and image support.
+                        let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
                         Some(json!({"id": next_id(), "type":"get_available_thinking_levels"}).to_string())
                     }
                     SessionCommand::SetEffort(e) => Some(json!({
@@ -212,6 +234,23 @@ mod tests {
     use super::*;
     use crate::core::ModelRef;
     use std::path::PathBuf;
+
+    #[test]
+    fn prompt_inlines_images() {
+        // Shape confirmed by fixtures/image_turn.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, b"abc").unwrap();
+        let a = Attachment::image(&path).unwrap();
+        let v: Value = serde_json::from_str(&encode_prompt("u1", "hi", &[a]).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            json!({"id":"u1","type":"prompt","message":"hi",
+                   "images":[{"type":"image","data":"YWJj","mimeType":"image/jpeg"}]})
+        );
+        let v: Value = serde_json::from_str(&encode_prompt("u2", "hi", &[]).unwrap()).unwrap();
+        assert!(v.get("images").is_none());
+    }
 
     #[test]
     fn session_args_shape() {

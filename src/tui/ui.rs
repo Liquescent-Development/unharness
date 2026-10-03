@@ -87,6 +87,13 @@ fn pinned_lines(app: &App) -> Vec<Line<'static>> {
             )));
         }
     }
+    if !app.attachments.is_empty() {
+        let names: Vec<String> = app.attachments.iter().map(|a| a.label()).collect();
+        lines.push(Line::from(Span::styled(
+            format!("  Attached: {}", sanitize(&names.join(", "))),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
     lines
 }
 

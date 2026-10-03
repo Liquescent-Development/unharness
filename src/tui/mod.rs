@@ -272,9 +272,9 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                     }
                 }
             }
-            Action::SendTurn(text) => {
+            Action::SendTurn { text, attachments } => {
                 if let Some(s) = session.as_ref() {
-                    if let Err(e) = s.send(SessionCommand::turn(text)).await {
+                    if let Err(e) = s.send(SessionCommand::SendTurn { text, attachments }).await {
                         app.on_event(crate::core::AgentEvent::TurnCompleted {
                             stop_reason: crate::core::StopReason::Error(e.to_string()),
                         });

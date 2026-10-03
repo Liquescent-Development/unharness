@@ -512,6 +512,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_app_server_image_turn() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_image_turn",
+        );
+    }
+
+    #[test]
     fn plan_update_replaces_the_plan() {
         // Shape from the 0.157.0 app-server schema (TurnPlanUpdatedNotification).
         let mut p = CodexAppServerParser::new();

@@ -16,7 +16,9 @@ use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, StopReason};
 use super::ids::{HarnessId, ModelRef};
 use super::process::{LineProcess, RawLine};
-use super::session::{ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo};
+use super::session::{
+    Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+};
 
 /// Mutable per-session state a protocol needs to build the next turn.
 #[derive(Debug, Clone)]
@@ -50,7 +52,12 @@ pub trait TurnParser: Send {
 
 pub trait PerTurnProtocol: Send + Sync {
     fn harness(&self) -> HarnessId;
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec>;
+    fn build_turn(
+        &self,
+        state: &TurnState,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<TurnSpec>;
     fn new_parser(&self) -> Box<dyn TurnParser>;
 }
 
@@ -107,7 +114,7 @@ async fn drive(
                             "this harness cannot steer or compact a session".into(),
                         )).await;
                     }
-                    SessionCommand::SendTurn { text, .. } => {
+                    SessionCommand::SendTurn { text, attachments } => {
                         if current.is_some() {
                             if turn_completed {
                                 // The parser saw the turn end but the child has
@@ -122,7 +129,7 @@ async fn drive(
                                 continue;
                             }
                         }
-                        match protocol.build_turn(&state, &text) {
+                        match protocol.build_turn(&state, &text, &attachments) {
                             Ok(spec) => match LineProcess::spawn(spec.command) {
                                 Ok(mut proc) => {
                                     if let Some(input) = spec.stdin
@@ -240,7 +247,12 @@ mod tests {
         fn harness(&self) -> HarnessId {
             HarnessId::Codex
         }
-        fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+        fn build_turn(
+            &self,
+            state: &TurnState,
+            text: &str,
+            _attachments: &[Attachment],
+        ) -> Result<TurnSpec> {
             let mut command = Command::new("sh");
             // Prints the resume id (if any), then echoes stdin.
             command.arg("-c").arg(format!(
@@ -323,7 +335,7 @@ mod tests {
             fn harness(&self) -> HarnessId {
                 HarnessId::Codex
             }
-            fn build_turn(&self, _s: &TurnState, _t: &str) -> Result<TurnSpec> {
+            fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
                 let mut command = Command::new("sh");
                 command.arg("-c").arg("sleep 30");
                 Ok(TurnSpec {

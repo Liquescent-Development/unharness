@@ -44,6 +44,7 @@ def main() -> int:
     ap.add_argument("--no-initialize", action="store_true")
     ap.add_argument("--extra", default="", help="extra CLI args (space separated)")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -85,7 +86,21 @@ def main() -> int:
               "request": {"subtype": "initialize"}})
 
     prompts = list(args.prompts)
-    send({"type": "user", "message": {"role": "user", "content": prompts.pop(0)}})
+    first = prompts.pop(0)
+    if args.image:
+        import base64
+        import mimetypes
+        with open(args.image, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        first = [
+            {"type": "text", "text": first},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": mimetypes.guess_type(args.image)[0] or "image/png",
+                "data": data,
+            }},
+        ]
+    send({"type": "user", "message": {"role": "user", "content": first}})
 
     last_activity = time.time()
     while True:

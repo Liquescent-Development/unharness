@@ -146,7 +146,7 @@ impl Harness for CodexHarness {
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
-            image_input: false,
+            image_input: true,
             plan_updates: true,
             subagents: false,
             steer: false,

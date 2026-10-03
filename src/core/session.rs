@@ -55,6 +55,28 @@ impl Attachment {
             Attachment::Image { path, .. } => path,
         }
     }
+
+    pub fn mime(&self) -> &str {
+        match self {
+            Attachment::Image { mime, .. } => mime,
+        }
+    }
+
+    /// File name for display.
+    pub fn label(&self) -> String {
+        self.path()
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path().display().to_string())
+    }
+
+    /// The file's bytes, base64-encoded, for protocols that inline images.
+    pub fn read_base64(&self) -> Result<String> {
+        use base64::Engine;
+        let bytes = std::fs::read(self.path())
+            .map_err(|e| anyhow!("could not read {}: {e}", self.path().display()))?;
+        Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

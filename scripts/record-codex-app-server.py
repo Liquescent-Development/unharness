@@ -23,6 +23,8 @@ def redact(line: str, cwd: str) -> str:
     if home:
         line = line.replace(home, "/HOME")
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
+    line = re.sub(r'"serverName":"[^"]*"', '"serverName":"user"', line)
+    line = re.sub(r'"installationId":"[^"]*"', '"installationId":"REDACTED"', line)
     return line
 
 
@@ -34,6 +36,7 @@ def main() -> int:
     ap.add_argument("--sandbox", default="read-only")
     ap.add_argument("--model")
     ap.add_argument("--idle-timeout", type=float, default=180.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -135,7 +138,10 @@ def main() -> int:
                     sys.stderr.write(f"[thread/start failed] {json.dumps(obj)[:300]}\n")
                     proc.stdin.close()
                     break
-                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+                items = [{"type": "text", "text": prompts.pop(0)}]
+                if args.image:
+                    items.append({"type": "localImage", "path": os.path.abspath(args.image)})
+                request("turn/start", {"threadId": thread_id, "input": items})
                 phase = "turn"
             elif rid == models_id:
                 proc.stdin.close()

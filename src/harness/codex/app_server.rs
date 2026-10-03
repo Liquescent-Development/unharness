@@ -12,9 +12,19 @@ use super::app_server_parse::ELICITATION_PREFIX;
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, ModelRef, PermissionDecision, PermissionKind,
+    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason,
 };
+
+/// `turn/start` input items: the text, then each image by path (codex reads the file).
+pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
+    let mut items = vec![json!({"type":"text","text": text})];
+    for a in attachments {
+        items.push(json!({"type":"localImage","path": a.path()}));
+    }
+    Value::Array(items)
+}
 
 /// `turn/start` sandbox policy object for a policy.
 pub fn sandbox_policy(policy: PermissionPolicy) -> Value {
@@ -121,7 +131,7 @@ struct Driver {
     effort: Option<String>,
     policy: PermissionPolicy,
     /// A turn requested before the thread was ready.
-    queued_turn: Option<String>,
+    queued_turn: Option<(String, Vec<Attachment>)>,
 }
 
 impl Driver {
@@ -135,14 +145,14 @@ impl Driver {
         Ok(id)
     }
 
-    async fn start_turn(&mut self, text: String) -> Result<()> {
+    async fn start_turn(&mut self, text: String, attachments: Vec<Attachment>) -> Result<()> {
         let Some(thread_id) = self.thread_id.clone() else {
-            self.queued_turn = Some(text);
+            self.queued_turn = Some((text, attachments));
             return Ok(());
         };
         let mut params = json!({
             "threadId": thread_id,
-            "input": [{"type":"text","text": text}],
+            "input": turn_input(&text, &attachments),
         });
         if let Some(m) = &self.model {
             params["model"] = json!(m.model);
@@ -199,7 +209,7 @@ async fn drive(
                     return;
                 };
                 let res: Result<()> = match cmd {
-                    SessionCommand::SendTurn { text, .. } => d.start_turn(text).await,
+                    SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
                     SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
                         let _ = events.send(AgentEvent::Error("not supported by codex yet".into())).await;
                         Ok(())
@@ -285,8 +295,8 @@ async fn drive(
                                                 .and_then(|r| r.pointer("/thread/id").or_else(|| r.get("threadId")))
                                                 .and_then(Value::as_str)
                                                 .map(str::to_string);
-                                            if let Some(t) = d.queued_turn.take()
-                                                && let Err(e) = d.start_turn(t).await
+                                            if let Some((t, a)) = d.queued_turn.take()
+                                                && let Err(e) = d.start_turn(t, a).await
                                             {
                                                 let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
                                             }
@@ -359,6 +369,16 @@ async fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_input_adds_local_images() {
+        // Shape confirmed by fixtures/app_server_image_turn.jsonl.
+        let a = Attachment::image("/w/a.png").unwrap();
+        assert_eq!(
+            turn_input("hi", &[a]),
+            json!([{"type":"text","text":"hi"},{"type":"localImage","path":"/w/a.png"}])
+        );
+    }
 
     #[test]
     fn decisions() {
