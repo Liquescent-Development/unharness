@@ -1,7 +1,8 @@
-//! The terminal UI: an event loop over crossterm input, a 25 FPS ticker, and
+//! The terminal UI: an event loop over crossterm input, an 8 FPS status ticker, and
 //! the active harness session's event stream.
 
 pub mod app;
+pub mod code;
 pub mod markdown;
 pub mod modal;
 pub mod transcript;
@@ -84,7 +85,7 @@ async fn event_loop(
     initial_prompt: Option<String>,
 ) -> Result<()> {
     let mut input = EventStream::new();
-    let mut ticker = tokio::time::interval(Duration::from_millis(40));
+    let mut ticker = tokio::time::interval(Duration::from_millis(125));
     let mut session: Option<SessionHandle> = None;
     let mut needs_redraw = true;
 
@@ -162,6 +163,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 app.quit();
             }
         }
+        (true, KeyCode::Char('d')) => app.quit(),
         (true, KeyCode::Char('h')) => app.open_harness_picker(),
         (true, KeyCode::Char('m')) => app.open_model_picker(),
         (true, KeyCode::Char('e')) => app.open_effort_picker(),
@@ -204,18 +206,26 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             }
         }
         (_, KeyCode::Esc) => {
+            // Esc cancels; it never quits (use /quit, Ctrl+D, or Ctrl+C when idle).
             if app.is_generating {
                 app.interrupt();
             } else if !app.suggestions.is_empty() {
                 app.suggestions.clear();
             } else if !app.input.is_empty() {
                 app.take_input();
-            } else {
-                app.quit();
             }
         }
         (_, KeyCode::Enter) => {
-            if app.is_generating || app.input.trim().is_empty() {
+            if app.input.trim().is_empty() {
+                return;
+            }
+            // A partial slash command with a highlighted suggestion completes
+            // on Enter instead of being sent as-is.
+            if app.should_accept_suggestion() {
+                app.accept_suggestion();
+                return;
+            }
+            if app.is_generating && !app.input.starts_with('/') {
                 return;
             }
             let text = app.take_input();

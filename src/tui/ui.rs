@@ -10,9 +10,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::app::App;
+use super::code::{code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines};
 use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
-use super::transcript::{Block as TBlock, tool_summary, truncate_chars};
+use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::{HarnessId, PermissionKind, PermissionPolicy};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -69,13 +70,9 @@ fn fmt_tokens(n: u64) -> String {
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let status = if app.is_generating {
-        let label = if app.is_thinking() {
-            "Thinking"
-        } else {
-            "Working"
-        };
+        let label = app.status_label();
         Span::styled(
-            format!(" {} {} ({:.1}s) ", app.spinner(), label, app.elapsed_secs()),
+            format!(" {} {}… {:.0}s ", app.spinner(), label, app.elapsed_secs()),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -263,7 +260,10 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                         Style::default().fg(Color::Green),
                     )
                 };
-                lines.push(Line::from(vec![
+                let summary = tool_summary_full(name, input);
+                let head_width = width.saturating_sub(name.len() + 8).max(10);
+                let mut summary_lines = wrap_words(&summary, head_width).into_iter();
+                let mut first = vec![
                     Span::styled("  ⚡ ", Style::default().fg(Color::Yellow)),
                     Span::styled(
                         name.clone(),
@@ -272,33 +272,39 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::raw("  "),
-                    Span::styled(tool_summary(name, input), Style::default().fg(Color::Gray)),
-                    status,
-                ]));
-                if !output.is_empty() {
-                    let limit = if *collapsed { 3 } else { usize::MAX };
-                    let total = output.lines().count();
-                    for l in output.lines().take(limit) {
-                        for w in wrap_words(l, width.saturating_sub(6).max(10)) {
-                            lines.push(Line::from(vec![
-                                Span::raw("     "),
-                                Span::styled(
-                                    w,
-                                    Style::default().fg(if *is_error {
-                                        Color::Red
-                                    } else {
-                                        Color::DarkGray
-                                    }),
-                                ),
-                            ]));
+                    Span::styled(
+                        summary_lines.next().unwrap_or_default(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ];
+                let rest: Vec<String> = summary_lines.collect();
+                if rest.is_empty() {
+                    first.push(status);
+                    lines.push(Line::from(first));
+                } else {
+                    lines.push(Line::from(first));
+                    let n = rest.len();
+                    for (i, seg) in rest.into_iter().enumerate() {
+                        let mut l = vec![
+                            Span::raw(" ".repeat(name.len() + 7)),
+                            Span::styled(seg, Style::default().fg(Color::Gray)),
+                        ];
+                        if i + 1 == n {
+                            l.push(status.clone());
                         }
+                        lines.push(Line::from(l));
                     }
-                    if *collapsed && total > limit {
-                        lines.push(Line::from(Span::styled(
-                            format!("     … {} more lines (Ctrl+O to expand)", total - limit),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                    }
+                }
+
+                let body = tool_body_lines(name, input, output, *is_error, width.saturating_sub(2));
+                let limit = if *collapsed { 4 } else { usize::MAX };
+                let total = body.len();
+                lines.extend(body.into_iter().take(limit));
+                if *collapsed && total > limit {
+                    lines.push(Line::from(Span::styled(
+                        format!("  │ … {} more lines (Ctrl+O to expand)", total - limit),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
             }
             TBlock::System(t) => {
@@ -342,6 +348,50 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(lines).block(block).scroll((app.scroll, 0)),
         area,
     );
+}
+
+/// Body of a tool block: file edits as syntax-coloured diffs, file writes and
+/// reads highlighted by extension, diffs red/green, everything else plain.
+fn tool_body_lines(
+    name: &str,
+    input: &serde_json::Value,
+    output: &str,
+    is_error: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let get = |k: &str| input.get(k).and_then(serde_json::Value::as_str);
+    let path = get("file_path").or_else(|| get("path")).unwrap_or("");
+    let lname = name.to_lowercase();
+    let mut lines = Vec::new();
+
+    if (lname.contains("edit") || lname == "str_replace" || lname == "replace")
+        && let (Some(old), Some(new)) = (
+            get("old_string").or_else(|| get("old_str")),
+            get("new_string").or_else(|| get("new_str")),
+        )
+    {
+        lines.extend(replacement_lines(old, new, path, width));
+    } else if (lname == "write" || lname == "write_file" || lname == "create_file")
+        && let Some(content) = get("content").or_else(|| get("contents"))
+    {
+        lines.extend(replacement_lines("", content, path, width));
+    } else if (lname == "read" || lname == "read_file") && !output.is_empty() {
+        lines.extend(code_lines(output, path, width));
+    }
+
+    if !output.is_empty() && (lines.is_empty() || is_error) {
+        let style = if is_error {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        if !is_error && looks_like_diff(output) {
+            lines.extend(diff_lines(output, width));
+        } else {
+            lines.extend(plain_lines(output, width, style));
+        }
+    }
+    lines
 }
 
 pub fn wrap_prefixed_text(
@@ -435,11 +485,11 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+fn render_footer(frame: &mut Frame, _app: &App, area: Rect) {
     let k = |s: &'static str, c: Color| {
         Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD))
     };
-    let mut spans = vec![
+    let spans = vec![
         k("Enter", Color::Cyan),
         Span::raw(" Send  "),
         k("Ctrl+H", Color::Yellow),
@@ -453,14 +503,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
         k("Ctrl+R", Color::Blue),
         Span::raw(" Resume  "),
         k("Ctrl+O", Color::Gray),
-        Span::raw(" Tool output  "),
+        Span::raw(" Expand  "),
         k("Esc", Color::Red),
+        Span::raw(" Interrupt  "),
+        k("Ctrl+D", Color::Red),
+        Span::raw(" Quit"),
     ];
-    spans.push(Span::raw(if app.is_generating {
-        " Interrupt"
-    } else {
-        " Quit"
-    }));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

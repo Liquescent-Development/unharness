@@ -10,6 +10,9 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
 
+/// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
+pub const ELICITATION_PREFIX: &str = "MCP ";
+
 #[derive(Debug, Default)]
 pub struct CodexAppServerParser {
     turn_started: bool,
@@ -41,13 +44,31 @@ impl CodexAppServerParser {
         }
     }
 
+    /// Codex logs tracing lines (`2026-… ERROR module: msg`) to stderr. Only
+    /// WARN/ERROR are surfaced, without the timestamp and module path.
     pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() {
-            vec![]
-        } else {
-            vec![AgentEvent::Notice(format!("codex: {t}"))]
+            return vec![];
         }
+        let mut parts = t.splitn(3, ' ');
+        let first = parts.next().unwrap_or("");
+        let level = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("");
+        if first.len() > 20 && first.ends_with('Z') && first.contains('T') {
+            return match level {
+                "ERROR" => {
+                    let msg = rest.split_once(": ").map(|(_, m)| m).unwrap_or(rest);
+                    vec![AgentEvent::Notice(format!("codex: {msg}"))]
+                }
+                "WARN" => {
+                    let msg = rest.split_once(": ").map(|(_, m)| m).unwrap_or(rest);
+                    vec![AgentEvent::Notice(format!("codex warning: {msg}"))]
+                }
+                _ => vec![],
+            };
+        }
+        vec![AgentEvent::Notice(format!("codex: {t}"))]
     }
 
     fn on_notification(&mut self, method: &str, p: &Value) -> Vec<AgentEvent> {
@@ -358,6 +379,20 @@ impl CodexAppServerParser {
                     })
                     .unwrap_or_default(),
             },
+            "mcpServer/elicitation/request" => {
+                let server = s(p.get("serverName").unwrap_or(&Value::Null));
+                let message = p
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| p.pointer("/params/message").and_then(Value::as_str))
+                    .unwrap_or("needs your input");
+                PermissionKind::Input {
+                    title: format!("{ELICITATION_PREFIX}{server}: {message}"),
+                    placeholder: None,
+                    prefill: None,
+                    multiline: false,
+                }
+            }
             other => {
                 return vec![AgentEvent::Notice(format!(
                     "codex request '{other}' is not supported; declined"
@@ -431,8 +466,27 @@ mod tests {
         assert!(
             matches!(&ev[0], AgentEvent::TurnCompleted { stop_reason: StopReason::Error(e) } if e == "nope")
         );
-        let ev = p.feed(r#"{"method":"mcpServer/elicitation/request","id":9,"params":{}}"#);
+        let ev = p.feed(r#"{"method":"item/tool/call","id":9,"params":{}}"#);
         assert!(matches!(&ev[0], AgentEvent::Notice(n) if n.contains("not supported")));
+        let ev = p.feed(r#"{"method":"mcpServer/elicitation/request","id":10,"params":{"serverName":"cq","threadId":"t","message":"Which domain?"}}"#);
+        match &ev[0] {
+            AgentEvent::PermissionRequest(r) => {
+                assert_eq!(r.id, "10");
+                assert!(
+                    matches!(&r.kind, PermissionKind::Input { title, .. } if title.starts_with(ELICITATION_PREFIX) && title.contains("Which domain?"))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // stderr: tracing lines are filtered to WARN/ERROR without noise
+        assert!(
+            p.feed_stderr("2026-10-03T14:51:23.774097Z INFO codex_core::x: hello")
+                .is_empty()
+        );
+        assert_eq!(
+            p.feed_stderr("2026-10-03T14:51:23.774097Z ERROR codex_app_server::bespoke: request failed with code -32601"),
+            vec![AgentEvent::Notice("codex: request failed with code -32601".into())]
+        );
         assert!(p.feed(r#"{"id":1,"result":{}}"#).is_empty());
     }
 }

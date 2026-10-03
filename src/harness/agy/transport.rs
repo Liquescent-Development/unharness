@@ -115,20 +115,34 @@ pub fn start_stream(cfg: SessionConfig, transport: AgyTransport) -> Result<Sessi
         harness: HarnessId::Agy,
         process_model: ProcessModel::LongLived,
     });
-    tokio::spawn(drive(proc, cfg.resume, transport, events_tx, cmd_rx));
+    tokio::spawn(drive(proc, cfg, transport, events_tx, cmd_rx));
     Ok(handle)
+}
+
+fn spawn_stream(cfg: &SessionConfig) -> Result<LineProcess> {
+    let mut cmd = Command::new(&cfg.binary);
+    cmd.args(stream_args(cfg)).current_dir(&cfg.cwd);
+    for (k, v) in &cfg.env {
+        cmd.env(k, v);
+    }
+    LineProcess::spawn(cmd)
 }
 
 async fn drive(
     mut proc: LineProcess,
-    resume: Option<String>,
+    mut cfg: SessionConfig,
     transport: AgyTransport,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
+    let resume = cfg.resume.clone();
     let mut parser = AgyParser::new(resume.clone());
     let mut turn_open = false;
     let mut shutting_down = false;
+    // Model/effort/policy are process flags; a change restarts the process
+    // on the next turn, resuming the conversation by id.
+    let mut restart_needed = false;
+    let mut session_id = resume.clone();
     if let Some(id) = resume {
         let _ = events
             .send(AgentEvent::SessionStarted {
@@ -147,6 +161,26 @@ async fn drive(
                 };
                 match cmd {
                     SessionCommand::SendTurn { text } => {
+                        if restart_needed {
+                            restart_needed = false;
+                            proc.kill().await;
+                            cfg.resume = session_id.clone();
+                            match spawn_stream(&cfg) {
+                                Ok(p) => {
+                                    proc = p;
+                                    parser = AgyParser::new(session_id.clone());
+                                    let _ = events.send(AgentEvent::Notice(
+                                        "agy restarted with the new settings".into(),
+                                    )).await;
+                                }
+                                Err(e) => {
+                                    let _ = events.send(AgentEvent::TurnCompleted {
+                                        stop_reason: StopReason::Error(format!("agy restart failed: {e}")),
+                                    }).await;
+                                    continue;
+                                }
+                            }
+                        }
                         turn_open = true;
                         if let Err(e) = proc.write_line(&encode_turn(transport, &text)).await {
                             turn_open = false;
@@ -168,10 +202,17 @@ async fn drive(
                             "agy cannot answer permission prompts in headless mode".into(),
                         )).await;
                     }
-                    SessionCommand::SetModel(_) | SessionCommand::SetEffort(_) | SessionCommand::SetPolicy(_) => {
-                        let _ = events.send(AgentEvent::Notice(
-                            "agy: model, effort and policy changes apply when the next session starts".into(),
-                        )).await;
+                    SessionCommand::SetModel(m) => {
+                        cfg.model = Some(m);
+                        restart_needed = true;
+                    }
+                    SessionCommand::SetEffort(e) => {
+                        cfg.effort = e;
+                        restart_needed = true;
+                    }
+                    SessionCommand::SetPolicy(p) => {
+                        cfg.policy = p;
+                        restart_needed = true;
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
@@ -183,8 +224,12 @@ async fn drive(
                 match raw {
                     Some(RawLine::Stdout(line)) => {
                         for ev in parser.feed(&line) {
-                            if matches!(ev, AgentEvent::TurnCompleted { .. }) {
-                                turn_open = false;
+                            match &ev {
+                                AgentEvent::TurnCompleted { .. } => turn_open = false,
+                                AgentEvent::SessionStarted { session_id: id, .. } => {
+                                    session_id = Some(id.clone());
+                                }
+                                _ => {}
                             }
                             if events.send(ev).await.is_err() {
                                 proc.kill().await;

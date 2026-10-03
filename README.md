@@ -59,11 +59,21 @@ unharness skills add vercel-labs/agent-skills
 | `Ctrl+P` | Permission policy picker |
 | `Ctrl+R` | Resume a recorded session |
 | `Ctrl+O` | Expand or collapse the last tool call's output |
-| `Esc` / `Ctrl+C` | Interrupt the running turn, else quit |
+| `Esc` | Interrupt the running turn, else clear the prompt (never quits) |
+| `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
-Slash commands: `/switch`, `/provider`, `/model`, `/effort`, `/policy`,
+Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
 `/resume`, `/sessions`, `/usage`, `/skills`, `/clear`, `/help`, `/quit`.
-Typing `/` opens autocomplete.
+Typing `/` opens autocomplete; Enter on a partial command completes it.
+
+Policy, model and effort changes apply to the next turn on every harness
+(Claude via its control channel, Codex per `turn/start`, pi per RPC command,
+Antigravity by restarting its process on the same conversation).
+
+Tool calls render as blocks: shell output wrapped in a gutter, file edits as
+syntax-coloured red/green replacements, reads highlighted by file type, and
+unified diffs in red/green. Fenced code in answers is syntax highlighted and
+wrapped, never cut off.
 
 When a harness asks for permission, a modal opens: `y` allow once, `a` allow
 always (when the harness offers a rule), `n` deny with a reason, `i` show the

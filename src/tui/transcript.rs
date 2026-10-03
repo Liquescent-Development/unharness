@@ -285,8 +285,13 @@ impl Transcript {
     }
 }
 
-/// One-line description of a tool call for headers and bridges.
+/// One-line description of a tool call for headers and bridges (truncated).
 pub fn tool_summary(name: &str, input: &Value) -> String {
+    truncate_chars(&tool_summary_full(name, input), 60)
+}
+
+/// Untruncated single-line description of a tool call.
+pub fn tool_summary_full(name: &str, input: &Value) -> String {
     let pick = |keys: &[&str]| -> Option<String> {
         keys.iter()
             .find_map(|k| input.get(*k).and_then(Value::as_str))
@@ -314,11 +319,10 @@ pub fn tool_summary(name: &str, input: &Value) -> String {
             "prompt",
         ]),
     };
-    let s = s.unwrap_or_else(|| match input {
+    s.unwrap_or_else(|| match input {
         Value::Null => String::new(),
         v => v.to_string(),
-    });
-    truncate_chars(&s, 60)
+    })
 }
 
 pub fn truncate_chars(s: &str, max: usize) -> String {

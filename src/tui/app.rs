@@ -36,7 +36,8 @@ pub enum Action {
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const BASE_COMMANDS: &[(&str, &str)] = &[
-    ("/switch", "Open the harness picker"),
+    ("/harness", "Open the harness picker"),
+    ("/switch", "Alias for /harness"),
     (
         "/provider",
         "Open the provider picker (multi-provider harnesses)",
@@ -292,6 +293,34 @@ impl App {
                 .map(|d| d.as_secs_f32())
                 .unwrap_or(0.0)
         }
+    }
+
+    /// What the agent is doing right now, for the header.
+    pub fn status_label(&self) -> String {
+        if self.modal.as_ref().is_some_and(Modal::is_prompt) {
+            return "Waiting for you".to_string();
+        }
+        if let Some(super::transcript::Block::Tool {
+            name, done: false, ..
+        }) = self
+            .transcript
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| matches!(b, super::transcript::Block::Tool { .. }))
+        {
+            return format!("Running {name}");
+        }
+        if self.transcript.is_thinking() {
+            return "Thinking".to_string();
+        }
+        if matches!(
+            self.transcript.blocks.last(),
+            Some(super::transcript::Block::Assistant { duration: None, .. })
+        ) {
+            return "Streaming".to_string();
+        }
+        "Working".to_string()
     }
 
     pub fn tick_spinner(&mut self) {
@@ -634,6 +663,16 @@ impl App {
     }
 
     pub fn open_provider_picker(&mut self) {
+        if !self.harness().capabilities().multi_provider {
+            self.transcript.push_notice(format!(
+                "{} has a single provider ({}); use /harness to change agents or /model to change models",
+                self.active.short_name(),
+                self.current_provider()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "default".into())
+            ));
+            return;
+        }
         let Some(binary) = self.harness_binary() else {
             self.transcript
                 .push_error(format!("{} binary not found", self.active.short_name()));
@@ -976,7 +1015,7 @@ impl App {
         let name = parts.next().unwrap_or("");
         let arg = parts.next().map(str::to_string);
         match name {
-            "/switch" => match arg {
+            "/switch" | "/harness" => match arg {
                 Some(a) => match HarnessId::parse(&a) {
                     Some(id) => self.switch_harness(id),
                     None => self.transcript.push_error(format!("unknown harness '{a}'")),
@@ -1099,11 +1138,11 @@ impl App {
         };
         let mut out = Vec::new();
         match (cmd.as_str(), sub.as_deref()) {
-            ("/switch", Some(s)) => {
+            ("/switch" | "/harness", Some(s)) => {
                 for o in &self.harness_options {
                     let id = o.id.as_str();
                     if id.starts_with(s) {
-                        out.push((format!("/switch {id}"), o.display_name.to_string()));
+                        out.push((format!("{cmd} {id}"), o.display_name.to_string()));
                     }
                 }
             }
@@ -1172,6 +1211,19 @@ impl App {
         if !self.suggestions.is_empty() {
             self.selected_suggestion = (self.selected_suggestion + 1) % self.suggestions.len();
         }
+    }
+
+    /// Enter should complete the highlighted suggestion when the typed text
+    /// is only a prefix of a command (e.g. `/pro` → `/provider`).
+    pub fn should_accept_suggestion(&self) -> bool {
+        if !self.input.starts_with('/') || self.suggestions.is_empty() {
+            return false;
+        }
+        let Some((cmd, _)) = self.suggestions.get(self.selected_suggestion) else {
+            return false;
+        };
+        let typed = self.input.trim();
+        typed != cmd && cmd.starts_with(typed)
     }
 
     pub fn accept_suggestion(&mut self) {

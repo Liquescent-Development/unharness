@@ -8,12 +8,22 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::app_server_parse::CodexAppServerParser;
+use super::app_server_parse::ELICITATION_PREFIX;
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionKind, PermissionPolicy,
     ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
+
+/// `turn/start` sandbox policy object for a policy.
+pub fn sandbox_policy(policy: PermissionPolicy) -> Value {
+    match policy {
+        PermissionPolicy::Ask => json!({"type": "readOnly"}),
+        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => json!({"type": "workspaceWrite"}),
+        PermissionPolicy::Bypass => json!({"type": "dangerFullAccess"}),
+    }
+}
 
 /// `thread/start` parameters for a policy.
 pub fn policy_params(policy: PermissionPolicy) -> (&'static str, &'static str) {
@@ -25,6 +35,24 @@ pub fn policy_params(policy: PermissionPolicy) -> (&'static str, &'static str) {
 }
 
 pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> Value {
+    if let PermissionKind::Input { title, .. } = kind
+        && title.starts_with(ELICITATION_PREFIX)
+    {
+        // MCP elicitation: {action, content}
+        return match decision {
+            PermissionDecision::Answer(Value::String(text)) => {
+                json!({"action": "accept", "content": {"value": text}})
+            }
+            PermissionDecision::Answer(Value::Bool(b)) => {
+                json!({"action": "accept", "content": {"value": b}})
+            }
+            PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
+                json!({"action": "accept", "content": {}})
+            }
+            PermissionDecision::Deny { .. } => json!({"action": "decline"}),
+            PermissionDecision::Answer(_) => json!({"action": "cancel"}),
+        };
+    }
     match kind {
         PermissionKind::Question { .. } => match decision {
             PermissionDecision::Answer(Value::Object(map)) => {
@@ -91,6 +119,7 @@ struct Driver {
     turn_id: Option<String>,
     model: Option<ModelRef>,
     effort: Option<String>,
+    policy: PermissionPolicy,
     /// A turn requested before the thread was ready.
     queued_turn: Option<String>,
 }
@@ -121,6 +150,9 @@ impl Driver {
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
         }
+        let (approval, _) = policy_params(self.policy);
+        params["approvalPolicy"] = json!(approval);
+        params["sandboxPolicy"] = sandbox_policy(self.policy);
         self.request("turn/start", params, Outstanding::TurnStart)
             .await?;
         Ok(())
@@ -143,6 +175,7 @@ async fn drive(
         turn_id: None,
         model: cfg.model.clone(),
         effort: cfg.effort.clone(),
+        policy: cfg.policy,
         queued_turn: None,
     };
     let mut shutting_down = false;
@@ -194,10 +227,9 @@ async fn drive(
                         d.effort = e;
                         Ok(())
                     }
-                    SessionCommand::SetPolicy(_) => {
-                        let _ = events.send(AgentEvent::Notice(
-                            "codex: the permission policy applies when the next session starts".into(),
-                        )).await;
+                    SessionCommand::SetPolicy(p) => {
+                        // Applied on the next turn/start (approvalPolicy + sandboxPolicy).
+                        d.policy = p;
                         Ok(())
                     }
                     SessionCommand::Shutdown => {
@@ -277,7 +309,9 @@ async fn drive(
                                     Value::String(s) => s.clone(),
                                     other => other.to_string(),
                                 };
-                                let supported = method.ends_with("requestApproval") || method == "item/tool/requestUserInput";
+                                let supported = method.ends_with("requestApproval")
+                                    || method == "item/tool/requestUserInput"
+                                    || method == "mcpServer/elicitation/request";
                                 if !supported {
                                     let _ = d.proc.write_line(&jsonrpc::error_response(id, -32601, "unsupported by unharness")).await;
                                 } else {
