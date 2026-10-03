@@ -124,9 +124,16 @@ impl PiParser {
             "compaction_start" => out.push(AgentEvent::Notice("compacting context…".into())),
             "compaction_end" => {
                 if let Some(msg) = v.get("errorMessage").and_then(Value::as_str) {
-                    out.push(AgentEvent::Error(format!("compaction failed: {msg}")));
+                    out.push(AgentEvent::Error(msg.to_string()));
                 } else {
                     out.push(AgentEvent::Notice("context compacted".into()));
+                }
+                // A requested compaction is its own unit of work; automatic
+                // ones happen inside a turn that ends by itself.
+                if s(v, "reason") == "manual" {
+                    out.push(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Done,
+                    });
                 }
             }
             "thinking_level_changed" => out.push(AgentEvent::Notice(format!(
@@ -275,6 +282,10 @@ impl PiParser {
                 command,
                 s(v, "error")
             )));
+            // compaction_end already reported the failure and closed the unit.
+            if command == "compact" {
+                out.pop();
+            }
             if command == "prompt" {
                 self.turn_started = false;
                 out.push(AgentEvent::TurnCompleted {
@@ -386,6 +397,15 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             PiParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_steer_and_compact() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "steer_and_compact",
+        );
     }
 
     #[test]

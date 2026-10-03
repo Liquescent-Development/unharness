@@ -116,6 +116,8 @@ enum Outstanding {
     ThreadStart,
     TurnStart,
     Interrupt,
+    /// Steer, compact: only an error response matters, and the parser reports it.
+    Other,
 }
 
 struct Driver {
@@ -210,10 +212,33 @@ async fn drive(
                 };
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
-                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
-                        let _ = events.send(AgentEvent::Error("not supported by codex yet".into())).await;
-                        Ok(())
+                    SessionCommand::Steer { text, attachments } => {
+                        match (d.thread_id.clone(), d.turn_id.clone()) {
+                            (Some(t), Some(turn)) => {
+                                let params = json!({
+                                    "threadId": t,
+                                    "expectedTurnId": turn,
+                                    "input": turn_input(&text, &attachments),
+                                });
+                                d.request("turn/steer", params, Outstanding::Other).await.map(|_| ())
+                            }
+                            // Nothing is running: it is simply the next turn.
+                            _ => d.start_turn(text, attachments).await,
+                        }
                     }
+                    SessionCommand::Compact { .. } => match d.thread_id.clone() {
+                        // Runs as a turn of its own (turn/started … turn/completed).
+                        Some(t) => d
+                            .request("thread/compact/start", json!({"threadId": t}), Outstanding::Other)
+                            .await
+                            .map(|_| ()),
+                        None => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error("codex: no thread to compact yet".into()),
+                            }).await;
+                            Ok(())
+                        }
+                    },
                     SessionCommand::Interrupt => {
                         match (&d.thread_id, &d.turn_id) {
                             (Some(t), Some(turn)) => {
@@ -316,6 +341,13 @@ async fn drive(
                                     }
                                     _ => {}
                                 }
+                            }
+                            // Track the running turn: steer and interrupt need its id.
+                            Some(RpcMessage::Notification { method, params }) if method == "turn/started" => {
+                                d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                            }
+                            Some(RpcMessage::Notification { method, .. }) if method == "turn/completed" => {
+                                d.turn_id = None;
                             }
                             Some(RpcMessage::Request { id, method, .. }) => {
                                 // Remember the rpc id so the decision can be routed back.

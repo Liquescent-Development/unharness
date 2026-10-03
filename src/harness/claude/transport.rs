@@ -106,6 +106,13 @@ pub fn user_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
     Ok(json!({"type":"user","message":{"role":"user","content":content}}).to_string())
 }
 
+/// A user message merged into the running turn once its tool calls finish.
+pub fn steer_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
+    let mut v: Value = serde_json::from_str(&user_turn(text, attachments)?)?;
+    v["priority"] = json!("next");
+    Ok(v.to_string())
+}
+
 pub fn control_request(subtype: &str, extra: Value) -> (String, String) {
     let id = uuid::Uuid::new_v4().to_string();
     let mut req = json!({"subtype": subtype});
@@ -234,10 +241,18 @@ async fn drive(
                             None
                         }
                     },
-                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
-                        let _ = events.send(AgentEvent::Error("not supported by claude yet".into())).await;
-                        None
-                    }
+                    SessionCommand::Steer { text, attachments } => match steer_turn(&text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
+                            None
+                        }
+                    },
+                    // `-p` mode accepts the slash command as a message; it ends
+                    // with a `result`, like a turn.
+                    SessionCommand::Compact { instructions } => Some(user_message(
+                        format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
+                    )),
                     SessionCommand::Interrupt => Some(control_request("interrupt", json!({})).1),
                     SessionCommand::RespondPermission { id, decision } => {
                         match pending.remove(&id) {
@@ -436,6 +451,16 @@ mod tests {
         assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
         let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
         assert!(user_turn("hi", &[gone]).is_err());
+    }
+
+    #[test]
+    fn steer_is_a_prioritised_user_message() {
+        // Shape confirmed by fixtures/steer_and_compact.jsonl.
+        let v: Value = serde_json::from_str(&steer_turn("more", &[]).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            json!({"type":"user","message":{"role":"user","content":"more"},"priority":"next"})
+        );
     }
 
     #[test]

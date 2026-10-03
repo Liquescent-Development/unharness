@@ -571,6 +571,11 @@ mod tests {
     }
 
     #[test]
+    fn fixture_steer_and_compact() {
+        fixture("steer_and_compact");
+    }
+
+    #[test]
     fn fixture_image_turn() {
         fixture("image_turn");
     }

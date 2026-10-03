@@ -410,6 +410,89 @@ async fn codex_app_server_handshake_turns_and_approval() {
 }
 
 #[tokio::test]
+async fn codex_app_server_steers_the_running_turn_and_compacts() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_steer_and_compact.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("run it")).await.unwrap();
+    // Steer once the command has started, as a user would mid-turn.
+    loop {
+        if matches!(
+            next_event(&mut handle).await,
+            AgentEvent::ToolCallStarted { .. }
+        ) {
+            break;
+        }
+    }
+    handle
+        .send(SessionCommand::Steer {
+            text: "also say STEERED".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.ends_with("done STEERED"), "{text}");
+
+    // Compaction runs as a turn of its own.
+    handle
+        .send(SessionCommand::Compact { instructions: None })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(n) if n == "context compacted"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    let sent = fake.sent_lines();
+    let turn_start = sent
+        .iter()
+        .position(|v| v["method"] == "turn/start")
+        .unwrap();
+    let steer = &sent[turn_start + 1];
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(steer["params"]["input"][0]["text"], "also say STEERED");
+    // The turn id comes from the fixture's turn/started notification.
+    assert!(
+        steer["params"]["expectedTurnId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("01a103c7"))
+    );
+    assert!(sent.iter().any(|v| v["method"] == "thread/compact/start"));
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn codex_exec_per_turn_resumes_by_thread() {
     if !python_available() {
         return;

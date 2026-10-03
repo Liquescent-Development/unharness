@@ -45,6 +45,8 @@ def main() -> int:
     ap.add_argument("--extra", default="", help="extra CLI args (space separated)")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -102,6 +104,8 @@ def main() -> int:
         ]
     send({"type": "user", "message": {"role": "user", "content": first}})
 
+    steered = False
+    compacted = False
     last_activity = time.time()
     while True:
         if proc.poll() is not None:
@@ -120,6 +124,10 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
+        if (args.steer and not steered and t == "assistant"
+                and any(b.get("type") == "tool_use" for b in obj.get("message", {}).get("content", []))):
+            steered = True
+            send({"type": "user", "message": {"role": "user", "content": args.steer}, "priority": "next"})
         if t == "control_request":
             req = obj.get("request", {})
             rid = obj.get("request_id")
@@ -144,6 +152,9 @@ def main() -> int:
         elif t == "result":
             if prompts:
                 send({"type": "user", "message": {"role": "user", "content": prompts.pop(0)}})
+            elif args.compact and not compacted:
+                compacted = True
+                send({"type": "user", "message": {"role": "user", "content": "/compact"}})
             else:
                 proc.stdin.close()
                 # drain remaining output

@@ -37,6 +37,13 @@ pub enum Action {
     Shutdown,
 }
 
+/// A prompt waiting for the running turn to finish.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedPrompt {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
 impl Action {
     /// A text-only turn.
     pub fn turn(text: impl Into<String>) -> Self {
@@ -70,6 +77,14 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/usage", "Show token usage and cost"),
     ("/plan", "Show or hide the agent's plan"),
+    (
+        "/steer",
+        "Send a message into the running turn: /steer <text>",
+    ),
+    (
+        "/compact",
+        "Summarise the context now: /compact [instructions]",
+    ),
     (
         "/attach",
         "Attach an image to the next prompt: /attach <path>",
@@ -128,6 +143,9 @@ pub struct App {
     pub show_plan: bool,
     /// Images that go out with the next prompt.
     pub attachments: Vec<Attachment>,
+    /// Prompts entered during a turn; one is sent each time a turn completes.
+    pub queued: VecDeque<QueuedPrompt>,
+    compacting: bool,
     /// What live sessions reported on top of the declared capabilities.
     live_caps: HashMap<HarnessId, CapsUpdate>,
 
@@ -287,6 +305,8 @@ impl App {
             plan,
             show_plan: true,
             attachments: Vec::new(),
+            queued: VecDeque::new(),
+            compacting: false,
             live_caps: HashMap::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
@@ -454,6 +474,9 @@ impl App {
         if self.modal.as_ref().is_some_and(Modal::is_prompt) {
             return "Waiting for you".to_string();
         }
+        if self.compacting {
+            return "Compacting".to_string();
+        }
         if let Some(super::transcript::Block::Tool {
             name, done: false, ..
         }) = self
@@ -500,6 +523,7 @@ impl App {
             return;
         }
         self.is_generating = false;
+        self.compacting = false;
         let dur = self
             .generation_start
             .take()
@@ -562,6 +586,101 @@ impl App {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// Hold a prompt until the running turn finishes.
+    pub fn queue_prompt(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.is_generating {
+            self.submit_prompt(text);
+            return;
+        }
+        self.queued.push_back(QueuedPrompt {
+            text,
+            attachments: std::mem::take(&mut self.attachments),
+        });
+    }
+
+    /// Send the oldest queued prompt, if idle. Returns whether one was sent.
+    pub fn send_next_queued(&mut self) -> bool {
+        if self.is_generating {
+            return false;
+        }
+        let Some(q) = self.queued.pop_front() else {
+            return false;
+        };
+        let pending = std::mem::replace(&mut self.attachments, q.attachments);
+        self.submit_prompt(q.text);
+        self.attachments = pending;
+        true
+    }
+
+    /// Put the newest queued prompt back in the prompt box for editing.
+    pub fn unqueue_last(&mut self) {
+        if !self.input.is_empty() {
+            return;
+        }
+        if let Some(q) = self.queued.pop_back() {
+            self.cursor = q.text.chars().count();
+            self.input = q.text;
+            self.attachments.extend(q.attachments);
+        }
+    }
+
+    /// Inject a message into the running turn, where the harness can; queue it otherwise.
+    pub fn steer(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.is_generating || self.compacting {
+            self.queue_prompt(text);
+            return;
+        }
+        if !self.caps().steer || !self.session_alive {
+            self.transcript.push_notice(format!(
+                "{} cannot be steered mid-turn; queued for when it finishes",
+                self.active.short_name()
+            ));
+            self.queue_prompt(text);
+            return;
+        }
+        let attachments = std::mem::take(&mut self.attachments);
+        let mut shown = text.clone();
+        for a in &attachments {
+            shown.push_str(&format!("\n[image: {}]", a.label()));
+        }
+        self.transcript.push_user(shown);
+        self.actions
+            .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
+    }
+
+    /// Ask the harness to summarise its context now.
+    pub fn compact(&mut self, instructions: Option<String>) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before compacting");
+            return;
+        }
+        if !self.caps().compaction {
+            self.transcript.push_error(format!(
+                "{} cannot compact on request",
+                self.active.short_name()
+            ));
+            return;
+        }
+        if !self.session_alive {
+            self.transcript
+                .push_notice("no live session to compact; send a prompt first");
+            return;
+        }
+        self.start_generation();
+        self.compacting = true;
+        self.actions
+            .push_back(Action::Command(SessionCommand::Compact { instructions }));
     }
 
     /// Queue an image for the next prompt.
@@ -689,6 +808,7 @@ impl App {
                 self.live_caps.entry(self.active).or_default().merge(update);
             }
             AgentEvent::TurnCompleted { stop_reason } => {
+                let done = stop_reason == StopReason::Done;
                 match stop_reason {
                     StopReason::Done => {}
                     StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
@@ -696,6 +816,16 @@ impl App {
                 }
                 self.finish_generation();
                 self.persist();
+                // A clean finish moves on to the next queued prompt; after an
+                // interrupt or error the user decides (Enter sends it).
+                if done {
+                    self.send_next_queued();
+                } else if !self.queued.is_empty() {
+                    self.transcript.push_notice(format!(
+                        "{} queued prompt(s) held; press Enter to send the next",
+                        self.queued.len()
+                    ));
+                }
             }
             AgentEvent::Notice(n) => self.transcript.push_notice(n),
             AgentEvent::Error(e) => self.transcript.push_error(e),
@@ -1266,6 +1396,9 @@ impl App {
         let mut parts = cmd.split_whitespace();
         let name = parts.next().unwrap_or("");
         let arg = parts.next().map(str::to_string);
+        // Everything after the command, for commands that take free text
+        // (a path or a message may contain spaces).
+        let rest = cmd.trim_start().strip_prefix(name).unwrap_or("").trim();
         match name {
             "/switch" | "/harness" => match arg {
                 Some(a) => match HarnessId::parse(&a) {
@@ -1351,9 +1484,13 @@ impl App {
                         .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
                 }
             }
-            // The whole rest of the line is the path (it may contain spaces).
-            "/attach" => match cmd.trim_start().strip_prefix(name).map(str::trim) {
-                Some(path) if !path.is_empty() => self.attach(path),
+            "/steer" => match rest {
+                "" => self.transcript.push_notice("usage: /steer <message>"),
+                text => self.steer(text.to_string()),
+            },
+            "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
+            "/attach" => match rest {
+                path if !path.is_empty() => self.attach(path),
                 _ if self.attachments.is_empty() => {
                     self.transcript.push_notice("usage: /attach <image path>")
                 }
@@ -1405,6 +1542,7 @@ impl App {
             "/clear" => {
                 self.transcript.clear();
                 self.plan.clear();
+                self.queued.clear();
                 self.transcript.push_system("Transcript cleared.");
                 self.persist();
             }
@@ -1898,6 +2036,92 @@ pub(crate) mod tests {
             rate_limit_summary(app.rate_limit.as_ref().unwrap()),
             "five_hour 90% used"
         );
+    }
+
+    #[test]
+    fn prompts_queue_during_a_turn_and_drain_on_completion() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::Claude);
+        app.queue_prompt("first".into());
+        assert!(app.is_generating && app.queued.is_empty());
+        app.take_actions();
+
+        app.queue_prompt("second".into());
+        app.queue_prompt("third".into());
+        assert_eq!(app.queued.len(), 2);
+        assert!(app.take_actions().is_empty());
+
+        // The newest one can be pulled back for editing.
+        app.unqueue_last();
+        assert_eq!(app.input, "third");
+        app.take_input();
+
+        app.session_alive = true;
+        app.on_event(done());
+        assert!(app.is_generating && app.queued.is_empty());
+        assert_eq!(app.take_actions(), vec![Action::turn("second")]);
+
+        // After an interrupt the queue is held until the user presses Enter.
+        app.queue_prompt("fourth".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert!(!app.is_generating && app.queued.len() == 1);
+        assert!(app.send_next_queued());
+        assert_eq!(app.take_actions(), vec![Action::turn("fourth")]);
+    }
+
+    #[test]
+    fn steer_goes_into_the_turn_or_falls_back_to_the_queue() {
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("go".into());
+        app.session_alive = true;
+        app.take_actions();
+        app.steer("left a bit".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Steer {
+                text: "left a bit".into(),
+                attachments: Vec::new()
+            })]
+        );
+        assert!(app.queued.is_empty());
+
+        // Antigravity cannot be steered: the message waits for the turn to end.
+        let mut app = test_app(HarnessId::Agy);
+        app.submit_prompt("go".into());
+        app.session_alive = true;
+        app.take_actions();
+        app.steer("left a bit".into());
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.queued.len(), 1);
+    }
+
+    #[test]
+    fn compact_needs_an_idle_live_session_that_supports_it() {
+        let mut app = test_app(HarnessId::Claude);
+        app.compact(None);
+        assert!(app.take_actions().is_empty());
+        app.session_alive = true;
+        app.handle_slash_command("/compact keep the API notes");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Compact {
+                instructions: Some("keep the API notes".into())
+            })]
+        );
+        assert_eq!(app.status_label(), "Compacting");
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(!app.is_generating);
+
+        let mut app = test_app(HarnessId::Agy);
+        app.session_alive = true;
+        app.compact(None);
+        assert!(app.take_actions().is_empty());
     }
 
     #[test]

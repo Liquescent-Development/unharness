@@ -46,6 +46,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// Most queued prompts shown above the prompt.
+const QUEUE_ROWS: usize = 3;
+
 /// Most plan rows shown above the prompt; the rest are summarised.
 const PLAN_ROWS: usize = 6;
 
@@ -86,6 +89,20 @@ fn pinned_lines(app: &App) -> Vec<Line<'static>> {
                 style,
             )));
         }
+    }
+    for (i, q) in app.queued.iter().enumerate() {
+        if i == QUEUE_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more queued", app.queued.len() - QUEUE_ROWS),
+                Style::default().fg(Color::DarkGray),
+            )));
+            break;
+        }
+        let first_line = q.text.lines().next().unwrap_or("");
+        lines.push(Line::from(Span::styled(
+            format!("  Queued: {}", sanitize(&truncate_chars(first_line, 90))),
+            Style::default().fg(Color::DarkGray),
+        )));
     }
     if !app.attachments.is_empty() {
         let names: Vec<String> = app.attachments.iter().map(|a| a.label()).collect();

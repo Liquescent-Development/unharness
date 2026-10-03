@@ -270,6 +270,7 @@ impl CodexAppServerParser {
                 name: s(item.get("tool").unwrap_or(&Value::Null)).to_string(),
                 input: item.get("arguments").cloned().unwrap_or(Value::Null),
             }),
+            "contextCompaction" => out.push(AgentEvent::Notice("compacting context…".into())),
             "webSearch" => out.push(AgentEvent::ToolCallStarted {
                 id,
                 name: "web_search".into(),
@@ -352,6 +353,7 @@ impl CodexAppServerParser {
                 output: String::new(),
                 is_error: false,
             }),
+            "contextCompaction" => out.push(AgentEvent::Notice("context compacted".into())),
             // A proposed plan (plan mode) is prose; the step list arrives as
             // `turn/plan/updated`.
             "plan" => {
@@ -508,6 +510,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_two_turns",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_steer_and_compact() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_steer_and_compact",
         );
     }
 

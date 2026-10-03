@@ -34,6 +34,8 @@ def main() -> int:
     ap.add_argument("--no-models", action="store_true", help="skip get_available_models")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -95,6 +97,8 @@ def main() -> int:
     send(first)
 
     done = False
+    steered = False
+    compacting = False
     last = time.time()
     while proc.poll() is None:
         line = proc.stdout.readline()
@@ -111,6 +115,9 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
+        if args.steer and not steered and t == "tool_execution_start":
+            steered = True
+            send({"id": next_id(), "type": "steer", "message": args.steer})
         if t == "extension_ui_request":
             method = obj.get("method")
             rid = obj.get("id")
@@ -125,7 +132,10 @@ def main() -> int:
                 send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
             else:
                 done = True
-        elif t == "response" and done and obj.get("command") == "get_session_stats":
+        elif t == "response" and done and args.compact and not compacting and obj.get("command") == "get_session_stats":
+            compacting = True
+            send({"id": next_id(), "type": "compact"})
+        elif t == "response" and done and obj.get("command") == ("compact" if args.compact else "get_session_stats"):
             proc.stdin.close()
             for rest in proc.stdout:
                 record("", rest)

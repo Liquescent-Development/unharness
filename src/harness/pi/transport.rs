@@ -49,9 +49,14 @@ pub enum PendingKind {
     Input,
 }
 
-/// A `prompt` command; images are inlined as base64.
-pub fn encode_prompt(id: &str, text: &str, attachments: &[Attachment]) -> Result<String> {
-    let mut cmd = json!({"id": id, "type":"prompt","message": text});
+/// A `prompt` or `steer` command; images are inlined as base64.
+pub fn encode_message(
+    kind: &str,
+    id: &str,
+    text: &str,
+    attachments: &[Attachment],
+) -> Result<String> {
+    let mut cmd = json!({"id": id, "type": kind, "message": text});
     if !attachments.is_empty() {
         let images = attachments
             .iter()
@@ -123,7 +128,7 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text, attachments } => match encode_prompt(&next_id(), &text, &attachments) {
+                    SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
                         Ok(line) => Some(line),
                         Err(e) => {
                             let _ = events.send(AgentEvent::TurnCompleted {
@@ -132,9 +137,19 @@ async fn drive(
                             None
                         }
                     },
-                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
-                        let _ = events.send(AgentEvent::Error("not supported by pi yet".into())).await;
-                        None
+                    SessionCommand::Steer { text, attachments } => match encode_message("steer", &next_id(), &text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
+                            None
+                        }
+                    },
+                    SessionCommand::Compact { instructions } => {
+                        let mut cmd = json!({"id": next_id(), "type":"compact"});
+                        if let Some(i) = instructions {
+                            cmd["customInstructions"] = json!(i);
+                        }
+                        Some(cmd.to_string())
                     }
                     SessionCommand::Interrupt => Some(json!({"id": next_id(), "type":"abort"}).to_string()),
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
@@ -242,14 +257,17 @@ mod tests {
         let path = dir.path().join("a.jpg");
         std::fs::write(&path, b"abc").unwrap();
         let a = Attachment::image(&path).unwrap();
-        let v: Value = serde_json::from_str(&encode_prompt("u1", "hi", &[a]).unwrap()).unwrap();
+        let v: Value =
+            serde_json::from_str(&encode_message("prompt", "u1", "hi", &[a]).unwrap()).unwrap();
         assert_eq!(
             v,
             json!({"id":"u1","type":"prompt","message":"hi",
                    "images":[{"type":"image","data":"YWJj","mimeType":"image/jpeg"}]})
         );
-        let v: Value = serde_json::from_str(&encode_prompt("u2", "hi", &[]).unwrap()).unwrap();
+        let v: Value =
+            serde_json::from_str(&encode_message("steer", "u2", "hi", &[]).unwrap()).unwrap();
         assert!(v.get("images").is_none());
+        assert_eq!(v["type"], "steer");
     }
 
     #[test]

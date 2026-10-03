@@ -37,6 +37,8 @@ def main() -> int:
     ap.add_argument("--model")
     ap.add_argument("--idle-timeout", type=float, default=180.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -89,6 +91,9 @@ def main() -> int:
     prompts = list(args.prompts)
     phase = "init"
     models_id = None
+    turn_id = None
+    steered = False
+    compact_id = None
 
     last = time.time()
     while proc.poll() is None:
@@ -148,10 +153,22 @@ def main() -> int:
                 break
             continue
 
+        params = obj.get("params") or {}
+        if method == "turn/started":
+            turn_id = (params.get("turn") or {}).get("id")
+        if (args.steer and not steered and method == "item/started"
+                and (params.get("item") or {}).get("type") == "commandExecution"):
+            steered = True
+            request("turn/steer", {"threadId": thread_id, "expectedTurnId": turn_id,
+                                   "input": [{"type": "text", "text": args.steer}]})
+
         # Notifications.
         if method == "turn/completed":
             if prompts:
                 request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+            elif args.compact and compact_id is None:
+                # Compaction runs as a turn of its own and ends with turn/completed.
+                compact_id = request("thread/compact/start", {"threadId": thread_id})
             else:
                 models_id = request("model/list", {})
         elif method == "error":

@@ -161,7 +161,9 @@ async fn event_loop(
 
 fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    let alt = modifiers.contains(KeyModifiers::ALT);
     match (ctrl, code) {
+        (false, KeyCode::Up) if alt => app.unqueue_last(),
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
                 app.interrupt();
@@ -223,6 +225,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         }
         (_, KeyCode::Enter) => {
             if app.input.trim().is_empty() {
+                // Idle with prompts held back (after an interrupt or error).
+                app.send_next_queued();
                 return;
             }
             // A partial slash command with a highlighted suggestion completes
@@ -231,14 +235,14 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 app.accept_suggestion();
                 return;
             }
-            if app.is_generating && !app.input.starts_with('/') {
-                return;
-            }
             let text = app.take_input();
             if text.starts_with('/') {
                 app.handle_slash_command(&text);
+            } else if alt {
+                app.steer(text);
             } else {
-                app.submit_prompt(text);
+                // Sent now when idle, after the running turn otherwise.
+                app.queue_prompt(text);
             }
         }
         (_, KeyCode::Char(c)) => app.insert_char(c),
