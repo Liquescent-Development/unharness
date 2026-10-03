@@ -1750,10 +1750,10 @@ impl App {
             "/help" => {
                 let mut help = String::from("Commands:\n");
                 for (c, d) in BASE_COMMANDS {
-                    help.push_str(&format!("  {c:<10} {d}\n"));
+                    help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
