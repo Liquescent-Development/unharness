@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::Result;
 
-use super::{which, AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions};
+use super::{AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions, which};
 
 pub struct AgyAdapter;
 
@@ -16,10 +16,10 @@ impl HarnessAdapter for AgyAdapter {
     }
 
     fn resolve_binary(&self, override_path: Option<&Path>) -> Option<PathBuf> {
-        if let Some(p) = override_path {
-            if p.exists() {
-                return Some(p.to_path_buf());
-            }
+        if let Some(p) = override_path
+            && p.exists()
+        {
+            return Some(p.to_path_buf());
         }
         which("agy")
     }
@@ -38,58 +38,60 @@ impl HarnessAdapter for AgyAdapter {
     fn auth_status(&self, _binary: &Path) -> AuthInfo {
         if let Some(home) = dirs::home_dir() {
             let settings_path = home.join(".gemini/antigravity-cli/settings.json");
-            if settings_path.exists() {
-                if let Ok(content) = std::fs::read_to_string(&settings_path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(gcp) = val.get("gcp") {
-                            let project = gcp.get("project").and_then(|p| p.as_str()).unwrap_or("configured");
-                            return AuthInfo {
-                                authenticated: true,
-                                details: Some(format!("GCP project: {}", project)),
-                            };
-                        }
-                    }
-                }
+            if settings_path.exists()
+                && let Ok(content) = std::fs::read_to_string(&settings_path)
+                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(gcp) = val.get("gcp")
+            {
+                let project = gcp
+                    .get("project")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("configured");
+                return AuthInfo {
+                    authenticated: true,
+                    details: Some(format!("GCP project: {}", project)),
+                };
             }
         }
 
         AuthInfo {
             authenticated: false,
-            details: Some("No GCP project found in ~/.gemini/antigravity-cli/settings.json".to_string()),
+            details: Some(
+                "No GCP project found in ~/.gemini/antigravity-cli/settings.json".to_string(),
+            ),
         }
     }
 
     fn available_models(&self, binary: Option<&Path>) -> Vec<ModelInfo> {
         // Try live discovery via `agy models`
-        if let Some(bin) = binary {
-            if let Ok(output) = Command::new(bin).arg("models").output() {
-                if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout);
-                    let mut models = Vec::new();
-                    for line in text.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() || trimmed.starts_with("Fetching") {
-                            continue;
-                        }
-                        let parts: Vec<&str> = trimmed.split('\t').collect();
-                        if parts.len() >= 2 {
-                            models.push(ModelInfo {
-                                id: parts[0].trim().to_string(),
-                                display_name: parts[1].trim().to_string(),
-                                description: None,
-                            });
-                        } else if !trimmed.is_empty() {
-                            models.push(ModelInfo {
-                                id: trimmed.to_string(),
-                                display_name: trimmed.to_string(),
-                                description: None,
-                            });
-                        }
-                    }
-                    if !models.is_empty() {
-                        return models;
-                    }
+        if let Some(bin) = binary
+            && let Ok(output) = Command::new(bin).arg("models").output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut models = Vec::new();
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with("Fetching") {
+                    continue;
                 }
+                let parts: Vec<&str> = trimmed.split('\t').collect();
+                if parts.len() >= 2 {
+                    models.push(ModelInfo {
+                        id: parts[0].trim().to_string(),
+                        display_name: parts[1].trim().to_string(),
+                        description: None,
+                    });
+                } else if !trimmed.is_empty() {
+                    models.push(ModelInfo {
+                        id: trimmed.to_string(),
+                        display_name: trimmed.to_string(),
+                        description: None,
+                    });
+                }
+            }
+            if !models.is_empty() {
+                return models;
             }
         }
 
@@ -172,7 +174,10 @@ mod tests {
             ..Default::default()
         };
         let cmd = adapter.build_command(Path::new("/bin/agy"), &opts).unwrap();
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
 
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--model".to_string()));
@@ -191,7 +196,10 @@ mod tests {
             ..Default::default()
         };
         let cmd = adapter.build_command(Path::new("/bin/agy"), &opts).unwrap();
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
 
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--output-format".to_string()));

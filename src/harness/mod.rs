@@ -2,9 +2,9 @@ pub mod agy;
 pub mod claude;
 pub mod codex;
 
+use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::{bail, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessKind {
@@ -116,13 +116,13 @@ pub fn resolve_active_harness(
         }
     }
 
-    if let Some(def) = configured_default {
-        if let Some(kind) = HarnessKind::parse_str(def) {
-            let adapter = get_adapter(kind);
-            let binary_override = override_paths.get(&kind).map(|p| p.as_path());
-            if let Some(bin) = adapter.resolve_binary(binary_override) {
-                return Ok((kind, bin));
-            }
+    if let Some(def) = configured_default
+        && let Some(kind) = HarnessKind::parse_str(def)
+    {
+        let adapter = get_adapter(kind);
+        let binary_override = override_paths.get(&kind).map(|p| p.as_path());
+        if let Some(bin) = adapter.resolve_binary(binary_override) {
+            return Ok((kind, bin));
         }
     }
 
@@ -147,10 +147,10 @@ pub fn which(name: &str) -> Option<PathBuf> {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = candidate.metadata() {
-                        if meta.permissions().mode() & 0o111 != 0 {
-                            return Some(candidate);
-                        }
+                    if let Ok(meta) = candidate.metadata()
+                        && meta.permissions().mode() & 0o111 != 0
+                    {
+                        return Some(candidate);
                     }
                 }
                 #[cfg(not(unix))]
@@ -168,9 +168,15 @@ mod tests {
     #[test]
     fn test_parse_harness_str() {
         assert_eq!(HarnessKind::parse_str("agy"), Some(HarnessKind::Agy));
-        assert_eq!(HarnessKind::parse_str("antigravity"), Some(HarnessKind::Agy));
+        assert_eq!(
+            HarnessKind::parse_str("antigravity"),
+            Some(HarnessKind::Agy)
+        );
         assert_eq!(HarnessKind::parse_str("claude"), Some(HarnessKind::Claude));
-        assert_eq!(HarnessKind::parse_str("claude-code"), Some(HarnessKind::Claude));
+        assert_eq!(
+            HarnessKind::parse_str("claude-code"),
+            Some(HarnessKind::Claude)
+        );
         assert_eq!(HarnessKind::parse_str("codex"), Some(HarnessKind::Codex));
         assert_eq!(HarnessKind::parse_str("unknown"), None);
     }

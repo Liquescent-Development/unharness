@@ -4,8 +4,8 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "unharness",
     author = "Richard Kiene",
-    version = "0.1.0",
-    about = "Vendor-neutral CLI orchestrator and skill synchronizer for AI coding agents (agy, claude, codex)",
+    version,
+    about = "Vendor-neutral TUI and CLI runner for AI coding agents (agy, claude, codex, pi)",
     long_about = None
 )]
 pub struct Cli {
@@ -42,7 +42,7 @@ pub struct CommonRunArgs {
     #[arg(short = 'm', long)]
     pub model: Option<String>,
 
-    /// Reasoning effort (low, medium, high, xhigh, max)
+    /// Reasoning effort (harness-specific, e.g. low, medium, high, xhigh, max)
     #[arg(short = 'e', long)]
     pub effort: Option<String>,
 
@@ -54,7 +54,7 @@ pub struct CommonRunArgs {
     #[arg(long, alias = "raw")]
     pub no_tui: bool,
 
-    /// Skip pre-flight sync of skills and rules
+    /// Skip pre-flight sync of rules symlinks
     #[arg(long)]
     pub no_sync: bool,
 }
@@ -64,24 +64,17 @@ pub enum Commands {
     /// Initialize unharness in current repository (AGENTS.md, .agents/skills, symlinks)
     Init,
 
-    /// Synchronize skills and rules across harnesses (.claude, .agents, .gemini)
-    Sync {
-        /// Sync workspace skills and rules only
-        #[arg(short = 'w', long)]
-        workspace: bool,
+    /// Synchronize rules symlinks (CLAUDE.md, GEMINI.md -> AGENTS.md)
+    Sync,
 
-        /// Sync global user skills only
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
-
-    /// Health check: detect installed harnesses, auth status, active skills, symlinks
+    /// Health check: detect installed harnesses, auth status, skills CLI, symlinks
     Doctor,
 
-    /// Manage, list, and validate skills
+    /// Manage skills via the `skills` CLI (e.g. `unharness skills add owner/repo`)
     Skills {
-        #[command(subcommand)]
-        cmd: SkillsSubcommand,
+        /// Arguments passed through to `npx skills`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
     /// Switch default harness in config (agy, claude, codex)
@@ -96,26 +89,4 @@ pub enum Commands {
 
     /// Explicitly run a prompt through a harness
     Run(CommonRunArgs),
-}
-
-#[derive(Subcommand, Debug)]
-pub enum SkillsSubcommand {
-    /// List all available skills (workspace and global)
-    List,
-
-    /// Create a new portable skill template with valid frontmatter
-    Create {
-        /// Name of the new skill (kebab-case)
-        name: String,
-
-        /// Create in user global skills (~/.agents/skills) instead of workspace
-        #[arg(short, long)]
-        global: bool,
-    },
-
-    /// Validate all SKILL.md files for valid frontmatter and metadata
-    Validate,
-
-    /// Synchronize skills across harness directories
-    Sync,
 }

@@ -1,13 +1,13 @@
 use ratatui::{
+    Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
-    Frame,
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{ActivePopup, App, MessageRole, EFFORT_LEVELS};
+use super::app::{ActivePopup, App, EFFORT_LEVELS, MessageRole};
 use super::markdown::render_markdown_to_lines;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -58,11 +58,17 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let effort_str = app.current_effort();
 
     let status_span = if app.is_generating {
-        let label = if app.is_thinking { "Thinking" } else { "Working" };
+        let label = if app.is_thinking {
+            "Thinking"
+        } else {
+            "Working"
+        };
         let elapsed = app.current_elapsed_secs();
         Span::styled(
             format!(" {} {} ({:.1}s) ", app.current_spinner(), label, elapsed),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         )
     } else if let Some(dur) = app.generation_duration {
         Span::styled(
@@ -74,11 +80,19 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let title_line = Line::from(vec![
-        Span::styled(" UNHARNESS ", Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            " UNHARNESS ",
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" "),
         Span::styled(
             format!("[{}]", app.active_harness.display_name()),
-            Style::default().fg(harness_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(harness_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -88,7 +102,9 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::raw(" "),
         Span::styled(
             format!("[Effort: {}]", effort_str),
-            Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
@@ -127,20 +143,31 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
     for msg in &app.messages {
         match msg.role {
             MessageRole::User => {
-                lines.push(Line::from(vec![
-                    Span::styled("❯ You", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                ]));
-                lines.extend(wrap_prefixed_text("  ", &msg.content, max_text_width, Style::default().fg(Color::White)));
+                lines.push(Line::from(vec![Span::styled(
+                    "❯ You",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                lines.extend(wrap_prefixed_text(
+                    "  ",
+                    &msg.content,
+                    max_text_width,
+                    Style::default().fg(Color::White),
+                ));
                 lines.push(Line::default());
             }
             MessageRole::Assistant => {
-                let dur_str = msg.duration.map(|d| format!(" ({:.1}s)", d.as_secs_f32())).unwrap_or_default();
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("● {}{}", msg.sender, dur_str),
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    ),
-                ]));
+                let dur_str = msg
+                    .duration
+                    .map(|d| format!(" ({:.1}s)", d.as_secs_f32()))
+                    .unwrap_or_default();
+                lines.push(Line::from(vec![Span::styled(
+                    format!("● {}{}", msg.sender, dur_str),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 let md_lines = render_markdown_to_lines(&msg.content, max_text_width);
                 lines.extend(md_lines);
                 lines.push(Line::default());
@@ -148,16 +175,24 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
             MessageRole::Thought => {
                 let is_live_thought = app.is_generating && app.is_thinking;
                 let title = if is_live_thought {
-                    format!("  ┌─ 💭 Thinking ({:.1}s) ──────────────────────────", app.current_elapsed_secs())
+                    format!(
+                        "  ┌─ 💭 Thinking ({:.1}s) ──────────────────────────",
+                        app.current_elapsed_secs()
+                    )
                 } else if let Some(dur) = msg.duration {
-                    format!("  ┌─ 💭 Thought for {:.1}s ────────────────────────", dur.as_secs_f32())
+                    format!(
+                        "  ┌─ 💭 Thought for {:.1}s ────────────────────────",
+                        dur.as_secs_f32()
+                    )
                 } else {
                     "  ┌─ 💭 Thinking Process ──────────────────────────".to_string()
                 };
 
                 lines.push(Line::from(Span::styled(
                     title,
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
                 )));
 
                 let inner_thought_width = max_text_width.saturating_sub(6).max(10);
@@ -166,7 +201,12 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                     for w in wrapped {
                         lines.push(Line::from(vec![
                             Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(w, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                            Span::styled(
+                                w,
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::ITALIC),
+                            ),
                         ]));
                     }
                 }
@@ -182,7 +222,9 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                     "  ⚡ ",
                     &msg.content,
                     max_text_width,
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::DIM),
                 ));
             }
             MessageRole::System => {
@@ -190,7 +232,9 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                     "  ℹ ",
                     &msg.content,
                     max_text_width,
-                    Style::default().fg(Color::Blue).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::ITALIC),
                 ));
                 lines.push(Line::default());
             }
@@ -217,9 +261,7 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         app.auto_scroll = true;
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((app.scroll, 0));
+    let paragraph = Paragraph::new(lines).block(block).scroll((app.scroll, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -343,15 +385,40 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
 
 fn render_footer(frame: &mut Frame, _app: &App, area: Rect) {
     let footer_text = Line::from(vec![
-        Span::styled("Enter", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Send  "),
-        Span::styled("Ctrl+H", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Ctrl+H",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Harness  "),
-        Span::styled("Ctrl+M", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Ctrl+M",
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Model  "),
-        Span::styled("Ctrl+E", Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Ctrl+E",
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Effort/Think  "),
-        Span::styled("Ctrl+P", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Ctrl+P",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" Auto  "),
         Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
         Span::raw(" Scroll  "),
@@ -391,14 +458,24 @@ fn render_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
         let prefix = if is_selected { "❯ " } else { "  " };
 
         let style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
 
         lines.push(Line::from(vec![
             Span::styled(format!("{}{:<22} ", prefix, cmd), style),
-            Span::styled(format!("─ {}", desc), Style::default().fg(if is_selected { Color::DarkGray } else { Color::Gray })),
+            Span::styled(
+                format!("─ {}", desc),
+                Style::default().fg(if is_selected {
+                    Color::DarkGray
+                } else {
+                    Color::Gray
+                }),
+            ),
         ]));
     }
 
@@ -412,7 +489,11 @@ fn render_harness_picker(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(" Switch AI Harness (↑/↓ Select, Enter Confirm, Esc Cancel) ")
         .title_alignment(ratatui::layout::Alignment::Center);
 
@@ -434,7 +515,10 @@ fn render_harness_picker(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         let style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else if !opt.installed {
             Style::default().fg(Color::DarkGray)
         } else {
@@ -442,7 +526,9 @@ fn render_harness_picker(frame: &mut Frame, app: &App, area: Rect) {
         };
 
         let active_style = if is_active {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -450,7 +536,14 @@ fn render_harness_picker(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(cursor, style),
             Span::styled(format!("{:<24}", opt.kind.display_name()), style),
-            Span::styled(format!(" {:<20}", status_str), Style::default().fg(if opt.installed { Color::Gray } else { Color::Red })),
+            Span::styled(
+                format!(" {:<20}", status_str),
+                Style::default().fg(if opt.installed {
+                    Color::Gray
+                } else {
+                    Color::Red
+                }),
+            ),
             Span::styled(active_badge, active_style),
         ]));
         lines.push(Line::default());
@@ -471,7 +564,11 @@ fn render_model_picker(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(title)
         .title_alignment(ratatui::layout::Alignment::Center);
 
@@ -488,23 +585,38 @@ fn render_model_picker(frame: &mut Frame, app: &App, area: Rect) {
         let active_badge = if is_active { " [Active]" } else { "" };
 
         let style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
 
         let active_style = if is_active {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
 
-        let desc = model.description.as_deref().unwrap_or(model.display_name.as_str());
+        let desc = model
+            .description
+            .as_deref()
+            .unwrap_or(model.display_name.as_str());
 
         lines.push(Line::from(vec![
             Span::styled(cursor, style),
             Span::styled(format!("{:<24} ", model.id), style),
-            Span::styled(format!("─ {:<30} ", desc), Style::default().fg(if is_selected { Color::White } else { Color::Gray })),
+            Span::styled(
+                format!("─ {:<30} ", desc),
+                Style::default().fg(if is_selected {
+                    Color::White
+                } else {
+                    Color::Gray
+                }),
+            ),
             Span::styled(active_badge, active_style),
         ]));
         lines.push(Line::default());
@@ -525,7 +637,11 @@ fn render_effort_picker(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(title)
         .title_alignment(ratatui::layout::Alignment::Center);
 
@@ -542,13 +658,18 @@ fn render_effort_picker(frame: &mut Frame, app: &App, area: Rect) {
         let active_badge = if is_active { " [Active]" } else { "" };
 
         let style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::LightBlue).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
 
         let active_style = if is_active {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -556,7 +677,14 @@ fn render_effort_picker(frame: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled(cursor, style),
             Span::styled(format!("{:<10} ", eff.display_name), style),
-            Span::styled(format!("─ {:<44} ", eff.description), Style::default().fg(if is_selected { Color::White } else { Color::Gray })),
+            Span::styled(
+                format!("─ {:<44} ", eff.description),
+                Style::default().fg(if is_selected {
+                    Color::White
+                } else {
+                    Color::Gray
+                }),
+            ),
             Span::styled(active_badge, active_style),
         ]));
         lines.push(Line::default());

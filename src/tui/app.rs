@@ -1,8 +1,8 @@
+use crate::config::Config;
+use crate::harness::{HarnessKind, ModelInfo, get_adapter};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
-use crate::config::Config;
-use crate::harness::{get_adapter, HarnessKind, ModelInfo};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MessageRole {
@@ -23,6 +23,7 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)] // replaced by a generic ListPicker in the v2 TUI
 pub enum ActivePopup {
     HarnessPicker,
     ModelPicker,
@@ -113,7 +114,10 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 const BASE_COMMAND_CATALOG: &[(&str, &str)] = &[
     ("/switch", "Open harness switcher picker modal"),
     ("/switch agy", "Switch active harness to Antigravity (agy)"),
-    ("/switch claude", "Switch active harness to Claude Code (claude)"),
+    (
+        "/switch claude",
+        "Switch active harness to Claude Code (claude)",
+    ),
     ("/switch codex", "Switch active harness to Codex (codex)"),
     ("/model", "Open model picker modal for active harness"),
     ("/effort", "Open reasoning effort / think level modal"),
@@ -126,44 +130,29 @@ const BASE_COMMAND_CATALOG: &[(&str, &str)] = &[
 ];
 
 impl App {
-    pub fn new(cwd: PathBuf, initial_harness: HarnessKind, auto_approve: bool, config: &Config) -> Self {
+    pub fn new(
+        cwd: PathBuf,
+        initial_harness: HarnessKind,
+        auto_approve: bool,
+        config: &Config,
+    ) -> Self {
         let mut selected_models = HashMap::new();
-        if let Some(ref m) = config.harnesses.agy.default_model {
-            selected_models.insert(HarnessKind::Agy, m.clone());
-        }
-        if let Some(ref m) = config.harnesses.claude.default_model {
-            selected_models.insert(HarnessKind::Claude, m.clone());
-        }
-        if let Some(ref m) = config.harnesses.codex.default_model {
-            selected_models.insert(HarnessKind::Codex, m.clone());
-        }
-
         let mut selected_efforts = HashMap::new();
-        let default_effort = "high".to_string();
-        if let Some(ref e) = config.harnesses.agy.default_effort {
-            selected_efforts.insert(HarnessKind::Agy, e.clone());
-        } else {
-            selected_efforts.insert(HarnessKind::Agy, default_effort.clone());
-        }
-        if let Some(ref e) = config.harnesses.claude.default_effort {
-            selected_efforts.insert(HarnessKind::Claude, e.clone());
-        } else {
-            selected_efforts.insert(HarnessKind::Claude, default_effort.clone());
-        }
-        if let Some(ref e) = config.harnesses.codex.default_effort {
-            selected_efforts.insert(HarnessKind::Codex, e.clone());
-        } else {
-            selected_efforts.insert(HarnessKind::Codex, default_effort);
+        for &kind in HarnessKind::default_priority() {
+            let id = kind.as_str();
+            if let Some(m) = config.default_model(id) {
+                selected_models.insert(kind, m.to_string());
+            }
+            selected_efforts.insert(
+                kind,
+                config.default_effort(id).unwrap_or("high").to_string(),
+            );
         }
 
         let mut harness_options = Vec::new();
         for &kind in HarnessKind::default_priority() {
             let adapter = get_adapter(kind);
-            let custom_bin = match kind {
-                HarnessKind::Agy => config.harnesses.agy.binary.as_deref(),
-                HarnessKind::Claude => config.harnesses.claude.binary.as_deref(),
-                HarnessKind::Codex => config.harnesses.codex.binary.as_deref(),
-            };
+            let custom_bin = config.binary_override(kind.as_str());
             let bin = adapter.resolve_binary(custom_bin);
             let installed = bin.is_some();
             let version = bin.and_then(|p| adapter.version(&p));
@@ -223,7 +212,8 @@ impl App {
     }
 
     pub fn set_model_for_active_harness(&mut self, model_id: String) {
-        self.selected_models.insert(self.active_harness, model_id.clone());
+        self.selected_models
+            .insert(self.active_harness, model_id.clone());
         self.add_system_message(format!(
             "Model set to '{}' for {}",
             model_id,
@@ -240,7 +230,8 @@ impl App {
 
     pub fn set_effort_for_active_harness(&mut self, effort_id: String) {
         let normalized = effort_id.to_lowercase();
-        self.selected_efforts.insert(self.active_harness, normalized.clone());
+        self.selected_efforts
+            .insert(self.active_harness, normalized.clone());
         self.add_system_message(format!(
             "Reasoning effort set to '{}' for {}",
             normalized,
@@ -250,9 +241,13 @@ impl App {
 
     pub fn current_elapsed_secs(&self) -> f32 {
         if self.is_generating {
-            self.generation_start.map(|s| s.elapsed().as_secs_f32()).unwrap_or(0.0)
+            self.generation_start
+                .map(|s| s.elapsed().as_secs_f32())
+                .unwrap_or(0.0)
         } else {
-            self.generation_duration.map(|d| d.as_secs_f32()).unwrap_or(0.0)
+            self.generation_duration
+                .map(|d| d.as_secs_f32())
+                .unwrap_or(0.0)
         }
     }
 
@@ -279,10 +274,11 @@ impl App {
         if let Some(start) = self.generation_start.take() {
             let dur = start.elapsed();
             self.generation_duration = Some(dur);
-            if let Some(last) = self.messages.last_mut() {
-                if last.role == MessageRole::Assistant && last.duration.is_none() {
-                    last.duration = Some(dur);
-                }
+            if let Some(last) = self.messages.last_mut()
+                && last.role == MessageRole::Assistant
+                && last.duration.is_none()
+            {
+                last.duration = Some(dur);
             }
         }
     }
@@ -304,20 +300,22 @@ impl App {
             if let Some(t_start) = self.thought_start.take() {
                 let dur = t_start.elapsed();
                 self.thought_duration = Some(dur);
-                if let Some(last) = self.messages.last_mut() {
-                    if last.role == MessageRole::Thought && last.duration.is_none() {
-                        last.duration = Some(dur);
-                    }
+                if let Some(last) = self.messages.last_mut()
+                    && last.role == MessageRole::Thought
+                    && last.duration.is_none()
+                {
+                    last.duration = Some(dur);
                 }
             }
         }
 
         let sender = self.active_harness.display_name().to_string();
-        if let Some(last) = self.messages.last_mut() {
-            if last.role == MessageRole::Assistant && last.sender == sender {
-                last.content.push_str(delta);
-                return;
-            }
+        if let Some(last) = self.messages.last_mut()
+            && last.role == MessageRole::Assistant
+            && last.sender == sender
+        {
+            last.content.push_str(delta);
+            return;
         }
         self.messages.push(Message {
             role: MessageRole::Assistant,
@@ -334,11 +332,12 @@ impl App {
         }
 
         let sender = self.active_harness.display_name().to_string();
-        if let Some(last) = self.messages.last_mut() {
-            if last.role == MessageRole::Thought && last.sender == sender {
-                last.content.push_str(delta);
-                return;
-            }
+        if let Some(last) = self.messages.last_mut()
+            && last.role == MessageRole::Thought
+            && last.sender == sender
+        {
+            last.content.push_str(delta);
+            return;
         }
         self.messages.push(Message {
             role: MessageRole::Thought,
@@ -385,7 +384,9 @@ impl App {
     pub fn switch_harness(&mut self, next: HarnessKind) {
         if self.active_harness != next {
             self.active_harness = next;
-            let model_display = self.current_model().unwrap_or_else(|| "default".to_string());
+            let model_display = self
+                .current_model()
+                .unwrap_or_else(|| "default".to_string());
             let effort_display = self.current_effort();
             self.add_system_message(format!(
                 "Switched active harness to {} (Model: {}, Effort: {})",
@@ -522,11 +523,13 @@ impl App {
             }
             Some(ActivePopup::ModelPicker) => {
                 if !self.model_options.is_empty() {
-                    self.model_picker_selected = (self.model_picker_selected + 1) % self.model_options.len();
+                    self.model_picker_selected =
+                        (self.model_picker_selected + 1) % self.model_options.len();
                 }
             }
             Some(ActivePopup::EffortPicker) => {
-                self.effort_picker_selected = (self.effort_picker_selected + 1) % EFFORT_LEVELS.len();
+                self.effort_picker_selected =
+                    (self.effort_picker_selected + 1) % EFFORT_LEVELS.len();
             }
             None => {}
         }
@@ -574,27 +577,43 @@ impl App {
                 }
 
                 for m in models {
-                    if subquery.is_empty() || m.id.to_lowercase().contains(subquery) || m.display_name.to_lowercase().contains(subquery) {
+                    if subquery.is_empty()
+                        || m.id.to_lowercase().contains(subquery)
+                        || m.display_name.to_lowercase().contains(subquery)
+                    {
                         let desc = m.description.unwrap_or(m.display_name);
                         matches.push((format!("/model {}", m.id), desc));
                     }
                 }
             }
             // 2. /effort or /think <subquery>
-            else if query.starts_with("/effort ") || query == "/effort" || query.starts_with("/think ") || query == "/think" {
+            else if query.starts_with("/effort ")
+                || query == "/effort"
+                || query.starts_with("/think ")
+                || query == "/think"
+            {
                 let (prefix, subquery) = if query.starts_with("/think") {
                     ("/think", query.strip_prefix("/think ").unwrap_or("").trim())
                 } else {
-                    ("/effort", query.strip_prefix("/effort ").unwrap_or("").trim())
+                    (
+                        "/effort",
+                        query.strip_prefix("/effort ").unwrap_or("").trim(),
+                    )
                 };
 
                 if query == prefix {
-                    matches.push((prefix.to_string(), "Open reasoning effort picker modal".to_string()));
+                    matches.push((
+                        prefix.to_string(),
+                        "Open reasoning effort picker modal".to_string(),
+                    ));
                 }
 
                 for eff in EFFORT_LEVELS {
                     if subquery.is_empty() || eff.id.starts_with(subquery) {
-                        matches.push((format!("{} {}", prefix, eff.id), eff.description.to_string()));
+                        matches.push((
+                            format!("{} {}", prefix, eff.id),
+                            eff.description.to_string(),
+                        ));
                     }
                 }
             }
@@ -702,7 +721,12 @@ mod tests {
 
     #[test]
     fn test_app_suggestions() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Agy, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Agy,
+            false,
+            &Config::default(),
+        );
         assert!(app.suggestions.is_empty());
 
         app.insert_char('/');
@@ -718,19 +742,33 @@ mod tests {
 
     #[test]
     fn test_model_suggestions_for_claude() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Claude, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Claude,
+            false,
+            &Config::default(),
+        );
         for c in "/model ".chars() {
             app.insert_char(c);
         }
 
         assert!(app.suggestions.iter().any(|(cmd, _)| cmd.contains("opus")));
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd.contains("sonnet")));
+        assert!(
+            app.suggestions
+                .iter()
+                .any(|(cmd, _)| cmd.contains("sonnet"))
+        );
         assert!(app.suggestions.iter().any(|(cmd, _)| cmd.contains("fable")));
     }
 
     #[test]
     fn test_effort_suggestions() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Claude, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Claude,
+            false,
+            &Config::default(),
+        );
         for c in "/effort ".chars() {
             app.insert_char(c);
         }
@@ -742,7 +780,12 @@ mod tests {
 
     #[test]
     fn test_modal_picker_navigation() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Agy, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Agy,
+            false,
+            &Config::default(),
+        );
         assert_eq!(app.active_harness, HarnessKind::Agy);
         assert!(app.popup.is_none());
 
@@ -760,7 +803,12 @@ mod tests {
 
     #[test]
     fn test_effort_picker_modal() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Claude, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Claude,
+            false,
+            &Config::default(),
+        );
         assert_eq!(app.current_effort(), "high");
 
         app.open_effort_picker();
@@ -775,7 +823,12 @@ mod tests {
 
     #[test]
     fn test_thinking_timer_flow() {
-        let mut app = App::new(PathBuf::from("/tmp"), HarnessKind::Claude, false, &Config::default());
+        let mut app = App::new(
+            PathBuf::from("/tmp"),
+            HarnessKind::Claude,
+            false,
+            &Config::default(),
+        );
         assert!(!app.is_generating);
         assert!(!app.is_thinking);
 

@@ -3,24 +3,25 @@ pub mod markdown;
 pub mod stream;
 pub mod ui;
 
-use std::io::{stdout, Stdout};
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 use anyhow::Result;
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use futures::StreamExt;
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
+use std::io::{Stdout, stdout};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::harness::{get_adapter, HarnessKind};
-use crate::sync::{discover_skills_in_dir, find_workspace_root};
+use crate::harness::{HarnessKind, get_adapter};
+use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
+use crate::sync::find_workspace_root;
 use app::App;
-use stream::{spawn_stream_task, StreamEvent, StreamRunConfig};
+use stream::{StreamEvent, StreamRunConfig, spawn_stream_task};
 
 pub async fn run_tui(
     cwd: &Path,
@@ -29,6 +30,15 @@ pub async fn run_tui(
     initial_prompt: Option<String>,
     config: &Config,
 ) -> Result<()> {
+    // Restore the terminal before the panic message prints, otherwise a panic
+    // leaves the user's shell in raw mode on the alternate screen.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        default_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -279,12 +289,10 @@ fn build_stream_cfg(
     config: &Config,
 ) -> StreamRunConfig {
     let adapter = get_adapter(app.active_harness);
-    let binary_override = match app.active_harness {
-        HarnessKind::Agy => config.harnesses.agy.binary.as_deref(),
-        HarnessKind::Claude => config.harnesses.claude.binary.as_deref(),
-        HarnessKind::Codex => config.harnesses.codex.binary.as_deref(),
-    };
-    let binary = adapter.resolve_binary(binary_override).unwrap_or_else(|| PathBuf::from(adapter.binary_name()));
+    let binary_override = config.binary_override(app.active_harness.as_str());
+    let binary = adapter
+        .resolve_binary(binary_override)
+        .unwrap_or_else(|| PathBuf::from(adapter.binary_name()));
 
     StreamRunConfig {
         harness: app.active_harness,
@@ -335,21 +343,23 @@ fn handle_slash_command(cmd: &str, app: &mut App) {
             let ws_root = find_workspace_root(&app.cwd);
             let mut list = Vec::new();
             if let Some(ref root) = ws_root {
-                let ws_skills = discover_skills_in_dir(&root.join(".agents").join("skills"), false);
-                for s in ws_skills {
+                for s in discover_skills_in_dir(&workspace_skills_dir(root)) {
                     list.push(format!("• [workspace] {}", s.name));
                 }
             }
-            if let Some(home) = dirs::home_dir() {
-                let global_skills = discover_skills_in_dir(&home.join(".agents").join("skills"), true);
-                for s in global_skills {
+            if let Some(dir) = global_skills_dir() {
+                for s in discover_skills_in_dir(&dir) {
                     list.push(format!("• [global] {}", s.name));
                 }
             }
             if list.is_empty() {
                 app.add_system_message("No skills discovered in .agents/skills".to_string());
             } else {
-                app.add_system_message(format!("Available Skills ({}):\n{}", list.len(), list.join("\n")));
+                app.add_system_message(format!(
+                    "Available Skills ({}):\n{}",
+                    list.len(),
+                    list.join("\n")
+                ));
             }
         }
         "/clear" => {
@@ -367,7 +377,10 @@ fn handle_slash_command(cmd: &str, app: &mut App) {
             app.should_quit = true;
         }
         _ => {
-            app.add_error_message(format!("Unknown command '{}'. Type /help for available commands.", cmd));
+            app.add_error_message(format!(
+                "Unknown command '{}'. Type /help for available commands.",
+                cmd
+            ));
         }
     }
 }

@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::Result;
 
-use super::{which, AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions};
+use super::{AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions, which};
 
 pub struct ClaudeAdapter;
 
@@ -16,10 +16,10 @@ impl HarnessAdapter for ClaudeAdapter {
     }
 
     fn resolve_binary(&self, override_path: Option<&Path>) -> Option<PathBuf> {
-        if let Some(p) = override_path {
-            if p.exists() {
-                return Some(p.to_path_buf());
-            }
+        if let Some(p) = override_path
+            && p.exists()
+        {
+            return Some(p.to_path_buf());
         }
         which("claude")
     }
@@ -37,35 +37,38 @@ impl HarnessAdapter for ClaudeAdapter {
 
     fn auth_status(&self, binary: &Path) -> AuthInfo {
         let output = Command::new(binary).args(["auth", "status"]).output().ok();
-        if let Some(out) = output {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout);
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
-                    let logged_in = val.get("loggedIn").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let org = val.get("orgName").and_then(|v| v.as_str());
-                    let plan = val.get("subscriptionType").and_then(|v| v.as_str());
-                    let email = val.get("email").and_then(|v| v.as_str());
+        if let Some(out) = output
+            && out.status.success()
+        {
+            let s = String::from_utf8_lossy(&out.stdout);
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&s) {
+                let logged_in = val
+                    .get("loggedIn")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let org = val.get("orgName").and_then(|v| v.as_str());
+                let plan = val.get("subscriptionType").and_then(|v| v.as_str());
+                let email = val.get("email").and_then(|v| v.as_str());
 
-                    let mut details = Vec::new();
-                    if let Some(o) = org {
-                        details.push(format!("org: {}", o));
-                    }
-                    if let Some(p) = plan {
-                        details.push(format!("plan: {}", p));
-                    }
-                    if let Some(e) = email {
-                        details.push(format!("user: {}", e));
-                    }
-
-                    return AuthInfo {
-                        authenticated: logged_in,
-                        details: if details.is_empty() {
-                            None
-                        } else {
-                            Some(details.join(", "))
-                        },
-                    };
+                let mut details = Vec::new();
+                if let Some(o) = org {
+                    details.push(format!("org: {}", o));
                 }
+                if let Some(p) = plan {
+                    details.push(format!("plan: {}", p));
+                }
+                if let Some(e) = email {
+                    details.push(format!("user: {}", e));
+                }
+
+                return AuthInfo {
+                    authenticated: logged_in,
+                    details: if details.is_empty() {
+                        None
+                    } else {
+                        Some(details.join(", "))
+                    },
+                };
             }
         }
 
@@ -80,7 +83,9 @@ impl HarnessAdapter for ClaudeAdapter {
             ModelInfo {
                 id: "claude-opus-5-5".to_string(),
                 display_name: "Claude Opus 5.5".to_string(),
-                description: Some("Deepest reasoning, most capable coding model (default)".to_string()),
+                description: Some(
+                    "Deepest reasoning, most capable coding model (default)".to_string(),
+                ),
             },
             ModelInfo {
                 id: "claude-sonnet-5-5".to_string(),
@@ -172,8 +177,13 @@ mod tests {
             model: Some("claude-3-7-sonnet-20250219".to_string()),
             ..Default::default()
         };
-        let cmd = adapter.build_command(Path::new("/bin/claude"), &opts).unwrap();
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        let cmd = adapter
+            .build_command(Path::new("/bin/claude"), &opts)
+            .unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
 
         assert!(args.contains(&"--dangerously-skip-permissions".to_string()));
         assert!(args.contains(&"--model".to_string()));
@@ -190,8 +200,13 @@ mod tests {
             format: Some("stream-json".to_string()),
             ..Default::default()
         };
-        let cmd = adapter.build_command(Path::new("/bin/claude"), &opts).unwrap();
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().to_string()).collect();
+        let cmd = adapter
+            .build_command(Path::new("/bin/claude"), &opts)
+            .unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
 
         assert!(args.contains(&"-p".to_string()));
         assert!(args.contains(&"--output-format".to_string()));

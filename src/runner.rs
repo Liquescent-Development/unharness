@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
-use anyhow::{bail, Result};
+
+use anyhow::{Result, bail};
 use colored::*;
 
 use crate::config::Config;
-use crate::harness::{get_adapter, resolve_active_harness, HarnessKind, RunOptions};
-use crate::sync::{find_workspace_root, run_full_sync};
+use crate::harness::{HarnessKind, RunOptions, get_adapter, resolve_active_harness};
+use crate::sync::{find_workspace_root, sync_workspace_rules};
 use crate::tui;
 
 pub async fn run_harness(
@@ -18,30 +19,23 @@ pub async fn run_harness(
 ) -> Result<()> {
     let ws_root = find_workspace_root(cwd);
 
-    // 1. Preflight auto-sync
-    if !no_sync && config.auto_sync {
-        if let Ok(report) = run_full_sync(ws_root.as_deref(), true) {
-            let total_created = report.workspace_skills.symlinks_created + report.global_skills.symlinks_created;
-            if total_created > 0 {
-                eprintln!(
-                    "{} Synchronized {} new skill symlink(s)",
-                    "[unharness]".cyan().bold(),
-                    total_created
-                );
-            }
+    // 1. Preflight rules sync
+    if !no_sync
+        && config.auto_sync
+        && let Some(ref root) = ws_root
+        && let Ok(report) = sync_workspace_rules(root)
+    {
+        for w in &report.warnings {
+            eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
     }
 
     // 2. Resolve target harness
     let mut overrides = HashMap::new();
-    if let Some(ref p) = config.harnesses.agy.binary {
-        overrides.insert(HarnessKind::Agy, p.clone());
-    }
-    if let Some(ref p) = config.harnesses.claude.binary {
-        overrides.insert(HarnessKind::Claude, p.clone());
-    }
-    if let Some(ref p) = config.harnesses.codex.binary {
-        overrides.insert(HarnessKind::Codex, p.clone());
+    for kind in [HarnessKind::Agy, HarnessKind::Claude, HarnessKind::Codex] {
+        if let Some(p) = config.binary_override(kind.as_str()) {
+            overrides.insert(kind, p.to_path_buf());
+        }
     }
 
     let (kind, binary) = resolve_active_harness(
@@ -51,21 +45,15 @@ pub async fn run_harness(
     )?;
 
     // 3. Fill defaults from config
-    let harness_config = match kind {
-        HarnessKind::Agy => &config.harnesses.agy,
-        HarnessKind::Claude => &config.harnesses.claude,
-        HarnessKind::Codex => &config.harnesses.codex,
-    };
-
+    let id = kind.as_str();
     if opts.model.is_none() {
-        opts.model = harness_config.default_model.clone();
+        opts.model = config.default_model(id).map(str::to_string);
     }
     if opts.effort.is_none() {
-        opts.effort = harness_config.default_effort.clone();
+        opts.effort = config.default_effort(id).map(str::to_string);
     }
-    for extra in &harness_config.extra_args {
-        opts.extra_args.push(extra.clone());
-    }
+    opts.extra_args
+        .extend(config.extra_args(id).iter().cloned());
 
     if opts.cwd.is_none() {
         opts.cwd = Some(cwd.to_path_buf());
@@ -80,7 +68,6 @@ pub async fn run_harness(
             std::process::exit(status.code().unwrap_or(1));
         }
     } else if no_tui {
-        // Direct execution of underlying harness CLI
         let adapter = get_adapter(kind);
         let mut cmd = adapter.build_command(&binary, &opts)?;
 
@@ -88,7 +75,12 @@ pub async fn run_harness(
         {
             use std::os::unix::process::CommandExt;
             let err = cmd.exec();
-            bail!("Failed to execute {} ({:?}): {}", adapter.display_name(), binary, err);
+            bail!(
+                "Failed to execute {} ({:?}): {}",
+                adapter.display_name(),
+                binary,
+                err
+            );
         }
 
         #[cfg(not(unix))]
@@ -97,7 +89,6 @@ pub async fn run_harness(
             std::process::exit(status.code().unwrap_or(1));
         }
     } else {
-        // Standard unharness unified TUI
         tui::run_tui(cwd, kind, opts.auto_approve, opts.prompt, config).await?;
     }
 

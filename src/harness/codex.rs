@@ -1,8 +1,8 @@
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use anyhow::Result;
 
-use super::{which, AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions};
+use super::{AuthInfo, HarnessAdapter, HarnessKind, ModelInfo, RunOptions, which};
 
 pub struct CodexAdapter;
 
@@ -16,10 +16,10 @@ impl HarnessAdapter for CodexAdapter {
     }
 
     fn resolve_binary(&self, override_path: Option<&Path>) -> Option<PathBuf> {
-        if let Some(p) = override_path {
-            if p.exists() {
-                return Some(p.to_path_buf());
-            }
+        if let Some(p) = override_path
+            && p.exists()
+        {
+            return Some(p.to_path_buf());
         }
         which("codex")
     }
@@ -37,14 +37,14 @@ impl HarnessAdapter for CodexAdapter {
 
     fn auth_status(&self, binary: &Path) -> AuthInfo {
         let output = Command::new(binary).args(["auth", "status"]).output().ok();
-        if let Some(out) = output {
-            if out.status.success() {
-                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return AuthInfo {
-                    authenticated: true,
-                    details: if s.is_empty() { None } else { Some(s) },
-                };
-            }
+        if let Some(out) = output
+            && out.status.success()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return AuthInfo {
+                authenticated: true,
+                details: if s.is_empty() { None } else { Some(s) },
+            };
         }
 
         if let Some(home) = dirs::home_dir() {

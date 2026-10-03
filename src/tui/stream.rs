@@ -1,6 +1,6 @@
+use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Stdio;
-use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc::Sender;
@@ -11,7 +11,10 @@ use crate::harness::HarnessKind;
 pub enum StreamEvent {
     TextDelta(String),
     ThoughtDelta(String),
-    ToolCall { name: String, summary: String },
+    ToolCall {
+        name: String,
+        summary: String,
+    },
     #[allow(dead_code)]
     Status(String),
     Done,
@@ -133,45 +136,60 @@ pub async fn spawn_stream_task(
 }
 
 async fn parse_agy_line(line: &str, tx: &Sender<StreamEvent>) {
-    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-        if let Some(event) = val.get("event").and_then(|e| e.as_str()) {
-            match event {
-                "step_update" => {
-                    if let Some(step) = val.get("step_update") {
-                        let step_type = step.get("step_type").and_then(|s| s.as_str()).unwrap_or("");
-                        let delta = step.get("text_delta").and_then(|d| d.as_str()).unwrap_or("");
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
+        && let Some(event) = val.get("event").and_then(|e| e.as_str())
+    {
+        match event {
+            "step_update" => {
+                if let Some(step) = val.get("step_update") {
+                    let step_type = step.get("step_type").and_then(|s| s.as_str()).unwrap_or("");
+                    let delta = step
+                        .get("text_delta")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
 
-                        match step_type {
-                            "agent_response" => {
-                                if !delta.is_empty() {
-                                    let _ = tx.send(StreamEvent::TextDelta(delta.to_string())).await;
-                                }
+                    match step_type {
+                        "agent_response" => {
+                            if !delta.is_empty() {
+                                let _ = tx.send(StreamEvent::TextDelta(delta.to_string())).await;
                             }
-                            "thought" => {
-                                if !delta.is_empty() {
-                                    let _ = tx.send(StreamEvent::ThoughtDelta(delta.to_string())).await;
-                                }
-                            }
-                            "tool_use" => {
-                                let name = step.get("tool_name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-                                let input = step.get("input").map(|i| i.to_string()).unwrap_or_default();
-                                let _ = tx.send(StreamEvent::ToolCall { name, summary: input }).await;
-                            }
-                            _ => {}
                         }
+                        "thought" => {
+                            if !delta.is_empty() {
+                                let _ = tx.send(StreamEvent::ThoughtDelta(delta.to_string())).await;
+                            }
+                        }
+                        "tool_use" => {
+                            let name = step
+                                .get("tool_name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("tool")
+                                .to_string();
+                            let input =
+                                step.get("input").map(|i| i.to_string()).unwrap_or_default();
+                            let _ = tx
+                                .send(StreamEvent::ToolCall {
+                                    name,
+                                    summary: input,
+                                })
+                                .await;
+                        }
+                        _ => {}
                     }
                 }
-                "result" => {
-                    // Result finalized
-                }
-                _ => {}
             }
-            return;
+            "result" => {
+                // Result finalized
+            }
+            _ => {}
         }
+        return;
     }
 
     // Fallback: non-JSON raw line
-    let _ = tx.send(StreamEvent::TextDelta(line.to_string() + "\n")).await;
+    let _ = tx
+        .send(StreamEvent::TextDelta(line.to_string() + "\n"))
+        .await;
 }
 
 async fn parse_claude_line(line: &str, tx: &Sender<StreamEvent>) {
@@ -179,23 +197,35 @@ async fn parse_claude_line(line: &str, tx: &Sender<StreamEvent>) {
         let msg_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
         match msg_type {
             "assistant" => {
-                if let Some(message) = val.get("message") {
-                    if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
-                        for block in content {
-                            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            if block_type == "text" {
-                                if let Some(txt) = block.get("text").and_then(|t| t.as_str()) {
-                                    let _ = tx.send(StreamEvent::TextDelta(txt.to_string())).await;
-                                }
-                            } else if block_type == "thinking" {
-                                if let Some(thk) = block.get("thinking").and_then(|t| t.as_str()) {
-                                    let _ = tx.send(StreamEvent::ThoughtDelta(thk.to_string())).await;
-                                }
-                            } else if block_type == "tool_use" {
-                                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("tool").to_string();
-                                let input = block.get("input").map(|i| i.to_string()).unwrap_or_default();
-                                let _ = tx.send(StreamEvent::ToolCall { name, summary: input }).await;
+                if let Some(message) = val.get("message")
+                    && let Some(content) = message.get("content").and_then(|c| c.as_array())
+                {
+                    for block in content {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        if block_type == "text" {
+                            if let Some(txt) = block.get("text").and_then(|t| t.as_str()) {
+                                let _ = tx.send(StreamEvent::TextDelta(txt.to_string())).await;
                             }
+                        } else if block_type == "thinking" {
+                            if let Some(thk) = block.get("thinking").and_then(|t| t.as_str()) {
+                                let _ = tx.send(StreamEvent::ThoughtDelta(thk.to_string())).await;
+                            }
+                        } else if block_type == "tool_use" {
+                            let name = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("tool")
+                                .to_string();
+                            let input = block
+                                .get("input")
+                                .map(|i| i.to_string())
+                                .unwrap_or_default();
+                            let _ = tx
+                                .send(StreamEvent::ToolCall {
+                                    name,
+                                    summary: input,
+                                })
+                                .await;
                         }
                     }
                 }
@@ -209,5 +239,7 @@ async fn parse_claude_line(line: &str, tx: &Sender<StreamEvent>) {
     }
 
     // Fallback: non-JSON raw line
-    let _ = tx.send(StreamEvent::TextDelta(line.to_string() + "\n")).await;
+    let _ = tx
+        .send(StreamEvent::TextDelta(line.to_string() + "\n"))
+        .await;
 }

@@ -24,7 +24,11 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
             } else {
                 // Opening code block
                 in_code_block = true;
-                code_lang = trimmed[3..].trim().to_lowercase();
+                code_lang = trimmed
+                    .strip_prefix("```")
+                    .unwrap_or("")
+                    .trim()
+                    .to_lowercase();
                 let lang_label = if code_lang.is_empty() {
                     "code".to_string()
                 } else {
@@ -32,8 +36,16 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
                 };
                 lines.push(Line::from(vec![
                     Span::styled("  ┌─ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(lang_label, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                    Span::styled(" ──────────────────────────────────", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        lang_label,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        " ──────────────────────────────────",
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
             }
             continue;
@@ -57,38 +69,49 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
         }
 
         // 4. Headers (#, ##, ###)
-        if trimmed.starts_with("# ") {
-            let title = trimmed[2..].trim();
+        if let Some(rest) = trimmed.strip_prefix("# ") {
+            let title = rest.trim();
             lines.push(Line::from(Span::styled(
                 format!("  # {}", title),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             )));
             continue;
         }
-        if trimmed.starts_with("## ") {
-            let title = trimmed[3..].trim();
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            let title = rest.trim();
             lines.push(Line::from(Span::styled(
                 format!("  ## {}", title),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             )));
             continue;
         }
-        if trimmed.starts_with("### ") {
-            let title = trimmed[4..].trim();
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            let title = rest.trim();
             lines.push(Line::from(Span::styled(
                 format!("  ### {}", title),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             )));
             continue;
         }
 
         // 5. Blockquotes (> ...)
-        if trimmed.starts_with("> ") {
-            let quote = trimmed[2..].trim();
+        if let Some(rest) = trimmed.strip_prefix("> ") {
+            let quote = rest.trim();
             for wrapped in wrap_text_preserving(quote, max_width.saturating_sub(4)) {
                 lines.push(Line::from(vec![
                     Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(wrapped, Style::default().fg(Color::Gray).add_modifier(Modifier::ITALIC)),
+                    Span::styled(
+                        wrapped,
+                        Style::default()
+                            .fg(Color::Gray)
+                            .add_modifier(Modifier::ITALIC),
+                    ),
                 ]));
             }
             continue;
@@ -100,7 +123,12 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
             let wrapped_items = wrap_text_preserving(item, max_width.saturating_sub(4));
             for (idx, wrapped) in wrapped_items.into_iter().enumerate() {
                 if idx == 0 {
-                    let mut spans = vec![Span::styled("  • ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))];
+                    let mut spans = vec![Span::styled(
+                        "  • ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    )];
                     spans.extend(parse_inline_formatting(&wrapped));
                     lines.push(Line::from(spans));
                 } else {
@@ -130,7 +158,9 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
     if in_code_block {
         lines.push(Line::from(Span::styled(
             "  ┆ ... (code block in progress)",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
 
@@ -151,23 +181,45 @@ fn style_diff_line(line: &str, max_width: usize) -> Line<'static> {
 
     if line.starts_with('+') {
         Line::from(vec![
-            Span::styled("  │+ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled(truncated[1..].to_string(), Style::default().fg(Color::Green)),
+            Span::styled(
+                "  │+ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncated[1..].to_string(),
+                Style::default().fg(Color::Green),
+            ),
         ])
     } else if line.starts_with('-') {
         Line::from(vec![
-            Span::styled("  │- ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  │- ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(truncated[1..].to_string(), Style::default().fg(Color::Red)),
         ])
     } else if line.starts_with("@@ ") {
         Line::from(vec![
             Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(truncated, Style::default().fg(Color::Cyan).add_modifier(Modifier::ITALIC)),
+            Span::styled(
+                truncated,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::ITALIC),
+            ),
         ])
-    } else if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
+    } else if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ")
+    {
         Line::from(vec![
             Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(truncated, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                truncated,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])
     } else {
         Line::from(vec![
@@ -184,20 +236,39 @@ fn style_code_line(line: &str, _lang: &str, max_width: usize) -> Line<'static> {
     // Simple syntax highlight for keywords, strings, comments
     let trimmed = truncated.trim_start();
     if trimmed.starts_with("//") || trimmed.starts_with('#') {
-        spans.push(Span::styled(truncated, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+        spans.push(Span::styled(
+            truncated,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
         return Line::from(spans);
     }
 
     let words = split_tokens(&truncated);
     for word in words {
         if is_code_keyword(word) {
-            spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                word.to_string(),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
         } else if word.starts_with('"') || word.starts_with('\'') {
-            spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Green)));
+            spans.push(Span::styled(
+                word.to_string(),
+                Style::default().fg(Color::Green),
+            ));
         } else if word.chars().all(|c| c.is_ascii_digit()) {
-            spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Yellow)));
+            spans.push(Span::styled(
+                word.to_string(),
+                Style::default().fg(Color::Yellow),
+            ));
         } else {
-            spans.push(Span::styled(word.to_string(), Style::default().fg(Color::White)));
+            spans.push(Span::styled(
+                word.to_string(),
+                Style::default().fg(Color::White),
+            ));
         }
     }
 
@@ -207,10 +278,39 @@ fn style_code_line(line: &str, _lang: &str, max_width: usize) -> Line<'static> {
 fn is_code_keyword(word: &str) -> bool {
     matches!(
         word,
-        "fn" | "let" | "pub" | "struct" | "impl" | "enum" | "mut" | "match" | "if" | "else" |
-        "return" | "const" | "type" | "use" | "mod" | "crate" | "async" | "await" | "for" |
-        "while" | "loop" | "break" | "def" | "class" | "import" | "from" | "self" | "None" |
-        "True" | "False" | "function" | "export" | "default" | "interface"
+        "fn" | "let"
+            | "pub"
+            | "struct"
+            | "impl"
+            | "enum"
+            | "mut"
+            | "match"
+            | "if"
+            | "else"
+            | "return"
+            | "const"
+            | "type"
+            | "use"
+            | "mod"
+            | "crate"
+            | "async"
+            | "await"
+            | "for"
+            | "while"
+            | "loop"
+            | "break"
+            | "def"
+            | "class"
+            | "import"
+            | "from"
+            | "self"
+            | "None"
+            | "True"
+            | "False"
+            | "function"
+            | "export"
+            | "default"
+            | "interface"
     )
 }
 
@@ -253,7 +353,9 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
                 let code_content = &code_rest[..end_idx];
                 spans.push(Span::styled(
                     format!(" {} ", code_content),
-                    Style::default().fg(Color::Yellow).bg(Color::Rgb(35, 38, 48)),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Rgb(35, 38, 48)),
                 ));
                 rest = &code_rest[end_idx + 1..];
             } else {
@@ -271,7 +373,9 @@ fn parse_inline_formatting(text: &str) -> Vec<Span<'static>> {
                 let bold_content = &bold_rest[..end_idx];
                 spans.push(Span::styled(
                     bold_content.to_string(),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 rest = &bold_rest[end_idx + 2..];
             } else {
@@ -348,7 +452,8 @@ mod tests {
 
     #[test]
     fn test_render_diff() {
-        let diff_text = "```diff\n--- a/file.rs\n+++ b/file.rs\n@@ -1,2 +1,3 @@\n-old line\n+new line\n```";
+        let diff_text =
+            "```diff\n--- a/file.rs\n+++ b/file.rs\n@@ -1,2 +1,3 @@\n-old line\n+new line\n```";
         let lines = render_markdown_to_lines(diff_text, 80);
         assert!(lines.len() >= 6);
     }
