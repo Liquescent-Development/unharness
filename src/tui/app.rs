@@ -291,6 +291,25 @@ impl App {
 
     // ---------------------------------------------------------------- persistence
 
+    /// Printed after the TUI closes, when a conversation was saved.
+    pub fn exit_summary(&self) -> Option<String> {
+        if !self.conversation.has_content() {
+            return None;
+        }
+        let id = &self.conversation.id;
+        let short = &id[..8.min(id.len())];
+        let mut harnesses: Vec<&str> = self.session_ids.keys().map(|h| h.as_str()).collect();
+        harnesses.sort_unstable();
+        Some(format!(
+            "Conversation {short} saved ({}). Resume it with:\n  unharness --resume {short}",
+            if harnesses.is_empty() {
+                "no sessions yet".to_string()
+            } else {
+                harnesses.join(", ")
+            }
+        ))
+    }
+
     fn sync_conversation(&mut self) {
         let c = &mut self.conversation;
         c.active_harness = self.active;
@@ -1621,6 +1640,23 @@ pub(crate) mod tests {
         let forced = test_app_in(cwd, HarnessId::Pi, Some(conv_id[..8].to_string()), true);
         assert_eq!(forced.active, HarnessId::Pi);
         assert_eq!(forced.session_ids.len(), 2);
+    }
+
+    #[test]
+    fn exit_summary_only_when_saved() {
+        let mut app = test_app(HarnessId::Claude);
+        assert!(app.exit_summary().is_none());
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        let line = app.exit_summary().unwrap();
+        assert!(line.contains("unharness --resume"));
+        assert!(line.contains(&app.conversation.id[..8]));
+        assert!(line.contains("(claude)"));
     }
 
     #[test]

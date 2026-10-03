@@ -78,6 +78,10 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+
+    if let Some(line) = app.exit_summary() {
+        println!("{line}");
+    }
     res
 }
 
