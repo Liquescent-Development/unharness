@@ -107,6 +107,15 @@ pub fn user_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
     Ok(json!({"type":"user","message":{"role":"user","content":content}}).to_string())
 }
 
+/// A user turn tagged with a fresh uuid: `(uuid, line)`. `rewind_conversation`
+/// takes that uuid to drop the turn and everything after it.
+pub fn anchored_turn(text: &str, attachments: &[Attachment]) -> Result<(String, String)> {
+    let anchor = uuid::Uuid::new_v4().to_string();
+    let mut v: Value = serde_json::from_str(&user_turn(text, attachments)?)?;
+    v["uuid"] = json!(anchor);
+    Ok((anchor, v.to_string()))
+}
+
 /// A user message merged into the running turn once its tool calls finish.
 pub fn steer_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
     let mut v: Value = serde_json::from_str(&user_turn(text, attachments)?)?;
@@ -233,8 +242,12 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text, attachments } => match user_turn(&text, &attachments) {
-                        Ok(line) => Some(line),
+                    // Each turn carries a uuid of ours, so it can be rewound to later.
+                    SessionCommand::SendTurn { text, attachments } => match anchored_turn(&text, &attachments) {
+                        Ok((anchor, line)) => {
+                            let _ = events.send(AgentEvent::TurnAnchor { id: anchor }).await;
+                            Some(line)
+                        }
                         Err(e) => {
                             let _ = events.send(AgentEvent::TurnCompleted {
                                 stop_reason: StopReason::Error(e.to_string()),
@@ -249,6 +262,9 @@ async fn drive(
                             None
                         }
                     },
+                    SessionCommand::Rewind { anchor } => Some(
+                        control_request("rewind_conversation", json!({"target_message_uuid": anchor})).1,
+                    ),
                     // `-p` mode accepts the slash command as a message; it ends
                     // with a `result`, like a turn.
                     SessionCommand::Compact { instructions } => Some(user_message(
@@ -452,6 +468,16 @@ mod tests {
         assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
         let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
         assert!(user_turn("hi", &[gone]).is_err());
+    }
+
+    #[test]
+    fn turns_carry_their_own_uuid() {
+        // Shape confirmed by fixtures/rewind.jsonl.
+        let (anchor, line) = anchored_turn("hi", &[]).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["uuid"], anchor.as_str());
+        assert_eq!(v["message"]["content"], "hi");
+        assert_ne!(anchor, anchored_turn("hi", &[]).unwrap().0);
     }
 
     #[test]

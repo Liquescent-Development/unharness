@@ -154,7 +154,10 @@ impl Harness for CodexHarness {
             compaction: app_server,
             context_usage: app_server,
             rate_limits: app_server,
-            rewind: RewindSupport::default(),
+            rewind: RewindSupport {
+                conversation: app_server,
+                files: false,
+            },
             fork: false,
         }
     }

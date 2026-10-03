@@ -84,6 +84,19 @@ pub struct Conversation {
     /// The agent's latest plan / todo list.
     #[serde(default)]
     pub plan: Vec<PlanEntry>,
+    /// Where each harness can rewind its own session to.
+    #[serde(default)]
+    pub anchors: Vec<TurnAnchorRecord>,
+}
+
+/// A user turn as one harness's session knows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnAnchorRecord {
+    /// Index of the user block in the transcript.
+    pub block: usize,
+    pub harness: HarnessId,
+    /// The harness's id for that turn (`AgentEvent::TurnAnchor`).
+    pub id: String,
 }
 
 impl Conversation {
@@ -100,6 +113,7 @@ impl Conversation {
             blocks: Vec::new(),
             usage: HashMap::new(),
             plan: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 

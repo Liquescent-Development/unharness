@@ -39,6 +39,8 @@ def main() -> int:
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--rewind", action="store_true",
+                    help="after the second prompt, rewind to before it, then send the remaining prompts")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -94,6 +96,9 @@ def main() -> int:
     turn_id = None
     steered = False
     compact_id = None
+    turn_ids = []
+    revert_id = None
+    rewound = False
 
     last = time.time()
     while proc.poll() is None:
@@ -151,11 +156,16 @@ def main() -> int:
             elif rid == models_id:
                 proc.stdin.close()
                 break
+            elif rid == revert_id:
+                revert_id = None
+                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
             continue
 
         params = obj.get("params") or {}
         if method == "turn/started" and params.get("threadId") == thread_id:
             turn_id = (params.get("turn") or {}).get("id")
+            if compact_id is None:
+                turn_ids.append(turn_id)
         if (args.steer and not steered and method == "item/started"
                 and (params.get("item") or {}).get("type") == "commandExecution"):
             steered = True
@@ -168,7 +178,10 @@ def main() -> int:
         if method == "turn/completed" and params.get("threadId") != thread_id:
             continue
         if method == "turn/completed":
-            if prompts:
+            if args.rewind and len(turn_ids) == 2 and prompts and not rewound:
+                rewound = True
+                revert_id = request("thread/revert", {"threadId": thread_id, "beforeTurnId": turn_ids[1]})
+            elif prompts:
                 request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
             elif args.compact and compact_id is None:
                 # Compaction runs as a turn of its own and ends with turn/completed.

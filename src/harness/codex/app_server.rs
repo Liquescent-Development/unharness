@@ -226,6 +226,13 @@ async fn drive(
                             _ => d.start_turn(text, attachments).await,
                         }
                     }
+                    SessionCommand::Rewind { anchor } => match d.thread_id.clone() {
+                        Some(t) => d
+                            .request("thread/revert", json!({"threadId": t, "beforeTurnId": anchor}), Outstanding::Other)
+                            .await
+                            .map(|_| ()),
+                        None => Ok(()),
+                    },
                     SessionCommand::Compact { .. } => match d.thread_id.clone() {
                         // Runs as a turn of its own (turn/started … turn/completed).
                         Some(t) => d
@@ -313,6 +320,8 @@ async fn drive(
                                     Some(Outstanding::ThreadStart) => {
                                         if let Some(err) = error {
                                             let msg = err.get("message").and_then(Value::as_str).unwrap_or("thread start failed");
+                                            // No turn id to rewind to: keep the anchor sequence aligned.
+                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
                                             let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
                                         } else {
                                             d.thread_id = result
@@ -330,6 +339,8 @@ async fn drive(
                                     Some(Outstanding::TurnStart) => {
                                         if let Some(err) = error {
                                             let msg = err.get("message").and_then(Value::as_str).unwrap_or("turn start failed");
+                                            // No turn id to rewind to: keep the anchor sequence aligned.
+                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
                                             let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
                                         } else {
                                             d.turn_id = result
@@ -337,6 +348,10 @@ async fn drive(
                                                 .and_then(|r| r.pointer("/turn/id"))
                                                 .and_then(Value::as_str)
                                                 .map(str::to_string);
+                                            // `thread/revert` takes this id to drop the turn later.
+                                            if let Some(id) = d.turn_id.clone() {
+                                                let _ = events.send(AgentEvent::TurnAnchor { id }).await;
+                                            }
                                         }
                                     }
                                     _ => {}

@@ -132,10 +132,20 @@ async fn claude_basic_turn_streams_tool_and_text() {
     handle.send(SessionCommand::turn("run echo")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
 
+    // The driver tags the turn with a uuid of its own (the rewind target)
+    // before anything comes back from the harness.
+    let Some(AgentEvent::TurnAnchor { id: anchor }) = events.first() else {
+        panic!("expected the turn anchor first, got {:?}", events.first());
+    };
     assert!(matches!(
-        events.first(),
+        events.get(1),
         Some(AgentEvent::SessionStarted { .. })
     ));
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["type"] == "user" && v["uuid"] == anchor.as_str())
+    );
     assert!(
         events
             .iter()
@@ -862,5 +872,68 @@ async fn acp_resumes_a_session_and_applies_the_configured_model() {
     assert_eq!(sent[2]["params"]["configId"], "model");
     assert_eq!(sent[2]["params"]["value"], "haiku");
     assert_eq!(sent[3]["method"], "session/prompt");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
+    let harness = unharness::harness::pi::PiHarness;
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    // Each turn is followed by its anchor: pi lists the user messages (and
+    // their entry ids) once the turn has settled.
+    let mut anchors = Vec::new();
+    for prompt in ["alpha", "beta"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        run_turn(&mut handle, |_| None).await;
+        loop {
+            if let AgentEvent::TurnAnchor { id } = next_event(&mut handle).await {
+                anchors.push(id);
+                break;
+            }
+        }
+    }
+    assert_eq!(anchors.len(), 2);
+
+    // Rewind to before the second turn, and send the next prompt at once:
+    // the driver must not pass it on before the fork has answered.
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchors[1].clone(),
+        })
+        .await
+        .unwrap();
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "alpha"))
+    );
+    // The fork is a new pi session.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a103de"))
+    ));
+
+    let sent = fake.sent_lines();
+    let pos = |pred: &dyn Fn(&Value) -> bool| sent.iter().position(pred).unwrap();
+    let fork = pos(&|v| v["type"] == "fork");
+    assert_eq!(sent[fork]["entryId"], anchors[1].as_str());
+    let prompt = pos(&|v| v["type"] == "prompt" && v["message"] == "which?");
+    let state_after_fork = sent
+        .iter()
+        .skip(fork)
+        .position(|v| v["type"] == "get_state")
+        .map(|i| i + fork)
+        .unwrap();
+    assert!(fork < state_after_fork && state_after_fork < prompt);
+
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }

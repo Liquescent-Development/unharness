@@ -109,9 +109,11 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                    SessionCommand::Steer { .. }
+                    | SessionCommand::Compact { .. }
+                    | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
-                            "this harness cannot steer or compact a session".into(),
+                            "this harness cannot steer, compact or rewind a session".into(),
                         )).await;
                     }
                     SessionCommand::SendTurn { text, attachments } => {

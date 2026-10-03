@@ -18,14 +18,25 @@ pub struct PiParser {
     announced_tools: HashSet<String>,
     /// Latest `partialResult` text per running tool call.
     partial_output: HashMap<String, String>,
+    /// User messages already seen in `get_fork_messages`; `None` until the
+    /// first listing of a session, which only sets the baseline.
+    fork_messages_seen: Option<usize>,
 }
 
 impl PiParser {
     pub fn new(session_id: Option<String>) -> Self {
         PiParser {
             session_id,
+            // A new session has no user messages yet.
+            fork_messages_seen: Some(0),
             ..Default::default()
         }
+    }
+
+    /// The session already has history (it was resumed): the next
+    /// `get_fork_messages` listing is a baseline, not a finished turn.
+    pub fn expect_fork_baseline(&mut self) {
+        self.fork_messages_seen = None;
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -327,6 +338,26 @@ impl PiParser {
                     }
                 }
             }
+            // The first user message that is new since the last listing is the
+            // turn that just ran (steering messages come after it).
+            "get_fork_messages" => {
+                let messages = v
+                    .pointer("/data/messages")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if let Some(seen) = self.fork_messages_seen
+                    && let Some(id) = messages
+                        .get(seen)
+                        .and_then(|m| m.get("entryId"))
+                        .and_then(Value::as_str)
+                {
+                    out.push(AgentEvent::TurnAnchor { id: id.to_string() });
+                }
+                self.fork_messages_seen = Some(messages.len());
+            }
+            // The fork is a new session: the listing that follows is its baseline.
+            "fork" => self.fork_messages_seen = None,
             "get_session_stats" => {
                 if let Some(c) = v.pointer("/data/contextUsage") {
                     out.push(AgentEvent::Context(ContextUsage {
@@ -397,6 +428,15 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             PiParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_rewind() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "rewind",
+        );
     }
 
     #[test]

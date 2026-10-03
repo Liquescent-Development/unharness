@@ -1,0 +1,19 @@
+SessionStarted id=01a103da-508e-7322-93c0-d8a499186b6e model=gpt-6-astra
+TurnStarted
+TextDelta "ok"
+Usage in=16233 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=16238 window=258400
+RateLimit status=- 7d=1%
+TurnCompleted Done
+TurnStarted
+TextDelta "ok"
+Usage in=16254 out=5 cache_read=16000 cache_write=0 cost=- cumulative=false
+Context used=16259 window=258400
+RateLimit status=- 7d=1%
+TurnCompleted Done
+TurnStarted
+TextDelta "alpha"
+Usage in=16261 out=5 cache_read=16000 cache_write=0 cost=- cumulative=false
+Context used=16266 window=258400
+RateLimit status=- 7d=1%
+TurnCompleted Done

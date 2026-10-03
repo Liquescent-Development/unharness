@@ -49,6 +49,14 @@ pub enum PendingKind {
     Input,
 }
 
+/// Whether `line` is pi's response to `command`.
+fn is_response_to(line: &str, command: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|v| {
+        v.get("type").and_then(Value::as_str) == Some("response")
+            && v.get("command").and_then(Value::as_str) == Some(command)
+    })
+}
+
 /// A `prompt` or `steer` command; images are inlined as base64.
 pub fn encode_message(
     kind: &str,
@@ -96,13 +104,17 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         harness: HarnessId::PI,
         process_model: ProcessModel::LongLived,
     });
-    tokio::spawn(drive(proc, session_id, cfg.policy, events_tx, cmd_rx));
+    let resumed = cfg.resume.is_some();
+    tokio::spawn(drive(
+        proc, session_id, resumed, cfg.policy, events_tx, cmd_rx,
+    ));
     Ok(handle)
 }
 
 async fn drive(
     mut proc: LineProcess,
     session_id: String,
+    resumed: bool,
     mut policy: PermissionPolicy,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
@@ -115,10 +127,21 @@ async fn drive(
         format!("u{seq}")
     };
     let mut shutting_down = false;
+    // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
+    let mut forking = false;
+    let mut held_turn: Option<String> = None;
 
     let _ = proc
         .write_line(&json!({"id": next_id(), "type":"get_state"}).to_string())
         .await;
+    if resumed {
+        // Learn which user messages predate this run, so later listings
+        // can tell which one is new.
+        parser.expect_fork_baseline();
+        let _ = proc
+            .write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string())
+            .await;
+    }
 
     loop {
         tokio::select! {
@@ -127,6 +150,7 @@ async fn drive(
                     proc.kill().await;
                     break;
                 };
+                let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
                 let line = match cmd {
                     SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
                         Ok(line) => Some(line),
@@ -144,6 +168,12 @@ async fn drive(
                             None
                         }
                     },
+                    // `fork` branches a new session from before that message. It
+                    // is only in place once it answers, so turns wait for that.
+                    SessionCommand::Rewind { anchor } => {
+                        forking = true;
+                        Some(json!({"id": next_id(), "type":"fork","entryId": anchor}).to_string())
+                    }
                     SessionCommand::Compact { instructions } => {
                         let mut cmd = json!({"id": next_id(), "type":"compact"});
                         if let Some(i) = instructions {
@@ -183,7 +213,9 @@ async fn drive(
                         None
                     }
                 };
-                if let Some(line) = line
+                if forking && is_turn {
+                    held_turn = line;
+                } else if let Some(line) = line
                     && let Err(e) = proc.write_line(&line).await
                 {
                     let _ = events.send(AgentEvent::Error(format!("pi: {e}"))).await;
@@ -192,6 +224,16 @@ async fn drive(
             raw = proc.lines.recv() => {
                 match raw {
                     Some(RawLine::Stdout(line)) => {
+                        if forking && is_response_to(&line, "fork") {
+                            // The fork is a new session: re-read its id and
+                            // message list, then send what was waiting.
+                            forking = false;
+                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
+                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
+                            if let Some(turn) = held_turn.take() {
+                                let _ = proc.write_line(&turn).await;
+                            }
+                        }
                         for ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let kind = match &req.kind {
@@ -217,6 +259,8 @@ async fn drive(
                             // Context usage is only available on request.
                             if matches!(ev, AgentEvent::TurnCompleted { .. }) {
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
+                                // The turn's user message now has an entry id to rewind to.
+                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
                             }
                             if events.send(ev).await.is_err() {
                                 proc.kill().await;

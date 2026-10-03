@@ -90,6 +90,11 @@ pub enum SessionCommand {
         text: String,
         attachments: Vec<Attachment>,
     },
+    /// Drop the user turn `anchor` (a `TurnAnchor` id) and everything after
+    /// it from the session (`Capabilities::rewind`). Files are not touched.
+    Rewind {
+        anchor: String,
+    },
     /// Summarise the context now (`Capabilities::compaction`).
     Compact {
         instructions: Option<String>,

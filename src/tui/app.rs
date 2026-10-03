@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption};
+use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
-use crate::core::conversations::{Conversation, ConversationStore, now_rfc3339, truncate_title};
+use crate::core::conversations::{
+    Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339, truncate_title,
+};
 use crate::core::registry::Registry;
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
@@ -81,6 +83,11 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
         "/steer",
         "Send a message into the running turn: /steer <text>",
     ),
+    ("/rewind", "Go back to before an earlier prompt and edit it"),
+    (
+        "/fork",
+        "Continue in a copy of this conversation, leaving the original as it is",
+    ),
     (
         "/compact",
         "Summarise the context now: /compact [instructions]",
@@ -143,6 +150,12 @@ pub struct App {
     pub show_plan: bool,
     /// Images that go out with the next prompt.
     pub attachments: Vec<Attachment>,
+    /// Where each harness can rewind its session to (see `TurnAnchor`).
+    anchors: Vec<TurnAnchorRecord>,
+    /// User blocks whose anchor has not arrived yet, oldest first. A harness
+    /// that can rewind reports one anchor per turn, in order, but not
+    /// always before the next turn starts (pi lists it after the turn).
+    anchor_pending: VecDeque<usize>,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
     compacting: bool,
@@ -266,6 +279,7 @@ impl App {
         let session_usage = conversation.usage.get(&active).cloned().unwrap_or_default();
         let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
         let plan = conversation.plan.clone();
+        let anchors = conversation.anchors.clone();
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
@@ -305,6 +319,8 @@ impl App {
             plan,
             show_plan: true,
             attachments: Vec::new(),
+            anchors,
+            anchor_pending: VecDeque::new(),
             queued: VecDeque::new(),
             compacting: false,
             live_caps: HashMap::new(),
@@ -374,6 +390,7 @@ impl App {
         c.blocks = self.transcript.to_records();
         c.usage.insert(self.active, self.session_usage.clone());
         c.plan = self.plan.clone();
+        c.anchors = self.anchors.clone();
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
         {
@@ -576,6 +593,10 @@ impl App {
             shown.push_str(&format!("\n[image: {}]", a.label()));
         }
         self.transcript.push_user(shown);
+        if self.caps().rewind.conversation {
+            self.anchor_pending
+                .push_back(self.transcript.blocks.len() - 1);
+        }
         self.start_generation();
 
         let outgoing = match bridge {
@@ -664,6 +685,153 @@ impl App {
         self.transcript.push_user(shown);
         self.actions
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
+    }
+
+    /// The harness's own id for the user turn at `block`, when its live
+    /// session can be rewound to it.
+    fn native_anchor(&self, block: usize) -> Option<&str> {
+        if !self.session_alive || !self.caps().rewind.conversation {
+            return None;
+        }
+        self.anchors
+            .iter()
+            .find(|a| a.block == block && a.harness == self.active)
+            .map(|a| a.id.as_str())
+    }
+
+    pub fn open_rewind_picker(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before rewinding");
+            return;
+        }
+        let items: Vec<RewindOption> = self
+            .transcript
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(block, b)| match b {
+                super::transcript::Block::User { text } => Some(RewindOption {
+                    block,
+                    text: text.clone(),
+                    native: self.native_anchor(block).is_some(),
+                }),
+                _ => None,
+            })
+            .collect();
+        if items.is_empty() {
+            self.transcript.push_notice("nothing to rewind to yet");
+            return;
+        }
+        let last = items.len() - 1;
+        self.modal = Some(Modal::Rewind(
+            ListPicker::new(items).with_selected(Some(last)),
+        ));
+    }
+
+    /// Drop the user turn at `block` and everything after it, and put its
+    /// text back in the prompt box. The active harness's session is rewound
+    /// where it can be; any session that saw the dropped turns and cannot be
+    /// rewound is replaced by a fresh one that gets the remaining
+    /// conversation as context. Files on disk are never changed.
+    pub fn rewind_to(&mut self, block: usize) {
+        if self.is_generating {
+            return;
+        }
+        let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
+        else {
+            return;
+        };
+        // The attachment markers are display only.
+        let prompt: String = text
+            .lines()
+            .filter(|l| !(l.starts_with("[image: ") && l.ends_with(']')))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let native = self.native_anchor(block).map(str::to_string);
+        let active = self.active;
+        match &native {
+            Some(anchor) => self
+                .actions
+                .push_back(Action::Command(SessionCommand::Rewind {
+                    anchor: anchor.clone(),
+                })),
+            None => {
+                if self.session_alive {
+                    self.actions.push_back(Action::Shutdown);
+                }
+                self.session_ids.remove(&active);
+            }
+        }
+        // Other harnesses that were active after the rewind point saw turns
+        // that no longer exist.
+        let stale: Vec<HarnessId> = self
+            .last_active_index
+            .iter()
+            .filter(|(h, seen)| **h != active && **seen > block)
+            .map(|(h, _)| *h)
+            .collect();
+        for h in stale {
+            self.session_ids.remove(&h);
+            self.last_active_index.remove(&h);
+        }
+        if native.is_none() {
+            self.last_active_index.remove(&active);
+        }
+
+        self.transcript.blocks.truncate(block);
+        self.anchors.retain(|a| a.block < block);
+        self.anchor_pending.clear();
+        self.queued.clear();
+        self.cursor = prompt.chars().count();
+        self.input = prompt;
+        self.transcript.push_system(match native {
+            Some(_) => format!(
+                "Rewound. {} forgot the later turns; files on disk are unchanged.",
+                self.short_name()
+            ),
+            None => format!(
+                "Rewound. {} will start a fresh session with the conversation so far; files on disk are unchanged.",
+                self.short_name()
+            ),
+        });
+        self.auto_scroll = true;
+        self.persist();
+    }
+
+    /// Continue in a copy of this conversation. The copy starts fresh vendor
+    /// sessions (two conversations cannot share one), seeded with the transcript.
+    pub fn fork_conversation(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before forking");
+            return;
+        }
+        if !self.conversation.has_content() {
+            self.transcript.push_notice("nothing to fork yet");
+            return;
+        }
+        self.persist();
+        let original = self.conversation.id.clone();
+        if self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        let mut fork = Conversation::new(self.active);
+        fork.title = self.conversation.title.clone();
+        self.conversation = fork;
+        self.session_ids.clear();
+        self.last_active_index.clear();
+        self.anchors.clear();
+        self.anchor_pending.clear();
+        self.session_usage = Usage::default();
+        self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
+        self.transcript.push_system(format!(
+            "Forked from conversation {}. This copy starts fresh agent sessions with the transcript as context; the original is unchanged.",
+            &original[..8.min(original.len())]
+        ));
+        self.persist();
     }
 
     /// Ask the harness to summarise its context now.
@@ -799,7 +967,17 @@ impl App {
                 }
                 self.rate_limit = Some(r);
             }
-            AgentEvent::TurnAnchor { .. } => {}
+            // An empty id means the turn never reached the harness.
+            AgentEvent::TurnAnchor { id } => {
+                if let Some(block) = self.anchor_pending.pop_front()
+                    && !id.is_empty()
+                {
+                    let harness = self.active;
+                    self.anchors
+                        .retain(|a| !(a.block == block && a.harness == harness));
+                    self.anchors.push(TurnAnchorRecord { block, harness, id });
+                }
+            }
             AgentEvent::CapabilitiesChanged(update) => {
                 if let Some(levels) = &update.effort_levels
                     && self.caps().effort_levels != *levels
@@ -907,6 +1085,7 @@ impl App {
             .unwrap_or_default();
         self.turn_usage = Usage::default();
         self.context = ContextUsage::default();
+        self.anchor_pending.clear();
         self.persist();
         self.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {})",
@@ -1014,6 +1193,8 @@ impl App {
         self.turn_usage = Usage::default();
         self.context = ContextUsage::default();
         self.plan = conv.plan.clone();
+        self.anchors = conv.anchors.clone();
+        self.anchor_pending.clear();
         self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
         self.generation_duration = None;
         self.modal = None;
@@ -1203,6 +1384,8 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
             Modal::Resume(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Resume(r.id.clone())))),
+            Modal::Rewind(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Rewind(r.block)))),
             Modal::Permission(m) => {
                 if m.denying {
                     match key.code {
@@ -1393,6 +1576,10 @@ impl App {
                         self.modal = None;
                         self.resume_conversation(id);
                     }
+                    ModalChoice::Rewind(block) => {
+                        self.modal = None;
+                        self.rewind_to(block);
+                    }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
                     ModalChoice::Dismiss => self.close_modal(),
                 }
@@ -1498,6 +1685,8 @@ impl App {
                 "" => self.transcript.push_notice("usage: /steer <message>"),
                 text => self.steer(text.to_string()),
             },
+            "/rewind" => self.open_rewind_picker(),
+            "/fork" => self.fork_conversation(),
             "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
             "/attach" => match rest {
                 path if !path.is_empty() => self.attach(path),
@@ -1553,6 +1742,8 @@ impl App {
                 self.transcript.clear();
                 self.plan.clear();
                 self.queued.clear();
+                self.anchors.clear();
+                self.anchor_pending.clear();
                 self.transcript.push_system("Transcript cleared.");
                 self.persist();
             }
@@ -1775,6 +1966,7 @@ enum ModalChoice {
     Effort(String),
     Policy(PermissionPolicy),
     Resume(String),
+    Rewind(usize),
     Decision(PermissionDecision),
     Dismiss,
 }
@@ -2046,6 +2238,162 @@ pub(crate) mod tests {
             rate_limit_summary(app.rate_limit.as_ref().unwrap()),
             "five_hour 90% used"
         );
+    }
+
+    #[test]
+    fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
+        use super::super::transcript::Block;
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2"), ("three", "a3")] {
+            app.submit_prompt(prompt.into());
+            app.session_alive = true;
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TextDelta(format!("re {prompt}")));
+            app.on_event(done());
+        }
+        app.take_actions();
+        let block_of = |app: &App, want: &str| {
+            app.transcript
+                .blocks
+                .iter()
+                .position(|b| matches!(b, Block::User { text } if text == want))
+                .unwrap()
+        };
+
+        // Live session with an anchor: the harness drops the turns itself.
+        let two = block_of(&app, "two");
+        app.rewind_to(two);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Rewind {
+                anchor: "a2".into()
+            })]
+        );
+        assert_eq!(app.input, "two");
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert!(
+            !app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::User { text } if text == "two" || text == "three"))
+        );
+        assert!(app.anchors.iter().all(|a| a.id == "a1"));
+        app.take_input();
+
+        // No live session: forget the vendor session; the next prompt starts
+        // a fresh one with the remaining transcript as context.
+        app.session_alive = false;
+        let one = block_of(&app, "one");
+        app.rewind_to(one);
+        assert!(app.take_actions().is_empty());
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert_eq!(app.input, "one");
+    }
+
+    #[test]
+    fn rewind_drops_sessions_that_saw_the_removed_turns() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(done());
+        let after_one = app.transcript.blocks.len();
+        app.switch_harness(HarnessId::CODEX);
+        app.submit_prompt("two".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.on_event(done());
+        app.switch_harness(HarnessId::PI);
+        app.submit_prompt("three".into());
+        app.on_event(done());
+        app.take_actions();
+
+        // Rewinding to before "two": Codex saw it and is reset; Claude's
+        // session ended before it and stays.
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(
+                |b| matches!(b, super::super::transcript::Block::User { text } if text == "two"),
+            )
+            .unwrap();
+        assert!(two >= after_one);
+        app.rewind_to(two);
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert!(!app.session_ids.contains_key(&HarnessId::CODEX));
+    }
+
+    #[test]
+    fn anchors_attach_in_order_even_when_they_arrive_late() {
+        // pi reports a turn's anchor after the turn, when a queued prompt may
+        // already have started the next one.
+        let mut app = test_app(HarnessId::PI);
+        app.submit_prompt("one".into());
+        app.session_alive = true;
+        app.queue_prompt("two".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.on_event(AgentEvent::TurnAnchor { id: "e1".into() });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        // A turn that never reached the harness reports an empty anchor.
+        app.submit_prompt("three".into());
+        app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
+        app.on_event(AgentEvent::TurnAnchor { id: String::new() });
+        let ids: Vec<(&str, usize)> = app
+            .anchors
+            .iter()
+            .map(|a| (a.id.as_str(), a.block))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0].0 == "e1" && ids[1].0 == "e2" && ids[0].1 < ids[1].1);
+    }
+
+    #[test]
+    fn fork_continues_in_a_copy_with_fresh_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        let original = app.conversation.id.clone();
+        app.fork_conversation();
+        assert_ne!(app.conversation.id, original);
+        assert!(app.session_ids.is_empty());
+        // Both are on disk; the original still has its vendor session.
+        let saved = app.store.load(&original).unwrap();
+        assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
+        assert!(app.store.load(&app.conversation.id).is_ok());
+        // The copy's first prompt carries the transcript as context.
+        app.take_actions();
+        app.session_alive = false;
+        app.submit_prompt("two".into());
+        assert!(app.take_actions().iter().any(
+            |a| matches!(a, Action::SendTurn { text, .. } if text.contains("answer") && text.contains("two"))
+        ));
     }
 
     #[test]

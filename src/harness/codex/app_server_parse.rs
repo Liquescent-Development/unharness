@@ -587,6 +587,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_app_server_rewind() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_rewind",
+        );
+    }
+
+    #[test]
     fn fixture_app_server_subagent() {
         assert_fixture(
             &mut CodexAppServerParser::new(),

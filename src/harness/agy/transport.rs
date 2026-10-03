@@ -160,9 +160,11 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::Steer { .. } | SessionCommand::Compact { .. } => {
+                    SessionCommand::Steer { .. }
+                    | SessionCommand::Compact { .. }
+                    | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
-                            "agy cannot steer or compact a session".into(),
+                            "agy cannot steer, compact or rewind a session".into(),
                         )).await;
                     }
                     SessionCommand::SendTurn { text, .. } => {

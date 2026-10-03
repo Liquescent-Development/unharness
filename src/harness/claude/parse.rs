@@ -603,6 +603,11 @@ mod tests {
     }
 
     #[test]
+    fn fixture_rewind() {
+        fixture("rewind");
+    }
+
+    #[test]
     fn fixture_subagent() {
         fixture("subagent");
     }

@@ -101,7 +101,10 @@ impl Harness for ClaudeHarness {
             compaction: true,
             context_usage: true,
             rate_limits: true,
-            rewind: RewindSupport::default(),
+            rewind: RewindSupport {
+                conversation: true,
+                files: false,
+            },
             fork: false,
         }
     }

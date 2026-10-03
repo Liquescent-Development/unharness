@@ -60,6 +60,17 @@ pub struct HarnessOption {
     pub interactive_permissions: bool,
 }
 
+/// A user turn the conversation can be rewound to.
+#[derive(Debug, Clone)]
+pub struct RewindOption {
+    /// Index of the user block in the transcript.
+    pub block: usize,
+    pub text: String,
+    /// The active harness can drop the turn from its own session; otherwise
+    /// it starts a fresh session with the remaining conversation as context.
+    pub native: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderOption {
     pub id: String,
@@ -233,6 +244,7 @@ pub enum Modal {
     Effort(ListPicker<String>),
     Policy(ListPicker<PermissionPolicy>),
     Resume(ListPicker<ConversationSummary>),
+    Rewind(ListPicker<RewindOption>),
     Permission(PermissionModal),
     Question(QuestionModal),
     Confirm(ConfirmModal),

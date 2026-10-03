@@ -236,9 +236,9 @@ async fn drive(
                             }
                         }
                     }
-                    SessionCommand::Steer { .. } => {
+                    SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
-                            "this agent cannot be steered mid-turn".into(),
+                            "this agent cannot be steered or rewound".into(),
                         )).await;
                         Ok(())
                     }

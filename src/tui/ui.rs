@@ -864,6 +864,21 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 )
             }),
         ),
+        Modal::Rewind(p) => (
+            centered_rect(85, 60, area),
+            modal_block(format!(" Rewind to before… ({NAV}) "), Color::Blue),
+            picker_lines(p, Color::Blue, |r| {
+                (
+                    truncate_chars(r.text.lines().next().unwrap_or(""), 70),
+                    if r.native {
+                        "session rewound".to_string()
+                    } else {
+                        "fresh session, context re-sent".to_string()
+                    },
+                    false,
+                )
+            }),
+        ),
         Modal::Permission(m) => {
             let popup = centered_rect(80, 55, area);
             let width = (popup.width.saturating_sub(6)).max(20) as usize;
