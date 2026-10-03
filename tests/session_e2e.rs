@@ -493,6 +493,78 @@ async fn codex_app_server_steers_the_running_turn_and_compacts() {
 }
 
 #[tokio::test]
+async fn codex_sub_agent_events_are_attributed_and_do_not_end_the_turn() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_subagent.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("delegate")).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        // The sub-agent asks to run a command; its request arrives wrapped.
+        if let AgentEvent::Sub { event, .. } = &ev
+            && let AgentEvent::PermissionRequest(req) = event.as_ref()
+        {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        events.push(ev);
+        if done {
+            break;
+        }
+    }
+
+    // The sub-agent's own turn/completed did not end ours: the main agent's
+    // answer comes after the sub-agent's work.
+    let spawn = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolCallStarted { id, name, .. } if name == "agent" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("sub-agent announced");
+    let sub_tool = events.iter().position(|e| {
+        matches!(e, AgentEvent::Sub { parent, event }
+            if *parent == spawn && matches!(event.as_ref(), AgentEvent::ToolCallStarted { name, .. } if name == "shell"))
+    });
+    let answer = events
+        .iter()
+        .rposition(|e| matches!(e, AgentEvent::TextDelta(t) if t == "alpha"));
+    assert!(sub_tool.is_some() && answer > sub_tool);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+            .count(),
+        1
+    );
+
+    let sent = fake.sent_lines();
+    assert!(
+        sent.iter()
+            .any(|v| v["id"] == 0 && v["result"]["decision"] == "accept")
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn codex_exec_per_turn_resumes_by_thread() {
     if !python_available() {
         return;

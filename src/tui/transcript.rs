@@ -32,6 +32,8 @@ pub enum Block {
         collapsed: bool,
         started: Instant,
         duration: Option<Duration>,
+        /// The tool call that spawned the subagent this call ran in.
+        parent: Option<String>,
     },
     System(String),
     Notice(String),
@@ -96,6 +98,7 @@ impl Transcript {
                     input,
                     output,
                     is_error,
+                    parent,
                     ..
                 } => BlockRecord::Tool {
                     id: id.clone(),
@@ -103,6 +106,7 @@ impl Transcript {
                     input: input.clone(),
                     output: output.clone(),
                     is_error: *is_error,
+                    parent: parent.clone(),
                 },
                 Block::System(t) => BlockRecord::System { text: t.clone() },
                 Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
@@ -133,6 +137,7 @@ impl Transcript {
                     input,
                     output,
                     is_error,
+                    parent,
                 } => Block::Tool {
                     id: id.clone(),
                     name: name.clone(),
@@ -143,6 +148,7 @@ impl Transcript {
                     collapsed: true,
                     started: Instant::now(),
                     duration: Some(Duration::ZERO),
+                    parent: parent.clone(),
                 },
                 BlockRecord::System { text } => Block::System(text.clone()),
                 BlockRecord::Notice { text } => Block::Notice(text.clone()),
@@ -209,6 +215,11 @@ impl Transcript {
     }
 
     pub fn tool_started(&mut self, id: &str, name: &str, input: Value) {
+        self.tool_started_in(None, id, name, input);
+    }
+
+    /// A tool call, possibly made by the subagent that `parent` spawned.
+    pub fn tool_started_in(&mut self, parent: Option<&str>, id: &str, name: &str, input: Value) {
         self.close_thought();
         self.blocks.push(Block::Tool {
             id: id.to_string(),
@@ -220,6 +231,7 @@ impl Transcript {
             collapsed: true,
             started: Instant::now(),
             duration: None,
+            parent: parent.map(str::to_string),
         });
     }
 
@@ -271,6 +283,7 @@ impl Transcript {
                     collapsed: true,
                     started: Instant::now(),
                     duration: Some(Duration::ZERO),
+                    parent: None,
                 });
             }
         }
@@ -326,6 +339,9 @@ impl Transcript {
             match b {
                 Block::User { text } => chunks.push(format!("User: {text}")),
                 Block::Assistant { text, sender, .. } => chunks.push(format!("{sender}: {text}")),
+                Block::Tool {
+                    parent: Some(_), ..
+                } => {} // the spawning call's result covers its subagent
                 Block::Tool {
                     name,
                     input,

@@ -67,6 +67,10 @@ impl ClaudeParser {
     }
 
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        // Messages produced inside a subagent name the tool call that spawned it.
+        if let Some(parent) = val.get("parent_tool_use_id").and_then(Value::as_str) {
+            return self.feed_sub(parent, val);
+        }
         let mut out = Vec::new();
         match str_at(val, "type") {
             "system" => self.on_system(val, &mut out),
@@ -103,6 +107,28 @@ impl ClaudeParser {
             _ => {}
         }
         out
+    }
+
+    /// A subagent's message: same shapes as the main agent's, attributed to
+    /// `parent`, and never part of the main turn's bookkeeping.
+    fn feed_sub(&mut self, parent: &str, val: &Value) -> Vec<AgentEvent> {
+        let mut inner = Vec::new();
+        let turn_started = std::mem::replace(&mut self.turn_started, true);
+        match str_at(val, "type") {
+            "assistant" => self.on_assistant(val, &mut inner),
+            "user" => self.on_user(val, &mut inner),
+            // Partial subagent messages would clobber the main stream's
+            // block state; the complete message follows anyway.
+            _ => {}
+        }
+        self.turn_started = turn_started;
+        inner
+            .into_iter()
+            .map(|event| AgentEvent::Sub {
+                parent: parent.to_string(),
+                event: Box::new(event),
+            })
+            .collect()
     }
 
     fn on_system(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
@@ -153,11 +179,9 @@ impl ClaudeParser {
                     self.turn_started = true;
                     out.push(AgentEvent::TurnStarted);
                 }
-                // The prompt size of the main agent's latest request is how
-                // full its context is; subagents have their own window.
-                if val.get("parent_tool_use_id").is_none_or(Value::is_null)
-                    && let Some(usage) = event.pointer("/message/usage")
-                {
+                // The prompt size of the latest request is how full the
+                // context is (subagent messages never reach this handler).
+                if let Some(usage) = event.pointer("/message/usage") {
                     let used = u64_at(usage, "input_tokens")
                         + u64_at(usage, "cache_read_input_tokens")
                         + u64_at(usage, "cache_creation_input_tokens");
@@ -576,6 +600,11 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_subagent() {
+        fixture("subagent");
     }
 
     #[test]

@@ -39,6 +39,9 @@ pub enum BlockRecord {
         input: Value,
         output: String,
         is_error: bool,
+        /// The tool call that spawned the subagent this call ran in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     System {
         text: String,

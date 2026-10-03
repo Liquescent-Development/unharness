@@ -343,11 +343,17 @@ async fn drive(
                                 }
                             }
                             // Track the running turn: steer and interrupt need its id.
-                            Some(RpcMessage::Notification { method, params }) if method == "turn/started" => {
-                                d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
-                            }
-                            Some(RpcMessage::Notification { method, .. }) if method == "turn/completed" => {
-                                d.turn_id = None;
+                            // Sub-agent threads share the stream; only the main thread's turn counts.
+                            Some(RpcMessage::Notification { method, params })
+                                if params.get("threadId").and_then(Value::as_str) == d.thread_id.as_deref() =>
+                            {
+                                match method.as_str() {
+                                    "turn/started" => {
+                                        d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                                    }
+                                    "turn/completed" => d.turn_id = None,
+                                    _ => {}
+                                }
                             }
                             Some(RpcMessage::Request { id, method, .. }) => {
                                 // Remember the rpc id so the decision can be routed back.
@@ -367,7 +373,12 @@ async fn drive(
                             _ => {}
                         }
                         for ev in d.parser.feed(&line) {
-                            if let AgentEvent::PermissionRequest(req) = &ev
+                            // A sub-agent's request arrives wrapped in `Sub`.
+                            let mut inner = &ev;
+                            while let AgentEvent::Sub { event, .. } = inner {
+                                inner = event;
+                            }
+                            if let AgentEvent::PermissionRequest(req) = inner
                                 && let Some((rpc_id, _)) = d.pending.remove(&req.id)
                             {
                                 d.pending.insert(req.id.clone(), (rpc_id, req.kind.clone()));

@@ -148,7 +148,7 @@ impl Harness for CodexHarness {
             usage_reporting: true,
             image_input: true,
             plan_updates: true,
-            subagents: false,
+            subagents: app_server,
             steer: app_server,
             compaction: app_server,
             context_usage: app_server,

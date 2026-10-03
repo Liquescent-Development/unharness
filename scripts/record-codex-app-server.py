@@ -154,7 +154,7 @@ def main() -> int:
             continue
 
         params = obj.get("params") or {}
-        if method == "turn/started":
+        if method == "turn/started" and params.get("threadId") == thread_id:
             turn_id = (params.get("turn") or {}).get("id")
         if (args.steer and not steered and method == "item/started"
                 and (params.get("item") or {}).get("type") == "commandExecution"):
@@ -163,6 +163,10 @@ def main() -> int:
                                    "input": [{"type": "text", "text": args.steer}]})
 
         # Notifications.
+        # Sub-agent threads report on the same stream; only the main thread's
+        # turn ends ours.
+        if method == "turn/completed" and params.get("threadId") != thread_id:
+            continue
         if method == "turn/completed":
             if prompts:
                 request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})

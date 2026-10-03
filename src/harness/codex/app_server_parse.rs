@@ -3,7 +3,7 @@
 //! Responses to our own requests are handled by the transport driver (it
 //! owns the request ids); this parser ignores them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
@@ -24,6 +24,9 @@ pub struct CodexAppServerParser {
     /// Rate-limit updates are sparse; a null window keeps its last value.
     rate_primary: Option<RateLimitWindow>,
     rate_secondary: Option<RateLimitWindow>,
+    /// Sub-agent thread id → the item that spawned it. Sub-agent threads
+    /// report on the same stream as the main thread.
+    children: HashMap<String, String>,
 }
 
 impl CodexAppServerParser {
@@ -33,11 +36,25 @@ impl CodexAppServerParser {
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
-            Some(RpcMessage::Notification { method, params }) => {
-                self.on_notification(&method, &params)
-            }
+            Some(RpcMessage::Notification { method, params }) => match self.child_parent(&params) {
+                // A sub-agent's turn and token accounting are its own.
+                Some(_)
+                    if matches!(
+                        method.as_str(),
+                        "turn/started" | "turn/completed" | "thread/tokenUsage/updated"
+                    ) =>
+                {
+                    vec![]
+                }
+                Some(parent) => wrap_sub(&parent, self.on_notification(&method, &params)),
+                None => self.on_notification(&method, &params),
+            },
             Some(RpcMessage::Request { id, method, params }) => {
-                self.on_server_request(&id, &method, &params)
+                let events = self.on_server_request(&id, &method, &params);
+                match self.child_parent(&params) {
+                    Some(parent) => wrap_sub(&parent, events),
+                    None => events,
+                }
             }
             Some(RpcMessage::Response { error: Some(e), .. }) => vec![AgentEvent::Error(format!(
                 "codex: {}",
@@ -75,6 +92,13 @@ impl CodexAppServerParser {
             };
         }
         vec![AgentEvent::Notice(format!("codex: {t}"))]
+    }
+
+    /// The spawning item's id when `params` belong to a sub-agent thread.
+    fn child_parent(&self, params: &Value) -> Option<String> {
+        self.children
+            .get(params.get("threadId")?.as_str()?)
+            .cloned()
     }
 
     fn on_notification(&mut self, method: &str, p: &Value) -> Vec<AgentEvent> {
@@ -271,6 +295,40 @@ impl CodexAppServerParser {
                 input: item.get("arguments").cloned().unwrap_or(Value::Null),
             }),
             "contextCompaction" => out.push(AgentEvent::Notice("compacting context…".into())),
+            // One item announces the sub-agent, a later one (with its own id)
+            // reports how it ended; both name the sub-agent's thread.
+            "subAgentActivity" => {
+                let thread = s(item.get("agentThreadId").unwrap_or(&Value::Null)).to_string();
+                match s(item.get("kind").unwrap_or(&Value::Null)) {
+                    "started" => {
+                        self.children.insert(thread, id.clone());
+                        out.push(AgentEvent::ToolCallStarted {
+                            id,
+                            name: "agent".into(),
+                            input: json!({
+                                "path": item.get("agentPath").cloned().unwrap_or(Value::Null),
+                            }),
+                        });
+                    }
+                    kind => {
+                        if let Some(parent) = self.children.get(&thread) {
+                            out.push(AgentEvent::ToolCallResult {
+                                id: parent.clone(),
+                                output: String::new(),
+                                is_error: kind != "completed",
+                            });
+                        }
+                    }
+                }
+            }
+            "collabAgentToolCall" => out.push(AgentEvent::ToolCallStarted {
+                id,
+                name: format!("agent:{}", s(item.get("tool").unwrap_or(&Value::Null))),
+                input: json!({
+                    "prompt": item.get("prompt").cloned().unwrap_or(Value::Null),
+                    "agents": item.get("receiverThreadIds").cloned().unwrap_or(Value::Null),
+                }),
+            }),
             "webSearch" => out.push(AgentEvent::ToolCallStarted {
                 id,
                 name: "web_search".into(),
@@ -354,6 +412,11 @@ impl CodexAppServerParser {
                 is_error: false,
             }),
             "contextCompaction" => out.push(AgentEvent::Notice("context compacted".into())),
+            "collabAgentToolCall" => out.push(AgentEvent::ToolCallResult {
+                id,
+                output: String::new(),
+                is_error: s(item.get("status").unwrap_or(&Value::Null)) == "failed",
+            }),
             // A proposed plan (plan mode) is prose; the step list arrives as
             // `turn/plan/updated`.
             "plan" => {
@@ -471,6 +534,16 @@ fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn wrap_sub(parent: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+    events
+        .into_iter()
+        .map(|event| AgentEvent::Sub {
+            parent: parent.to_string(),
+            event: Box::new(event),
+        })
+        .collect()
+}
+
 /// A `primary` / `secondary` rate-limit window, labelled by its length (`5h`, `7d`).
 fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
     let w = w.filter(|w| w.is_object())?;
@@ -510,6 +583,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_two_turns",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent",
         );
     }
 

@@ -231,6 +231,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 done,
                 collapsed,
                 duration,
+                parent,
                 ..
             } => {
                 let status = if !*done {
@@ -252,7 +253,15 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 let head_width = width.saturating_sub(name.len() + 18).max(10);
                 let mut summary_lines = wrap_words(&summary, head_width).into_iter();
                 let mut first = vec![
-                    Span::styled("  ⚡ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        // Calls made inside a subagent hang off their spawner.
+                        if parent.is_some() {
+                            "    ↳ "
+                        } else {
+                            "  ⚡ "
+                        },
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::styled(
                         name.clone(),
                         Style::default()

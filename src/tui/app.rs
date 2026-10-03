@@ -767,18 +767,22 @@ impl App {
                 }
             }
             AgentEvent::PlanUpdated { entries, .. } => self.plan = entries,
-            AgentEvent::Sub { event, .. } => {
-                // Subagent tool activity is shown inline; its prose is not.
-                if matches!(
-                    *event,
-                    AgentEvent::ToolCallStarted { .. }
-                        | AgentEvent::ToolCallDelta { .. }
-                        | AgentEvent::ToolCallResult { .. }
-                        | AgentEvent::PermissionRequest(_)
-                ) {
-                    self.on_event(*event);
+            AgentEvent::Sub { parent, event } => match *event {
+                AgentEvent::ToolCallStarted { id, name, input } => {
+                    self.transcript
+                        .tool_started_in(Some(&parent), &id, &name, input)
                 }
-            }
+                // The subagent's prose streams into its spawning call while
+                // that is still running; the call's result replaces it.
+                AgentEvent::TextDelta(t) => self.transcript.tool_delta(&parent, &t),
+                ev @ (AgentEvent::ToolCallDelta { .. }
+                | AgentEvent::ToolCallResult { .. }
+                | AgentEvent::PermissionRequest(_)
+                | AgentEvent::Sub { .. }
+                | AgentEvent::Notice(_)
+                | AgentEvent::Error(_)) => self.on_event(ev),
+                _ => {}
+            },
             AgentEvent::Context(c) => self.context.merge(c),
             AgentEvent::RateLimit(r) => {
                 // Warn once each time a window crosses the threshold.
@@ -2036,6 +2040,60 @@ pub(crate) mod tests {
             rate_limit_summary(app.rate_limit.as_ref().unwrap()),
             "five_hour 90% used"
         );
+    }
+
+    #[test]
+    fn subagent_calls_hang_off_their_spawner() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("delegate".into());
+        app.on_event(AgentEvent::ToolCallStarted {
+            id: "spawn".into(),
+            name: "Agent".into(),
+            input: serde_json::json!({"description": "look around"}),
+        });
+        let sub = |event| AgentEvent::Sub {
+            parent: "spawn".into(),
+            event: Box::new(event),
+        };
+        app.on_event(sub(AgentEvent::ToolCallStarted {
+            id: "inner".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": "a.txt"}),
+        }));
+        app.on_event(sub(AgentEvent::ToolCallResult {
+            id: "inner".into(),
+            output: "contents".into(),
+            is_error: false,
+        }));
+        // The subagent's prose shows as the spawning call's live output.
+        app.on_event(sub(AgentEvent::TextDelta("found it".into())));
+        let find = |app: &App, want: &str| {
+            app.transcript
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    Block::Tool {
+                        id, parent, output, ..
+                    } if id == want => Some((parent.clone(), output.clone())),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            find(&app, "inner"),
+            (Some("spawn".into()), "contents".into())
+        );
+        assert_eq!(find(&app, "spawn"), (None, "found it".into()));
+
+        // Saved and restored with the link; left out of the bridge.
+        let records = app.transcript.to_records();
+        let back = Transcript::from_records(&records);
+        assert!(back.blocks.iter().any(
+            |b| matches!(b, Block::Tool { id, parent: Some(p), .. } if id == "inner" && p == "spawn")
+        ));
+        let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
+        assert!(bridge.contains("[tool Agent") && !bridge.contains("[tool Read"));
     }
 
     #[test]
