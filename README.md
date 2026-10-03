@@ -50,6 +50,12 @@ unharness skills add vercel-labs/agent-skills
 
 ### In the TUI
 
+The transcript fills the window. Everything about the current state sits
+under the prompt: a status rule (what the agent is doing and for how long),
+the prompt line, then the working directory and git branch, the harness,
+provider/model, effort and policy, token usage and cost, the session id, any
+capability caveat, and the key hints.
+
 | Key | Action |
 |---|---|
 | `Enter` | Send the prompt |

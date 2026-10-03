@@ -58,6 +58,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
 pub struct App {
     pub cwd: PathBuf,
     pub workspace_root: Option<PathBuf>,
+    pub git_branch: Option<String>,
     pub registry: Arc<Registry>,
     pub config: Config,
 
@@ -178,9 +179,11 @@ impl App {
             session_ids.insert(init.harness, r);
         }
 
+        let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
+            git_branch,
             registry,
             bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
             config,
@@ -1302,6 +1305,16 @@ impl App {
 
     pub fn scroll_to_bottom(&mut self) {
         self.auto_scroll = true;
+    }
+}
+
+/// Current branch from `.git/HEAD` without spawning git.
+fn git_branch(root: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref: refs/heads/") {
+        Some(b) => Some(b.to_string()),
+        None => Some(head.chars().take(8).collect()),
     }
 }
 

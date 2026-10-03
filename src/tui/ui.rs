@@ -20,23 +20,18 @@ use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, trunca
 use crate::core::{HarnessId, PermissionKind, PermissionPolicy};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    let warning = app.policy_warning();
+    let bottom_height = 1 + 1 + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Min(5),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(5), Constraint::Length(bottom_height as u16)])
         .split(frame.area());
 
-    render_header(frame, app, chunks[0]);
-    render_transcript(frame, app, chunks[1]);
-    render_input(frame, app, chunks[2]);
-    render_footer(frame, app, chunks[3]);
+    render_transcript(frame, app, chunks[0]);
+    let prompt_row = render_bottom(frame, app, chunks[1], warning.as_deref());
 
     if !app.suggestions.is_empty() && app.modal.is_none() {
-        render_suggestions(frame, app, chunks[2]);
+        render_suggestions(frame, app, prompt_row);
     }
     if app.modal.is_some() {
         render_modal(frame, app, frame.area());
@@ -71,102 +66,16 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let status = if app.is_generating {
-        let label = app.status_label();
-        Span::styled(
-            format!(" {} {}… {:.0}s ", app.spinner(), label, app.elapsed_secs()),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else if let Some(d) = app.generation_duration {
-        Span::styled(
-            format!(" Done ({:.1}s) ", d.as_secs_f32()),
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::styled(" Idle ", Style::default().fg(Color::DarkGray))
-    };
-
-    let effective = app.effective_policy();
-    let policy_label = if effective == app.policy_requested {
-        format!("[Policy: {effective}]")
-    } else {
-        format!("[Policy: {}→{}!]", app.policy_requested, effective)
-    };
-
-    let title = Line::from(vec![
-        Span::styled(
-            " UNHARNESS ",
-            Style::default()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("[{}]", app.active.short_name()),
-            Style::default()
-                .fg(harness_color(app.active))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("[{}]", app.model_label()),
-            Style::default().fg(Color::Yellow),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            format!("[Effort: {}]", app.current_effort().unwrap_or("default")),
-            Style::default().fg(Color::LightBlue),
-        ),
-        Span::raw(" "),
-        Span::styled(policy_label, Style::default().fg(policy_color(effective))),
-        Span::raw(" "),
-        status,
-    ]);
-
-    let t = &app.turn_usage;
-    let s = &app.session_usage;
-    let mut usage = format!(
-        "turn {}↑ {}↓",
-        fmt_tokens(t.input + t.cache_read + t.cache_write),
-        fmt_tokens(t.output)
-    );
-    usage.push_str(&format!(" · session {}", fmt_tokens(s.total_tokens())));
-    if let Some(c) = s.cost_usd {
-        usage.push_str(&format!(" · ${c:.2}"));
-    }
-    let session = app
-        .session_ids
-        .get(&app.active)
-        .map(|id| format!(" · session {}", truncate_chars(id, 8)))
-        .unwrap_or_default();
-    let info = format!("  {} · {}{}", app.cwd.to_string_lossy(), usage, session);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(title);
-    let p = Paragraph::new(vec![
-        Line::from(Span::styled(info, Style::default().fg(Color::Gray))),
-        Line::from(Span::styled(
-            app.policy_warning()
-                .map(|w| format!("  ⚠ {w}"))
-                .unwrap_or_default(),
-            Style::default().fg(Color::Yellow),
-        )),
-    ])
-    .block(block);
-    frame.render_widget(p, area);
-}
-
 fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Activity ");
+        .title(Span::styled(
+            " unharness ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
     let inner = block.inner(area);
     let width = (inner.width.saturating_sub(4)).max(10) as usize;
 
@@ -425,64 +334,233 @@ pub fn wrap_prefixed_text(
     lines
 }
 
-fn render_input(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(if app.is_generating {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::Cyan)
-        })
-        .title(if app.is_generating {
-            " Prompt (Esc to interrupt) "
-        } else {
-            " Prompt (type / for commands) "
-        });
-    frame.render_widget(Paragraph::new(sanitize(&app.input)).block(block), area);
+/// Status rule, prompt, rule, context lines, optional warning, key hints.
+/// Returns the prompt row's rect (for the suggestions popup).
+fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>) -> Rect {
+    let mut constraints = vec![
+        Constraint::Length(1), // status rule
+        Constraint::Length(1), // prompt
+        Constraint::Length(1), // rule
+        Constraint::Length(1), // where / what
+        Constraint::Length(1), // usage / session
+    ];
+    if warning.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    constraints.push(Constraint::Length(1)); // footer
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    let width = area.width as usize;
+    let rule_style = Style::default().fg(Color::DarkGray);
+
+    // Status rule: ── ⠇ Running shell · 12s ─────
+    let status = if app.is_generating {
+        Span::styled(
+            format!(
+                " {} {} · {:.0}s ",
+                app.spinner(),
+                app.status_label(),
+                app.elapsed_secs()
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if app
+        .modal
+        .as_ref()
+        .is_some_and(super::modal::Modal::is_prompt)
+    {
+        Span::styled(" Waiting for you ", Style::default().fg(Color::Cyan))
+    } else if let Some(d) = app.generation_duration {
+        Span::styled(
+            format!(" Ready · last turn {:.1}s ", d.as_secs_f32()),
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::styled(" Ready ", Style::default().fg(Color::DarkGray))
+    };
+    let status_w = UnicodeWidthStr::width(status.content.as_ref());
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("──", rule_style),
+            status,
+            Span::styled("─".repeat(width.saturating_sub(status_w + 2)), rule_style),
+        ])),
+        rows[0],
+    );
+
+    // Prompt line
+    let prompt_style = if app.is_generating {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("❯ ", prompt_style),
+            Span::raw(sanitize(&app.input)),
+        ])),
+        rows[1],
+    );
     if app.modal.is_none() {
         let before: String = app.input.chars().take(app.cursor).collect();
-        let x = area.x + 1 + UnicodeWidthStr::width(before.as_str()) as u16;
-        frame.set_cursor_position((x.min(area.x + area.width.saturating_sub(2)), area.y + 1));
+        let x = rows[1].x + 2 + UnicodeWidthStr::width(before.as_str()) as u16;
+        frame.set_cursor_position((
+            x.min(rows[1].x + rows[1].width.saturating_sub(1)),
+            rows[1].y,
+        ));
     }
-}
 
-fn render_footer(frame: &mut Frame, _app: &App, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("─".repeat(width), rule_style))),
+        rows[2],
+    );
+
+    // Line 1: where (left) · harness/model/effort/policy (right)
+    let mut cwd = app.cwd.to_string_lossy().to_string();
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = app.cwd.strip_prefix(&home)
+    {
+        cwd = format!("~/{}", rest.to_string_lossy());
+    }
+    let left1 = Line::from(vec![
+        Span::styled(cwd, Style::default().fg(Color::Gray)),
+        Span::styled(
+            app.git_branch
+                .as_ref()
+                .map(|b| format!(" ({b})"))
+                .unwrap_or_default(),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    let effective = app.effective_policy();
+    let policy_text = if effective == app.policy_requested {
+        format!("policy {effective}")
+    } else {
+        format!("policy {}→{}", app.policy_requested, effective)
+    };
+    let right1 = Line::from(vec![
+        Span::styled(
+            format!("[{}] ", app.active.short_name()),
+            Style::default()
+                .fg(harness_color(app.active))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(app.model_label(), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!(" · effort {}", app.current_effort().unwrap_or("default")),
+            Style::default().fg(Color::LightBlue),
+        ),
+        Span::styled(
+            format!(" · {policy_text}"),
+            Style::default().fg(policy_color(effective)),
+        ),
+    ]);
+    render_split(frame, rows[3], left1, right1);
+
+    // Line 2: usage (left) · session id (right)
+    let t = &app.turn_usage;
+    let s = &app.session_usage;
+    let mut usage = format!(
+        "↑{} ↓{} · session {}",
+        fmt_tokens(t.input + t.cache_read + t.cache_write),
+        fmt_tokens(t.output),
+        fmt_tokens(s.total_tokens())
+    );
+    if let Some(c) = s.cost_usd {
+        usage.push_str(&format!(" · ${c:.2}"));
+    }
+    let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
+    let right2 = Line::from(Span::styled(
+        app.session_ids
+            .get(&app.active)
+            .map(|id| format!("session {}", truncate_chars(id, 12)))
+            .unwrap_or_else(|| "no session yet".into()),
+        Style::default().fg(Color::DarkGray),
+    ));
+    render_split(frame, rows[4], left2, right2);
+
+    let mut next = 5;
+    if let Some(w) = warning {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("⚠ {w}"),
+                Style::default().fg(Color::Yellow),
+            ))),
+            rows[next],
+        );
+        next += 1;
+    }
+
     let k = |s: &'static str, c: Color| {
         Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD))
     };
-    let spans = vec![
+    let footer = Line::from(vec![
         k("Enter", Color::Cyan),
-        Span::raw(" Send  "),
-        k("Ctrl+H", Color::Yellow),
-        Span::raw(" Harness  "),
-        k("Ctrl+M", Color::Magenta),
-        Span::raw(" Model  "),
-        k("Ctrl+E", Color::LightBlue),
-        Span::raw(" Effort  "),
-        k("Ctrl+P", Color::Green),
-        Span::raw(" Policy  "),
-        k("Ctrl+R", Color::Blue),
-        Span::raw(" Resume  "),
-        k("Ctrl+O", Color::Gray),
-        Span::raw(" Expand  "),
+        Span::raw(" send · "),
+        k("^H", Color::Yellow),
+        Span::raw(" harness · "),
+        k("^M", Color::Magenta),
+        Span::raw(" model · "),
+        k("^E", Color::LightBlue),
+        Span::raw(" effort · "),
+        k("^P", Color::Green),
+        Span::raw(" policy · "),
+        k("^R", Color::Blue),
+        Span::raw(" resume · "),
+        k("^O", Color::Gray),
+        Span::raw(" expand · "),
         k("Esc", Color::Red),
-        Span::raw(" Interrupt  "),
-        k("Ctrl+D", Color::Red),
-        Span::raw(" Quit"),
-    ];
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        Span::raw(" interrupt · "),
+        k("^D", Color::Red),
+        Span::raw(" quit"),
+    ]);
+    let mut footer_lines = vec![footer];
+    clamp_lines(&mut footer_lines, width);
+    let footer = footer_lines.remove(0);
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+        rows[next],
+    );
+
+    rows[1]
 }
 
-fn render_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
+/// Left text and right text on one row; the right side is dropped first
+/// when the terminal is too narrow for both.
+fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'static>) {
+    let width = row.width as usize;
+    let lw = left.width();
+    let rw = right.width();
+    if lw + 2 + rw <= width {
+        let mut spans = left.spans;
+        spans.push(Span::raw(" ".repeat(width - lw - rw)));
+        spans.extend(right.spans);
+        frame.render_widget(Paragraph::new(Line::from(spans)), row);
+    } else {
+        let mut lines = vec![left];
+        clamp_lines(&mut lines, width);
+        frame.render_widget(Paragraph::new(lines.remove(0)), row);
+    }
+}
+
+fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
     let count = app.suggestions.len().min(8) as u16;
     let height = count + 2;
-    if input_area.y < height {
+    // Sits above the status rule so it never covers the prompt.
+    let top = prompt_row.y.saturating_sub(1);
+    if top < height {
         return;
     }
     let area = Rect {
-        x: input_area.x + 1,
-        y: input_area.y.saturating_sub(height),
-        width: 76.min(input_area.width.saturating_sub(4)),
+        x: prompt_row.x + 1,
+        y: top - height,
+        width: 76.min(prompt_row.width.saturating_sub(4)),
         height,
     };
     frame.render_widget(Clear, area);
@@ -928,6 +1006,79 @@ mod tests {
         let w = wrap_words(&"x".repeat(25), 10);
         assert_eq!(w.len(), 3);
         assert_eq!(wrap_words("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn bottom_cluster_layout() {
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::TextDelta("hi there".into()));
+        app.on_event(crate::core::AgentEvent::Usage(crate::core::Usage {
+            input: 1200,
+            output: 40,
+            cost_usd: Some(0.12),
+            ..Default::default()
+        }));
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        for c in "/mo".chars() {
+            app.insert_char(c);
+        }
+        let backend = TestBackend::new(110, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        if std::env::var("UNHARNESS_DUMP_UI").is_ok() {
+            eprintln!("{}", rows.join("\n"));
+        }
+        let n = rows.len();
+        assert!(
+            rows[n - 1].contains("Enter") && rows[n - 1].ends_with("^D quit"),
+            "footer: {}",
+            rows[n - 1]
+        );
+        assert!(
+            rows[n - 2].starts_with("↑1.2k ↓40") && rows[n - 2].contains("$0.12"),
+            "usage: {}",
+            rows[n - 2]
+        );
+        assert!(
+            rows[n - 3].contains("[Claude]") && rows[n - 3].contains("policy ask"),
+            "context: {}",
+            rows[n - 3]
+        );
+        assert!(
+            rows[n - 4].chars().all(|c| c == '─'),
+            "rule: {}",
+            rows[n - 4]
+        );
+        assert!(rows[n - 5].starts_with("❯ /mo"), "prompt: {}", rows[n - 5]);
+        assert!(
+            rows[n - 6].contains("Ready · last turn"),
+            "status: {}",
+            rows[n - 6]
+        );
+        assert!(
+            rows[0].contains("unharness"),
+            "transcript title: {}",
+            rows[0]
+        );
+        // suggestions popup sits above the status rule
+        assert!(
+            rows[..n - 6].iter().any(|r| r.contains("/model")),
+            "suggestions missing"
+        );
     }
 
     #[test]
