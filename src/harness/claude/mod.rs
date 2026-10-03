@@ -103,9 +103,9 @@ impl Harness for ClaudeHarness {
             rate_limits: true,
             rewind: RewindSupport {
                 conversation: true,
-                files: false,
+                anchors_survive_fork: false,
             },
-            fork: false,
+            fork: true,
         }
     }
 

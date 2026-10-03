@@ -23,7 +23,13 @@ pub fn session_args(cfg: &SessionConfig) -> (Vec<String>, String) {
     let mut args = vec![
         "--mode".to_string(),
         "rpc".to_string(),
-        "--session-id".to_string(),
+        // `--fork` branches the named session into a new one, whose id pi
+        // reports in `get_state`.
+        if cfg.fork && cfg.resume.is_some() {
+            "--fork".to_string()
+        } else {
+            "--session-id".to_string()
+        },
         session_id.clone(),
     ];
     if let Some(m) = &cfg.model {
@@ -327,6 +333,7 @@ mod tests {
             effort: Some("high".into()),
             policy: PermissionPolicy::Ask,
             resume: None,
+            fork: false,
             extra_args: vec!["--no-extensions".into()],
             env: vec![],
         };
@@ -336,6 +343,20 @@ mod tests {
         assert!(s.contains("--provider anthropic --model claude-sonnet-4-5"));
         assert!(s.contains("--thinking high"));
         assert!(s.ends_with("--no-extensions"));
+
+        // Checked live: `--fork` branches the session into a new one whose
+        // id pi reports in get_state; entry ids are kept.
+        let fork = SessionConfig {
+            resume: Some("abc".into()),
+            fork: true,
+            ..cfg.clone()
+        };
+        assert!(
+            session_args(&fork)
+                .0
+                .join(" ")
+                .starts_with("--mode rpc --fork abc")
+        );
 
         let mut r = cfg.clone();
         r.resume = Some("abc".into());

@@ -118,6 +118,7 @@ enum Outstanding {
     Interrupt,
     /// Steer, compact: only an error response matters, and the parser reports it.
     Other,
+    Revert,
 }
 
 struct Driver {
@@ -228,7 +229,7 @@ async fn drive(
                     }
                     SessionCommand::Rewind { anchor } => match d.thread_id.clone() {
                         Some(t) => d
-                            .request("thread/revert", json!({"threadId": t, "beforeTurnId": anchor}), Outstanding::Other)
+                            .request("thread/revert", json!({"threadId": t, "beforeTurnId": anchor}), Outstanding::Revert)
                             .await
                             .map(|_| ()),
                         None => Ok(()),
@@ -300,7 +301,15 @@ async fn drive(
                                         let _ = d.proc.write_line(&jsonrpc::notification("initialized", Value::Null)).await;
                                         let (approval, sandbox) = policy_params(cfg.policy);
                                         let r = match &cfg.resume {
-                                            Some(id) => d.request("thread/resume", json!({"threadId": id}), Outstanding::ThreadStart).await,
+                                            // A fork answers like a start: with the new thread.
+                                            Some(id) => {
+                                                // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                if cfg.fork {
+                                                    d.request("thread/fork", json!({"threadId": id, "excludeTurns": true}), Outstanding::ThreadStart).await
+                                                } else {
+                                                    d.request("thread/resume", json!({"threadId": id}), Outstanding::ThreadStart).await
+                                                }
+                                            }
                                             None => {
                                                 let mut params = json!({
                                                     "cwd": cfg.cwd,
@@ -334,6 +343,12 @@ async fn drive(
                                             {
                                                 let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
                                             }
+                                        }
+                                    }
+                                    Some(Outstanding::Revert) => {
+                                        if let Some(err) = error {
+                                            let reason = err.get("message").and_then(Value::as_str).unwrap_or("revert failed").to_string();
+                                            let _ = events.send(AgentEvent::RewindFailed { reason }).await;
                                         }
                                     }
                                     Some(Outstanding::TurnStart) => {

@@ -293,6 +293,12 @@ impl PiParser {
                 command,
                 s(v, "error")
             )));
+            if command == "fork" {
+                out.pop();
+                out.push(AgentEvent::RewindFailed {
+                    reason: s(v, "error").to_string(),
+                });
+            }
             // compaction_end already reported the failure and closed the unit.
             if command == "compact" {
                 out.pop();
@@ -357,7 +363,16 @@ impl PiParser {
                 self.fork_messages_seen = Some(messages.len());
             }
             // The fork is a new session: the listing that follows is its baseline.
-            "fork" => self.fork_messages_seen = None,
+            "fork" => {
+                // An extension can veto a fork.
+                if v.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
+                    out.push(AgentEvent::RewindFailed {
+                        reason: "the fork was cancelled by a pi extension".into(),
+                    });
+                } else {
+                    self.fork_messages_seen = None;
+                }
+            }
             "get_session_stats" => {
                 if let Some(c) = v.pointer("/data/contextUsage") {
                     out.push(AgentEvent::Context(ContextUsage {

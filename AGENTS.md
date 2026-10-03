@@ -38,6 +38,11 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   fixture used by an e2e test must have the same `>>` lines the driver sends.
 - **Sync never destroys user files.** `sync/rules.rs` replaces a file with a
   symlink only when its content is identical; otherwise it warns.
+- **Checkpoints never touch the user's git state.** `core/checkpoints.rs`
+  builds commits through a private index and keeps them under
+  `refs/unharness/checkpoints/`; it must not write the index, HEAD, a
+  branch or the stash, and a restore snapshots the tree first so it can be
+  undone.
 - **No silent edits to vendor settings.** unharness does not write to
   `~/.claude`, `~/.codex`, `~/.gemini` or similar.
 - **Processes are reaped.** Child processes go through `core::process::
@@ -105,6 +110,14 @@ recorded ones. For anything else:
 - Subagent threads in Codex report on the main stream under their own
   `threadId`; the parser and driver ignore their `turn/started` /
   `turn/completed` so they cannot end or re-target the main turn.
+- Rewind and fork, all checked live: Claude `rewind_conversation` (targets
+  the uuid we put on each user message; refuses the session's first message
+  and uuids from the session a fork came from with "stale target", reported
+  as `RewindFailed`), `--resume X --fork-session`; Codex `thread/revert`
+  and `thread/fork` (turn ids survive a fork); pi `fork` (a new session,
+  only in place once it answers) and `--fork <id>` (entry ids survive).
+  Claude's `rewind_files` answers "File rewinding is not enabled" in this
+  mode, which is why file restore is unharness's own.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

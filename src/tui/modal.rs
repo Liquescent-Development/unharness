@@ -69,6 +69,8 @@ pub struct RewindOption {
     /// The active harness can drop the turn from its own session; otherwise
     /// it starts a fresh session with the remaining conversation as context.
     pub native: bool,
+    /// A file checkpoint from just before this prompt exists.
+    pub files: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -77,6 +77,9 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
         Some(id) => {
             args.push("--resume".into());
             args.push(id.clone());
+            if cfg.fork {
+                args.push("--fork-session".into());
+            }
         }
         None => {
             args.push("--session-id".into());
@@ -376,6 +379,7 @@ mod tests {
             effort: Some("high".into()),
             policy,
             resume: None,
+            fork: false,
             extra_args: vec!["--bare".into()],
             env: vec![],
         }
@@ -468,6 +472,18 @@ mod tests {
         assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
         let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
         assert!(user_turn("hi", &[gone]).is_err());
+    }
+
+    #[test]
+    fn fork_branches_the_resumed_session() {
+        // Checked live: the branch gets a new session id and keeps the history.
+        let mut cfg = cfg(PermissionPolicy::Ask);
+        cfg.resume = Some("abc".into());
+        cfg.fork = true;
+        let s = session_args(&cfg).join(" ");
+        assert!(s.contains("--resume abc --fork-session"));
+        cfg.fork = false;
+        assert!(!session_args(&cfg).join(" ").contains("--fork-session"));
     }
 
     #[test]

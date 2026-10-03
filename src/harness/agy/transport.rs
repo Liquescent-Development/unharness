@@ -347,6 +347,7 @@ mod tests {
             effort: Some("high".into()),
             policy: PermissionPolicy::AcceptEdits,
             resume: Some("conv-1".into()),
+            fork: false,
             extra_args: vec!["--add-dir".into(), "/x".into()],
             env: vec![],
         }

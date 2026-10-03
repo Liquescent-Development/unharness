@@ -49,6 +49,11 @@ pub enum AgentEvent {
     TurnAnchor {
         id: String,
     },
+    /// A requested rewind did not happen: the session still holds the turns
+    /// the user removed.
+    RewindFailed {
+        reason: String,
+    },
     /// What the harness can do changed (model switch, handshake result...).
     CapabilitiesChanged(CapsUpdate),
     TurnCompleted {
@@ -371,6 +376,7 @@ impl AgentEvent {
                     .join(" ")
             ),
             AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),
+            AgentEvent::RewindFailed { reason } => format!("RewindFailed {:?}", short(reason)),
             AgentEvent::CapabilitiesChanged(u) => {
                 let mut parts = Vec::new();
                 if let Some(e) = &u.effort_levels {

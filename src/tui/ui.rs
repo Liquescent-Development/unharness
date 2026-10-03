@@ -866,15 +866,22 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Modal::Rewind(p) => (
             centered_rect(85, 60, area),
-            modal_block(format!(" Rewind to before… ({NAV}) "), Color::Blue),
+            modal_block(
+                format!(" Rewind to before… ({NAV} · f = also restore files) "),
+                Color::Blue,
+            ),
             picker_lines(p, Color::Blue, |r| {
                 (
-                    truncate_chars(r.text.lines().next().unwrap_or(""), 70),
-                    if r.native {
-                        "session rewound".to_string()
-                    } else {
-                        "fresh session, context re-sent".to_string()
-                    },
+                    truncate_chars(r.text.lines().next().unwrap_or(""), 60),
+                    format!(
+                        "{}{}",
+                        if r.native {
+                            "session rewound"
+                        } else {
+                            "fresh session, context re-sent"
+                        },
+                        if r.files { " · files: f" } else { "" }
+                    ),
                     false,
                 )
             }),

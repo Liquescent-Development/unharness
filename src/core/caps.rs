@@ -138,14 +138,18 @@ pub struct Capabilities {
     /// Account rate-limit windows are reported (`RateLimit`).
     pub rate_limits: bool,
     pub rewind: RewindSupport,
+    /// A session can be branched into a new one (`SessionConfig::fork`).
     pub fork: bool,
 }
 
-/// What a harness can roll back to an earlier turn.
+/// How a harness can go back to an earlier turn of its own session. (Files
+/// are restored by unharness itself, from its checkpoints.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RewindSupport {
+    /// The session can drop a turn and everything after it (`TurnAnchor`).
     pub conversation: bool,
-    pub files: bool,
+    /// Anchors of the original session still work in a fork of it.
+    pub anchors_survive_fork: bool,
 }
 
 impl Capabilities {

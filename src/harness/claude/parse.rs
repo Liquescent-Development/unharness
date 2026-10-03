@@ -89,6 +89,22 @@ impl ClaudeParser {
                 if let Some(err) = val.pointer("/response/error").and_then(Value::as_str) {
                     out.push(AgentEvent::Error(format!("control error: {err}")));
                 }
+                // The answer to `rewind_conversation` is a "success" either
+                // way; `rewound` says whether it happened.
+                let answer = val.pointer("/response/response");
+                if answer
+                    .and_then(|a| a.get("rewound"))
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    out.push(AgentEvent::RewindFailed {
+                        reason: answer
+                            .and_then(|a| a.get("error"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("the session did not rewind")
+                            .to_string(),
+                    });
+                }
             }
             "rate_limit_event" => {
                 let info = val.get("rate_limit_info").unwrap_or(&Value::Null);
@@ -625,6 +641,22 @@ mod tests {
     #[test]
     fn fixture_task_list() {
         fixture("task_list");
+    }
+
+    #[test]
+    fn a_rewind_that_did_not_happen_is_reported() {
+        // Seen live when the target uuid belongs to the session a fork came from.
+        let mut p = ClaudeParser::new();
+        let evs = p.feed(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"r","response":{"rewound":false,"prefillText":null,"precedingAssistantUuid":null,"error":"stale target","reason":"stale_target"}}}"#,
+        );
+        assert_eq!(
+            evs,
+            vec![AgentEvent::RewindFailed {
+                reason: "stale target".into()
+            }]
+        );
+        assert!(p.feed(r#"{"type":"control_response","response":{"subtype":"success","request_id":"r","response":{"rewound":true}}}"#).is_empty());
     }
 
     #[test]

@@ -37,6 +37,7 @@ What each harness supports beyond a plain turn:
 | Context-window gauge | yes | yes | yes | yes | no |
 | Rate-limit windows | yes | yes | no | no | no |
 | Native rewind | yes | yes | yes | no (fresh session) | no (fresh session) |
+| Native fork | yes | yes | yes | no (fresh session) | no (fresh session) |
 
 ## Install
 
@@ -88,7 +89,8 @@ capability caveat, and the key hints.
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
 `/resume`, `/sessions`, `/usage`, `/plan`, `/attach <image>`, `/detach`,
-`/steer <text>`, `/compact [instructions]`, `/rewind`, `/fork`, `/skills`,
+`/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
+`/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
 
@@ -99,11 +101,25 @@ context is (`ctx 34%`); `/usage` adds the account's rate-limit windows, and a
 notice appears when one passes 80%.
 
 `/rewind` lists your earlier prompts. Picking one removes it and everything
-after it from the conversation and puts its text back in the prompt box. The
-picker says whether the agent's own session will be rewound, or whether a
-fresh session will be started with the remaining conversation as context.
-Files on disk are never changed by a rewind. `/fork` continues in a copy of
-the conversation and leaves the original as it is.
+after it from the conversation and puts its text back in the prompt box.
+Where the harness can, its own session is rewound (it then genuinely no
+longer knows the removed turns), whether or not it is running at the moment;
+otherwise it starts a fresh session with the remaining conversation as
+context, and the picker says which will happen. If a harness reports that it
+could not rewind, unharness falls back to the fresh session by itself.
+
+Press `f` instead of Enter in the picker to also put the files back to how
+they were before that prompt. In a git repository unharness checkpoints the
+working tree before every prompt: tracked and untracked files, not ignored
+ones, as commits kept under `refs/unharness/checkpoints/` that never touch
+your index, branch, HEAD or stash. The restore works for any harness, since
+it does not depend on the agent, and `/undo-restore` reverses it. Changes
+outside the repository are not covered. `file_checkpoints = false` turns
+checkpoints off; `unharness sessions --clear` removes them.
+
+`/fork` continues in a copy of the conversation and leaves the original as it
+is. Harnesses that can branch a session do, so the copy knows exactly what
+the original knew; the others start fresh with the transcript as context.
 
 Tool calls made inside a subagent are shown under the call that spawned it.
 
@@ -149,6 +165,7 @@ default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
+file_checkpoints = true          # snapshot the working tree before each prompt (git repos)
 
 [harnesses.claude]
 # binary = "/path/to/claude"
@@ -235,7 +252,8 @@ them instead.
 ```
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess,
-               per-turn driver, JSON-RPC framing, Registry, SessionsStore
+               per-turn driver, JSON-RPC framing, Registry, SessionsStore,
+               file checkpoints
 src/harness/   one module per harness: descriptor, capabilities, probe,
                list_models, start_session, build_print_command
   claude/      stream-json transport + parser + fixtures/

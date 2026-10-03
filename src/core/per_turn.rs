@@ -282,6 +282,7 @@ mod tests {
             effort: None,
             policy: PermissionPolicy::Ask,
             resume: None,
+            fork: false,
             extra_args: vec![],
             env: vec![],
         }

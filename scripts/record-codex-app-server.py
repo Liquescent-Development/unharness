@@ -39,6 +39,7 @@ def main() -> int:
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--fork-thread", help="branch this existing thread (thread/fork) instead of starting one")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
     args = ap.parse_args()
@@ -136,10 +137,13 @@ def main() -> int:
         if rid is not None and "method" not in obj:
             if rid == init_id:
                 notify("initialized")
-                params = {"cwd": cwd, "approvalPolicy": args.approval, "sandbox": args.sandbox}
-                if args.model:
-                    params["model"] = args.model
-                pending_start = request("thread/start", params)
+                if args.fork_thread:
+                    pending_start = request("thread/fork", {"threadId": args.fork_thread, "excludeTurns": True})
+                else:
+                    params = {"cwd": cwd, "approvalPolicy": args.approval, "sandbox": args.sandbox}
+                    if args.model:
+                        params["model"] = args.model
+                    pending_start = request("thread/start", params)
                 phase = "thread"
             elif rid == pending_start:
                 result = obj.get("result") or {}

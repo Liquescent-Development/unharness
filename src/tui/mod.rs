@@ -317,6 +317,7 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         model: app.current_model().cloned(),
         effort: app.current_effort().map(str::to_string),
         policy: app.effective_policy(),
+        fork: resume.is_some() && app.fork_pending(),
         resume: if app.caps().resume_by_id {
             resume
         } else {

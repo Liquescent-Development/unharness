@@ -61,6 +61,7 @@ impl Fake {
             effort: None,
             policy,
             resume: None,
+            fork: false,
             extra_args: vec![],
             env,
         }
@@ -935,5 +936,41 @@ async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
         .unwrap();
     assert!(fork < state_after_fork && state_after_fork < prompt);
 
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_fork.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.resume = Some("01a103e9-859f-7680-ac4c-56b3e6512414".into());
+    cfg.fork = true;
+    let mut handle = harness.start_session(cfg).unwrap();
+
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    // The branch is a thread of its own, and turns go to it.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a103fc"))
+    ));
+    let sent = fake.sent_lines();
+    assert_eq!(sent[2]["method"], "thread/fork");
+    assert_eq!(
+        sent[2]["params"]["threadId"],
+        "01a103e9-859f-7680-ac4c-56b3e6512414"
+    );
+    let turn = sent.iter().find(|v| v["method"] == "turn/start").unwrap();
+    assert!(
+        turn["params"]["threadId"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("01a103fc"))
+    );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }

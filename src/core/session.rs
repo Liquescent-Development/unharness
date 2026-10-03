@@ -23,6 +23,9 @@ pub struct SessionConfig {
     pub policy: PermissionPolicy,
     /// Session id to resume, if any.
     pub resume: Option<String>,
+    /// Branch a new session off `resume` instead of reattaching to it
+    /// (`Capabilities::fork`); the original session is left untouched.
+    pub fork: bool,
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
 }

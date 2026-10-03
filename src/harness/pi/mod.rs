@@ -73,9 +73,9 @@ impl Harness for PiHarness {
             rate_limits: false,
             rewind: RewindSupport {
                 conversation: true,
-                files: false,
+                anchors_survive_fork: true,
             },
-            fork: false,
+            fork: true,
         }
     }
 

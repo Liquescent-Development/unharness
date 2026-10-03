@@ -2,6 +2,7 @@
 //! session/process plumbing every harness transport is built on.
 
 pub mod caps;
+pub mod checkpoints;
 pub mod conversations;
 pub mod event;
 pub mod ids;

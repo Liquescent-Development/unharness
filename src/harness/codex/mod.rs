@@ -156,9 +156,9 @@ impl Harness for CodexHarness {
             rate_limits: app_server,
             rewind: RewindSupport {
                 conversation: app_server,
-                files: false,
+                anchors_survive_fork: true,
             },
-            fork: false,
+            fork: app_server,
         }
     }
 

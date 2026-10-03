@@ -248,8 +248,10 @@ impl CodexAppServerParser {
             }
             "thread/compacted" => out.push(AgentEvent::Notice("context compacted".into())),
             "warning" | "deprecationNotice" | "configWarning" => {
+                // `deprecationNotice` carries `summary` instead of `message`.
                 let msg = p
                     .get("message")
+                    .or_else(|| p.get("summary"))
                     .and_then(Value::as_str)
                     .unwrap_or("codex warning");
                 out.push(AgentEvent::Notice(msg.to_string()));
@@ -583,6 +585,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_two_turns",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_fork() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_fork",
         );
     }
 

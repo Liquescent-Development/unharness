@@ -1,7 +1,7 @@
 //! TUI state. Pure with respect to I/O: key handling mutates state and queues
 //! `Action`s that the event loop in `mod.rs` executes against the session.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,8 +12,10 @@ use serde_json::Value;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
+use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339, truncate_title,
+    CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
+    truncate_title,
 };
 use crate::core::registry::Registry;
 use crate::core::{
@@ -85,6 +87,10 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/rewind", "Go back to before an earlier prompt and edit it"),
     (
+        "/undo-restore",
+        "Reverse the last file restore made by /rewind",
+    ),
+    (
         "/fork",
         "Continue in a copy of this conversation, leaving the original as it is",
     ),
@@ -152,6 +158,17 @@ pub struct App {
     pub attachments: Vec<Attachment>,
     /// Where each harness can rewind its session to (see `TurnAnchor`).
     anchors: Vec<TurnAnchorRecord>,
+    /// Harnesses whose stored session id must be branched, not reattached
+    /// (set by `/fork` until the branch exists).
+    fork_pending: HashSet<HarnessId>,
+    /// File checkpoints of the workspace; `None` outside a git repository
+    /// or when switched off.
+    checkpoints: Option<Checkpoints>,
+    file_checkpoints: Vec<CheckpointRecord>,
+    checkpoint_failed: bool,
+    /// The tree as it was before the last file restore, for `/undo-restore`.
+    restore_undo: Option<String>,
+    restore_seq: usize,
     /// User blocks whose anchor has not arrived yet, oldest first. A harness
     /// that can rewind reports one anchor per turn, in order, but not
     /// always before the next turn starts (pi lists it after the turn).
@@ -280,6 +297,13 @@ impl App {
         let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
         let plan = conversation.plan.clone();
         let anchors = conversation.anchors.clone();
+        let file_checkpoints = conversation.checkpoints.clone();
+        let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
+        let checkpoints = if config.file_checkpoints.unwrap_or(true) {
+            init.workspace_root.as_deref().and_then(Checkpoints::open)
+        } else {
+            None
+        };
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
@@ -320,6 +344,12 @@ impl App {
             show_plan: true,
             attachments: Vec::new(),
             anchors,
+            fork_pending,
+            checkpoints,
+            file_checkpoints,
+            checkpoint_failed: false,
+            restore_undo: None,
+            restore_seq: 0,
             anchor_pending: VecDeque::new(),
             queued: VecDeque::new(),
             compacting: false,
@@ -391,6 +421,9 @@ impl App {
         c.usage.insert(self.active, self.session_usage.clone());
         c.plan = self.plan.clone();
         c.anchors = self.anchors.clone();
+        c.checkpoints = self.file_checkpoints.clone();
+        c.fork_pending = self.fork_pending.iter().copied().collect();
+        c.fork_pending.sort_by_key(|h| h.as_str());
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
         {
@@ -593,10 +626,11 @@ impl App {
             shown.push_str(&format!("\n[image: {}]", a.label()));
         }
         self.transcript.push_user(shown);
+        let block = self.transcript.blocks.len() - 1;
         if self.caps().rewind.conversation {
-            self.anchor_pending
-                .push_back(self.transcript.blocks.len() - 1);
+            self.anchor_pending.push_back(block);
         }
+        self.checkpoint_files(block);
         self.start_generation();
 
         let outgoing = match bridge {
@@ -615,6 +649,27 @@ impl App {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// Record the working tree as it is before the turn at `block` runs.
+    fn checkpoint_files(&mut self, block: usize) {
+        let Some(cp) = self.checkpoints.clone() else {
+            return;
+        };
+        match cp.snapshot(&self.checkpoint_name(&block.to_string())) {
+            Ok(commit) => {
+                self.file_checkpoints.retain(|c| c.block != block);
+                self.file_checkpoints
+                    .push(CheckpointRecord { block, commit });
+            }
+            Err(e) if !self.checkpoint_failed => {
+                self.checkpoint_failed = true;
+                self.transcript.push_notice(format!(
+                    "could not checkpoint files (rewind will not be able to restore them): {e:#}"
+                ));
+            }
+            Err(_) => {}
+        }
     }
 
     /// Hold a prompt until the running turn finishes.
@@ -687,16 +742,40 @@ impl App {
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
     }
 
-    /// The harness's own id for the user turn at `block`, when its live
-    /// session can be rewound to it.
+    /// The harness's own id for the user turn at `block`, when its session
+    /// (running or resumable) can be rewound to it.
     fn native_anchor(&self, block: usize) -> Option<&str> {
-        if !self.session_alive || !self.caps().rewind.conversation {
+        if !self.caps().rewind.conversation || !self.session_ids.contains_key(&self.active) {
             return None;
         }
-        self.anchors
+        // Going back to before the session's first turn leaves nothing of
+        // it: a fresh session is the same thing, and Claude refuses to
+        // rewind to its first message ("stale target").
+        let mut mine = self.anchors.iter().filter(|a| a.harness == self.active);
+        if !mine.clone().any(|a| a.block < block) {
+            return None;
+        }
+        mine.find(|a| a.block == block).map(|a| a.id.as_str())
+    }
+
+    /// The file checkpoint taken just before the user block at `block`.
+    fn checkpoint_at(&self, block: usize) -> Option<&str> {
+        self.file_checkpoints
             .iter()
-            .find(|a| a.block == block && a.harness == self.active)
-            .map(|a| a.id.as_str())
+            .find(|c| c.block == block)
+            .map(|c| c.commit.as_str())
+    }
+
+    /// Name of a checkpoint ref for this conversation (see `core::checkpoints`).
+    fn checkpoint_name(&self, suffix: &str) -> String {
+        let id = &self.conversation.id;
+        format!("{}/{suffix}", &id[..8.min(id.len())])
+    }
+
+    /// Whether the active harness's next session must branch the stored
+    /// session id (it belongs to the conversation this one was forked from).
+    pub fn fork_pending(&self) -> bool {
+        self.fork_pending.contains(&self.active)
     }
 
     pub fn open_rewind_picker(&mut self) {
@@ -715,6 +794,7 @@ impl App {
                     block,
                     text: text.clone(),
                     native: self.native_anchor(block).is_some(),
+                    files: self.checkpoint_at(block).is_some(),
                 }),
                 _ => None,
             })
@@ -731,10 +811,11 @@ impl App {
 
     /// Drop the user turn at `block` and everything after it, and put its
     /// text back in the prompt box. The active harness's session is rewound
-    /// where it can be; any session that saw the dropped turns and cannot be
-    /// rewound is replaced by a fresh one that gets the remaining
-    /// conversation as context. Files on disk are never changed.
-    pub fn rewind_to(&mut self, block: usize) {
+    /// natively where it can be; any session that saw the dropped turns and
+    /// cannot be rewound is replaced by a fresh one that gets the remaining
+    /// conversation as context. With `restore_files`, the working tree is
+    /// first put back to how it was before that turn.
+    pub fn rewind_to(&mut self, block: usize, restore_files: bool) {
         if self.is_generating {
             return;
         }
@@ -749,20 +830,51 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Files first: if they cannot be restored, nothing else changes.
+        let mut files_note = "files on disk are unchanged".to_string();
+        if restore_files {
+            let (Some(cp), Some(commit)) = (
+                self.checkpoints.clone(),
+                self.checkpoint_at(block).map(str::to_string),
+            ) else {
+                self.transcript
+                    .push_error("there is no file checkpoint for that prompt");
+                return;
+            };
+            self.restore_seq += 1;
+            let undo_name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
+            match cp.restore(&commit, &undo_name) {
+                Ok(report) => {
+                    files_note = format!(
+                        "{} file(s) put back to how they were before that prompt (/undo-restore reverses this)",
+                        report.changed
+                    );
+                    self.restore_undo = Some(report.undo);
+                }
+                Err(e) => {
+                    self.transcript.push_error(format!(
+                        "could not restore files, nothing was rewound: {e:#}"
+                    ));
+                    return;
+                }
+            }
+        }
+
         let native = self.native_anchor(block).map(str::to_string);
         let active = self.active;
         match &native {
-            Some(anchor) => self
-                .actions
-                .push_back(Action::Command(SessionCommand::Rewind {
-                    anchor: anchor.clone(),
-                })),
-            None => {
-                if self.session_alive {
-                    self.actions.push_back(Action::Shutdown);
+            Some(anchor) => {
+                // A session that is not running is reattached first.
+                if !self.session_alive {
+                    let resume = self.session_ids.get(&active).cloned();
+                    self.actions.push_back(Action::StartSession { resume });
                 }
-                self.session_ids.remove(&active);
+                self.actions
+                    .push_back(Action::Command(SessionCommand::Rewind {
+                        anchor: anchor.clone(),
+                    }));
             }
+            None => self.forget_session(active),
         }
         // Other harnesses that were active after the rewind point saw turns
         // that no longer exist.
@@ -773,26 +885,23 @@ impl App {
             .map(|(h, _)| *h)
             .collect();
         for h in stale {
-            self.session_ids.remove(&h);
-            self.last_active_index.remove(&h);
-        }
-        if native.is_none() {
-            self.last_active_index.remove(&active);
+            self.forget_session(h);
         }
 
         self.transcript.blocks.truncate(block);
         self.anchors.retain(|a| a.block < block);
+        self.file_checkpoints.retain(|c| c.block < block);
         self.anchor_pending.clear();
         self.queued.clear();
         self.cursor = prompt.chars().count();
         self.input = prompt;
         self.transcript.push_system(match native {
             Some(_) => format!(
-                "Rewound. {} forgot the later turns; files on disk are unchanged.",
+                "Rewound. {} forgot the later turns; {files_note}.",
                 self.short_name()
             ),
             None => format!(
-                "Rewound. {} will start a fresh session with the conversation so far; files on disk are unchanged.",
+                "Rewound. {} will start a fresh session with the conversation so far; {files_note}.",
                 self.short_name()
             ),
         });
@@ -800,8 +909,49 @@ impl App {
         self.persist();
     }
 
-    /// Continue in a copy of this conversation. The copy starts fresh vendor
-    /// sessions (two conversations cannot share one), seeded with the transcript.
+    /// Stop using `harness`'s vendor session: its next turn starts a fresh
+    /// one and gets the conversation so far as context.
+    fn forget_session(&mut self, harness: HarnessId) {
+        if harness == self.active && self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        self.session_ids.remove(&harness);
+        self.last_active_index.remove(&harness);
+        self.fork_pending.remove(&harness);
+        self.anchors.retain(|a| a.harness != harness);
+    }
+
+    /// Reverse the last file restore (itself reversible the same way).
+    pub fn undo_restore(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn first");
+            return;
+        }
+        let (Some(cp), Some(undo)) = (self.checkpoints.clone(), self.restore_undo.clone()) else {
+            self.transcript.push_notice("no file restore to undo");
+            return;
+        };
+        self.restore_seq += 1;
+        let name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
+        match cp.restore(&undo, &name) {
+            Ok(report) => {
+                self.restore_undo = Some(report.undo);
+                self.transcript.push_system(format!(
+                    "{} file(s) put back to how they were before the restore.",
+                    report.changed
+                ));
+            }
+            Err(e) => self
+                .transcript
+                .push_error(format!("could not undo the restore: {e:#}")),
+        }
+    }
+
+    /// Continue in a copy of this conversation. Each harness's session is
+    /// branched natively where the harness can (the copy then knows exactly
+    /// what the original knew); the others start fresh with the transcript
+    /// as context. The original and its sessions are left untouched.
     pub fn fork_conversation(&mut self) {
         if self.is_generating {
             self.transcript
@@ -820,17 +970,48 @@ impl App {
         let mut fork = Conversation::new(self.active);
         fork.title = self.conversation.title.clone();
         self.conversation = fork;
-        self.session_ids.clear();
-        self.last_active_index.clear();
-        self.anchors.clear();
+
+        let mut branched = Vec::new();
+        let mut fresh = Vec::new();
+        let harnesses: Vec<HarnessId> = self.session_ids.keys().copied().collect();
+        for h in harnesses {
+            let caps = self.registry.get(h).map(|x| x.capabilities());
+            match caps {
+                Some(c) if c.fork && c.resume_by_id => {
+                    self.fork_pending.insert(h);
+                    if !c.rewind.anchors_survive_fork {
+                        self.anchors.retain(|a| a.harness != h);
+                    }
+                    branched.push(h.as_str());
+                }
+                _ => {
+                    self.session_ids.remove(&h);
+                    self.last_active_index.remove(&h);
+                    self.anchors.retain(|a| a.harness != h);
+                    fresh.push(h.as_str());
+                }
+            }
+        }
+        branched.sort_unstable();
+        fresh.sort_unstable();
         self.anchor_pending.clear();
         self.session_usage = Usage::default();
         self.turn_usage = Usage::default();
         self.context = ContextUsage::default();
-        self.transcript.push_system(format!(
-            "Forked from conversation {}. This copy starts fresh agent sessions with the transcript as context; the original is unchanged.",
+        let mut note = format!(
+            "Forked from conversation {}; the original is unchanged.",
             &original[..8.min(original.len())]
-        ));
+        );
+        if !branched.is_empty() {
+            note.push_str(&format!(" Sessions branched: {}.", branched.join(", ")));
+        }
+        if !fresh.is_empty() {
+            note.push_str(&format!(
+                " Fresh sessions with the transcript as context: {}.",
+                fresh.join(", ")
+            ));
+        }
+        self.transcript.push_system(note);
         self.persist();
     }
 
@@ -903,6 +1084,10 @@ impl App {
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
                 let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+                // A branch of the forked-from session now exists under its own id.
+                if is_new {
+                    self.fork_pending.remove(&self.active);
+                }
                 self.session_ids.insert(self.active, session_id.clone());
                 self.persist();
                 if is_new {
@@ -966,6 +1151,21 @@ impl App {
                         .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
                 }
                 self.rate_limit = Some(r);
+            }
+            AgentEvent::RewindFailed { reason } => {
+                let name = self.short_name();
+                if self.is_generating {
+                    // The edited prompt is already running in the old session.
+                    self.transcript.push_error(format!(
+                        "{name} could not rewind its session ({reason}): it still remembers the turns you removed"
+                    ));
+                } else {
+                    self.transcript.push_notice(format!(
+                        "{name} could not rewind its session ({reason}); it will start a fresh one with the conversation so far"
+                    ));
+                    self.forget_session(self.active);
+                    self.persist();
+                }
             }
             // An empty id means the turn never reached the harness.
             AgentEvent::TurnAnchor { id } => {
@@ -1194,6 +1394,9 @@ impl App {
         self.context = ContextUsage::default();
         self.plan = conv.plan.clone();
         self.anchors = conv.anchors.clone();
+        self.file_checkpoints = conv.checkpoints.clone();
+        self.fork_pending = conv.fork_pending.iter().copied().collect();
+        self.restore_undo = None;
         self.anchor_pending.clear();
         self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
         self.generation_duration = None;
@@ -1384,8 +1587,16 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
             Modal::Resume(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Resume(r.id.clone())))),
-            Modal::Rewind(p) => picker_nav(p, key.code)
-                .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Rewind(r.block)))),
+            // Enter rewinds the conversation; `f` also restores the files.
+            Modal::Rewind(p) => match key.code {
+                KeyCode::Char('f') => match p.current() {
+                    Some(r) if r.files => Some(Some(ModalChoice::Rewind(r.block, true))),
+                    _ => None,
+                },
+                code => picker_nav(p, code).map(|c| {
+                    c.and_then(|_| p.current().map(|r| ModalChoice::Rewind(r.block, false)))
+                }),
+            },
             Modal::Permission(m) => {
                 if m.denying {
                     match key.code {
@@ -1576,9 +1787,9 @@ impl App {
                         self.modal = None;
                         self.resume_conversation(id);
                     }
-                    ModalChoice::Rewind(block) => {
+                    ModalChoice::Rewind(block, restore_files) => {
                         self.modal = None;
-                        self.rewind_to(block);
+                        self.rewind_to(block, restore_files);
                     }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
                     ModalChoice::Dismiss => self.close_modal(),
@@ -1686,6 +1897,7 @@ impl App {
                 text => self.steer(text.to_string()),
             },
             "/rewind" => self.open_rewind_picker(),
+            "/undo-restore" => self.undo_restore(),
             "/fork" => self.fork_conversation(),
             "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
             "/attach" => match rest {
@@ -1743,6 +1955,8 @@ impl App {
                 self.plan.clear();
                 self.queued.clear();
                 self.anchors.clear();
+                self.file_checkpoints.clear();
+                self.fork_pending.clear();
                 self.anchor_pending.clear();
                 self.transcript.push_system("Transcript cleared.");
                 self.persist();
@@ -1966,7 +2180,8 @@ enum ModalChoice {
     Effort(String),
     Policy(PermissionPolicy),
     Resume(String),
-    Rewind(usize),
+    /// (user block, also restore files)
+    Rewind(usize, bool),
     Decision(PermissionDecision),
     Dismiss,
 }
@@ -2268,33 +2483,82 @@ pub(crate) mod tests {
         };
 
         // Live session with an anchor: the harness drops the turns itself.
-        let two = block_of(&app, "two");
-        app.rewind_to(two);
+        let three = block_of(&app, "three");
+        app.rewind_to(three, false);
         assert_eq!(
             app.take_actions(),
             vec![Action::Command(SessionCommand::Rewind {
-                anchor: "a2".into()
+                anchor: "a3".into()
             })]
         );
-        assert_eq!(app.input, "two");
+        assert_eq!(app.input, "three");
         assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
         assert!(
             !app.transcript
                 .blocks
                 .iter()
-                .any(|b| matches!(b, Block::User { text } if text == "two" || text == "three"))
+                .any(|b| matches!(b, Block::User { text } if text == "three"))
         );
-        assert!(app.anchors.iter().all(|a| a.id == "a1"));
+        assert_eq!(app.anchors.len(), 2);
         app.take_input();
 
-        // No live session: forget the vendor session; the next prompt starts
-        // a fresh one with the remaining transcript as context.
+        // The session is not running: it is reattached, then rewound.
         app.session_alive = false;
-        let one = block_of(&app, "one");
-        app.rewind_to(one);
-        assert!(app.take_actions().is_empty());
+        let two = block_of(&app, "two");
+        app.rewind_to(two, false);
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("s1".into())
+                },
+                Action::Command(SessionCommand::Rewind {
+                    anchor: "a2".into()
+                })
+            ]
+        );
+        assert_eq!(app.input, "two");
+        app.take_input();
+
+        // The harness reports that it did not rewind: fall back to a fresh
+        // session that gets the remaining conversation as context.
+        app.session_alive = true;
+        app.on_event(AgentEvent::RewindFailed {
+            reason: "stale target".into(),
+        });
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
-        assert_eq!(app.input, "one");
+
+        // Back to before a session's first turn nothing of it remains, so a
+        // fresh session is used rather than a native rewind.
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s2".into(),
+            model: None,
+        });
+        app.submit_prompt("one".into());
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnAnchor { id: "b1".into() });
+        app.on_event(done());
+        app.take_actions();
+        let one = block_of(&app, "one");
+        app.rewind_to(one, false);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+
+        // A harness that cannot rewind at all goes straight to the fallback.
+        let mut app = test_app(HarnessId::AGY);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "g1".into(),
+            model: None,
+        });
+        app.submit_prompt("one".into());
+        app.on_event(done());
+        app.take_actions();
+        let one = block_of(&app, "one");
+        app.rewind_to(one, false);
+        assert!(app.take_actions().is_empty());
+        assert!(!app.session_ids.contains_key(&HarnessId::AGY));
     }
 
     #[test]
@@ -2333,7 +2597,7 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert!(two >= after_one);
-        app.rewind_to(two);
+        app.rewind_to(two, false);
         assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
         assert!(!app.session_ids.contains_key(&HarnessId::CODEX));
     }
@@ -2367,33 +2631,112 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn fork_continues_in_a_copy_with_fresh_sessions() {
+    fn fork_branches_sessions_where_the_harness_can() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
         let tmp = tempfile::tempdir().unwrap();
-        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
         app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "agy-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("answer".into()));
+        app.on_event(done());
+        app.switch_harness(HarnessId::CLAUDE);
+        app.submit_prompt("two".into());
         app.on_event(AgentEvent::SessionStarted {
             session_id: "claude-1".into(),
             model: None,
         });
-        app.on_event(AgentEvent::TextDelta("answer".into()));
-        app.on_event(AgentEvent::TurnCompleted {
-            stop_reason: StopReason::Done,
-        });
+        app.on_event(AgentEvent::TurnAnchor { id: "u2".into() });
+        app.on_event(done());
+        app.take_actions();
+        app.session_alive = false;
+
         let original = app.conversation.id.clone();
         app.fork_conversation();
         assert_ne!(app.conversation.id, original);
-        assert!(app.session_ids.is_empty());
-        // Both are on disk; the original still has its vendor session.
+        // Claude can branch a session: the id is kept, to be forked on next
+        // use. Its rewind ids do not carry over into a branch. Antigravity
+        // cannot, so the copy starts it fresh.
+        assert_eq!(app.session_ids.get(&HarnessId::CLAUDE).unwrap(), "claude-1");
+        assert!(app.fork_pending());
+        assert!(app.anchors.is_empty());
+        assert!(!app.session_ids.contains_key(&HarnessId::AGY));
+
+        // The original is on disk untouched; the copy remembers what is pending.
         let saved = app.store.load(&original).unwrap();
         assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
-        assert!(app.store.load(&app.conversation.id).is_ok());
-        // The copy's first prompt carries the transcript as context.
-        app.take_actions();
-        app.session_alive = false;
-        app.submit_prompt("two".into());
-        assert!(app.take_actions().iter().any(
-            |a| matches!(a, Action::SendTurn { text, .. } if text.contains("answer") && text.contains("two"))
-        ));
+        assert!(saved.fork_pending.is_empty());
+        let copy = app.store.load(&app.conversation.id).unwrap();
+        assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
+
+        // The branch knows the whole conversation: nothing is re-sent as text.
+        app.submit_prompt("three".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("claude-1".into())
+                },
+                Action::turn("three")
+            ]
+        );
+        // Once the branch reports its own id, it is an ordinary session.
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        assert!(!app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-2");
+    }
+
+    #[test]
+    fn rewind_can_restore_files_and_undo_it() {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "before\n").unwrap();
+
+        let mut app = test_app_in(root.to_path_buf(), HarnessId::AGY, None, false);
+        app.submit_prompt("change it".into());
+        // The agent edits a file and creates another during the turn.
+        std::fs::write(root.join("a.txt"), "after\n").unwrap();
+        std::fs::write(root.join("new.txt"), "made by the agent\n").unwrap();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        app.open_rewind_picker();
+        assert!(matches!(&app.modal, Some(Modal::Rewind(p)) if p.items[0].files));
+        app.handle_modal_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(app.input, "change it");
+
+        app.handle_slash_command("/undo-restore");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(root.join("new.txt").exists());
     }
 
     #[test]

@@ -87,6 +87,21 @@ pub struct Conversation {
     /// Where each harness can rewind its own session to.
     #[serde(default)]
     pub anchors: Vec<TurnAnchorRecord>,
+    /// The working tree as it was before each prompt.
+    #[serde(default)]
+    pub checkpoints: Vec<CheckpointRecord>,
+    /// Harnesses whose session id here belongs to the conversation this one
+    /// was forked from: their next session must branch it, not reattach.
+    #[serde(default)]
+    pub fork_pending: Vec<HarnessId>,
+}
+
+/// A file checkpoint taken just before the user block at `block` was sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckpointRecord {
+    pub block: usize,
+    /// Commit id (see `core::checkpoints`).
+    pub commit: String,
 }
 
 /// A user turn as one harness's session knows it.
@@ -114,6 +129,8 @@ impl Conversation {
             usage: HashMap::new(),
             plan: Vec::new(),
             anchors: Vec::new(),
+            checkpoints: Vec::new(),
+            fork_pending: Vec::new(),
         }
     }
 
