@@ -83,7 +83,9 @@ pub enum Commands {
     /// Health check: detect installed harnesses, auth status, skills CLI, symlinks
     Doctor,
 
-    /// Manage skills via the `skills` CLI (e.g. `unharness skills add owner/repo`)
+    /// Manage skills via the `skills` CLI (add, list, update, remove, find, init),
+    /// or `import` ones the installed harnesses already have
+    /// (`unharness skills import [--from claude,codex,pi] [-g] [--all]`)
     #[command(disable_help_flag = true)]
     Skills {
         /// Arguments passed through to `npx skills`

@@ -8,7 +8,7 @@ use unharness::cli::{Cli, Commands};
 use unharness::config::Config;
 use unharness::core::conversations::ConversationStore;
 use unharness::sync::find_workspace_root;
-use unharness::{doctor, init, models_cmd, runner, skills_cmd, switch, sync};
+use unharness::{doctor, init, models_cmd, runner, skills_cmd, skills_import, switch, sync};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,7 +21,13 @@ async fn main() -> Result<()> {
         Some(Commands::Init) => init::init_workspace(&cwd)?,
         Some(Commands::Doctor) => doctor::run_doctor(&cwd, &config)?,
         Some(Commands::Sync) => handle_sync(&cwd)?,
-        Some(Commands::Skills { args }) => skills_cmd::run_skills(&cwd, &args)?,
+        Some(Commands::Skills { args }) => {
+            if args.first().map(String::as_str) == Some("import") {
+                skills_import::run_import(&cwd, ws_root.as_deref(), &args[1..])?
+            } else {
+                skills_cmd::run_skills(&cwd, &args)?
+            }
+        }
         Some(Commands::Models { harness, provider }) => {
             models_cmd::list_models(&config, harness.as_deref(), provider.as_deref())?
         }

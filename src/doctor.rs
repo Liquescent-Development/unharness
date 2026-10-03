@@ -10,6 +10,7 @@ use crate::core::{HarnessId, PermissionPolicy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
+use crate::skills_import::installed_plugins;
 use crate::sync::find_workspace_root;
 
 pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
@@ -140,6 +141,31 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
         .unwrap_or_default();
     report_skills("", &global);
     println!();
+
+    // 4b. Harness plugins and extensions (informational; not importable)
+    if let Some(home) = dirs::home_dir() {
+        let plugins = installed_plugins(&home);
+        if !plugins.is_empty() {
+            println!(
+                "{}",
+                "Harness plugins (not portable; skills inside them are):".bold()
+            );
+            for p in &plugins {
+                println!(
+                    "  {} {:<8} {} {}",
+                    "•".dimmed(),
+                    p.harness,
+                    p.name,
+                    p.detail.dimmed()
+                );
+            }
+            println!(
+                "  {}",
+                "`unharness skills import` finds SKILL.md directories bundled in these.".dimmed()
+            );
+            println!();
+        }
+    }
 
     // 5. Conversations
     let store = ConversationStore::open(ws_root.as_deref(), cwd);

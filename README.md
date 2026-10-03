@@ -153,7 +153,21 @@ content differs from `AGENTS.md` is never overwritten.
 
 Skills live in `.agents/skills/` and are installed and projected into every
 agent's directory by `unharness skills <args...>`, a passthrough to `npx
-skills`.
+skills`. The one exception is `import`, which is unharness's own:
+
+```bash
+unharness skills import                    # pick from skills your harnesses already have
+unharness skills import --from plugins -g  # only Claude plugin-bundled skills, globally
+unharness skills import --all --dry-run    # show what would be imported
+```
+
+It scans `~/.claude/skills` (and synced buckets), Claude plugin caches,
+`~/.codex/skills` (`--include-system` for the Codex built-ins), the
+Antigravity and pi skill directories, and project-level `.claude`, `.codex`
+and `.pi` skill dirs, then installs the chosen ones through `skills add
+<path>` so they land in `.agents/skills` and get projected everywhere.
+Plugins and pi extensions are harness-specific; `unharness doctor` lists
+them instead.
 
 ## Architecture
 

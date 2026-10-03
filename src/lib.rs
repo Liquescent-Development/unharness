@@ -13,6 +13,7 @@ pub mod models_cmd;
 pub mod runner;
 pub mod skills;
 pub mod skills_cmd;
+pub mod skills_import;
 pub mod switch;
 pub mod sync;
 pub mod tui;
