@@ -1,11 +1,13 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Result;
 use colored::*;
 
 use crate::config::Config;
-use crate::harness::{HarnessKind, get_adapter, which};
+use crate::core::registry::Registry;
+use crate::core::sessions_store::SessionsStore;
+use crate::core::{HarnessId, PermissionPolicy};
+use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
 use crate::sync::find_workspace_root;
@@ -14,76 +16,83 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     println!("{}", "=== unharness doctor ===".bold().cyan());
     println!();
 
+    let registry = Registry::new();
+    let overrides = binary_overrides(&registry, config);
+
     // 1. Harnesses
     println!("{}", "AI Harnesses:".bold());
-    for &kind in HarnessKind::default_priority() {
-        let adapter = get_adapter(kind);
-        let custom_bin = config.binary_override(kind.as_str());
-
-        match adapter.resolve_binary(custom_bin) {
+    for (h, probe) in registry.probe_all(&overrides) {
+        let d = h.descriptor();
+        match probe.binary {
             Some(path) => {
-                let version_str = adapter
-                    .version(&path)
-                    .unwrap_or_else(|| "unknown version".to_string());
-                let auth = adapter.auth_status(&path);
-
                 println!(
                     "  {} {} (v{}) at {}",
                     "[✓]".green().bold(),
-                    adapter.display_name().bold(),
-                    version_str,
+                    d.display_name.bold(),
+                    probe.version.as_deref().unwrap_or("unknown"),
                     path.display().to_string().dimmed()
                 );
-
-                let details = auth.details.unwrap_or_else(|| {
-                    if auth.authenticated {
-                        "logged in".to_string()
+                let details = probe.auth.details.unwrap_or_else(|| {
+                    if probe.auth.authenticated {
+                        "logged in".into()
                     } else {
-                        "not authenticated".to_string()
+                        "not authenticated".into()
                     }
                 });
-                let details = if auth.authenticated {
+                let details = if probe.auth.authenticated {
                     details.green()
                 } else {
                     details.yellow()
                 };
                 println!("      {} Auth: {}", "↳".dimmed(), details);
-            }
-            None => {
+
+                let caps = h.capabilities();
+                let policies: Vec<String> = PermissionPolicy::ALL
+                    .iter()
+                    .map(|p| match caps.supports_policy(*p) {
+                        Some(s) if s.degraded.is_some() => format!("{p}*"),
+                        Some(_) => p.to_string(),
+                        None => format!("{}", p.to_string().dimmed()),
+                    })
+                    .collect();
                 println!(
-                    "  {} {} {}",
-                    "[-]".dimmed(),
-                    adapter.display_name().dimmed(),
-                    format!("(binary '{}' not found on PATH)", adapter.binary_name()).dimmed()
+                    "      {} Permissions: {} · policies: {}{}",
+                    "↳".dimmed(),
+                    if caps.interactive_permissions {
+                        "interactive".green()
+                    } else {
+                        "not interactive".yellow()
+                    },
+                    policies.join(" "),
+                    if caps.resume_by_id { " · resume" } else { "" }
                 );
             }
+            None => println!(
+                "  {} {} {}",
+                "[-]".dimmed(),
+                d.display_name.dimmed(),
+                format!("(binary '{}' not found on PATH)", d.binary_names.join("/")).dimmed()
+            ),
         }
     }
-
-    if let Some(pi_bin) = which("pi") {
-        println!(
-            "  {} {} at {}",
-            "[✓]".green().bold(),
-            "Pi (pi)".bold(),
-            pi_bin.display().to_string().dimmed()
-        );
-    }
-
+    println!(
+        "      {}",
+        "* = supported with caveats (shown in the TUI)".dimmed()
+    );
     println!();
 
-    match crate::harness::resolve_active_harness(
-        None,
-        config.default_harness.as_deref(),
-        &HashMap::new(),
-    ) {
-        Ok((active_kind, active_bin)) => println!(
+    match registry.resolve(None, config.default_harness.as_deref(), &overrides) {
+        Ok((h, bin)) => println!(
             "Active Default: {} ({})",
-            active_kind.display_name().bold().green(),
-            active_bin.display().to_string().dimmed()
+            h.descriptor().display_name.bold().green(),
+            bin.display().to_string().dimmed()
         ),
-        Err(e) => println!("Active Default: {}", format!("Error: {}", e).red()),
+        Err(e) => println!("Active Default: {}", format!("Error: {e}").red()),
     }
-
+    println!(
+        "Default Policy: {}",
+        config.default_policy.as_deref().unwrap_or("ask").bold()
+    );
     println!();
 
     // 2. Skills CLI
@@ -97,31 +106,23 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     println!("  {} {}", marker, skills_cli.describe());
     println!();
 
-    // 3. Workspace Status
+    // 3. Workspace
     println!("{}", "Workspace Context:".bold());
-    match find_workspace_root(cwd) {
+    let ws_root = find_workspace_root(cwd);
+    match &ws_root {
         Some(root) => {
             println!("  Root: {}", root.display());
-            report_rules(&root);
-
-            let ws_skills = discover_skills_in_dir(&workspace_skills_dir(&root));
-            if ws_skills.is_empty() {
-                println!(
-                    "  {} Workspace Skills: none in .agents/skills",
-                    "[-]".dimmed()
-                );
-            } else {
-                println!(
-                    "  {} Workspace Skills: {} in .agents/skills",
-                    "[✓]".green().bold(),
-                    ws_skills.len().to_string().bold()
-                );
-                for s in &ws_skills {
+            report_rules(root);
+            report_skills(
+                "Workspace Skills",
+                &discover_skills_in_dir(&workspace_skills_dir(root)),
+            );
+            for k in config.harnesses.keys() {
+                if HarnessId::parse(k).is_none() {
                     println!(
-                        "      {} {} {}",
-                        "•".dimmed(),
-                        s.name,
-                        s.description.as_deref().unwrap_or("").dimmed()
+                        "  {} unknown harness '{}' in unharness.toml",
+                        "[!]".yellow(),
+                        k
                     );
                 }
             }
@@ -130,30 +131,39 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
             "  Not inside a recognized workspace (no .git, .agents, AGENTS.md, or unharness.toml found)"
         ),
     }
-
     println!();
 
-    // 4. Global Skills
+    // 4. Global skills
     println!("{}", "Global Skills (~/.agents/skills):".bold());
-    let global_skills = global_skills_dir()
+    let global = global_skills_dir()
         .map(|d| discover_skills_in_dir(&d))
         .unwrap_or_default();
-    if global_skills.is_empty() {
-        println!("  {} none", "[-]".dimmed());
-    } else {
-        println!(
-            "  {} {} skills",
-            "[✓]".green().bold(),
-            global_skills.len().to_string().bold()
-        );
-        for s in &global_skills {
+    report_skills("", &global);
+    println!();
+
+    // 5. Sessions
+    let store = SessionsStore::open(ws_root.as_deref(), cwd);
+    println!("{}", "Sessions:".bold());
+    let mut any = false;
+    for id in registry.ids() {
+        let n = store.recent(id).len();
+        if n > 0 {
+            any = true;
             println!(
-                "      {} {} {}",
-                "•".dimmed(),
-                s.name,
-                s.description.as_deref().unwrap_or("").dimmed()
+                "  {} {}: {} recorded, last {}",
+                "[✓]".green().bold(),
+                id.short_name(),
+                n,
+                store.last(id).unwrap_or("-").dimmed()
             );
         }
+    }
+    if !any {
+        println!(
+            "  {} none recorded in {}",
+            "[-]".dimmed(),
+            store.path().display()
+        );
     }
 
     println!();
@@ -162,6 +172,32 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
         "Run 'unharness \"prompt\"' to start, or 'unharness skills add <source>' to install skills.".green()
     );
     Ok(())
+}
+
+fn report_skills(label: &str, skills: &[crate::skills::SkillInfo]) {
+    let prefix = if label.is_empty() {
+        String::new()
+    } else {
+        format!("{label}: ")
+    };
+    if skills.is_empty() {
+        println!("  {} {}none", "[-]".dimmed(), prefix);
+        return;
+    }
+    println!(
+        "  {} {}{} skills",
+        "[✓]".green().bold(),
+        prefix,
+        skills.len().to_string().bold()
+    );
+    for s in skills {
+        println!(
+            "      {} {} {}",
+            "•".dimmed(),
+            s.name,
+            s.description.as_deref().unwrap_or("").dimmed()
+        );
+    }
 }
 
 fn report_rules(root: &Path) {

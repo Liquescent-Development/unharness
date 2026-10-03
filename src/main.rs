@@ -4,9 +4,9 @@ use anyhow::Result;
 use clap::Parser;
 use colored::*;
 
-use unharness::cli::{Cli, Commands, CommonRunArgs};
+use unharness::cli::{Cli, Commands};
 use unharness::config::Config;
-use unharness::harness::RunOptions;
+use unharness::core::sessions_store::SessionsStore;
 use unharness::sync::find_workspace_root;
 use unharness::{doctor, init, models_cmd, runner, skills_cmd, switch, sync};
 
@@ -25,11 +25,12 @@ async fn main() -> Result<()> {
         Some(Commands::Models { harness, provider }) => {
             models_cmd::list_models(&config, harness.as_deref(), provider.as_deref())?
         }
+        Some(Commands::Sessions { clear }) => handle_sessions(ws_root.as_deref(), &cwd, clear)?,
         Some(Commands::Switch { harness, global }) => {
             switch::switch_default_harness(&cwd, &harness, global)?
         }
-        Some(Commands::Run(run_args)) => execute_run(run_args, &config, &cwd).await?,
-        None => execute_run(cli.run_args, &config, &cwd).await?,
+        Some(Commands::Run(run_args)) => runner::run(run_args, &config, &cwd).await?,
+        None => runner::run(cli.run_args, &config, &cwd).await?,
     }
 
     Ok(())
@@ -69,23 +70,40 @@ fn handle_sync(cwd: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn execute_run(args: CommonRunArgs, config: &Config, cwd: &std::path::Path) -> Result<()> {
-    let prompt = if !args.prompt.is_empty() {
-        Some(args.prompt.join(" "))
-    } else {
-        None
-    };
-
-    let opts = RunOptions {
-        prompt,
-        print_mode: args.print,
-        auto_approve: args.auto,
-        model: args.model,
-        effort: args.effort,
-        format: args.format,
-        cwd: Some(cwd.to_path_buf()),
-        extra_args: Vec::new(),
-    };
-
-    runner::run_harness(args.harness, opts, config, args.no_sync, args.no_tui, cwd).await
+fn handle_sessions(
+    ws_root: Option<&std::path::Path>,
+    cwd: &std::path::Path,
+    clear: bool,
+) -> Result<()> {
+    let mut store = SessionsStore::open(ws_root, cwd);
+    if clear {
+        store.harnesses.clear();
+        store.save()?;
+        println!("Cleared recorded sessions in {}", store.path().display());
+        return Ok(());
+    }
+    println!(
+        "Sessions recorded in {}",
+        store.path().display().to_string().dimmed()
+    );
+    let mut any = false;
+    for (harness, sessions) in &store.harnesses {
+        if sessions.recent.is_empty() {
+            continue;
+        }
+        any = true;
+        println!("{}", harness.bold().cyan());
+        for r in &sessions.recent {
+            let last = if sessions.last.as_deref() == Some(&r.id) {
+                " (last)".green().to_string()
+            } else {
+                String::new()
+            };
+            println!("  {}  {}  {}{}", r.id, r.last_used.dimmed(), r.title, last);
+        }
+    }
+    if !any {
+        println!("  none");
+    }
+    Ok(())
 }

@@ -16,8 +16,11 @@ impl Registry {
     /// All ported harnesses in default priority order. Harnesses not yet
     /// ported to the `Harness` trait are absent (see `harness::legacy`).
     pub fn new() -> Self {
-        let harnesses: Vec<Box<dyn Harness>> =
-            vec![Box::new(crate::harness::claude::ClaudeHarness)];
+        let harnesses: Vec<Box<dyn Harness>> = vec![
+            Box::new(crate::harness::legacy::shim::LegacyHarness::agy()),
+            Box::new(crate::harness::claude::ClaudeHarness),
+            Box::new(crate::harness::legacy::shim::LegacyHarness::codex()),
+        ];
         Registry { harnesses }
     }
 

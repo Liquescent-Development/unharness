@@ -22,7 +22,7 @@ pub struct CommonRunArgs {
     #[arg(trailing_var_arg = true)]
     pub prompt: Vec<String>,
 
-    /// Select AI harness (agy, claude, codex)
+    /// Select AI harness (agy, claude, codex, pi)
     #[arg(short = 'H', long, env = "UNHARNESS_HARNESS")]
     pub harness: Option<String>,
 
@@ -30,13 +30,22 @@ pub struct CommonRunArgs {
     #[arg(short = 'p', long)]
     pub print: bool,
 
-    /// Auto-approve permissions / dangerously skip permissions
-    #[arg(short = 'y', long, alias = "dangerously-skip-permissions")]
+    /// Permission policy: ask, accept-edits, auto, bypass
+    #[arg(long, env = "UNHARNESS_POLICY")]
+    pub policy: Option<String>,
+
+    /// Shorthand for --policy bypass (dangerously skip all permissions)
+    #[arg(
+        short = 'y',
+        long = "yes",
+        alias = "dangerously-skip-permissions",
+        alias = "auto"
+    )]
     pub auto: bool,
 
-    /// Force interactive mode
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
+    /// Provider within the harness (e.g. anthropic, openai, google; pi supports many)
+    #[arg(long)]
+    pub provider: Option<String>,
 
     /// Override model for the session
     #[arg(short = 'm', long)]
@@ -45,6 +54,10 @@ pub struct CommonRunArgs {
     /// Reasoning effort (harness-specific, e.g. low, medium, high, xhigh, max)
     #[arg(short = 'e', long)]
     pub effort: Option<String>,
+
+    /// Resume a session by id, or the most recent one when no id is given
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
 
     /// Output format for print mode (text, json, stream-json)
     #[arg(long)]
@@ -88,7 +101,14 @@ pub enum Commands {
         provider: Option<String>,
     },
 
-    /// Switch default harness in config (agy, claude, codex)
+    /// List or clear recorded sessions for this workspace
+    Sessions {
+        /// Remove all recorded sessions
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Switch default harness in config (agy, claude, codex, pi)
     Switch {
         /// Target harness name
         harness: String,
@@ -100,4 +120,26 @@ pub enum Commands {
 
     /// Explicitly run a prompt through a harness
     Run(CommonRunArgs),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_flag_forms() {
+        let c = Cli::parse_from(["unharness", "--resume"]);
+        assert_eq!(c.run_args.resume.as_deref(), Some(""));
+        let c = Cli::parse_from(["unharness", "--resume", "abc"]);
+        assert_eq!(c.run_args.resume.as_deref(), Some("abc"));
+        let c = Cli::parse_from(["unharness", "-y", "--policy", "ask", "do", "it"]);
+        assert!(c.run_args.auto);
+        assert_eq!(c.run_args.policy.as_deref(), Some("ask"));
+        assert_eq!(c.run_args.prompt, vec!["do", "it"]);
+        let c = Cli::parse_from(["unharness", "skills", "add", "--global", "x/y"]);
+        match c.command {
+            Some(Commands::Skills { args }) => assert_eq!(args, vec!["add", "--global", "x/y"]),
+            other => panic!("{other:?}"),
+        }
+    }
 }

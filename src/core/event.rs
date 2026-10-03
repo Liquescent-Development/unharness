@@ -126,6 +126,17 @@ pub struct Usage {
 }
 
 impl Usage {
+    /// Accumulate a per-turn usage into a running total.
+    pub fn add(&mut self, other: &Usage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        if let Some(c) = other.cost_usd {
+            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + c);
+        }
+    }
+
     pub fn total_tokens(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write
     }

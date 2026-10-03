@@ -1,85 +1,102 @@
+//! Rendering. Reads `App` state only; no side effects beyond the frame.
+
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{ActivePopup, App, EFFORT_LEVELS, MessageRole};
+use super::app::App;
 use super::markdown::render_markdown_to_lines;
+use super::modal::{ListPicker, Modal};
+use super::transcript::{Block as TBlock, tool_summary, truncate_chars};
+use crate::core::{HarnessId, PermissionKind, PermissionPolicy};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Min(5),    // Messages viewport
-            Constraint::Length(3), // Input box
-            Constraint::Length(1), // Footer status hints
+            Constraint::Length(4),
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
     render_header(frame, app, chunks[0]);
-    render_messages(frame, app, chunks[1]);
+    render_transcript(frame, app, chunks[1]);
     render_input(frame, app, chunks[2]);
     render_footer(frame, app, chunks[3]);
 
-    // Render suggestions above input if active
-    if !app.suggestions.is_empty() && app.popup.is_none() {
+    if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, chunks[2]);
     }
+    if app.modal.is_some() {
+        render_modal(frame, app, frame.area());
+    }
+}
 
-    // Render modal popup if open
-    if let Some(popup) = app.popup {
-        match popup {
-            ActivePopup::HarnessPicker => render_harness_picker(frame, app, frame.area()),
-            ActivePopup::ModelPicker => render_model_picker(frame, app, frame.area()),
-            ActivePopup::EffortPicker => render_effort_picker(frame, app, frame.area()),
-        }
+fn harness_color(id: HarnessId) -> Color {
+    match id {
+        HarnessId::Agy => Color::Cyan,
+        HarnessId::Claude => Color::Magenta,
+        HarnessId::Codex => Color::Green,
+        HarnessId::Pi => Color::Yellow,
+    }
+}
+
+fn policy_color(p: PermissionPolicy) -> Color {
+    match p {
+        PermissionPolicy::Ask => Color::Green,
+        PermissionPolicy::AcceptEdits => Color::Cyan,
+        PermissionPolicy::Auto => Color::Yellow,
+        PermissionPolicy::Bypass => Color::Red,
+    }
+}
+
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
-    let harness_color = match app.active_harness {
-        crate::harness::HarnessKind::Agy => Color::Cyan,
-        crate::harness::HarnessKind::Claude => Color::Magenta,
-        crate::harness::HarnessKind::Codex => Color::Green,
-    };
-
-    let auto_color = if app.auto_approve {
-        Color::Green
-    } else {
-        Color::DarkGray
-    };
-
-    let model_str = app.current_model().unwrap_or_else(|| "default".to_string());
-    let effort_str = app.current_effort();
-
-    let status_span = if app.is_generating {
-        let label = if app.is_thinking {
+    let status = if app.is_generating {
+        let label = if app.is_thinking() {
             "Thinking"
         } else {
             "Working"
         };
-        let elapsed = app.current_elapsed_secs();
         Span::styled(
-            format!(" {} {} ({:.1}s) ", app.current_spinner(), label, elapsed),
+            format!(" {} {} ({:.1}s) ", app.spinner(), label, app.elapsed_secs()),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if let Some(dur) = app.generation_duration {
+    } else if let Some(d) = app.generation_duration {
         Span::styled(
-            format!(" Done ({:.1}s) ", dur.as_secs_f32()),
+            format!(" Done ({:.1}s) ", d.as_secs_f32()),
             Style::default().fg(Color::DarkGray),
         )
     } else {
         Span::styled(" Idle ", Style::default().fg(Color::DarkGray))
     };
 
-    let title_line = Line::from(vec![
+    let effective = app.effective_policy();
+    let policy_label = if effective == app.policy_requested {
+        format!("[Policy: {effective}]")
+    } else {
+        format!("[Policy: {}→{}!]", app.policy_requested, effective)
+    };
+
+    let title = Line::from(vec![
         Span::styled(
             " UNHARNESS ",
             Style::default()
@@ -89,116 +106,121 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::raw(" "),
         Span::styled(
-            format!("[{}]", app.active_harness.display_name()),
+            format!("[{}]", app.active.short_name()),
             Style::default()
-                .fg(harness_color)
+                .fg(harness_color(app.active))
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("[Model: {}]", model_str),
+            format!("[{}]", app.model_label()),
             Style::default().fg(Color::Yellow),
         ),
         Span::raw(" "),
         Span::styled(
-            format!("[Effort: {}]", effort_str),
-            Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
+            format!("[Effort: {}]", app.current_effort().unwrap_or("default")),
+            Style::default().fg(Color::LightBlue),
         ),
         Span::raw(" "),
-        Span::styled(
-            format!("[Auto: {}]", if app.auto_approve { "ON" } else { "OFF" }),
-            Style::default().fg(auto_color),
-        ),
+        Span::styled(policy_label, Style::default().fg(policy_color(effective))),
         Span::raw(" "),
-        status_span,
+        status,
     ]);
 
-    let cwd_display = app.cwd.to_string_lossy();
-    let header_block = Block::default()
+    let t = &app.turn_usage;
+    let s = &app.session_usage;
+    let mut usage = format!(
+        "turn {}↑ {}↓",
+        fmt_tokens(t.input + t.cache_read + t.cache_write),
+        fmt_tokens(t.output)
+    );
+    usage.push_str(&format!(" · session {}", fmt_tokens(s.total_tokens())));
+    if let Some(c) = s.cost_usd {
+        usage.push_str(&format!(" · ${c:.2}"));
+    }
+    let session = app
+        .session_ids
+        .get(&app.active)
+        .map(|id| format!(" · session {}", truncate_chars(id, 8)))
+        .unwrap_or_default();
+    let info = format!("  {} · {}{}", app.cwd.to_string_lossy(), usage, session);
+
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(title_line)
-        .title_alignment(ratatui::layout::Alignment::Left);
-
-    let info_paragraph = Paragraph::new(format!("  Repository: {}", cwd_display))
-        .style(Style::default().fg(Color::Gray))
-        .block(header_block);
-
-    frame.render_widget(info_paragraph, area);
+        .title(title);
+    let p = Paragraph::new(vec![
+        Line::from(Span::styled(info, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(
+            app.policy_warning()
+                .map(|w| format!("  ⚠ {w}"))
+                .unwrap_or_default(),
+            Style::default().fg(Color::Yellow),
+        )),
+    ])
+    .block(block);
+    frame.render_widget(p, area);
 }
 
-fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" Activity ");
-
-    let inner_area = block.inner(area);
-    let max_text_width = (inner_area.width.saturating_sub(4)).max(10) as usize;
+    let inner = block.inner(area);
+    let width = (inner.width.saturating_sub(4)).max(10) as usize;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let thinking_live = app.is_thinking();
+    let elapsed = app.elapsed_secs();
 
-    for msg in &app.messages {
-        match msg.role {
-            MessageRole::User => {
-                lines.push(Line::from(vec![Span::styled(
+    for b in &app.transcript.blocks {
+        match b {
+            TBlock::User { text } => {
+                lines.push(Line::from(Span::styled(
                     "❯ You",
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
-                )]));
-                lines.extend(wrap_prefixed_text(
-                    "  ",
-                    &msg.content,
-                    max_text_width,
-                    Style::default().fg(Color::White),
-                ));
+                )));
+                lines.extend(wrap_prefixed_text("  ", text, width, Style::default()));
                 lines.push(Line::default());
             }
-            MessageRole::Assistant => {
-                let dur_str = msg
-                    .duration
+            TBlock::Assistant {
+                text,
+                sender,
+                duration,
+            } => {
+                let dur = duration
                     .map(|d| format!(" ({:.1}s)", d.as_secs_f32()))
                     .unwrap_or_default();
-                lines.push(Line::from(vec![Span::styled(
-                    format!("● {}{}", msg.sender, dur_str),
+                lines.push(Line::from(Span::styled(
+                    format!("● {sender}{dur}"),
                     Style::default()
                         .fg(Color::Green)
                         .add_modifier(Modifier::BOLD),
-                )]));
-                let md_lines = render_markdown_to_lines(&msg.content, max_text_width);
-                lines.extend(md_lines);
+                )));
+                lines.extend(render_markdown_to_lines(text, width));
                 lines.push(Line::default());
             }
-            MessageRole::Thought => {
-                let is_live_thought = app.is_generating && app.is_thinking;
-                let title = if is_live_thought {
-                    format!(
-                        "  ┌─ 💭 Thinking ({:.1}s) ──────────────────────────",
-                        app.current_elapsed_secs()
-                    )
-                } else if let Some(dur) = msg.duration {
-                    format!(
-                        "  ┌─ 💭 Thought for {:.1}s ────────────────────────",
-                        dur.as_secs_f32()
-                    )
-                } else {
-                    "  ┌─ 💭 Thinking Process ──────────────────────────".to_string()
+            TBlock::Thought { text, duration } => {
+                let title = match duration {
+                    Some(d) => format!("  ┌─ 💭 Thought for {:.1}s ", d.as_secs_f32()),
+                    None if thinking_live => format!("  ┌─ 💭 Thinking ({elapsed:.1}s) "),
+                    None => "  ┌─ 💭 Thinking ".to_string(),
                 };
-
                 lines.push(Line::from(Span::styled(
-                    title,
+                    format!(
+                        "{title}{}",
+                        "─".repeat(width.saturating_sub(title.len()).min(40))
+                    ),
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),
                 )));
-
-                let inner_thought_width = max_text_width.saturating_sub(6).max(10);
-                for raw_l in msg.content.lines() {
-                    let wrapped = wrap_words_helper(raw_l, inner_thought_width);
-                    for w in wrapped {
+                let inner_w = width.saturating_sub(6).max(10);
+                for raw in text.lines() {
+                    for w in wrap_words(raw, inner_w) {
                         lines.push(Line::from(vec![
                             Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
@@ -210,39 +232,99 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
                         ]));
                     }
                 }
-
                 lines.push(Line::from(Span::styled(
-                    "  └────────────────────────────────────────────────",
+                    "  └".to_string() + &"─".repeat(width.saturating_sub(3).min(50)),
                     Style::default().fg(Color::DarkGray),
                 )));
                 lines.push(Line::default());
             }
-            MessageRole::Tool => {
-                lines.extend(wrap_prefixed_text(
-                    "  ⚡ ",
-                    &msg.content,
-                    max_text_width,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::DIM),
-                ));
+            TBlock::Tool {
+                name,
+                input,
+                output,
+                is_error,
+                done,
+                collapsed,
+                duration,
+                ..
+            } => {
+                let status = if !*done {
+                    Span::styled(" ⠿ running", Style::default().fg(Color::Yellow))
+                } else if *is_error {
+                    Span::styled(" ✗", Style::default().fg(Color::Red))
+                } else {
+                    Span::styled(
+                        format!(
+                            " ✓{}",
+                            duration
+                                .map(|d| format!(" {:.1}s", d.as_secs_f32()))
+                                .unwrap_or_default()
+                        ),
+                        Style::default().fg(Color::Green),
+                    )
+                };
+                lines.push(Line::from(vec![
+                    Span::styled("  ⚡ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        name.clone(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(tool_summary(name, input), Style::default().fg(Color::Gray)),
+                    status,
+                ]));
+                if !output.is_empty() {
+                    let limit = if *collapsed { 3 } else { usize::MAX };
+                    let total = output.lines().count();
+                    for l in output.lines().take(limit) {
+                        for w in wrap_words(l, width.saturating_sub(6).max(10)) {
+                            lines.push(Line::from(vec![
+                                Span::raw("     "),
+                                Span::styled(
+                                    w,
+                                    Style::default().fg(if *is_error {
+                                        Color::Red
+                                    } else {
+                                        Color::DarkGray
+                                    }),
+                                ),
+                            ]));
+                        }
+                    }
+                    if *collapsed && total > limit {
+                        lines.push(Line::from(Span::styled(
+                            format!("     … {} more lines (Ctrl+O to expand)", total - limit),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
             }
-            MessageRole::System => {
+            TBlock::System(t) => {
                 lines.extend(wrap_prefixed_text(
                     "  ℹ ",
-                    &msg.content,
-                    max_text_width,
+                    t,
+                    width,
                     Style::default()
                         .fg(Color::Blue)
                         .add_modifier(Modifier::ITALIC),
                 ));
                 lines.push(Line::default());
             }
-            MessageRole::Error => {
+            TBlock::Notice(t) => {
+                lines.extend(wrap_prefixed_text(
+                    "  · ",
+                    t,
+                    width,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            TBlock::Error(t) => {
                 lines.extend(wrap_prefixed_text(
                     "  ✗ ",
-                    &msg.content,
-                    max_text_width,
+                    t,
+                    width,
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::default());
@@ -250,23 +332,19 @@ fn render_messages(frame: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let total_visual_lines = lines.len() as u16;
-    let available_height = inner_area.height;
-    let max_scroll = total_visual_lines.saturating_sub(available_height);
-
-    if app.auto_scroll {
-        app.scroll = max_scroll;
-    } else if app.scroll >= max_scroll {
+    let total = lines.len() as u16;
+    let max_scroll = total.saturating_sub(inner.height);
+    if app.auto_scroll || app.scroll >= max_scroll {
         app.scroll = max_scroll;
         app.auto_scroll = true;
     }
-
-    let paragraph = Paragraph::new(lines).block(block).scroll((app.scroll, 0));
-
-    frame.render_widget(paragraph, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(block).scroll((app.scroll, 0)),
+        area,
+    );
 }
 
-fn wrap_prefixed_text(
+pub fn wrap_prefixed_text(
     prefix: &'static str,
     text: &str,
     max_width: usize,
@@ -276,158 +354,114 @@ fn wrap_prefixed_text(
     let prefix_width = UnicodeWidthStr::width(prefix);
     let indent = " ".repeat(prefix_width);
     let content_width = max_width.saturating_sub(prefix_width).max(10);
-
-    for raw_line in text.lines() {
-        if raw_line.is_empty() {
+    for raw in text.lines() {
+        if raw.is_empty() {
             lines.push(Line::default());
             continue;
         }
-
-        let wrapped = wrap_words_helper(raw_line, content_width);
-        for (i, segment) in wrapped.into_iter().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, style),
-                    Span::styled(segment, style),
-                ]));
+        for (i, seg) in wrap_words(raw, content_width).into_iter().enumerate() {
+            let head = if i == 0 {
+                Span::styled(prefix, style)
             } else {
-                lines.push(Line::from(vec![
-                    Span::raw(indent.clone()),
-                    Span::styled(segment, style),
-                ]));
-            }
+                Span::raw(indent.clone())
+            };
+            lines.push(Line::from(vec![head, Span::styled(seg, style)]));
         }
     }
     lines
 }
 
-fn wrap_words_helper(text: &str, max_width: usize) -> Vec<String> {
+pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_len = 0;
-
     for word in text.split(' ') {
         let word_len = UnicodeWidthStr::width(word);
-
-        // If a single word is wider than max_width, force-break it by characters
         if word_len > max_width {
             if !current.is_empty() {
-                lines.push(current);
-                current = String::new();
-                current_len = 0;
+                lines.push(std::mem::take(&mut current));
             }
             let mut chunk = String::new();
             let mut chunk_len = 0;
             for c in word.chars() {
                 let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
                 if chunk_len + cw > max_width {
-                    lines.push(chunk);
-                    chunk = String::new();
+                    lines.push(std::mem::take(&mut chunk));
                     chunk_len = 0;
                 }
                 chunk.push(c);
                 chunk_len += cw;
             }
-            if !chunk.is_empty() {
-                current = chunk;
-                current_len = chunk_len;
-            }
+            current = chunk;
+            current_len = chunk_len;
             continue;
         }
-
         if current_len == 0 {
             current.push_str(word);
-            current_len += word_len;
+            current_len = word_len;
         } else if current_len + 1 + word_len <= max_width {
             current.push(' ');
             current.push_str(word);
             current_len += 1 + word_len;
         } else {
-            lines.push(current);
-            current = word.to_string();
+            lines.push(std::mem::replace(&mut current, word.to_string()));
             current_len = word_len;
         }
     }
-
-    if !current.is_empty() {
+    if !current.is_empty() || lines.is_empty() {
         lines.push(current);
     }
-
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-
     lines
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
-    let input_block = Block::default()
+    let block = Block::default()
         .borders(Borders::ALL)
         .border_style(if app.is_generating {
             Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::Cyan)
         })
-        .title(" Prompt (type / for commands) ");
-
-    let input_paragraph = Paragraph::new(app.input.as_str())
-        .style(Style::default().fg(Color::White))
-        .block(input_block);
-
-    frame.render_widget(input_paragraph, area);
-
-    if !app.is_generating && app.popup.is_none() {
-        let cursor_x = area.x + 1 + app.cursor_pos as u16;
-        let cursor_y = area.y + 1;
-        frame.set_cursor_position((cursor_x, cursor_y));
+        .title(if app.is_generating {
+            " Prompt (Esc to interrupt) "
+        } else {
+            " Prompt (type / for commands) "
+        });
+    frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
+    if app.modal.is_none() {
+        let before: String = app.input.chars().take(app.cursor).collect();
+        let x = area.x + 1 + UnicodeWidthStr::width(before.as_str()) as u16;
+        frame.set_cursor_position((x.min(area.x + area.width.saturating_sub(2)), area.y + 1));
     }
 }
 
-fn render_footer(frame: &mut Frame, _app: &App, area: Rect) {
-    let footer_text = Line::from(vec![
-        Span::styled(
-            "Enter",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let k = |s: &'static str, c: Color| {
+        Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD))
+    };
+    let mut spans = vec![
+        k("Enter", Color::Cyan),
         Span::raw(" Send  "),
-        Span::styled(
-            "Ctrl+H",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
+        k("Ctrl+H", Color::Yellow),
         Span::raw(" Harness  "),
-        Span::styled(
-            "Ctrl+M",
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
+        k("Ctrl+M", Color::Magenta),
         Span::raw(" Model  "),
-        Span::styled(
-            "Ctrl+E",
-            Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" Effort/Think  "),
-        Span::styled(
-            "Ctrl+P",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" Auto  "),
-        Span::styled("PgUp/PgDn", Style::default().fg(Color::DarkGray)),
-        Span::raw(" Scroll  "),
-        Span::styled("Ctrl+C / Esc", Style::default().fg(Color::Red)),
-        Span::raw(" Cancel/Quit"),
-    ]);
-
-    let footer = Paragraph::new(footer_text);
-    frame.render_widget(footer, area);
+        k("Ctrl+E", Color::LightBlue),
+        Span::raw(" Effort  "),
+        k("Ctrl+P", Color::Green),
+        Span::raw(" Policy  "),
+        k("Ctrl+R", Color::Blue),
+        Span::raw(" Resume  "),
+        k("Ctrl+O", Color::Gray),
+        Span::raw(" Tool output  "),
+        k("Esc", Color::Red),
+    ];
+    spans.push(Span::raw(if app.is_generating {
+        " Interrupt"
+    } else {
+        " Quit"
+    }));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
@@ -436,266 +470,418 @@ fn render_suggestions(frame: &mut Frame, app: &App, input_area: Rect) {
     if input_area.y < height {
         return;
     }
-
-    let width = 72.min(input_area.width.saturating_sub(4));
     let area = Rect {
         x: input_area.x + 1,
         y: input_area.y.saturating_sub(height),
-        width,
+        width: 76.min(input_area.width.saturating_sub(4)),
         height,
     };
-
     frame.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" Suggestions [Tab to Complete] ");
-
     let mut lines = Vec::new();
     for (i, (cmd, desc)) in app.suggestions.iter().take(count as usize).enumerate() {
-        let is_selected = i == app.selected_suggestion;
-        let prefix = if is_selected { "❯ " } else { "  " };
-
-        let style = if is_selected {
+        let selected = i == app.selected_suggestion;
+        let style = if selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default()
         };
-
         lines.push(Line::from(vec![
-            Span::styled(format!("{}{:<22} ", prefix, cmd), style),
             Span::styled(
-                format!("─ {}", desc),
-                Style::default().fg(if is_selected {
-                    Color::DarkGray
-                } else {
-                    Color::Gray
-                }),
+                format!("{}{:<26} ", if selected { "❯ " } else { "  " }, cmd),
+                style,
             ),
+            Span::styled(format!("─ {desc}"), Style::default().fg(Color::Gray)),
         ]));
     }
-
-    let p = Paragraph::new(lines).block(block);
-    frame.render_widget(p, area);
-}
-
-fn render_harness_picker(frame: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(65, 45, area);
-    frame.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(" Switch AI Harness (↑/↓ Select, Enter Confirm, Esc Cancel) ")
-        .title_alignment(ratatui::layout::Alignment::Center);
-
-    let mut lines = Vec::new();
-    lines.push(Line::default());
-
-    for (i, opt) in app.harness_options.iter().enumerate() {
-        let is_selected = i == app.picker_selected;
-        let is_active = opt.kind == app.active_harness;
-
-        let cursor = if is_selected { " ❯ " } else { "   " };
-        let active_badge = if is_active { " [Active]" } else { "" };
-
-        let status_str = if opt.installed {
-            let ver = opt.version.as_deref().unwrap_or("detected");
-            format!("(v{})", ver)
-        } else {
-            "(not found on PATH)".to_string()
-        };
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if !opt.installed {
-            Style::default().fg(Color::DarkGray)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let active_style = if is_active {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(cursor, style),
-            Span::styled(format!("{:<24}", opt.kind.display_name()), style),
-            Span::styled(
-                format!(" {:<20}", status_str),
-                Style::default().fg(if opt.installed {
-                    Color::Gray
-                } else {
-                    Color::Red
-                }),
-            ),
-            Span::styled(active_badge, active_style),
-        ]));
-        lines.push(Line::default());
-    }
-
-    let p = Paragraph::new(lines).block(block);
-    frame.render_widget(p, popup_area);
-}
-
-fn render_model_picker(frame: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(75, 55, area);
-    frame.render_widget(Clear, popup_area);
-
-    let title = format!(
-        " Select Model for {} (↑/↓ Select, Enter Confirm, Esc Cancel) ",
-        app.active_harness.display_name()
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Suggestions [Tab to complete] "),
+        ),
+        area,
     );
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(title)
-        .title_alignment(ratatui::layout::Alignment::Center);
-
-    let mut lines = Vec::new();
-    lines.push(Line::default());
-
-    let current_model_id = app.current_model();
-
-    for (i, model) in app.model_options.iter().enumerate() {
-        let is_selected = i == app.model_picker_selected;
-        let is_active = current_model_id.as_deref() == Some(&model.id);
-
-        let cursor = if is_selected { " ❯ " } else { "   " };
-        let active_badge = if is_active { " [Active]" } else { "" };
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Magenta)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let active_style = if is_active {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let desc = model
-            .description
-            .as_deref()
-            .unwrap_or(model.display_name.as_str());
-
-        lines.push(Line::from(vec![
-            Span::styled(cursor, style),
-            Span::styled(format!("{:<24} ", model.id), style),
-            Span::styled(
-                format!("─ {:<30} ", desc),
-                Style::default().fg(if is_selected {
-                    Color::White
-                } else {
-                    Color::Gray
-                }),
-            ),
-            Span::styled(active_badge, active_style),
-        ]));
-        lines.push(Line::default());
-    }
-
-    let p = Paragraph::new(lines).block(block);
-    frame.render_widget(p, popup_area);
 }
 
-fn render_effort_picker(frame: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(75, 45, area);
-    frame.render_widget(Clear, popup_area);
+// ------------------------------------------------------------------ modals
 
-    let title = format!(
-        " Select Reasoning Effort / Think Mode for {} (↑/↓ Select, Enter Confirm, Esc Cancel) ",
-        app.active_harness.display_name()
-    );
-
-    let block = Block::default()
+fn modal_block(title: String, color: Color) -> Block<'static> {
+    Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_style(Style::default().fg(color).add_modifier(Modifier::BOLD))
         .title(title)
-        .title_alignment(ratatui::layout::Alignment::Center);
-
-    let mut lines = Vec::new();
-    lines.push(Line::default());
-
-    let current_effort = app.current_effort();
-
-    for (i, eff) in EFFORT_LEVELS.iter().enumerate() {
-        let is_selected = i == app.effort_picker_selected;
-        let is_active = current_effort == eff.id;
-
-        let cursor = if is_selected { " ❯ " } else { "   " };
-        let active_badge = if is_active { " [Active]" } else { "" };
-
-        let style = if is_selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::LightBlue)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
-
-        let active_style = if is_active {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        lines.push(Line::from(vec![
-            Span::styled(cursor, style),
-            Span::styled(format!("{:<10} ", eff.display_name), style),
-            Span::styled(
-                format!("─ {:<44} ", eff.description),
-                Style::default().fg(if is_selected {
-                    Color::White
-                } else {
-                    Color::Gray
-                }),
-            ),
-            Span::styled(active_badge, active_style),
-        ]));
-        lines.push(Line::default());
-    }
-
-    let p = Paragraph::new(lines).block(block);
-    frame.render_widget(p, popup_area);
+        .title_alignment(Alignment::Center)
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
-    let popup_layout = Layout::default()
+fn picker_lines<T>(
+    picker: &ListPicker<T>,
+    color: Color,
+    row: impl Fn(&T) -> (String, String, bool),
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::default()];
+    for (i, item) in picker.items.iter().enumerate() {
+        let (label, desc, active) = row(item);
+        let selected = i == picker.selected;
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if selected { " ❯ " } else { "   " }, style),
+            Span::styled(format!("{label:<28} "), style),
+            Span::styled(format!("─ {desc}"), Style::default().fg(Color::Gray)),
+            Span::styled(
+                if active { "  [active]" } else { "" },
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+    lines
+}
+
+fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(modal) = &app.modal else { return };
+    const NAV: &str = "↑/↓ select · Enter confirm · Esc cancel";
+    let (popup, block, lines): (Rect, Block, Vec<Line<'static>>) = match modal {
+        Modal::Harness(p) => (
+            centered_rect(70, 50, area),
+            modal_block(format!(" Harness ({NAV}) "), Color::Cyan),
+            picker_lines(p, Color::Cyan, |o| {
+                let status = if o.installed {
+                    format!(
+                        "v{}{}",
+                        o.version.as_deref().unwrap_or("?"),
+                        if o.interactive_permissions {
+                            ", interactive permissions"
+                        } else {
+                            ", no permission prompts"
+                        }
+                    )
+                } else {
+                    "not found on PATH".to_string()
+                };
+                (o.display_name.to_string(), status, o.id == app.active)
+            }),
+        ),
+        Modal::Provider(p) => (
+            centered_rect(60, 50, area),
+            modal_block(format!(" Provider ({NAV}) "), Color::Yellow),
+            picker_lines(p, Color::Yellow, |o| {
+                (
+                    o.name.clone(),
+                    o.id.clone(),
+                    app.current_provider().is_some_and(|c| c.0 == o.id),
+                )
+            }),
+        ),
+        Modal::Model(p) => (
+            centered_rect(80, 60, area),
+            modal_block(
+                format!(" Model for {} ({NAV}) ", app.active.short_name()),
+                Color::Magenta,
+            ),
+            picker_lines(p, Color::Magenta, |m| {
+                let mut desc = m
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| m.display_name.clone());
+                if let Some(e) = &m.effort_levels {
+                    desc.push_str(&format!("  [{}]", e.join("/")));
+                }
+                (
+                    m.model_ref.model.clone(),
+                    desc,
+                    app.current_model()
+                        .is_some_and(|c| c.model == m.model_ref.model),
+                )
+            }),
+        ),
+        Modal::Effort(p) => (
+            centered_rect(60, 50, area),
+            modal_block(format!(" Reasoning effort ({NAV}) "), Color::LightBlue),
+            picker_lines(p, Color::LightBlue, |e| {
+                (
+                    e.clone(),
+                    String::new(),
+                    app.current_effort() == Some(e.as_str()),
+                )
+            }),
+        ),
+        Modal::Policy(p) => {
+            let caps = app.harness().capabilities();
+            (
+                centered_rect(80, 50, area),
+                modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
+                picker_lines(p, Color::Green, |pol| {
+                    let support = match caps.supports_policy(*pol) {
+                        Some(s) => s
+                            .degraded
+                            .map(|d| format!(" (degraded: {d})"))
+                            .unwrap_or_default(),
+                        None => " (not supported here; falls back)".to_string(),
+                    };
+                    (
+                        pol.as_str().to_string(),
+                        format!("{}{}", pol.description(), support),
+                        *pol == app.policy_requested,
+                    )
+                }),
+            )
+        }
+        Modal::Resume(p) => (
+            centered_rect(85, 60, area),
+            modal_block(
+                format!(" Resume {} session ({NAV}) ", app.active.short_name()),
+                Color::Blue,
+            ),
+            picker_lines(p, Color::Blue, |r| {
+                (
+                    truncate_chars(&r.id, 26),
+                    format!("{}  {}", r.last_used, truncate_chars(&r.title, 50)),
+                    app.session_ids.get(&app.active) == Some(&r.id),
+                )
+            }),
+        ),
+        Modal::Permission(m) => {
+            let popup = centered_rect(80, 55, area);
+            let width = (popup.width.saturating_sub(6)).max(20) as usize;
+            let mut lines = vec![Line::default()];
+            if let PermissionKind::ToolUse {
+                tool,
+                input,
+                suggestions,
+                description,
+            } = &m.request.kind
+            {
+                lines.push(Line::from(vec![
+                    Span::styled("  Tool: ", Style::default().fg(Color::Gray)),
+                    Span::styled(
+                        tool.clone(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+                let summary = description
+                    .clone()
+                    .unwrap_or_else(|| tool_summary(tool, input));
+                lines.extend(wrap_prefixed_text("  ", &summary, width, Style::default()));
+                lines.push(Line::default());
+                let pretty = if m.show_input {
+                    serde_json::to_string_pretty(input).unwrap_or_default()
+                } else {
+                    input
+                        .as_object()
+                        .map(|o| {
+                            o.iter()
+                                .map(|(k, v)| {
+                                    let s = match v {
+                                        serde_json::Value::String(s) => s.clone(),
+                                        v => v.to_string(),
+                                    };
+                                    format!("{k}: {}", truncate_chars(&s.replace('\n', "⏎"), 100))
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .unwrap_or_else(|| input.to_string())
+                };
+                lines.extend(wrap_prefixed_text(
+                    "    ",
+                    &pretty,
+                    width,
+                    Style::default().fg(Color::DarkGray),
+                ));
+                lines.push(Line::default());
+                if m.denying {
+                    lines.push(Line::from(vec![
+                        Span::styled("  Reason: ", Style::default().fg(Color::Red)),
+                        Span::raw(m.reason.clone()),
+                        Span::styled("▏", Style::default().fg(Color::Red)),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        "  Enter send · Esc back",
+                        Style::default().fg(Color::Gray),
+                    )));
+                } else {
+                    let always = if suggestions.is_some() {
+                        "a allow always · "
+                    } else {
+                        ""
+                    };
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  y/Enter allow once · {always}n deny · i {} input · Esc cancel",
+                            if m.show_input { "hide" } else { "full" }
+                        ),
+                        Style::default().fg(Color::Gray),
+                    )));
+                }
+            }
+            (
+                popup,
+                modal_block(" Permission request ".into(), Color::Red),
+                lines,
+            )
+        }
+        Modal::Question(m) => {
+            let popup = centered_rect(80, 60, area);
+            let width = (popup.width.saturating_sub(6)).max(20) as usize;
+            let q = m.current();
+            let mut lines = vec![
+                Line::default(),
+                Line::from(Span::styled(
+                    format!("  {} ({}/{})", q.header, m.idx + 1, m.questions.len()),
+                    Style::default().fg(Color::Gray),
+                )),
+            ];
+            lines.extend(wrap_prefixed_text(
+                "  ",
+                &q.text,
+                width,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::default());
+            for (i, (label, desc)) in q.options.iter().enumerate() {
+                let selected = i == m.cursor;
+                let chosen = m.chosen[m.idx][i];
+                let mark = if q.multi {
+                    if chosen { "[x]" } else { "[ ]" }
+                } else if chosen {
+                    "(•)"
+                } else {
+                    "( )"
+                };
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} {mark} {label:<24}", if selected { " ❯" } else { "  " }),
+                        style,
+                    ),
+                    Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
+                ]));
+            }
+            if q.allow_other {
+                let selected = m.is_other_row();
+                let style = if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let text = &m.other[m.idx];
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} [other] ", if selected { " ❯" } else { "  " }),
+                        style,
+                    ),
+                    Span::raw(text.clone()),
+                    Span::styled(
+                        if m.editing_other { "▏" } else { "" },
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ]));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                if m.editing_other {
+                    "  type your answer · Enter done".to_string()
+                } else if q.multi {
+                    "  Space toggle · Enter next/submit · ←/→ page · Esc dismiss".to_string()
+                } else {
+                    "  Enter choose · ←/→ page · Esc dismiss".to_string()
+                },
+                Style::default().fg(Color::Gray),
+            )));
+            (
+                popup,
+                modal_block(" The agent has a question ".into(), Color::Cyan),
+                lines,
+            )
+        }
+        Modal::Confirm(m) => {
+            let popup = centered_rect(60, 30, area);
+            let width = (popup.width.saturating_sub(6)).max(20) as usize;
+            let mut lines = vec![Line::default()];
+            lines.extend(wrap_prefixed_text(
+                "  ",
+                &m.title,
+                width,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            if let Some(msg) = &m.message {
+                lines.extend(wrap_prefixed_text("  ", msg, width, Style::default()));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                "  y/Enter yes · n no · Esc dismiss",
+                Style::default().fg(Color::Gray),
+            )));
+            (popup, modal_block(" Confirm ".into(), Color::Yellow), lines)
+        }
+        Modal::Select(m) => (
+            centered_rect(60, 50, area),
+            modal_block(
+                format!(" {} ({NAV}) ", truncate_chars(&m.title, 50)),
+                Color::Yellow,
+            ),
+            picker_lines(&m.picker, Color::Yellow, |o| {
+                (o.clone(), String::new(), false)
+            }),
+        ),
+        Modal::Input(m) => {
+            let popup = centered_rect(70, 40, area);
+            let width = (popup.width.saturating_sub(6)).max(20) as usize;
+            let mut lines = vec![Line::default()];
+            lines.extend(wrap_prefixed_text(
+                "  ",
+                &m.title,
+                width,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::default());
+            lines.extend(wrap_prefixed_text("  > ", &m.text, width, Style::default()));
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                if m.multiline {
+                    "  Ctrl+Enter submit · Enter newline · Esc dismiss"
+                } else {
+                    "  Enter submit · Esc dismiss"
+                },
+                Style::default().fg(Color::Gray),
+            )));
+            (
+                popup,
+                modal_block(" Input requested ".into(), Color::Yellow),
+                lines,
+            )
+        }
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage((100 - percent_y) / 2),
@@ -703,7 +889,6 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_y) / 2),
         ])
         .split(r);
-
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -711,21 +896,77 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage(percent_x),
             Constraint::Percentage((100 - percent_x) / 2),
         ])
-        .split(popup_layout[1])[1]
+        .split(v[1])[1]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::tests::test_app;
+    use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
-    fn test_wrap_prefixed_text() {
-        let long_err = "jetski: no output produced — a tool required the \"mcp\" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. mcp(<target>)).";
-        let lines = wrap_prefixed_text("  ✗ ", long_err, 60, Style::default().fg(Color::Red));
-        assert!(lines.len() >= 3);
-        // Prefix is on first line
+    fn wrap_prefixed_text_indents_continuations() {
+        let long = "jetski: no output produced — a tool required the mcp permission that headless mode cannot prompt for, so it was auto-denied.";
+        let lines = wrap_prefixed_text("  ✗ ", long, 60, Style::default());
+        assert!(lines.len() >= 2);
         assert_eq!(lines[0].spans[0].content, "  ✗ ");
-        // Continuation lines start with spaces
         assert_eq!(lines[1].spans[0].content, "    ");
+    }
+
+    #[test]
+    fn wrap_words_breaks_long_tokens() {
+        let w = wrap_words(&"x".repeat(25), 10);
+        assert_eq!(w.len(), 3);
+        assert_eq!(wrap_words("", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn renders_without_panicking_in_every_modal() {
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("hello **world**".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::ThinkingDelta("hmm".into()));
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command":"ls"}),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t".into(),
+            output: "a\nb\nc\nd\ne".into(),
+            is_error: false,
+        });
+        app.on_event(crate::core::AgentEvent::TextDelta("done".into()));
+        let backend = TestBackend::new(100, 30);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+
+        app.open_harness_picker();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        app.open_effort_picker();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        app.open_policy_picker();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        app.open_model_picker();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        app.modal = None;
+        app.on_event(crate::core::AgentEvent::PermissionRequest(
+            crate::core::PermissionRequest {
+                id: "p".into(),
+                kind: PermissionKind::ToolUse {
+                    tool: "Write".into(),
+                    input: serde_json::json!({"file_path":"/x","content":"line1\nline2"}),
+                    suggestions: Some(serde_json::json!([])),
+                    description: None,
+                },
+                tool_call_id: None,
+            },
+        ));
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Permission request"));
+        assert!(text.contains("Write"));
     }
 }

@@ -1,245 +1,288 @@
-use crate::config::Config;
-use crate::harness::{HarnessKind, LegacyModelInfo as ModelInfo, get_adapter};
-use std::collections::HashMap;
+//! TUI state. Pure with respect to I/O: key handling mutates state and queues
+//! `Action`s that the event loop in `mod.rs` executes against the session.
+
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::Value;
+
+use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption};
+use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
+use crate::config::Config;
+use crate::core::registry::Registry;
+use crate::core::sessions_store::SessionsStore;
+use crate::core::{
+    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionPolicy, PermissionRequest,
+    ProviderId, SessionCommand, StopReason, Usage, resolve_policy,
+};
+use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
+
+/// Side effects the event loop performs on the App's behalf.
 #[derive(Debug, Clone, PartialEq)]
-pub enum MessageRole {
-    User,
-    Assistant,
-    Thought,
-    Tool,
-    System,
-    Error,
-}
-
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub role: MessageRole,
-    pub content: String,
-    pub sender: String,
-    pub duration: Option<Duration>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(clippy::enum_variant_names)] // replaced by a generic ListPicker in the v2 TUI
-pub enum ActivePopup {
-    HarnessPicker,
-    ModelPicker,
-    EffortPicker,
-}
-
-#[derive(Debug, Clone)]
-pub struct HarnessOption {
-    pub kind: HarnessKind,
-    pub installed: bool,
-    pub version: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffortOption {
-    pub id: &'static str,
-    pub display_name: &'static str,
-    pub description: &'static str,
-}
-
-pub const EFFORT_LEVELS: &[EffortOption] = &[
-    EffortOption {
-        id: "high",
-        display_name: "high",
-        description: "Deep reasoning for complex coding & architecture (recommended)",
+pub enum Action {
+    /// Start a session for the active harness (if none is alive).
+    StartSession {
+        resume: Option<String>,
     },
-    EffortOption {
-        id: "xhigh",
-        display_name: "xhigh",
-        description: "Extended thinking for difficult bug diagnosis & refactors",
-    },
-    EffortOption {
-        id: "max",
-        display_name: "max",
-        description: "Maximum thinking depth & exhaustive reasoning budget",
-    },
-    EffortOption {
-        id: "medium",
-        display_name: "medium",
-        description: "Balanced reasoning depth and latency",
-    },
-    EffortOption {
-        id: "low",
-        display_name: "low",
-        description: "Minimal thinking, fastest responses & lowest token cost",
-    },
-];
-
-pub struct App {
-    pub messages: Vec<Message>,
-    pub input: String,
-    pub cursor_pos: usize,
-    pub scroll: u16,
-    pub auto_scroll: bool,
-    pub is_generating: bool,
-    pub is_thinking: bool,
-    pub generation_start: Option<Instant>,
-    pub generation_duration: Option<Duration>,
-    pub thought_start: Option<Instant>,
-    pub thought_duration: Option<Duration>,
-    pub active_harness: HarnessKind,
-    pub last_used_harness: Option<HarnessKind>,
-    pub harness_turn_count: usize,
-    pub auto_approve: bool,
-    pub selected_models: HashMap<HarnessKind, String>,
-    pub selected_efforts: HashMap<HarnessKind, String>,
-    pub cwd: PathBuf,
-    pub spinner_frame: usize,
-    pub should_quit: bool,
-
-    // Modal state
-    pub popup: Option<ActivePopup>,
-    pub picker_selected: usize,
-    pub harness_options: Vec<HarnessOption>,
-
-    pub model_options: Vec<ModelInfo>,
-    pub model_picker_selected: usize,
-
-    pub effort_picker_selected: usize,
-
-    // Autocomplete / Suggestions state
-    pub suggestions: Vec<(String, String)>,
-    pub selected_suggestion: usize,
+    SendTurn(String),
+    Command(SessionCommand),
+    /// Shut the active session down (harness switch, resume, quit).
+    Shutdown,
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-const BASE_COMMAND_CATALOG: &[(&str, &str)] = &[
-    ("/switch", "Open harness switcher picker modal"),
-    ("/switch agy", "Switch active harness to Antigravity (agy)"),
+const BASE_COMMANDS: &[(&str, &str)] = &[
+    ("/switch", "Open the harness picker"),
     (
-        "/switch claude",
-        "Switch active harness to Claude Code (claude)",
+        "/provider",
+        "Open the provider picker (multi-provider harnesses)",
     ),
-    ("/switch codex", "Switch active harness to Codex (codex)"),
-    ("/model", "Open model picker modal for active harness"),
-    ("/effort", "Open reasoning effort / think level modal"),
-    ("/think", "Alias for /effort (change reasoning level)"),
-    ("/skills", "List loaded workspace and global skills"),
-    ("/auto", "Toggle auto-approving tool permissions"),
-    ("/clear", "Clear conversation history from screen"),
-    ("/help", "Show help, commands, and keybindings"),
+    ("/model", "Open the model picker"),
+    ("/effort", "Open the reasoning effort picker"),
+    ("/think", "Alias for /effort"),
+    ("/policy", "Open the permission policy picker"),
+    ("/resume", "Resume a previous session of the active harness"),
+    ("/sessions", "List recent sessions of the active harness"),
+    ("/usage", "Show token usage and cost"),
+    ("/skills", "List skills discovered in .agents/skills"),
+    ("/clear", "Clear the transcript"),
+    ("/help", "Show commands and shortcuts"),
     ("/quit", "Exit unharness"),
 ];
 
+pub struct App {
+    pub cwd: PathBuf,
+    pub workspace_root: Option<PathBuf>,
+    pub registry: Arc<Registry>,
+    pub config: Config,
+
+    pub active: HarnessId,
+    pub harness_options: Vec<HarnessOption>,
+    /// The policy the user asked for; the effective one is per harness.
+    pub policy_requested: PermissionPolicy,
+    pub providers: HashMap<HarnessId, ProviderId>,
+    pub models: HashMap<HarnessId, ModelRef>,
+    pub efforts: HashMap<HarnessId, String>,
+    model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
+
+    pub transcript: Transcript,
+    pub bridge_max_chars: usize,
+    /// Transcript length when each harness was last active (bridge start).
+    last_active_index: HashMap<HarnessId, usize>,
+    /// Session ids seen this run (or chosen via /resume), per harness.
+    pub session_ids: HashMap<HarnessId, String>,
+    pub session_alive: bool,
+    pub sessions_store: SessionsStore,
+    first_prompt: Option<String>,
+
+    pub input: String,
+    /// Char index into `input`.
+    pub cursor: usize,
+    pub scroll: u16,
+    pub auto_scroll: bool,
+
+    pub is_generating: bool,
+    pub generation_start: Option<Instant>,
+    pub generation_duration: Option<Duration>,
+    pub spinner_frame: usize,
+    pub turn_usage: Usage,
+    pub session_usage: Usage,
+
+    pub modal: Option<Modal>,
+    pending_prompts: VecDeque<PermissionRequest>,
+    pub suggestions: Vec<(String, String)>,
+    pub selected_suggestion: usize,
+
+    pub should_quit: bool,
+    actions: VecDeque<Action>,
+}
+
+pub struct AppInit {
+    pub cwd: PathBuf,
+    pub workspace_root: Option<PathBuf>,
+    pub registry: Arc<Registry>,
+    pub config: Config,
+    pub harness: HarnessId,
+    pub policy: PermissionPolicy,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub resume: Option<String>,
+}
+
 impl App {
-    pub fn new(
-        cwd: PathBuf,
-        initial_harness: HarnessKind,
-        auto_approve: bool,
-        config: &Config,
-    ) -> Self {
-        let mut selected_models = HashMap::new();
-        let mut selected_efforts = HashMap::new();
-        for &kind in HarnessKind::default_priority() {
-            let id = kind.as_str();
-            if let Some(m) = config.default_model(id) {
-                selected_models.insert(kind, m.to_string());
-            }
-            selected_efforts.insert(
-                kind,
-                config.default_effort(id).unwrap_or("high").to_string(),
-            );
-        }
+    pub fn new(init: AppInit) -> Self {
+        let registry = init.registry;
+        let config = init.config;
 
         let mut harness_options = Vec::new();
-        for &kind in HarnessKind::default_priority() {
-            let adapter = get_adapter(kind);
-            let custom_bin = config.binary_override(kind.as_str());
-            let bin = adapter.resolve_binary(custom_bin);
-            let installed = bin.is_some();
-            let version = bin.and_then(|p| adapter.version(&p));
+        for h in registry.all() {
+            let d = h.descriptor();
+            let probe = h.probe(config.binary_override(d.id.as_str()));
             harness_options.push(HarnessOption {
-                kind,
-                installed,
-                version,
+                id: d.id,
+                display_name: d.display_name,
+                installed: probe.binary.is_some(),
+                version: probe.version,
+                interactive_permissions: h.capabilities().interactive_permissions,
             });
         }
 
-        let mut app = Self {
-            messages: Vec::new(),
+        let mut providers = HashMap::new();
+        let mut models = HashMap::new();
+        let mut efforts = HashMap::new();
+        for h in registry.all() {
+            let id = h.descriptor().id;
+            let settings = config.harness(id.as_str());
+            let provider = settings
+                .and_then(|s| s.default_provider.clone())
+                .or_else(|| match h.descriptor().providers {
+                    ProviderSource::Static(list) => list.first().map(|(p, _)| p.to_string()),
+                    ProviderSource::Dynamic => None,
+                });
+            if let Some(p) = provider.clone() {
+                providers.insert(id, ProviderId::new(p));
+            }
+            if let (Some(p), Some(m)) = (
+                provider.clone(),
+                settings.and_then(|s| s.default_model.clone()),
+            ) {
+                models.insert(id, ModelRef::new(id, p.as_str(), m));
+            }
+            if let Some(e) = settings.and_then(|s| s.default_effort.clone()) {
+                efforts.insert(id, e);
+            }
+        }
+        if let Some(p) = init.provider {
+            providers.insert(init.harness, ProviderId::new(p));
+        }
+        if let Some(m) = init.model {
+            let p = providers
+                .get(&init.harness)
+                .cloned()
+                .unwrap_or_else(|| ProviderId::new("default"));
+            models.insert(init.harness, ModelRef::new(init.harness, p, m));
+        }
+        if let Some(e) = init.effort {
+            efforts.insert(init.harness, e);
+        }
+
+        let sessions_store = SessionsStore::open(init.workspace_root.as_deref(), &init.cwd);
+        let mut session_ids = HashMap::new();
+        if let Some(r) = init.resume {
+            session_ids.insert(init.harness, r);
+        }
+
+        let mut app = App {
+            cwd: init.cwd,
+            workspace_root: init.workspace_root,
+            registry,
+            bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
+            config,
+            active: init.harness,
+            harness_options,
+            policy_requested: init.policy,
+            providers,
+            models,
+            efforts,
+            model_cache: HashMap::new(),
+            transcript: Transcript::default(),
+            last_active_index: HashMap::new(),
+            session_ids,
+            session_alive: false,
+            sessions_store,
+            first_prompt: None,
             input: String::new(),
-            cursor_pos: 0,
+            cursor: 0,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
-            is_thinking: false,
             generation_start: None,
             generation_duration: None,
-            thought_start: None,
-            thought_duration: None,
-            active_harness: initial_harness,
-            last_used_harness: None,
-            harness_turn_count: 0,
-            auto_approve,
-            selected_models,
-            selected_efforts,
-            cwd,
             spinner_frame: 0,
-            should_quit: false,
-            popup: None,
-            picker_selected: 0,
-            harness_options,
-            model_options: Vec::new(),
-            model_picker_selected: 0,
-            effort_picker_selected: 0,
+            turn_usage: Usage::default(),
+            session_usage: Usage::default(),
+            modal: None,
+            pending_prompts: VecDeque::new(),
             suggestions: Vec::new(),
             selected_suggestion: 0,
+            should_quit: false,
+            actions: VecDeque::new(),
         };
 
-        app.messages.push(Message {
-            role: MessageRole::System,
-            content: format!(
-                "Welcome to unharness! Active harness: {}. Shortcuts: Ctrl+H (harness), Ctrl+M (model), Ctrl+E (effort), /help.",
-                initial_harness.display_name()
-            ),
-            sender: "unharness".to_string(),
-            duration: None,
-        });
-
+        let res = resolve_policy(&app.harness().capabilities(), app.policy_requested);
+        app.transcript.push_system(format!(
+            "Welcome to unharness. Harness: {}  Policy: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
+            app.active.display_name(),
+            res.effective
+        ));
+        if let Some(w) = res.warning {
+            app.transcript.push_notice(w);
+        }
+        if let Some(id) = app.session_ids.get(&app.active).cloned() {
+            app.transcript.push_notice(format!(
+                "resuming session {id}; prior transcript not replayed"
+            ));
+        }
         app
     }
 
-    pub fn current_model(&self) -> Option<String> {
-        self.selected_models.get(&self.active_harness).cloned()
+    // ----------------------------------------------------------------- accessors
+
+    pub fn harness(&self) -> &dyn Harness {
+        self.registry
+            .get(self.active)
+            .expect("active harness is registered")
     }
 
-    pub fn set_model_for_active_harness(&mut self, model_id: String) {
-        self.selected_models
-            .insert(self.active_harness, model_id.clone());
-        self.add_system_message(format!(
-            "Model set to '{}' for {}",
-            model_id,
-            self.active_harness.display_name()
-        ));
+    pub fn harness_binary(&self) -> Option<PathBuf> {
+        let d = self.harness().descriptor();
+        resolve_binary(d, self.config.binary_override(d.id.as_str()))
     }
 
-    pub fn current_effort(&self) -> String {
-        self.selected_efforts
-            .get(&self.active_harness)
-            .cloned()
-            .unwrap_or_else(|| "high".to_string())
+    pub fn effective_policy(&self) -> PermissionPolicy {
+        resolve_policy(&self.harness().capabilities(), self.policy_requested).effective
     }
 
-    pub fn set_effort_for_active_harness(&mut self, effort_id: String) {
-        let normalized = effort_id.to_lowercase();
-        self.selected_efforts
-            .insert(self.active_harness, normalized.clone());
-        self.add_system_message(format!(
-            "Reasoning effort set to '{}' for {}",
-            normalized,
-            self.active_harness.display_name()
-        ));
+    pub fn policy_warning(&self) -> Option<String> {
+        resolve_policy(&self.harness().capabilities(), self.policy_requested).warning
     }
 
-    pub fn current_elapsed_secs(&self) -> f32 {
+    pub fn current_provider(&self) -> Option<&ProviderId> {
+        self.providers.get(&self.active)
+    }
+
+    pub fn current_model(&self) -> Option<&ModelRef> {
+        self.models.get(&self.active)
+    }
+
+    pub fn current_effort(&self) -> Option<&str> {
+        self.efforts.get(&self.active).map(String::as_str)
+    }
+
+    pub fn model_label(&self) -> String {
+        match self.current_model() {
+            Some(m) => m.label(),
+            None => match self.current_provider() {
+                Some(p) => format!("{p}/default"),
+                None => "default".to_string(),
+            },
+        }
+    }
+
+    pub fn take_actions(&mut self) -> Vec<Action> {
+        self.actions.drain(..).collect()
+    }
+
+    pub fn is_thinking(&self) -> bool {
+        self.is_generating && self.transcript.is_thinking()
+    }
+
+    pub fn elapsed_secs(&self) -> f32 {
         if self.is_generating {
             self.generation_start
                 .map(|s| s.elapsed().as_secs_f32())
@@ -255,394 +298,873 @@ impl App {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
     }
 
-    pub fn current_spinner(&self) -> &'static str {
+    pub fn spinner(&self) -> &'static str {
         SPINNER_FRAMES[self.spinner_frame]
     }
 
-    pub fn start_generation(&mut self) {
+    // --------------------------------------------------------------- generation
+
+    fn start_generation(&mut self) {
         self.is_generating = true;
-        self.is_thinking = false;
         self.generation_start = Some(Instant::now());
         self.generation_duration = None;
-        self.thought_start = None;
-        self.thought_duration = None;
+        self.turn_usage = Usage::default();
+        self.auto_scroll = true;
     }
 
-    pub fn finish_generation(&mut self) {
+    fn finish_generation(&mut self) {
+        if !self.is_generating {
+            return;
+        }
         self.is_generating = false;
-        self.is_thinking = false;
-        if let Some(start) = self.generation_start.take() {
-            let dur = start.elapsed();
-            self.generation_duration = Some(dur);
-            if let Some(last) = self.messages.last_mut()
-                && last.role == MessageRole::Assistant
-                && last.duration.is_none()
-            {
-                last.duration = Some(dur);
-            }
-        }
+        let dur = self
+            .generation_start
+            .take()
+            .map(|s| s.elapsed())
+            .unwrap_or_default();
+        self.generation_duration = Some(dur);
+        self.transcript.finish_turn(dur);
     }
 
-    pub fn add_user_message(&mut self, text: String) {
-        self.messages.push(Message {
-            role: MessageRole::User,
-            content: text,
-            sender: "You".to_string(),
-            duration: None,
-        });
-        self.auto_scroll = true;
-    }
-
-    pub fn append_assistant_text(&mut self, delta: &str) {
-        // If coming from thinking, mark thought finished
-        if self.is_thinking {
-            self.is_thinking = false;
-            if let Some(t_start) = self.thought_start.take() {
-                let dur = t_start.elapsed();
-                self.thought_duration = Some(dur);
-                if let Some(last) = self.messages.last_mut()
-                    && last.role == MessageRole::Thought
-                    && last.duration.is_none()
-                {
-                    last.duration = Some(dur);
-                }
-            }
-        }
-
-        let sender = self.active_harness.display_name().to_string();
-        if let Some(last) = self.messages.last_mut()
-            && last.role == MessageRole::Assistant
-            && last.sender == sender
-        {
-            last.content.push_str(delta);
+    /// Send the prompt box contents as a turn.
+    pub fn submit_prompt(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() || self.is_generating {
             return;
         }
-        self.messages.push(Message {
-            role: MessageRole::Assistant,
-            content: delta.to_string(),
-            sender,
-            duration: None,
-        });
-    }
-
-    pub fn append_thought_text(&mut self, delta: &str) {
-        if !self.is_thinking {
-            self.is_thinking = true;
-            self.thought_start = Some(Instant::now());
+        if self.first_prompt.is_none() {
+            self.first_prompt = Some(text.clone());
         }
 
-        let sender = self.active_harness.display_name().to_string();
-        if let Some(last) = self.messages.last_mut()
-            && last.role == MessageRole::Thought
-            && last.sender == sender
-        {
-            last.content.push_str(delta);
-            return;
-        }
-        self.messages.push(Message {
-            role: MessageRole::Thought,
-            content: delta.to_string(),
-            sender,
-            duration: None,
-        });
-    }
-
-    pub fn add_tool_message(&mut self, name: &str, summary: &str) {
-        let content = if summary.is_empty() {
-            format!("⚡ Executing tool: {}", name)
+        // Bridge context from other harnesses: everything since this harness
+        // was last active, or everything on its first visit. Nothing when the
+        // live session already saw the whole transcript.
+        let visited = self.session_ids.contains_key(&self.active) || self.session_alive;
+        let from = if visited {
+            self.last_active_index
+                .get(&self.active)
+                .copied()
+                .unwrap_or(self.transcript.blocks.len())
         } else {
-            format!("⚡ Tool {}: {}", name, summary)
+            0
         };
-        self.messages.push(Message {
-            role: MessageRole::Tool,
-            content,
-            sender: self.active_harness.display_name().to_string(),
-            duration: None,
-        });
-    }
-
-    pub fn add_error_message(&mut self, err: String) {
-        self.messages.push(Message {
-            role: MessageRole::Error,
-            content: err,
-            sender: "unharness".to_string(),
-            duration: None,
-        });
-        self.auto_scroll = true;
-    }
-
-    pub fn add_system_message(&mut self, text: String) {
-        self.messages.push(Message {
-            role: MessageRole::System,
-            content: text,
-            sender: "unharness".to_string(),
-            duration: None,
-        });
-        self.auto_scroll = true;
-    }
-
-    pub fn switch_harness(&mut self, next: HarnessKind) {
-        if self.active_harness != next {
-            self.active_harness = next;
-            let model_display = self
-                .current_model()
-                .unwrap_or_else(|| "default".to_string());
-            let effort_display = self.current_effort();
-            self.add_system_message(format!(
-                "Switched active harness to {} (Model: {}, Effort: {})",
-                next.display_name(),
-                model_display,
-                effort_display
-            ));
-        }
-    }
-
-    pub fn toggle_auto_approve(&mut self) {
-        self.auto_approve = !self.auto_approve;
-        let status = if self.auto_approve { "ON" } else { "OFF" };
-        self.add_system_message(format!("Auto-approve permissions toggled: {}", status));
-    }
-
-    pub fn prepare_prompt_for_dispatch(&mut self, new_prompt: &str) -> (String, bool) {
-        let is_same_harness = self.last_used_harness == Some(self.active_harness);
-
-        if is_same_harness && self.harness_turn_count > 0 {
-            self.harness_turn_count += 1;
-            (new_prompt.to_string(), true)
+        let bridge = if from >= self.transcript.blocks.len() {
+            None
         } else {
-            self.last_used_harness = Some(self.active_harness);
-            self.harness_turn_count = 1;
+            self.transcript.bridge_text(from, self.bridge_max_chars)
+        };
+        self.last_active_index.remove(&self.active);
 
-            let mut history_chunks = Vec::new();
-            for msg in &self.messages {
-                match msg.role {
-                    MessageRole::User => {
-                        history_chunks.push(format!("User: {}", msg.content));
-                    }
-                    MessageRole::Assistant => {
-                        history_chunks.push(format!("{}: {}", msg.sender, msg.content));
-                    }
-                    _ => {}
-                }
-            }
+        self.transcript.push_user(text.clone());
+        self.start_generation();
 
-            if history_chunks.is_empty() {
-                (new_prompt.to_string(), false)
-            } else {
-                let history_text = history_chunks.join("\n\n");
-                let bridged_prompt = format!(
-                    "[Context: Previous conversation in unharness session]\n{}\n\n[Current Task for {}]:\n{}",
-                    history_text,
-                    self.active_harness.display_name(),
-                    new_prompt
+        let outgoing = match bridge {
+            Some(ctx) => format!(
+                "[Context: earlier conversation in this unharness session, possibly with other agents]\n{ctx}\n\n[Current task for {}]:\n{text}",
+                self.active.short_name()
+            ),
+            None => text,
+        };
+
+        if !self.session_alive {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+        self.actions.push_back(Action::SendTurn(outgoing));
+    }
+
+    pub fn interrupt(&mut self) {
+        if self.is_generating {
+            self.actions
+                .push_back(Action::Command(SessionCommand::Interrupt));
+            self.transcript.push_system("Interrupting…");
+        }
+    }
+
+    // ------------------------------------------------------------- session events
+
+    pub fn on_event(&mut self, ev: AgentEvent) {
+        let sender = self.active.short_name().to_string();
+        match ev {
+            AgentEvent::SessionStarted { session_id, model } => {
+                let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+                self.session_ids.insert(self.active, session_id.clone());
+                let title = self.first_prompt.clone().unwrap_or_default();
+                self.sessions_store.record_started(
+                    self.active,
+                    &session_id,
+                    model.as_deref(),
+                    &title,
                 );
-                (bridged_prompt, false)
-            }
-        }
-    }
-
-    // Modal picker helpers (Harness)
-    pub fn open_harness_picker(&mut self) {
-        for (i, opt) in self.harness_options.iter().enumerate() {
-            if opt.kind == self.active_harness {
-                self.picker_selected = i;
-                break;
-            }
-        }
-        self.popup = Some(ActivePopup::HarnessPicker);
-    }
-
-    // Modal picker helpers (Model)
-    pub fn open_model_picker(&mut self) {
-        let adapter = get_adapter(self.active_harness);
-        let bin = adapter.resolve_binary(None);
-        self.model_options = adapter.available_models(bin.as_deref());
-
-        self.model_picker_selected = 0;
-        if let Some(cur) = self.current_model() {
-            for (i, m) in self.model_options.iter().enumerate() {
-                if m.id == cur {
-                    self.model_picker_selected = i;
-                    break;
-                }
-            }
-        }
-        self.popup = Some(ActivePopup::ModelPicker);
-    }
-
-    // Modal picker helpers (Effort / Think)
-    pub fn open_effort_picker(&mut self) {
-        let current = self.current_effort();
-        self.effort_picker_selected = 0;
-        for (i, eff) in EFFORT_LEVELS.iter().enumerate() {
-            if eff.id == current {
-                self.effort_picker_selected = i;
-                break;
-            }
-        }
-        self.popup = Some(ActivePopup::EffortPicker);
-    }
-
-    pub fn close_popup(&mut self) {
-        self.popup = None;
-    }
-
-    pub fn picker_up(&mut self) {
-        match self.popup {
-            Some(ActivePopup::HarnessPicker) => {
-                if self.picker_selected > 0 {
-                    self.picker_selected -= 1;
-                } else if !self.harness_options.is_empty() {
-                    self.picker_selected = self.harness_options.len() - 1;
-                }
-            }
-            Some(ActivePopup::ModelPicker) => {
-                if self.model_picker_selected > 0 {
-                    self.model_picker_selected -= 1;
-                } else if !self.model_options.is_empty() {
-                    self.model_picker_selected = self.model_options.len() - 1;
-                }
-            }
-            Some(ActivePopup::EffortPicker) => {
-                if self.effort_picker_selected > 0 {
-                    self.effort_picker_selected -= 1;
-                } else {
-                    self.effort_picker_selected = EFFORT_LEVELS.len() - 1;
-                }
-            }
-            None => {}
-        }
-    }
-
-    pub fn picker_down(&mut self) {
-        match self.popup {
-            Some(ActivePopup::HarnessPicker) => {
-                if !self.harness_options.is_empty() {
-                    self.picker_selected = (self.picker_selected + 1) % self.harness_options.len();
-                }
-            }
-            Some(ActivePopup::ModelPicker) => {
-                if !self.model_options.is_empty() {
-                    self.model_picker_selected =
-                        (self.model_picker_selected + 1) % self.model_options.len();
-                }
-            }
-            Some(ActivePopup::EffortPicker) => {
-                self.effort_picker_selected =
-                    (self.effort_picker_selected + 1) % EFFORT_LEVELS.len();
-            }
-            None => {}
-        }
-    }
-
-    pub fn confirm_picker(&mut self) {
-        match self.popup {
-            Some(ActivePopup::HarnessPicker) => {
-                if let Some(opt) = self.harness_options.get(self.picker_selected) {
-                    let kind = opt.kind;
-                    self.switch_harness(kind);
-                }
-            }
-            Some(ActivePopup::ModelPicker) => {
-                if let Some(opt) = self.model_options.get(self.model_picker_selected) {
-                    let model_id = opt.id.clone();
-                    self.set_model_for_active_harness(model_id);
-                }
-            }
-            Some(ActivePopup::EffortPicker) => {
-                if let Some(eff) = EFFORT_LEVELS.get(self.effort_picker_selected) {
-                    self.set_effort_for_active_harness(eff.id.to_string());
-                }
-            }
-            None => {}
-        }
-        self.close_popup();
-    }
-
-    // Suggestions helpers
-    pub fn update_suggestions(&mut self) {
-        if self.input.starts_with('/') {
-            let query = self.input.to_lowercase();
-            let mut matches = Vec::new();
-
-            // 1. /model <subquery>
-            if query.starts_with("/model ") || query == "/model" {
-                let subquery = query.strip_prefix("/model ").unwrap_or("").trim();
-                let adapter = get_adapter(self.active_harness);
-                let bin = adapter.resolve_binary(None);
-                let models = adapter.available_models(bin.as_deref());
-
-                if query == "/model" {
-                    matches.push(("/model".to_string(), "Open model picker modal".to_string()));
-                }
-
-                for m in models {
-                    if subquery.is_empty()
-                        || m.id.to_lowercase().contains(subquery)
-                        || m.display_name.to_lowercase().contains(subquery)
-                    {
-                        let desc = m.description.unwrap_or(m.display_name);
-                        matches.push((format!("/model {}", m.id), desc));
-                    }
-                }
-            }
-            // 2. /effort or /think <subquery>
-            else if query.starts_with("/effort ")
-                || query == "/effort"
-                || query.starts_with("/think ")
-                || query == "/think"
-            {
-                let (prefix, subquery) = if query.starts_with("/think") {
-                    ("/think", query.strip_prefix("/think ").unwrap_or("").trim())
-                } else {
-                    (
-                        "/effort",
-                        query.strip_prefix("/effort ").unwrap_or("").trim(),
-                    )
-                };
-
-                if query == prefix {
-                    matches.push((
-                        prefix.to_string(),
-                        "Open reasoning effort picker modal".to_string(),
+                let _ = self.sessions_store.save();
+                if is_new {
+                    self.transcript.push_notice(format!(
+                        "session {} ({})",
+                        session_id,
+                        model.unwrap_or_else(|| "default model".into())
                     ));
                 }
-
-                for eff in EFFORT_LEVELS {
-                    if subquery.is_empty() || eff.id.starts_with(subquery) {
-                        matches.push((
-                            format!("{} {}", prefix, eff.id),
-                            eff.description.to_string(),
-                        ));
-                    }
+            }
+            AgentEvent::TurnStarted => {
+                if !self.is_generating {
+                    self.start_generation();
                 }
             }
-            // 3. Base commands
-            else {
-                for (cmd, desc) in BASE_COMMAND_CATALOG {
-                    if cmd.to_lowercase().starts_with(&query) || (query == "/" && !cmd.is_empty()) {
-                        matches.push((cmd.to_string(), desc.to_string()));
-                    }
+            AgentEvent::TextDelta(t) => self.transcript.append_assistant(&sender, &t),
+            AgentEvent::ThinkingDelta(t) => self.transcript.append_thought(&t),
+            AgentEvent::ToolCallStarted { id, name, input } => {
+                self.transcript.tool_started(&id, &name, input)
+            }
+            AgentEvent::ToolCallDelta { .. } => {
+                // Streaming args are not shown; ToolCallStarted carries the final input.
+            }
+            AgentEvent::ToolCallResult {
+                id,
+                output,
+                is_error,
+            } => self.transcript.tool_result(&id, &output, is_error),
+            AgentEvent::PermissionRequest(req) => self.on_permission_request(req),
+            AgentEvent::Usage(u) => {
+                if u.cumulative {
+                    self.session_usage = u;
+                } else {
+                    self.session_usage.add(&u);
+                    self.turn_usage = u;
                 }
             }
-
-            self.suggestions = matches;
-            if self.selected_suggestion >= self.suggestions.len() {
-                self.selected_suggestion = 0;
+            AgentEvent::CapabilitiesChanged { effort_levels } => {
+                self.transcript
+                    .push_notice(format!("effort levels now: {}", effort_levels.join(", ")));
             }
+            AgentEvent::TurnCompleted { stop_reason } => {
+                match stop_reason {
+                    StopReason::Done => {}
+                    StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
+                    StopReason::Error(e) => self.transcript.push_error(e),
+                }
+                self.finish_generation();
+                if let Some(id) = self.session_ids.get(&self.active).cloned() {
+                    let title = self.first_prompt.clone().unwrap_or_default();
+                    self.sessions_store.touch(self.active, &id, &title);
+                    let _ = self.sessions_store.save();
+                }
+            }
+            AgentEvent::Notice(n) => self.transcript.push_notice(n),
+            AgentEvent::Error(e) => self.transcript.push_error(e),
+            AgentEvent::ProcessExited { code } => {
+                self.session_alive = false;
+                if self.is_generating {
+                    self.finish_generation();
+                    self.transcript.push_error(format!(
+                        "{} exited{} before the turn completed",
+                        self.active.short_name(),
+                        code.map(|c| format!(" with code {c}")).unwrap_or_default()
+                    ));
+                }
+                if self.modal.as_ref().is_some_and(Modal::is_prompt) {
+                    self.modal = None;
+                }
+                self.pending_prompts.clear();
+            }
+        }
+    }
+
+    fn on_permission_request(&mut self, req: PermissionRequest) {
+        if self.modal.is_none() {
+            self.modal = Some(Modal::for_request(req));
         } else {
-            self.suggestions.clear();
+            self.pending_prompts.push_back(req);
+        }
+    }
+
+    fn answer_prompt(&mut self, decision: PermissionDecision) {
+        if let Some(id) = self.modal.as_ref().and_then(Modal::request_id) {
+            self.actions
+                .push_back(Action::Command(SessionCommand::RespondPermission {
+                    id: id.to_string(),
+                    decision,
+                }));
+        }
+        self.modal = self.pending_prompts.pop_front().map(Modal::for_request);
+    }
+
+    // ------------------------------------------------------------------ settings
+
+    pub fn switch_harness(&mut self, next: HarnessId) {
+        if next == self.active {
+            return;
+        }
+        if self.registry.get(next).is_none() {
+            self.transcript
+                .push_error(format!("harness '{next}' is not available"));
+            return;
+        }
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before switching harness");
+            return;
+        }
+        if self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        self.last_active_index
+            .insert(self.active, self.transcript.blocks.len());
+        self.active = next;
+        self.session_usage = Usage::default();
+        self.turn_usage = Usage::default();
+        self.transcript.push_system(format!(
+            "Switched to {} (model: {}, effort: {}, policy: {})",
+            next.display_name(),
+            self.model_label(),
+            self.current_effort().unwrap_or("default"),
+            self.effective_policy()
+        ));
+        if let Some(w) = self.policy_warning() {
+            self.transcript.push_notice(w);
+        }
+    }
+
+    pub fn set_policy(&mut self, p: PermissionPolicy) {
+        self.policy_requested = p;
+        let res = resolve_policy(&self.harness().capabilities(), p);
+        self.transcript
+            .push_system(format!("Permission policy: {}", res.effective));
+        if let Some(w) = res.warning {
+            self.transcript.push_notice(w);
+        }
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::SetPolicy(res.effective)));
+        }
+    }
+
+    pub fn set_provider(&mut self, provider: ProviderId) {
+        if self.current_provider() != Some(&provider) {
+            self.models.remove(&self.active);
+        }
+        self.providers.insert(self.active, provider.clone());
+        self.transcript
+            .push_system(format!("Provider: {provider} (pick a model with Ctrl+M)"));
+    }
+
+    pub fn set_model(&mut self, model: String) {
+        let provider = self
+            .current_provider()
+            .cloned()
+            .unwrap_or_else(|| ProviderId::new("default"));
+        let m = ModelRef::new(self.active, provider, model);
+        self.transcript.push_system(format!("Model: {}", m.label()));
+        self.models.insert(self.active, m.clone());
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::SetModel(m)));
+        }
+    }
+
+    pub fn set_effort(&mut self, effort: String) {
+        let caps = self.harness().capabilities();
+        if caps.effort_levels.is_empty() {
+            self.transcript.push_error(format!(
+                "{} does not expose reasoning effort",
+                self.active.display_name()
+            ));
+            return;
+        }
+        let effort = effort.to_lowercase();
+        if !caps.supports_effort(&effort) {
+            self.transcript.push_error(format!(
+                "unknown effort '{}'; {} supports: {}",
+                effort,
+                self.active.short_name(),
+                caps.effort_levels.join(", ")
+            ));
+            return;
+        }
+        self.efforts.insert(self.active, effort.clone());
+        self.transcript.push_system(format!("Effort: {effort}"));
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::SetEffort(Some(effort))));
+        }
+    }
+
+    pub fn resume_session(&mut self, id: String) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before resuming");
+            return;
+        }
+        if !self.harness().capabilities().resume_by_id {
+            self.transcript.push_error(format!(
+                "{} cannot resume sessions by id",
+                self.active.display_name()
+            ));
+            return;
+        }
+        if self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        self.session_ids.insert(self.active, id.clone());
+        self.last_active_index
+            .insert(self.active, self.transcript.blocks.len());
+        self.transcript.push_notice(format!(
+            "resuming session {id}; prior transcript not replayed"
+        ));
+        self.actions
+            .push_back(Action::StartSession { resume: Some(id) });
+    }
+
+    pub fn quit(&mut self) {
+        if self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        self.should_quit = true;
+    }
+
+    // ------------------------------------------------------------------- pickers
+
+    pub fn open_harness_picker(&mut self) {
+        let idx = self
+            .harness_options
+            .iter()
+            .position(|o| o.id == self.active);
+        self.modal = Some(Modal::Harness(
+            ListPicker::new(self.harness_options.clone()).with_selected(idx),
+        ));
+    }
+
+    pub fn open_provider_picker(&mut self) {
+        let Some(binary) = self.harness_binary() else {
+            self.transcript
+                .push_error(format!("{} binary not found", self.active.short_name()));
+            return;
+        };
+        let providers = match self.harness().list_providers(&binary) {
+            Ok(p) if !p.is_empty() => p,
+            Ok(_) => {
+                self.transcript
+                    .push_notice("this harness reports no providers");
+                return;
+            }
+            Err(e) => {
+                self.transcript.push_error(format!("list providers: {e}"));
+                return;
+            }
+        };
+        let items: Vec<ProviderOption> = providers
+            .into_iter()
+            .map(|(id, name)| ProviderOption { id: id.0, name })
+            .collect();
+        let idx = self
+            .current_provider()
+            .and_then(|p| items.iter().position(|i| i.id == p.0));
+        self.modal = Some(Modal::Provider(ListPicker::new(items).with_selected(idx)));
+    }
+
+    fn models_for(&mut self, provider: &ProviderId) -> Result<Vec<ModelInfo>, String> {
+        let key = (self.active, provider.0.clone());
+        if let Some(m) = self.model_cache.get(&key) {
+            return Ok(m.clone());
+        }
+        let binary = self
+            .harness_binary()
+            .ok_or_else(|| format!("{} binary not found", self.active.short_name()))?;
+        let models = self
+            .harness()
+            .list_models(&binary, provider)
+            .map_err(|e| e.to_string())?;
+        self.model_cache.insert(key, models.clone());
+        Ok(models)
+    }
+
+    pub fn open_model_picker(&mut self) {
+        let Some(provider) = self.current_provider().cloned() else {
+            if self.harness().capabilities().multi_provider {
+                self.open_provider_picker();
+            } else {
+                self.transcript
+                    .push_notice("no provider configured for this harness");
+            }
+            return;
+        };
+        match self.models_for(&provider) {
+            Ok(models) if !models.is_empty() => {
+                let idx = self
+                    .current_model()
+                    .and_then(|m| models.iter().position(|i| i.model_ref.model == m.model));
+                self.modal = Some(Modal::Model(ListPicker::new(models).with_selected(idx)));
+            }
+            Ok(_) => self.transcript.push_notice(format!(
+                "no models reported for {provider}; use /model <name> to set one directly"
+            )),
+            Err(e) => self.transcript.push_error(format!("list models: {e}")),
+        }
+    }
+
+    pub fn open_effort_picker(&mut self) {
+        let levels = self.harness().capabilities().effort_levels;
+        if levels.is_empty() {
+            self.transcript.push_error(format!(
+                "{} does not expose reasoning effort",
+                self.active.display_name()
+            ));
+            return;
+        }
+        let idx = self
+            .current_effort()
+            .and_then(|e| levels.iter().position(|l| l == e));
+        self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
+    }
+
+    pub fn open_policy_picker(&mut self) {
+        let idx = PermissionPolicy::ALL
+            .iter()
+            .position(|p| *p == self.policy_requested);
+        self.modal = Some(Modal::Policy(
+            ListPicker::new(PermissionPolicy::ALL.to_vec()).with_selected(idx),
+        ));
+    }
+
+    pub fn open_resume_picker(&mut self) {
+        let recent = self.sessions_store.recent(self.active).to_vec();
+        if recent.is_empty() {
+            self.transcript.push_notice(format!(
+                "no recorded sessions for {}",
+                self.active.short_name()
+            ));
+            return;
+        }
+        self.modal = Some(Modal::Resume(ListPicker::new(recent)));
+    }
+
+    pub fn close_modal(&mut self) {
+        if let Some(decision) = self.modal.as_ref().and_then(Modal::dismiss_decision) {
+            self.answer_prompt(decision);
+        } else {
+            self.modal = None;
+        }
+    }
+
+    // ------------------------------------------------------------------ modal keys
+
+    /// Route a key to the open modal. Local pickers close on Enter/Esc; prompt
+    /// modals send their decision through `answer_prompt`.
+    pub fn handle_modal_key(&mut self, key: KeyEvent) {
+        let Some(mut modal) = self.modal.take() else {
+            return;
+        };
+        let outcome = match &mut modal {
+            Modal::Harness(p) => picker_nav(p, key.code).map(|c| {
+                c.and_then(|_| p.current().map(|o| (o.id, o.installed)))
+                    .map(ModalChoice::Harness)
+            }),
+            Modal::Provider(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|o| ModalChoice::Provider(o.id.clone())))),
+            Modal::Model(p) => picker_nav(p, key.code).map(|c| {
+                c.and_then(|_| {
+                    p.current()
+                        .map(|m| ModalChoice::Model(m.model_ref.model.clone()))
+                })
+            }),
+            Modal::Effort(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|e| ModalChoice::Effort(e.clone())))),
+            Modal::Policy(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
+            Modal::Resume(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Resume(r.id.clone())))),
+            Modal::Permission(m) => {
+                if m.denying {
+                    match key.code {
+                        KeyCode::Enter => {
+                            let reason = if m.reason.trim().is_empty() {
+                                "denied by user".to_string()
+                            } else {
+                                m.reason.trim().to_string()
+                            };
+                            Some(Some(ModalChoice::Decision(PermissionDecision::Deny {
+                                reason,
+                            })))
+                        }
+                        KeyCode::Esc => {
+                            m.denying = false;
+                            None
+                        }
+                        KeyCode::Backspace => {
+                            m.reason.pop();
+                            None
+                        }
+                        KeyCode::Char(c) => {
+                            m.reason.push(c);
+                            None
+                        }
+                        _ => None,
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') => {
+                            Some(Some(ModalChoice::Decision(PermissionDecision::Allow {
+                                updated_input: None,
+                            })))
+                        }
+                        KeyCode::Char('a') => {
+                            Some(Some(ModalChoice::Decision(PermissionDecision::AllowAlways)))
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('d') => {
+                            m.denying = true;
+                            None
+                        }
+                        KeyCode::Char('i') => {
+                            m.show_input = !m.show_input;
+                            None
+                        }
+                        KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                        _ => None,
+                    }
+                }
+            }
+            Modal::Question(m) => {
+                if m.editing_other {
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Esc => m.editing_other = false,
+                        KeyCode::Backspace => {
+                            m.other[m.idx].pop();
+                        }
+                        KeyCode::Char(c) => m.other[m.idx].push(c),
+                        _ => {}
+                    }
+                    None
+                } else {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            m.up();
+                            None
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            m.down();
+                            None
+                        }
+                        KeyCode::Char(' ') => {
+                            m.choose();
+                            None
+                        }
+                        KeyCode::Left => {
+                            m.prev_page();
+                            None
+                        }
+                        KeyCode::Right | KeyCode::Tab => {
+                            m.next_page();
+                            None
+                        }
+                        KeyCode::Enter => {
+                            let page_done = m.choose() || m.has_answer(m.idx);
+                            if page_done
+                                && !m.next_page()
+                                && (0..m.questions.len()).all(|q| m.has_answer(q))
+                            {
+                                Some(Some(ModalChoice::Decision(PermissionDecision::Answer(
+                                    m.answers(),
+                                ))))
+                            } else {
+                                None
+                            }
+                        }
+                        KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                        _ => None,
+                    }
+                }
+            }
+            Modal::Confirm(_) => match key.code {
+                KeyCode::Enter | KeyCode::Char('y') => Some(Some(ModalChoice::Decision(
+                    PermissionDecision::Answer(Value::Bool(true)),
+                ))),
+                KeyCode::Char('n') => Some(Some(ModalChoice::Decision(
+                    PermissionDecision::Answer(Value::Bool(false)),
+                ))),
+                KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                _ => None,
+            },
+            Modal::Select(m) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    m.picker.up();
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    m.picker.down();
+                    None
+                }
+                KeyCode::Enter => Some(Some(ModalChoice::Decision(PermissionDecision::Answer(
+                    m.picker
+                        .current()
+                        .cloned()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                )))),
+                KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                _ => None,
+            },
+            Modal::Input(m) => match key.code {
+                KeyCode::Enter if !m.multiline || key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Some(Some(ModalChoice::Decision(PermissionDecision::Answer(
+                        Value::String(m.text.clone()),
+                    ))))
+                }
+                KeyCode::Enter => {
+                    m.text.push('\n');
+                    None
+                }
+                KeyCode::Backspace => {
+                    m.text.pop();
+                    None
+                }
+                KeyCode::Char(c) => {
+                    m.text.push(c);
+                    None
+                }
+                KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                _ => None,
+            },
+        };
+
+        match outcome {
+            // Key handled, modal stays open.
+            None => self.modal = Some(modal),
+            // Modal closed without a choice (Esc on a local picker).
+            Some(None) => {}
+            Some(Some(choice)) => {
+                self.modal = Some(modal);
+                match choice {
+                    ModalChoice::Harness((id, installed)) => {
+                        self.modal = None;
+                        if installed {
+                            self.switch_harness(id);
+                        } else {
+                            self.transcript.push_error(format!("{id} is not installed"));
+                        }
+                    }
+                    ModalChoice::Provider(id) => {
+                        self.modal = None;
+                        self.set_provider(ProviderId::new(id));
+                        self.open_model_picker();
+                    }
+                    ModalChoice::Model(m) => {
+                        self.modal = None;
+                        self.set_model(m);
+                    }
+                    ModalChoice::Effort(e) => {
+                        self.modal = None;
+                        self.set_effort(e);
+                    }
+                    ModalChoice::Policy(p) => {
+                        self.modal = None;
+                        self.set_policy(p);
+                    }
+                    ModalChoice::Resume(id) => {
+                        self.modal = None;
+                        self.resume_session(id);
+                    }
+                    ModalChoice::Decision(d) => self.answer_prompt(d),
+                    ModalChoice::Dismiss => self.close_modal(),
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- slash commands
+
+    pub fn handle_slash_command(&mut self, cmd: &str) {
+        let mut parts = cmd.split_whitespace();
+        let name = parts.next().unwrap_or("");
+        let arg = parts.next().map(str::to_string);
+        match name {
+            "/switch" => match arg {
+                Some(a) => match HarnessId::parse(&a) {
+                    Some(id) => self.switch_harness(id),
+                    None => self.transcript.push_error(format!("unknown harness '{a}'")),
+                },
+                None => self.open_harness_picker(),
+            },
+            "/provider" => match arg {
+                Some(a) => self.set_provider(ProviderId::new(a)),
+                None => self.open_provider_picker(),
+            },
+            "/model" => match arg {
+                Some(a) => self.set_model(a),
+                None => self.open_model_picker(),
+            },
+            "/effort" | "/think" => match arg {
+                Some(a) => self.set_effort(a),
+                None => self.open_effort_picker(),
+            },
+            "/policy" => match arg {
+                Some(a) => match PermissionPolicy::parse(&a) {
+                    Some(p) => self.set_policy(p),
+                    None => self.transcript.push_error(format!(
+                        "unknown policy '{a}' (ask, accept-edits, auto, bypass)"
+                    )),
+                },
+                None => self.open_policy_picker(),
+            },
+            "/resume" => match arg {
+                Some(a) => self.resume_session(a),
+                None => self.open_resume_picker(),
+            },
+            "/sessions" => {
+                let recent = self.sessions_store.recent(self.active);
+                if recent.is_empty() {
+                    self.transcript.push_notice("no recorded sessions");
+                } else {
+                    let lines: Vec<String> = recent
+                        .iter()
+                        .map(|r| format!("• {}  {}  {}", r.id, r.last_used, r.title))
+                        .collect();
+                    self.transcript.push_system(format!(
+                        "Recent {} sessions:\n{}",
+                        self.active.short_name(),
+                        lines.join("\n")
+                    ));
+                }
+            }
+            "/usage" => {
+                let t = &self.turn_usage;
+                let s = &self.session_usage;
+                self.transcript.push_system(format!(
+                    "Last turn: {}↑ {}↓ (cache read {}, write {}){}\nSession: {} tokens{}",
+                    t.input,
+                    t.output,
+                    t.cache_read,
+                    t.cache_write,
+                    t.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
+                    s.total_tokens(),
+                    s.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
+                ));
+            }
+            "/skills" => {
+                let mut list = Vec::new();
+                if let Some(root) = &self.workspace_root {
+                    for s in crate::skills::discover_skills_in_dir(
+                        &crate::skills::workspace_skills_dir(root),
+                    ) {
+                        list.push(format!("• [workspace] {}", s.name));
+                    }
+                }
+                if let Some(dir) = crate::skills::global_skills_dir() {
+                    for s in crate::skills::discover_skills_in_dir(&dir) {
+                        list.push(format!("• [global] {}", s.name));
+                    }
+                }
+                if list.is_empty() {
+                    self.transcript
+                        .push_notice("no skills in .agents/skills (try `unharness skills add`)");
+                } else {
+                    self.transcript.push_system(format!(
+                        "Skills ({}):\n{}",
+                        list.len(),
+                        list.join("\n")
+                    ));
+                }
+            }
+            "/clear" => {
+                self.transcript.clear();
+                self.transcript.push_system("Transcript cleared.");
+            }
+            "/help" => {
+                let mut help = String::from("Commands:\n");
+                for (c, d) in BASE_COMMANDS {
+                    help.push_str(&format!("  {c:<10} {d}\n"));
+                }
+                help.push_str(
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit",
+                );
+                self.transcript.push_system(help);
+            }
+            "/quit" | "/exit" => self.quit(),
+            other => self
+                .transcript
+                .push_error(format!("unknown command '{other}'; /help lists commands")),
+        }
+    }
+
+    // ------------------------------------------------------------------ suggestions
+
+    pub fn update_suggestions(&mut self) {
+        self.suggestions.clear();
+        if !self.input.starts_with('/') {
+            self.selected_suggestion = 0;
+            return;
+        }
+        let query = self.input.to_lowercase();
+        let (cmd, sub) = match query.split_once(' ') {
+            Some((c, s)) => (c.to_string(), Some(s.trim().to_string())),
+            None => (query.clone(), None),
+        };
+        let mut out = Vec::new();
+        match (cmd.as_str(), sub.as_deref()) {
+            ("/switch", Some(s)) => {
+                for o in &self.harness_options {
+                    let id = o.id.as_str();
+                    if id.starts_with(s) {
+                        out.push((format!("/switch {id}"), o.display_name.to_string()));
+                    }
+                }
+            }
+            ("/policy", Some(s)) => {
+                for p in PermissionPolicy::ALL {
+                    if p.as_str().starts_with(s) {
+                        out.push((format!("/policy {p}"), p.description().to_string()));
+                    }
+                }
+            }
+            ("/effort" | "/think", Some(s)) => {
+                for l in self.harness().capabilities().effort_levels {
+                    if l.starts_with(s) {
+                        out.push((format!("{cmd} {l}"), "Reasoning effort".to_string()));
+                    }
+                }
+            }
+            ("/model", Some(s)) => {
+                if let Some(p) = self.current_provider().cloned()
+                    && let Ok(models) = self.models_for(&p)
+                {
+                    for m in models {
+                        let id = m.model_ref.model.to_lowercase();
+                        if id.contains(s) || m.display_name.to_lowercase().contains(s) {
+                            out.push((
+                                format!("/model {}", m.model_ref.model),
+                                m.description.unwrap_or(m.display_name),
+                            ));
+                        }
+                    }
+                }
+            }
+            ("/resume", Some(s)) => {
+                for r in self.sessions_store.recent(self.active) {
+                    if r.id.starts_with(s) {
+                        out.push((format!("/resume {}", r.id), r.title.clone()));
+                    }
+                }
+            }
+            (_, None) => {
+                for (c, d) in BASE_COMMANDS {
+                    if c.starts_with(cmd.as_str()) {
+                        out.push((c.to_string(), d.to_string()));
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.suggestions = out;
+        if self.selected_suggestion >= self.suggestions.len() {
             self.selected_suggestion = 0;
         }
     }
 
     pub fn suggestion_up(&mut self) {
         if !self.suggestions.is_empty() {
-            if self.selected_suggestion > 0 {
-                self.selected_suggestion -= 1;
+            self.selected_suggestion = if self.selected_suggestion == 0 {
+                self.suggestions.len() - 1
             } else {
-                self.selected_suggestion = self.suggestions.len() - 1;
-            }
+                self.selected_suggestion - 1
+            };
         }
     }
 
@@ -655,194 +1177,370 @@ impl App {
     pub fn accept_suggestion(&mut self) {
         if let Some((cmd, _)) = self.suggestions.get(self.selected_suggestion) {
             self.input = cmd.clone();
-            self.cursor_pos = self.input.len();
+            self.cursor = self.input.chars().count();
             self.update_suggestions();
         }
     }
 
-    pub fn scroll_up(&mut self, amount: u16) {
-        self.auto_scroll = false;
-        self.scroll = self.scroll.saturating_sub(amount);
-    }
+    // ----------------------------------------------------------------- prompt box
 
-    pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll = self.scroll.saturating_add(amount);
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
+    fn byte_index(&self, char_idx: usize) -> usize {
+        self.input
+            .char_indices()
+            .nth(char_idx)
+            .map(|(i, _)| i)
+            .unwrap_or(self.input.len())
     }
 
     pub fn insert_char(&mut self, c: char) {
-        self.input.insert(self.cursor_pos, c);
-        self.cursor_pos += 1;
+        let idx = self.byte_index(self.cursor);
+        self.input.insert(idx, c);
+        self.cursor += 1;
         self.update_suggestions();
     }
 
     pub fn delete_backwards(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-            self.input.remove(self.cursor_pos);
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            let idx = self.byte_index(self.cursor);
+            self.input.remove(idx);
             self.update_suggestions();
         }
     }
 
     pub fn delete_forwards(&mut self) {
-        if self.cursor_pos < self.input.len() {
-            self.input.remove(self.cursor_pos);
+        if self.cursor < self.input.chars().count() {
+            let idx = self.byte_index(self.cursor);
+            self.input.remove(idx);
             self.update_suggestions();
         }
     }
 
     pub fn move_cursor_left(&mut self) {
-        if self.cursor_pos > 0 {
-            self.cursor_pos -= 1;
-        }
+        self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_pos < self.input.len() {
-            self.cursor_pos += 1;
-        }
+        self.cursor = (self.cursor + 1).min(self.input.chars().count());
     }
 
     pub fn move_cursor_home(&mut self) {
-        self.cursor_pos = 0;
+        self.cursor = 0;
     }
 
     pub fn move_cursor_end(&mut self) {
-        self.cursor_pos = self.input.len();
+        self.cursor = self.input.chars().count();
+    }
+
+    pub fn take_input(&mut self) -> String {
+        let text = std::mem::take(&mut self.input);
+        self.cursor = 0;
+        self.suggestions.clear();
+        text
+    }
+
+    pub fn scroll_up(&mut self, n: u16) {
+        self.auto_scroll = false;
+        self.scroll = self.scroll.saturating_sub(n);
+    }
+
+    pub fn scroll_down(&mut self, n: u16) {
+        self.scroll = self.scroll.saturating_add(n);
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
+    }
+}
+
+enum ModalChoice {
+    Harness((HarnessId, bool)),
+    Provider(String),
+    Model(String),
+    Effort(String),
+    Policy(PermissionPolicy),
+    Resume(String),
+    Decision(PermissionDecision),
+    Dismiss,
+}
+
+/// Shared navigation for local list pickers.
+/// `None` = key handled, keep open; `Some(None)` = close without choice;
+/// `Some(Some(()))` = confirm current item.
+fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            p.up();
+            None
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            p.down();
+            None
+        }
+        KeyCode::Enter => Some(Some(())),
+        KeyCode::Esc | KeyCode::Char('q') => Some(None),
+        _ => None,
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::core::{PermissionKind, Question};
+    use crate::harness::claude::ClaudeHarness;
+    use crate::harness::legacy::shim::LegacyHarness;
+    use crossterm::event::KeyEventKind;
 
-    #[test]
-    fn test_app_suggestions() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Agy,
-            false,
-            &Config::default(),
-        );
-        assert!(app.suggestions.is_empty());
-
-        app.insert_char('/');
-        assert_eq!(app.suggestions.len(), BASE_COMMAND_CATALOG.len());
-
-        app.insert_char('s');
-        app.insert_char('w');
-        assert_eq!(app.suggestions.len(), 4);
-
-        app.accept_suggestion();
-        assert_eq!(app.input, "/switch");
+    pub(crate) fn test_app(harness: HarnessId) -> App {
+        let registry = Registry::empty()
+            .with(Box::new(LegacyHarness::agy()))
+            .with(Box::new(ClaudeHarness))
+            .with(Box::new(LegacyHarness::codex()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        App::new(AppInit {
+            cwd: cwd.clone(),
+            workspace_root: Some(cwd),
+            registry: Arc::new(registry),
+            config: Config::default(),
+            harness,
+            policy: PermissionPolicy::Ask,
+            provider: None,
+            model: None,
+            effort: None,
+            resume: None,
+        })
     }
 
-    #[test]
-    fn test_model_suggestions_for_claude() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Claude,
-            false,
-            &Config::default(),
-        );
-        for c in "/model ".chars() {
-            app.insert_char(c);
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
         }
-
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd.contains("opus")));
-        assert!(
-            app.suggestions
-                .iter()
-                .any(|(cmd, _)| cmd.contains("sonnet"))
-        );
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd.contains("fable")));
     }
 
     #[test]
-    fn test_effort_suggestions() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Claude,
-            false,
-            &Config::default(),
-        );
-        for c in "/effort ".chars() {
-            app.insert_char(c);
-        }
-
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd == "/effort high"));
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd == "/effort low"));
-        assert!(app.suggestions.iter().any(|(cmd, _)| cmd == "/effort max"));
-    }
-
-    #[test]
-    fn test_modal_picker_navigation() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Agy,
-            false,
-            &Config::default(),
-        );
-        assert_eq!(app.active_harness, HarnessKind::Agy);
-        assert!(app.popup.is_none());
-
-        app.open_harness_picker();
-        assert_eq!(app.popup, Some(ActivePopup::HarnessPicker));
-        assert_eq!(app.picker_selected, 0);
-
-        app.picker_down();
-        assert_eq!(app.picker_selected, 1);
-
-        app.confirm_picker();
-        assert_eq!(app.active_harness, HarnessKind::Claude);
-        assert!(app.popup.is_none());
-    }
-
-    #[test]
-    fn test_effort_picker_modal() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Claude,
-            false,
-            &Config::default(),
-        );
-        assert_eq!(app.current_effort(), "high");
-
-        app.open_effort_picker();
-        assert_eq!(app.popup, Some(ActivePopup::EffortPicker));
-
-        app.picker_down();
-        app.confirm_picker();
-
-        assert_ne!(app.current_effort(), "");
-        assert!(app.popup.is_none());
-    }
-
-    #[test]
-    fn test_thinking_timer_flow() {
-        let mut app = App::new(
-            PathBuf::from("/tmp"),
-            HarnessKind::Claude,
-            false,
-            &Config::default(),
-        );
-        assert!(!app.is_generating);
-        assert!(!app.is_thinking);
-
-        app.start_generation();
+    fn submit_starts_session_then_sends_turn() {
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("hello".into());
         assert!(app.is_generating);
-
-        app.append_thought_text("pondering...");
-        assert!(app.is_thinking);
-
-        app.append_assistant_text("answer");
-        assert!(!app.is_thinking);
-
-        app.finish_generation();
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession { resume: None },
+                Action::SendTurn("hello".into())
+            ]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
         assert!(!app.is_generating);
-        assert!(app.generation_duration.is_some());
+        app.submit_prompt("again".into());
+        assert_eq!(app.take_actions(), vec![Action::SendTurn("again".into())]);
+    }
+
+    #[test]
+    fn switching_harness_bridges_context_once() {
+        let mut app = test_app(HarnessId::Claude);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        app.switch_harness(HarnessId::Agy);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+
+        app.submit_prompt("second question".into());
+        let actions = app.take_actions();
+        assert!(matches!(actions[0], Action::StartSession { resume: None }));
+        match &actions[1] {
+            Action::SendTurn(t) => {
+                assert!(t.contains("first question"));
+                assert!(t.contains("Claude: first answer"));
+                assert!(t.ends_with("second question"));
+            }
+            other => panic!("{other:?}"),
+        }
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        // A second turn on the same harness is not bridged.
+        app.submit_prompt("third".into());
+        assert_eq!(app.take_actions(), vec![Action::SendTurn("third".into())]);
+    }
+
+    #[test]
+    fn policy_resolution_per_harness() {
+        let mut app = test_app(HarnessId::Agy);
+        app.set_policy(PermissionPolicy::Auto);
+        assert_eq!(app.effective_policy(), PermissionPolicy::AcceptEdits);
+        app.switch_harness(HarnessId::Claude);
+        assert_eq!(app.effective_policy(), PermissionPolicy::Auto);
+        assert!(app.policy_warning().is_none());
+    }
+
+    #[test]
+    fn permission_modal_allow_and_deny_with_reason() {
+        let mut app = test_app(HarnessId::Claude);
+        app.session_alive = true;
+        let req = |id: &str| PermissionRequest {
+            id: id.into(),
+            kind: PermissionKind::ToolUse {
+                tool: "Bash".into(),
+                input: serde_json::json!({"command":"ls"}),
+                suggestions: None,
+                description: None,
+            },
+            tool_call_id: None,
+        };
+        app.on_event(AgentEvent::PermissionRequest(req("r1")));
+        app.on_event(AgentEvent::PermissionRequest(req("r2")));
+        assert!(matches!(app.modal, Some(Modal::Permission(_))));
+
+        app.handle_modal_key(key(KeyCode::Char('y')));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::RespondPermission {
+                id: "r1".into(),
+                decision: PermissionDecision::Allow {
+                    updated_input: None
+                }
+            })]
+        );
+        assert_eq!(app.modal.as_ref().and_then(Modal::request_id), Some("r2"));
+        app.handle_modal_key(key(KeyCode::Char('n')));
+        for c in "nope".chars() {
+            app.handle_modal_key(key(KeyCode::Char(c)));
+        }
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::RespondPermission {
+                id: "r2".into(),
+                decision: PermissionDecision::Deny {
+                    reason: "nope".into()
+                }
+            })]
+        );
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn question_modal_answers() {
+        let mut app = test_app(HarnessId::Claude);
+        app.session_alive = true;
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "q".into(),
+            kind: PermissionKind::Question {
+                questions: vec![Question {
+                    id: "Color?".into(),
+                    header: "Color".into(),
+                    text: "Color?".into(),
+                    options: vec![("Red".into(), "".into()), ("Blue".into(), "".into())],
+                    allow_other: true,
+                    multi: false,
+                }],
+            },
+            tool_call_id: None,
+        }));
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        match app.take_actions().pop() {
+            Some(Action::Command(SessionCommand::RespondPermission { decision, .. })) => {
+                assert_eq!(
+                    decision,
+                    PermissionDecision::Answer(serde_json::json!({"Color?":"Blue"}))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_picker_enter_and_esc() {
+        let mut app = test_app(HarnessId::Claude);
+        app.open_policy_picker();
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.policy_requested, PermissionPolicy::AcceptEdits);
+        app.open_effort_picker();
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none());
+        app.open_harness_picker();
+        app.handle_modal_key(key(KeyCode::Char('q')));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn slash_commands_and_suggestions() {
+        let mut app = test_app(HarnessId::Claude);
+        for c in "/pol".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.suggestions.len(), 1);
+        app.accept_suggestion();
+        assert_eq!(app.input, "/policy");
+        app.insert_char(' ');
+        app.insert_char('b');
+        assert_eq!(app.suggestions[0].0, "/policy bypass");
+
+        app.handle_slash_command("/effort xhigh");
+        assert_eq!(app.current_effort(), Some("xhigh"));
+        app.handle_slash_command("/effort bogus");
+        assert_eq!(app.current_effort(), Some("xhigh"));
+        app.handle_slash_command("/model sonnet");
+        assert_eq!(app.model_label(), "anthropic/sonnet");
+        app.handle_slash_command("/switch codex");
+        assert_eq!(app.active, HarnessId::Codex);
+        app.handle_slash_command("/quit");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn multibyte_input_editing() {
+        let mut app = test_app(HarnessId::Claude);
+        for c in "héllo".chars() {
+            app.insert_char(c);
+        }
+        app.move_cursor_left();
+        app.move_cursor_left();
+        app.delete_backwards();
+        assert_eq!(app.input, "hélo");
+        app.move_cursor_home();
+        app.delete_forwards();
+        assert_eq!(app.input, "élo");
+    }
+
+    #[test]
+    fn usage_accumulates() {
+        let mut app = test_app(HarnessId::Claude);
+        app.on_event(AgentEvent::Usage(Usage {
+            input: 10,
+            output: 5,
+            ..Default::default()
+        }));
+        app.on_event(AgentEvent::Usage(Usage {
+            input: 1,
+            output: 1,
+            ..Default::default()
+        }));
+        assert_eq!(app.turn_usage.input, 1);
+        assert_eq!(app.session_usage.input, 11);
+        app.on_event(AgentEvent::Usage(Usage {
+            input: 100,
+            cumulative: true,
+            ..Default::default()
+        }));
+        assert_eq!(app.session_usage.input, 100);
     }
 }

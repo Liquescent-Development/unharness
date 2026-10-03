@@ -1,6 +1,7 @@
 pub mod agy;
 pub mod claude;
 pub mod codex;
+pub mod shim;
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
