@@ -1,0 +1,546 @@
+//! Claude Code `--output-format stream-json` parser.
+//!
+//! Pure: one stdout line in, zero or more `AgentEvent`s out. Fixture-tested
+//! against recordings in `fixtures/` made with `scripts/record-claude.py`.
+
+use std::collections::{HashMap, HashSet};
+
+use serde_json::Value;
+
+use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
+
+#[derive(Debug, Default)]
+enum BlockAcc {
+    #[default]
+    Text,
+    Thinking,
+    ToolUse {
+        id: String,
+        name: String,
+        json: String,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct ClaudeParser {
+    session_id: Option<String>,
+    /// Open content blocks of the message currently streaming, by index.
+    blocks: HashMap<u64, BlockAcc>,
+    /// Tool-use ids already announced via `ToolCallStarted`.
+    seen_tool_ids: HashSet<String>,
+    /// Message ids for which we saw streamed deltas (so `assistant` is a dup).
+    streamed_messages: HashSet<String>,
+    turn_started: bool,
+}
+
+impl ClaudeParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            // Claude never prints non-JSON on stdout in stream-json mode; surface it.
+            return vec![AgentEvent::Notice(line.to_string())];
+        };
+        self.feed_value(&val)
+    }
+
+    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+        let t = line.trim();
+        if t.is_empty() {
+            return vec![];
+        }
+        vec![AgentEvent::Error(t.to_string())]
+    }
+
+    pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        match str_at(val, "type") {
+            "system" => self.on_system(val, &mut out),
+            "stream_event" => self.on_stream_event(val, &mut out),
+            "assistant" => self.on_assistant(val, &mut out),
+            "user" => self.on_user(val, &mut out),
+            "result" => self.on_result(val, &mut out),
+            "control_request" => self.on_control_request(val, &mut out),
+            "control_cancel_request" => {
+                out.push(AgentEvent::Notice(
+                    "permission request cancelled by harness".to_string(),
+                ));
+            }
+            // Handled by the driver (pending request bookkeeping).
+            "control_response" => {
+                if let Some(err) = val.pointer("/response/error").and_then(Value::as_str) {
+                    out.push(AgentEvent::Error(format!("control error: {err}")));
+                }
+            }
+            "rate_limit_event" => {
+                let status = val
+                    .pointer("/rate_limit_info/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("allowed");
+                if status != "allowed" {
+                    out.push(AgentEvent::Notice(format!("rate limit: {status}")));
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
+    fn on_system(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        match str_at(val, "subtype") {
+            "init" => {
+                let sid = str_at(val, "session_id").to_string();
+                if !sid.is_empty() && self.session_id.as_deref() != Some(&sid) {
+                    self.session_id = Some(sid.clone());
+                    out.push(AgentEvent::SessionStarted {
+                        session_id: sid,
+                        model: opt_str(val, "model"),
+                    });
+                }
+            }
+            "api_retry" => {
+                out.push(AgentEvent::Notice(format!(
+                    "API retry {}/{} ({})",
+                    val.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                    val.get("max_retries").and_then(Value::as_u64).unwrap_or(0),
+                    str_at(val, "error")
+                )));
+            }
+            "permission_denied" => {
+                let tool = opt_str(val, "tool_name")
+                    .or_else(|| opt_str(val, "tool"))
+                    .unwrap_or_else(|| "tool".to_string());
+                out.push(AgentEvent::Notice(format!(
+                    "permission denied for {tool} (no prompt available in this mode)"
+                )));
+            }
+            "compact_boundary" => out.push(AgentEvent::Notice("context compacted".into())),
+            // status, thinking_tokens, hook_*, plugin_install: not shown.
+            _ => {}
+        }
+    }
+
+    fn on_stream_event(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let Some(event) = val.get("event") else {
+            return;
+        };
+        match str_at(event, "type") {
+            "message_start" => {
+                if let Some(id) = event.pointer("/message/id").and_then(Value::as_str) {
+                    self.streamed_messages.insert(id.to_string());
+                }
+                self.blocks.clear();
+                if !self.turn_started {
+                    self.turn_started = true;
+                    out.push(AgentEvent::TurnStarted);
+                }
+            }
+            "content_block_start" => {
+                let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let Some(block) = event.get("content_block") else {
+                    return;
+                };
+                let acc = match str_at(block, "type") {
+                    "thinking" => BlockAcc::Thinking,
+                    "tool_use" => BlockAcc::ToolUse {
+                        id: str_at(block, "id").to_string(),
+                        name: str_at(block, "name").to_string(),
+                        json: String::new(),
+                    },
+                    _ => BlockAcc::Text,
+                };
+                self.blocks.insert(index, acc);
+            }
+            "content_block_delta" => {
+                let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                let Some(delta) = event.get("delta") else {
+                    return;
+                };
+                match str_at(delta, "type") {
+                    "text_delta" => {
+                        let t = str_at(delta, "text");
+                        if !t.is_empty() {
+                            out.push(AgentEvent::TextDelta(t.to_string()));
+                        }
+                    }
+                    "thinking_delta" => {
+                        let t = str_at(delta, "thinking");
+                        if !t.is_empty() {
+                            out.push(AgentEvent::ThinkingDelta(t.to_string()));
+                        }
+                    }
+                    "input_json_delta" => {
+                        let partial = str_at(delta, "partial_json");
+                        if let Some(BlockAcc::ToolUse { id, name, json }) =
+                            self.blocks.get_mut(&index)
+                            && !partial.is_empty()
+                        {
+                            json.push_str(partial);
+                            out.push(AgentEvent::ToolCallDelta {
+                                id: id.clone(),
+                                name: name.clone(),
+                                delta: partial.to_string(),
+                            });
+                        }
+                    }
+                    _ => {} // signature_delta
+                }
+            }
+            "content_block_stop" => {
+                let index = event.get("index").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(BlockAcc::ToolUse { id, name, json }) = self.blocks.remove(&index)
+                    && self.seen_tool_ids.insert(id.clone())
+                {
+                    let input =
+                        serde_json::from_str(&json).unwrap_or(Value::Object(Default::default()));
+                    out.push(AgentEvent::ToolCallStarted { id, name, input });
+                }
+            }
+            _ => {} // message_delta, message_stop
+        }
+    }
+
+    fn on_assistant(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let Some(message) = val.get("message") else {
+            return;
+        };
+        let streamed = message
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| self.streamed_messages.contains(id));
+        if !self.turn_started {
+            self.turn_started = true;
+            out.push(AgentEvent::TurnStarted);
+        }
+        let Some(content) = message.get("content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in content {
+            match str_at(block, "type") {
+                "tool_use" => {
+                    let id = str_at(block, "id").to_string();
+                    if self.seen_tool_ids.insert(id.clone()) {
+                        out.push(AgentEvent::ToolCallStarted {
+                            id,
+                            name: str_at(block, "name").to_string(),
+                            input: block.get("input").cloned().unwrap_or(Value::Null),
+                        });
+                    }
+                }
+                "text" if !streamed => {
+                    let t = str_at(block, "text");
+                    if !t.is_empty() {
+                        out.push(AgentEvent::TextDelta(t.to_string()));
+                    }
+                }
+                "thinking" if !streamed => {
+                    let t = str_at(block, "thinking");
+                    if !t.is_empty() {
+                        out.push(AgentEvent::ThinkingDelta(t.to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn on_user(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let Some(content) = val.pointer("/message/content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in content {
+            if str_at(block, "type") != "tool_result" {
+                continue;
+            }
+            out.push(AgentEvent::ToolCallResult {
+                id: str_at(block, "tool_use_id").to_string(),
+                output: flatten_content(block.get("content")),
+                is_error: block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            });
+        }
+    }
+
+    fn on_result(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        if let Some(usage) = val.get("usage") {
+            out.push(AgentEvent::Usage(Usage {
+                input: u64_at(usage, "input_tokens"),
+                output: u64_at(usage, "output_tokens"),
+                cache_read: u64_at(usage, "cache_read_input_tokens"),
+                cache_write: u64_at(usage, "cache_creation_input_tokens"),
+                cost_usd: val.get("total_cost_usd").and_then(Value::as_f64),
+                cumulative: false,
+            }));
+        }
+        if let Some(denials) = val.get("permission_denials").and_then(Value::as_array)
+            && !denials.is_empty()
+        {
+            let names: Vec<&str> = denials
+                .iter()
+                .filter_map(|d| d.get("tool_name").and_then(Value::as_str))
+                .collect();
+            out.push(AgentEvent::Notice(format!(
+                "{} permission denial(s): {}",
+                denials.len(),
+                names.join(", ")
+            )));
+        }
+        let subtype = str_at(val, "subtype");
+        let is_error = val
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let stop_reason = if subtype == "success" && !is_error {
+            StopReason::Done
+        } else {
+            let detail = val
+                .get("result")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("{subtype}: {s}"))
+                .unwrap_or_else(|| subtype.to_string());
+            StopReason::Error(detail)
+        };
+        out.push(AgentEvent::TurnCompleted { stop_reason });
+        self.turn_started = false;
+        self.blocks.clear();
+    }
+
+    fn on_control_request(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let request_id = str_at(val, "request_id").to_string();
+        let Some(req) = val.get("request") else {
+            return;
+        };
+        match str_at(req, "subtype") {
+            "can_use_tool" => {
+                let tool = str_at(req, "tool_name").to_string();
+                let input = req.get("input").cloned().unwrap_or(Value::Null);
+                let tool_call_id = opt_str(req, "tool_use_id");
+                let kind = if tool == "AskUserQuestion" {
+                    PermissionKind::Question {
+                        questions: parse_questions(&input),
+                    }
+                } else {
+                    PermissionKind::ToolUse {
+                        tool,
+                        input,
+                        suggestions: req.get("permission_suggestions").cloned(),
+                        description: opt_str(req, "description").or_else(|| {
+                            opt_str(req, "blocked_path").map(|p| format!("blocked path: {p}"))
+                        }),
+                    }
+                };
+                out.push(AgentEvent::PermissionRequest(PermissionRequest {
+                    id: request_id,
+                    kind,
+                    tool_call_id,
+                }));
+            }
+            other => out.push(AgentEvent::Notice(format!(
+                "unhandled control request: {other}"
+            ))),
+        }
+    }
+}
+
+/// AskUserQuestion input → our `Question`s. The question text doubles as the
+/// id because the answer map is keyed by it.
+pub fn parse_questions(input: &Value) -> Vec<Question> {
+    input
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|qs| {
+            qs.iter()
+                .map(|q| {
+                    let text = str_at(q, "question").to_string();
+                    Question {
+                        id: text.clone(),
+                        header: str_at(q, "header").to_string(),
+                        text,
+                        options: q
+                            .get("options")
+                            .and_then(Value::as_array)
+                            .map(|os| {
+                                os.iter()
+                                    .map(|o| {
+                                        (
+                                            str_at(o, "label").to_string(),
+                                            str_at(o, "description").to_string(),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        allow_other: true,
+                        multi: q
+                            .get("multiSelect")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Tool result content is either a string or `[{type:"text",text}, ...]`.
+pub fn flatten_content(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|i| match i {
+                Value::String(s) => Some(s.clone()),
+                Value::Object(_) => i
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| Some(format!("[{}]", str_at(i, "type")))),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
+fn opt_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn u64_at(v: &Value, key: &str) -> u64 {
+    v.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
+
+    impl LineParser for ClaudeParser {
+        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+            ClaudeParser::feed(self, line)
+        }
+        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+            ClaudeParser::feed_stderr(self, line)
+        }
+    }
+
+    fn fixture(case: &str) {
+        assert_fixture(&mut ClaudeParser::new(), &fixtures_dir(file!()), case);
+    }
+
+    #[test]
+    fn fixture_write_denied_auto_mode() {
+        fixture("write_denied");
+    }
+
+    #[test]
+    fn fixture_permission_and_question() {
+        fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_basic_turn_bash() {
+        fixture("basic_turn");
+    }
+
+    #[test]
+    fn streamed_text_is_not_duplicated_by_assistant_message() {
+        let mut p = ClaudeParser::new();
+        let mut ev = Vec::new();
+        ev.extend(p.feed(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}"#,
+        ));
+        ev.extend(p.feed(r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}"#));
+        ev.extend(p.feed(r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#));
+        ev.extend(p.feed(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"hi"}]}}"#,
+        ));
+        ev.extend(p.feed(r#"{"type":"result","subtype":"success","usage":{"input_tokens":1,"output_tokens":2},"total_cost_usd":0.5}"#));
+        assert_eq!(
+            ev,
+            vec![
+                AgentEvent::TurnStarted,
+                AgentEvent::TextDelta("hi".into()),
+                AgentEvent::Usage(Usage {
+                    input: 1,
+                    output: 2,
+                    cost_usd: Some(0.5),
+                    ..Default::default()
+                }),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Done
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn assistant_without_stream_emits_text_and_tool() {
+        let mut p = ClaudeParser::new();
+        let ev = p.feed(r#"{"type":"assistant","message":{"id":"m2","content":[{"type":"text","text":"x"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#);
+        assert_eq!(ev.len(), 3);
+        assert!(
+            matches!(&ev[2], AgentEvent::ToolCallStarted { id, name, .. } if id == "t1" && name == "Bash")
+        );
+        // A later stream stop for the same tool id does not re-announce it.
+        p.feed(r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"t1","name":"Bash"}}}"#);
+        let ev2 =
+            p.feed(r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#);
+        assert!(ev2.is_empty());
+    }
+
+    #[test]
+    fn control_request_maps_to_permission_and_question() {
+        let mut p = ClaudeParser::new();
+        let ev = p.feed(r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/x"},"permission_suggestions":[{"type":"addRules"}],"tool_use_id":"t9"}}"#);
+        match &ev[0] {
+            AgentEvent::PermissionRequest(req) => {
+                assert_eq!(req.id, "r1");
+                assert_eq!(req.tool_call_id.as_deref(), Some("t9"));
+                assert!(
+                    matches!(&req.kind, PermissionKind::ToolUse { tool, suggestions: Some(_), .. } if tool == "Write")
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        let ev = p.feed(r#"{"type":"control_request","request_id":"r2","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":{"questions":[{"question":"Color?","header":"Color","options":[{"label":"Red","description":"r"},{"label":"Blue","description":"b"}],"multiSelect":false}]}}}"#);
+        match &ev[0] {
+            AgentEvent::PermissionRequest(req) => match &req.kind {
+                PermissionKind::Question { questions } => {
+                    assert_eq!(questions.len(), 1);
+                    assert_eq!(questions[0].id, "Color?");
+                    assert_eq!(questions[0].options[1].0, "Blue");
+                }
+                other => panic!("{other:?}"),
+            },
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn flatten_tool_result_variants() {
+        assert_eq!(flatten_content(Some(&serde_json::json!("plain"))), "plain");
+        assert_eq!(
+            flatten_content(Some(
+                &serde_json::json!([{"type":"text","text":"a"},{"type":"image"}])
+            )),
+            "a\n[image]"
+        );
+        assert_eq!(flatten_content(None), "");
+    }
+}

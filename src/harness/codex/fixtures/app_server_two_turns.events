@@ -1,0 +1,21 @@
+SessionStarted id=01a10023-e1c2-7e82-a9e5-4d53ffccb2be model=gpt-6-astra
+TurnStarted
+TextDelta "pong"
+Usage in=14448 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+TurnCompleted Done
+TurnStarted
+TextDelta "I"
+TextDelta "’ll"
+TextDelta " run"
+TextDelta " the"
+TextDelta " shell"
+TextDelta " command"
+TextDelta " now"
+TextDelta "."
+ToolCallStarted id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 name=shell input={"command":"/usr/bin/zsh -lc 'echo codex-app-ok'","cwd":"...
+PermissionRequest id=0 ToolUse shell
+ToolCallResult id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 error=false "codex-app-ok\\n"
+Usage in=16977 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
+TextDelta "done"
+Usage in=17083 out=5 cache_read=16768 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

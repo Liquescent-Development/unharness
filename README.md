@@ -1,235 +1,201 @@
 # unharness
 
-A vendor-neutral CLI runner, skill orchestrator, and rule synchronizer for AI coding agents.
+One terminal UI for every AI coding agent you have an account for.
 
-## Why unharness?
+unharness wraps the vendor CLIs (`claude`, `codex`, `pi`, `agy`) behind a
+single ratatui interface with the same transcript, keybindings, permission
+prompts, model/effort pickers and session resume regardless of which agent is
+running. Switch agents mid-conversation and the context follows you.
 
-Coding agent SDK contracts change constantly, breaking custom supervisors and supervisory channels. However, the underlying harnesses maintain battle-tested CLI tools (`agy` for Antigravity, `claude` for Claude Code, `codex` for Codex).
+## Why
 
-Different harnesses expect project context and agent skills in different directory structures:
-- **Claude Code** looks in `.claude/skills/<name>/SKILL.md` and reads `CLAUDE.md`.
-- **Antigravity (`agy`)** discovers workspace skills in `.agents/skills/<name>/SKILL.md` and reads `GEMINI.md` / `AGENTS.md`.
-- **Codex** reads `AGENTS.md` and `.codex/skills/`.
+Agent SDKs churn; the vendor CLIs are the stable surface. Each one already
+speaks a streaming JSON protocol with a permission channel:
 
-`unharness` decouples you from any single vendor harness:
-1. **Single Source of Truth:** Skills live once in standard Agent Commons format (`.agents/skills/`) and rules live in `AGENTS.md`.
-2. **Transparent Cross-Harness Sync:** Automatically projects and symlinks skills and instructions into `.claude/skills`, `~/.gemini/antigravity-cli/.agents/skills`, `CLAUDE.md`, and `GEMINI.md`.
-3. **Unified CLI Dispatcher:** One command (`unharness`) to run any harness interactively or in print/headless mode with normalized flag translations (`-p`, `-y`, `-m`, `-e`).
-4. **Seamless Switching:** Easily switch your default provider between `agy`, `claude`, and `codex` (`agy -> claude -> codex` fallback by default).
+| Harness | Transport | Interactive permissions | Resume | Live models |
+|---|---|---|---|---|
+| Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | static list |
+| Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list` |
+| pi | `pi --mode rpc` (long-lived) | extension dialogs | `--session-id` | `get_available_models`, many providers |
+| Antigravity | `agy --print= --input-format stream-json` (long-lived, unverified: no account yet) | no | `--conversation` | `agy models` |
 
----
+unharness normalises those into one event model and one capability set, so
+the TUI never assumes what a harness can do. Anything a harness lacks is shown
+as a degraded capability rather than failing silently.
 
-## Installation
-
-Built in Rust:
+## Install
 
 ```bash
 cargo install --path .
+unharness doctor          # harnesses, auth, capabilities, skills CLI, rules
 ```
 
-Verify installation:
+Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
+CLI (`npx skills`), which needs Node.js.
+
+## Use
 
 ```bash
-unharness --version
-unharness doctor
+unharness                                   # TUI with the default harness
+unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
+unharness --policy accept-edits             # ask | accept-edits | auto | bypass
+unharness -y                                # alias for --policy bypass
+unharness --resume                          # resume the latest conversation (all harnesses in it)
+unharness --resume 01a1                     # by id prefix; -H overrides which harness continues
+unharness -p "Summarise src/"               # headless print mode
+unharness --no-tui                          # drop into the vendor's own TUI
+unharness models                            # providers and models per harness
+unharness sessions                          # recorded sessions in this workspace
+unharness skills add vercel-labs/agent-skills
 ```
 
----
+### In the TUI
 
-## Quickstart
+The transcript fills the window. Everything about the current state sits
+under the prompt: a status rule (what the agent is doing and for how long),
+the prompt line, then the working directory and git branch, the harness,
+provider/model, effort and policy, token usage and cost, the session id, any
+capability caveat, and the key hints.
 
-### 1. Initialize a Repository
+| Key | Action |
+|---|---|
+| `Enter` | Send the prompt |
+| `Ctrl+H` | Harness picker |
+| `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
+| `Ctrl+E` | Reasoning effort picker (levels come from the harness) |
+| `Ctrl+P` | Permission policy picker |
+| `Ctrl+R` | Resume a saved conversation |
+| `Ctrl+O` | Expand or collapse the last tool call's output |
+| `Esc` | Interrupt the running turn, else clear the prompt (never quits) |
+| `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
-Initialize `unharness` in any project:
+Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
+`/resume`, `/sessions`, `/usage`, `/skills`, `/clear`, `/help`, `/quit`.
+Typing `/` opens autocomplete; Enter on a partial command completes it.
 
-```bash
-unharness init
-```
+Policy, model and effort changes apply to the next turn on every harness
+(Claude via its control channel, Codex per `turn/start`, pi per RPC command,
+Antigravity by restarting its process on the same conversation).
 
-This:
-- Creates `.agents/skills/` for portable skills.
-- Creates `AGENTS.md` as the canonical project instructions.
-- Symlinks `CLAUDE.md -> AGENTS.md` and `GEMINI.md -> AGENTS.md`.
-- Creates `unharness.toml`.
+Tool calls render as blocks: shell output wrapped in a gutter, file edits as
+syntax-coloured red/green replacements, reads highlighted by file type, and
+unified diffs in red/green. Fenced code in answers is syntax highlighted and
+wrapped, never cut off.
 
-### 2. Inspect Environment & Health
+When a harness asks for permission, a modal opens: `y` allow once, `a` allow
+always (when the harness offers a rule), `n` deny with a reason, `i` show the
+full tool input. Agent questions (Claude's AskUserQuestion, Codex's
+requestUserInput, pi's extension dialogs) open the matching modal.
 
-```bash
-unharness doctor
-```
+### Permission policy
 
-Checks:
-- Installed harnesses (`agy`, `claude`, `codex`, `pi`) and their versions on `$PATH`.
-- Authentication status (e.g., active GCP project for `agy`, active enterprise org for `claude`).
-- Active default harness resolution.
-- Workspace skills and projection health.
-- User global skills in `~/.agents/skills` and their projections into `~/.claude/skills` and `~/.gemini/antigravity-cli/.agents/skills`.
+| Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
+|---|---|---|---|---|---|
+| `ask` | default mode, prompts in the TUI | `untrusted` + read-only sandbox, prompts in the TUI | read-only sandbox, cannot prompt* | only extension dialogs prompt* | soft-denies tools that would prompt* |
+| `accept-edits` | `acceptEdits` | `on-request` + workspace-write | workspace-write | falls back to ask* | `--mode accept-edits` |
+| `auto` | `auto` (classifier) | `on-request` + workspace-write | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
+| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | dialogs auto-accepted* | `--dangerously-skip-permissions` |
 
-### 3. Run Agents
+`*` shown as a warning in the header. A requested policy a harness cannot
+honour falls back to the nearest *less* permissive one it supports.
 
-Run with the default harness (Antigravity by default, or Claude if configured):
+### Switching harnesses
 
-```bash
-## Unified TUI Experience
+`/switch` shuts the current session down and starts the next harness lazily on
+your next prompt, seeding it with the conversation so far (capped by
+`bridge_max_chars`, default 24k characters, keeping the tail). Returning to a
+harness resumes its own session and bridges only what happened since.
 
-When you start an interactive session (`unharness` or `unharness "your task"`), `unharness` launches a **single, consistent terminal interface** regardless of whether you're running Antigravity, Claude Code, or Codex.
+## Configuration
 
-```
-┌─ UNHARNESS  [Claude Code (claude)] [Model: claude-opus-5-5] [Effort: high] [Auto: ON]  Thinking (3.2s) ─┐
-│  Repository: /Users/kiener/code/alpha/unharness                                                          │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌─ Activity ──────────────────────────────────────────────────────────────────────────────────────────────┐
-│  ❯ You                                                                                                  │
-│    Refactor the parser module                                                                           │
-│                                                                                                         │
-│  ┌─ 💭 Thinking (3.2s) ───────────────────────────────────────────────────                              │
-│  │ Checking parser error types and ensuring nom combinators match...                                    │
-│  └────────────────────────────────────────────────────────────────────────                              │
-│                                                                                                         │
-│  ● Claude Code (claude) (3.8s)                                                                          │
-│    Here is the updated parser with the unified diff:                                                    │
-│                                                                                                         │
-│    ┌─ diff ───────────────────────────────────────────────                                              │
-│    │ diff --git a/src/parser.rs b/src/parser.rs                                                         │
-│    │- fn parse_legacy(input: &str) -> Result<Data> {                                                    │
-│    │+ pub fn parse_telemetry(input: &str) -> Result<Data> {                                             │
-│    └──────────────────────────────────────────────────────                                              │
-└─────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-┌─ Prompt (type / for commands) ────────────────────────────────────────────────┐
-│                                                                               │
-└───────────────────────────────────────────────────────────────────────────────┘
-Enter Send  Ctrl+H Harness  Ctrl+M Model  Ctrl+P Auto  PgUp/PgDn Scroll  Ctrl+C/Esc Quit
-```
-
-### In-TUI Controls & Shortcuts
-
-- **`Ctrl+E`**: Open the **Reasoning Effort / Think Level Picker Modal** (`high`, `xhigh`, `max`, `medium`, `low`)
-- **`Ctrl+M`**: Open the **Model Picker Modal** to select models for the active harness
-- **`Ctrl+H`**: Open the **Harness Picker Modal** to switch AI harness (`agy` ⇄ `claude` ⇄ `codex`)
-- **`Ctrl+P`**: Toggle auto-approvals on/off
-- **`Tab`**: Autocomplete selected slash command, model, or effort level
-- **`↑` / `↓`**: Navigate suggestions or modal lists, or scroll chat
-- **`PgUp` / `PgDn`**: Fast scroll through conversation history
-- **`Ctrl+C` / `Esc`**: Cancel running turn or exit
-
-### Slash Commands & Autocomplete
-
-Typing `/` in the prompt automatically pops up an interactive command suggestions dropdown:
-
-- `/effort` or `/think` — Open reasoning effort / think mode picker modal
-- `/effort <level>` (or `/think <level>`) — Set effort directly (`high`, `xhigh`, `max`, `medium`, `low`)
-- `/model` — Open model picker modal for the active harness
-- `/model <name>` — Set the model directly (e.g. `/model opus`, `/model sonnet`, `/model fable`, `/model gemini-3.8-flash-high`)
-- `/switch` — Open the modal harness switcher picker
-- `/switch <agy|claude|codex>` — Switch directly to a specific harness
-- `/skills` — Show skills currently loaded from `.agents/skills`
-- `/auto` — Toggle tool auto-approvals
-- `/clear` — Clear chat history from the screen
-- `/help` — Display in-app help and shortcuts
-- `/quit` — Exit the TUI
-
-To bypass the TUI and drop directly into the underlying vendor CLI, pass `--no-tui` (or `--raw`):
-
-```bash
-unharness --no-tui "Prompt"
-```
-
-# Headless / one-shot print mode
-unharness -p "Explain the role of supervisor in this architecture"
-
-# Auto-approve tool permissions (translates to --dangerously-skip-permissions for agy, --permission-mode auto for claude)
-unharness -y -p "Run the test suite and report failures"
-```
-
-Explicitly target a specific harness:
-
-```bash
-# Force Antigravity
-unharness -H agy "Generate test suite"
-
-# Force Claude Code
-unharness -H claude "Review recent commits"
-
-# Force Codex
-unharness -H codex "Implement feature"
-```
-
-### 4. Switch Default Harness
-
-```bash
-# Switch workspace default
-unharness switch claude
-unharness switch agy
-
-# Switch global default across all repositories
-unharness switch claude --global
-```
-
-### 5. Manage & Validate Skills
-
-```bash
-# List all workspace and global skills with summaries
-unharness skills list
-
-# Create a new portable skill in .agents/skills/<name>/SKILL.md
-unharness skills create optimize-queries
-
-# Create a global skill in ~/.agents/skills/<name>/SKILL.md
-unharness skills create optimize-queries --global
-
-# Validate YAML frontmatter and directory naming across all skills
-unharness skills validate
-
-# Explicitly re-synchronize symlinks
-unharness sync
-```
-
----
-
-## Configuration (`unharness.toml`)
+Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
 
 ```toml
-default_harness = "agy" # Fallback: agy -> claude -> codex
-auto_sync = true        # Runs quick pre-flight skill/rule sync before execution
-
-[harnesses.agy]
-default_model = "gemini-3.8-flash-high"
-# default_effort = "high"
+default_harness  = "claude"      # agy | claude | codex | pi
+default_policy   = "ask"
+auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
+bridge_max_chars = 24000
 
 [harnesses.claude]
-# default_model = "claude-3-7-sonnet-20250219"
+# binary = "/path/to/claude"
+default_model  = "opus"
+default_effort = "high"
+default_policy = "accept-edits"
+extra_args     = []
 
 [harnesses.codex]
-# binary = "/path/to/codex"
+transport = "auto"               # auto | app-server | exec
+
+[harnesses.agy]
+transport = "stream"             # stream | stream-prompt | per-turn (see AGENTS.md)
+
+[harnesses.pi]
+default_provider = "openai-codex"
+default_model    = "gpt-5.5"
 ```
 
-Global configuration can be placed in `~/.config/unharness/config.toml`.
+### Conversations
 
----
+A conversation is the unit of resume. unharness saves it under
+`<workspace>/.unharness/conversations/` (ignored by `unharness init`): the
+merged transcript, the vendor session id of every harness that took part, the
+bridging bookmarks, and which harness was active. `unharness --resume`,
+`/resume`, and Ctrl+R restore the transcript into the pane and reattach each
+harness to its own vendor session when you `/harness` to it, bridging only
+what that harness has not seen. `unharness sessions` lists saved
+conversations; `--clear` removes them.
 
-## How Skills and Projections Work
+## Rules and skills
 
-```
-Workspace
-├── AGENTS.md                  <-- Canonical instructions
-├── CLAUDE.md -> AGENTS.md     <-- Symlink for Claude Code
-├── GEMINI.md -> AGENTS.md     <-- Symlink for Antigravity
-├── .agents/skills/            <-- Canonical skills directory
-│   ├── spec-cycle/
-│   │   └── SKILL.md
-│   └── code-review/
-│       └── SKILL.md
-└── .claude/skills/            <-- Managed symlink projections
-    ├── spec-cycle -> ../../.agents/skills/spec-cycle
-    └── code-review -> ../../.agents/skills/code-review
+`AGENTS.md` is the canonical instructions file; `CLAUDE.md` and `GEMINI.md`
+are symlinks to it (`unharness init` / `unharness sync`). A `CLAUDE.md` whose
+content differs from `AGENTS.md` is never overwritten.
 
-User Home (~/)
-├── .agents/skills/            <-- Canonical global skills
-│   └── <skill>/SKILL.md
-├── .claude/skills/            <-- Projected symlinks for Claude Code
-│   └── <skill> -> ../../.agents/skills/<skill>
-└── .gemini/antigravity-cli/.agents/skills/
-    └── <skill> -> ../../../../.agents/skills/<skill>
+Skills live in `.agents/skills/` and are installed and projected into every
+agent's directory by `unharness skills <args...>`, a passthrough to `npx
+skills`. The one exception is `import`, which is unharness's own:
+
+```bash
+unharness skills import                    # pick from skills your harnesses already have
+unharness skills import --from plugins -g  # only Claude plugin-bundled skills, globally
+unharness skills import --all --dry-run    # show what would be imported
 ```
 
-When you edit a skill in `.agents/skills/`, every harness immediately sees the update. Stale symlinks are automatically cleaned up when skills are removed.
+It scans `~/.claude/skills` (and synced buckets), Claude plugin caches,
+`~/.codex/skills` (`--include-system` for the Codex built-ins), the
+Antigravity and pi skill directories, and project-level `.claude`, `.codex`
+and `.pi` skill dirs, then installs the chosen ones through `skills add
+<path>` so they land in `.agents/skills` and get projected everywhere.
+Plugins and pi extensions are harness-specific; `unharness doctor` lists
+them instead.
+
+## Architecture
+
+```
+src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
+               AgentEvent, SessionHandle/SessionCommand, LineProcess,
+               per-turn driver, JSON-RPC framing, Registry, SessionsStore
+src/harness/   one module per harness: descriptor, capabilities, probe,
+               list_models, start_session, build_print_command
+  claude/      stream-json transport + parser + fixtures/
+  codex/       app-server + exec transports + parsers + fixtures/
+  pi/          rpc transport + parser + fixtures/
+  agy/         stream-json transport (best effort, unverified) + per-turn fallback
+src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
+scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
+               them for tests/session_e2e.rs
+```
+
+Adding a harness: a `HarnessId` variant, a module implementing `Harness`, a
+recorded fixture under `fixtures/` with its expected `.events`, one line in
+`Registry::from_config`.
+
+## Development
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test                                   # unit + fixture + e2e (needs python3)
+UNHARNESS_UPDATE_FIXTURES=1 cargo test      # regenerate .events after a parser change
+scripts/record-claude.py out.jsonl "prompt"  # record a new fixture (run from a scratch dir)
+```

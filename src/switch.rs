@@ -1,15 +1,18 @@
-use std::path::Path;
+use anyhow::{Result, bail};
 use colored::*;
-use anyhow::{bail, Result};
+use std::path::Path;
 
 use crate::config::Config;
-use crate::harness::HarnessKind;
+use crate::core::HarnessId;
 use crate::sync::find_workspace_root;
 
 pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<()> {
-    let kind = match HarnessKind::parse_str(target) {
+    let kind = match HarnessId::parse(target) {
         Some(k) => k,
-        None => bail!("Unknown harness '{}'. Supported: agy, claude, codex", target),
+        None => bail!(
+            "Unknown harness '{}'. Supported: agy, claude, codex, pi",
+            target
+        ),
     };
 
     if global {

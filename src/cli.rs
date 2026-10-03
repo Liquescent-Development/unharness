@@ -4,8 +4,8 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "unharness",
     author = "Richard Kiene",
-    version = "0.1.0",
-    about = "Vendor-neutral CLI orchestrator and skill synchronizer for AI coding agents (agy, claude, codex)",
+    version,
+    about = "Vendor-neutral TUI and CLI runner for AI coding agents (agy, claude, codex, pi)",
     long_about = None
 )]
 pub struct Cli {
@@ -22,7 +22,7 @@ pub struct CommonRunArgs {
     #[arg(trailing_var_arg = true)]
     pub prompt: Vec<String>,
 
-    /// Select AI harness (agy, claude, codex)
+    /// Select AI harness (agy, claude, codex, pi)
     #[arg(short = 'H', long, env = "UNHARNESS_HARNESS")]
     pub harness: Option<String>,
 
@@ -30,21 +30,34 @@ pub struct CommonRunArgs {
     #[arg(short = 'p', long)]
     pub print: bool,
 
-    /// Auto-approve permissions / dangerously skip permissions
-    #[arg(short = 'y', long, alias = "dangerously-skip-permissions")]
+    /// Permission policy: ask, accept-edits, auto, bypass
+    #[arg(long, env = "UNHARNESS_POLICY")]
+    pub policy: Option<String>,
+
+    /// Shorthand for --policy bypass (dangerously skip all permissions)
+    #[arg(
+        short = 'y',
+        long = "yes",
+        alias = "dangerously-skip-permissions",
+        alias = "auto"
+    )]
     pub auto: bool,
 
-    /// Force interactive mode
-    #[arg(short = 'i', long)]
-    pub interactive: bool,
+    /// Provider within the harness (e.g. anthropic, openai, google; pi supports many)
+    #[arg(long)]
+    pub provider: Option<String>,
 
     /// Override model for the session
     #[arg(short = 'm', long)]
     pub model: Option<String>,
 
-    /// Reasoning effort (low, medium, high, xhigh, max)
+    /// Reasoning effort (harness-specific, e.g. low, medium, high, xhigh, max)
     #[arg(short = 'e', long)]
     pub effort: Option<String>,
+
+    /// Resume a saved conversation by id (prefix ok), or the most recent one when no id is given
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub resume: Option<String>,
 
     /// Output format for print mode (text, json, stream-json)
     #[arg(long)]
@@ -54,7 +67,7 @@ pub struct CommonRunArgs {
     #[arg(long, alias = "raw")]
     pub no_tui: bool,
 
-    /// Skip pre-flight sync of skills and rules
+    /// Skip pre-flight sync of rules symlinks
     #[arg(long)]
     pub no_sync: bool,
 }
@@ -64,27 +77,42 @@ pub enum Commands {
     /// Initialize unharness in current repository (AGENTS.md, .agents/skills, symlinks)
     Init,
 
-    /// Synchronize skills and rules across harnesses (.claude, .agents, .gemini)
-    Sync {
-        /// Sync workspace skills and rules only
-        #[arg(short = 'w', long)]
-        workspace: bool,
+    /// Synchronize rules symlinks (CLAUDE.md, GEMINI.md -> AGENTS.md)
+    Sync,
 
-        /// Sync global user skills only
-        #[arg(short = 'g', long)]
-        global: bool,
-    },
-
-    /// Health check: detect installed harnesses, auth status, active skills, symlinks
+    /// Health check: detect installed harnesses, auth status, skills CLI, symlinks
     Doctor,
 
-    /// Manage, list, and validate skills
+    /// Manage skills via the `skills` CLI (add, list, update, remove, find, init),
+    /// or `import` ones the installed harnesses already have
+    /// (`unharness skills import [--from claude,codex,pi] [-g] [--all]`)
+    #[command(disable_help_flag = true)]
     Skills {
-        #[command(subcommand)]
-        cmd: SkillsSubcommand,
+        /// Arguments passed through to `npx skills`
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
-    /// Switch default harness in config (agy, claude, codex)
+    /// List providers and models per harness
+    Models {
+        /// Only this harness
+        #[arg(short = 'H', long)]
+        harness: Option<String>,
+
+        /// Only this provider
+        #[arg(long)]
+        provider: Option<String>,
+    },
+
+    /// List or clear saved conversations for this workspace
+    #[command(alias = "conversations")]
+    Sessions {
+        /// Remove all saved conversations
+        #[arg(long)]
+        clear: bool,
+    },
+
+    /// Switch default harness in config (agy, claude, codex, pi)
     Switch {
         /// Target harness name
         harness: String,
@@ -98,24 +126,30 @@ pub enum Commands {
     Run(CommonRunArgs),
 }
 
-#[derive(Subcommand, Debug)]
-pub enum SkillsSubcommand {
-    /// List all available skills (workspace and global)
-    List,
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    /// Create a new portable skill template with valid frontmatter
-    Create {
-        /// Name of the new skill (kebab-case)
-        name: String,
-
-        /// Create in user global skills (~/.agents/skills) instead of workspace
-        #[arg(short, long)]
-        global: bool,
-    },
-
-    /// Validate all SKILL.md files for valid frontmatter and metadata
-    Validate,
-
-    /// Synchronize skills across harness directories
-    Sync,
+    #[test]
+    fn resume_flag_forms() {
+        let c = Cli::parse_from(["unharness", "--resume"]);
+        assert_eq!(c.run_args.resume.as_deref(), Some(""));
+        let c = Cli::parse_from(["unharness", "--resume", "abc"]);
+        assert_eq!(c.run_args.resume.as_deref(), Some("abc"));
+        let c = Cli::parse_from(["unharness", "-y", "--policy", "ask", "do", "it"]);
+        assert!(c.run_args.auto);
+        assert_eq!(c.run_args.policy.as_deref(), Some("ask"));
+        assert_eq!(c.run_args.prompt, vec!["do", "it"]);
+        let c = Cli::parse_from(["unharness", "skills", "add", "--global", "x/y"]);
+        match c.command {
+            Some(Commands::Skills { args }) => assert_eq!(args, vec!["add", "--global", "x/y"]),
+            other => panic!("{other:?}"),
+        }
+        // --help belongs to the skills CLI, not to us.
+        let c = Cli::parse_from(["unharness", "skills", "--help"]);
+        match c.command {
+            Some(Commands::Skills { args }) => assert_eq!(args, vec!["--help"]),
+            other => panic!("{other:?}"),
+        }
+    }
 }
