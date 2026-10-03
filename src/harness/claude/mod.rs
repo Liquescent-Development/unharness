@@ -21,8 +21,9 @@ use crate::core::{
 pub struct ClaudeHarness;
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Claude,
+    id: HarnessId::CLAUDE,
     display_name: "Claude Code (claude)",
+    short_name: "Claude",
     binary_names: &["claude"],
     providers: ProviderSource::Static(&[("anthropic", "Anthropic")]),
 };
@@ -123,7 +124,7 @@ impl Harness for ClaudeHarness {
         Ok(MODELS
             .iter()
             .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::Claude, "anthropic", *id),
+                model_ref: ModelRef::new(HarnessId::CLAUDE, "anthropic", *id),
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
@@ -215,7 +216,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("run tests".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "sonnet")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "sonnet")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Bypass),
             format: Some("stream-json".into()),

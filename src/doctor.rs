@@ -4,9 +4,9 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::Config;
+use crate::core::PermissionPolicy;
 use crate::core::conversations::ConversationStore;
 use crate::core::registry::Registry;
-use crate::core::{HarnessId, PermissionPolicy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -119,7 +119,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                 &discover_skills_in_dir(&workspace_skills_dir(root)),
             );
             for k in config.harnesses.keys() {
-                if HarnessId::parse(k).is_none() {
+                if registry.parse(k).is_none() {
                     println!(
                         "  {} unknown harness '{}' in unharness.toml",
                         "[!]".yellow(),

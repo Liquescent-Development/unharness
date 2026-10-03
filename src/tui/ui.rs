@@ -116,10 +116,12 @@ fn pinned_lines(app: &App) -> Vec<Line<'static>> {
 
 fn harness_color(id: HarnessId) -> Color {
     match id {
-        HarnessId::Agy => Color::Cyan,
-        HarnessId::Claude => Color::Magenta,
-        HarnessId::Codex => Color::Green,
-        HarnessId::Pi => Color::Yellow,
+        HarnessId::AGY => Color::Cyan,
+        HarnessId::CLAUDE => Color::Magenta,
+        HarnessId::CODEX => Color::Green,
+        HarnessId::PI => Color::Yellow,
+        // Config-defined harnesses share one colour.
+        _ => Color::Blue,
     }
 }
 
@@ -531,7 +533,7 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     };
     let right1 = Line::from(vec![
         Span::styled(
-            format!("[{}] ", app.active.short_name()),
+            format!("[{}] ", app.short_name()),
             Style::default()
                 .fg(harness_color(app.active))
                 .add_modifier(Modifier::BOLD),
@@ -792,7 +794,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         Modal::Model(p) => (
             centered_rect(80, 60, area),
             modal_block(
-                format!(" Model for {} ({NAV}) ", app.active.short_name()),
+                format!(" Model for {} ({NAV}) ", app.short_name()),
                 Color::Magenta,
             ),
             picker_lines(p, Color::Magenta, |m| {
@@ -1133,7 +1135,7 @@ mod tests {
 
     #[test]
     fn bottom_cluster_layout() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello".into());
         app.take_actions();
         app.on_event(crate::core::AgentEvent::TextDelta("hi there".into()));
@@ -1209,7 +1211,7 @@ mod tests {
     #[test]
     fn plan_and_context_are_shown() {
         use crate::core::{AgentEvent, ContextUsage, PlanEntry, PlanStatus};
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         let entries = (0..9)
             .map(|i| PlanEntry {
                 text: format!("step {i}"),
@@ -1253,7 +1255,7 @@ mod tests {
 
     #[test]
     fn renders_without_panicking_in_every_modal() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello **world**".into());
         app.take_actions();
         app.on_event(crate::core::AgentEvent::ThinkingDelta("hmm".into()));

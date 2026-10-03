@@ -270,7 +270,7 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                         app.on_event(crate::core::AgentEvent::TurnCompleted {
                             stop_reason: crate::core::StopReason::Error(format!(
                                 "could not start {}: {e:#}",
-                                app.active.short_name()
+                                app.short_name()
                             )),
                         });
                     }

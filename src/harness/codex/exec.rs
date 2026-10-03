@@ -46,7 +46,7 @@ fn image_args(command: &mut Command, attachments: &[Attachment]) {
 
 impl PerTurnProtocol for CodexExec {
     fn harness(&self) -> HarnessId {
-        HarnessId::Codex
+        HarnessId::CODEX
     }
 
     fn build_turn(
@@ -122,7 +122,7 @@ mod tests {
         TurnState {
             binary: PathBuf::from("/bin/codex"),
             cwd: PathBuf::from("/work"),
-            model: Some(ModelRef::new(HarnessId::Codex, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
             effort: Some("high".into()),
             policy,
             session_id: session_id.map(str::to_string),

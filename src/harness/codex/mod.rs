@@ -58,8 +58,9 @@ impl Default for CodexHarness {
 }
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Codex,
+    id: HarnessId::CODEX,
     display_name: "Codex (codex)",
+    short_name: "Codex",
     binary_names: &["codex"],
     providers: ProviderSource::Static(&[("openai", "OpenAI")]),
 };
@@ -199,7 +200,7 @@ impl Harness for CodexHarness {
                         })
                         .unwrap_or_default();
                     ModelInfo {
-                        model_ref: ModelRef::new(HarnessId::Codex, "openai", id),
+                        model_ref: ModelRef::new(HarnessId::CODEX, "openai", id),
                         display_name: m
                             .get("displayName")
                             .and_then(Value::as_str)
@@ -217,7 +218,7 @@ impl Harness for CodexHarness {
         Ok(FALLBACK_MODELS
             .iter()
             .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::Codex, "openai", *id),
+                model_ref: ModelRef::new(HarnessId::CODEX, "openai", *id),
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
@@ -380,7 +381,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("fix it".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Codex, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::AcceptEdits),
             format: None,

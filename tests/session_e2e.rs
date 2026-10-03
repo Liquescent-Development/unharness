@@ -57,7 +57,7 @@ impl Fake {
         SessionConfig {
             binary: fake_harness(),
             cwd: self._tmp.path().to_path_buf(),
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "haiku")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
             effort: None,
             policy,
             resume: None,

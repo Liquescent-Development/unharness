@@ -316,11 +316,11 @@ mod tests {
     use super::*;
 
     fn conv(title: &str) -> Conversation {
-        let mut c = Conversation::new(HarnessId::Claude);
+        let mut c = Conversation::new(HarnessId::CLAUDE);
         c.title = title.into();
-        c.sessions.insert(HarnessId::Claude, "claude-sess".into());
-        c.sessions.insert(HarnessId::Codex, "codex-thread".into());
-        c.bookmarks.insert(HarnessId::Claude, 2);
+        c.sessions.insert(HarnessId::CLAUDE, "claude-sess".into());
+        c.sessions.insert(HarnessId::CODEX, "codex-thread".into());
+        c.bookmarks.insert(HarnessId::CLAUDE, 2);
         c.blocks.push(BlockRecord::User { text: "hi".into() });
         c.blocks.push(BlockRecord::Assistant {
             text: "hello".into(),
@@ -328,7 +328,7 @@ mod tests {
             secs: Some(1.5),
         });
         c.usage.insert(
-            HarnessId::Claude,
+            HarnessId::CLAUDE,
             Usage {
                 input: 10,
                 ..Default::default()
@@ -356,7 +356,7 @@ mod tests {
         let loaded = store.load(&c.id).unwrap();
         assert_eq!(loaded, c);
         let row = store.last().unwrap();
-        assert_eq!(row.harnesses, vec![HarnessId::Claude, HarnessId::Codex]);
+        assert_eq!(row.harnesses, vec![HarnessId::CLAUDE, HarnessId::CODEX]);
         assert_eq!(row.title, "first prompt");
 
         // Prefix lookup

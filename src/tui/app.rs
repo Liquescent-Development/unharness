@@ -319,7 +319,7 @@ impl App {
         let res = resolve_policy(&app.caps(), app.policy_requested);
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
-            app.active.display_name(),
+            app.display_name(),
             res.effective
         ));
         if let Some(w) = res.warning {
@@ -339,7 +339,7 @@ impl App {
                     .map(|h| h.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
-                app.active.short_name()
+                app.short_name()
             ));
         }
         app
@@ -403,6 +403,14 @@ impl App {
         self.registry
             .get(self.active)
             .expect("active harness is registered")
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        self.harness().descriptor().short_name
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        self.harness().descriptor().display_name
     }
 
     /// Declared capabilities of the active harness plus what its session reported.
@@ -573,7 +581,7 @@ impl App {
         let outgoing = match bridge {
             Some(ctx) => format!(
                 "[Context: earlier conversation in this unharness session, possibly with other agents]\n{ctx}\n\n[Current task for {}]:\n{text}",
-                self.active.short_name()
+                self.short_name()
             ),
             None => text,
         };
@@ -643,7 +651,7 @@ impl App {
         if !self.caps().steer || !self.session_alive {
             self.transcript.push_notice(format!(
                 "{} cannot be steered mid-turn; queued for when it finishes",
-                self.active.short_name()
+                self.short_name()
             ));
             self.queue_prompt(text);
             return;
@@ -666,10 +674,8 @@ impl App {
             return;
         }
         if !self.caps().compaction {
-            self.transcript.push_error(format!(
-                "{} cannot compact on request",
-                self.active.short_name()
-            ));
+            self.transcript
+                .push_error(format!("{} cannot compact on request", self.short_name()));
             return;
         }
         if !self.session_alive {
@@ -688,7 +694,7 @@ impl App {
         if !self.caps().image_input {
             self.transcript.push_error(format!(
                 "{} does not accept images with the current model",
-                self.active.short_name()
+                self.short_name()
             ));
             return;
         }
@@ -725,7 +731,7 @@ impl App {
     // ------------------------------------------------------------- session events
 
     pub fn on_event(&mut self, ev: AgentEvent) {
-        let sender = self.active.short_name().to_string();
+        let sender = self.short_name().to_string();
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
                 let is_new = self.session_ids.get(&self.active) != Some(&session_id);
@@ -839,7 +845,7 @@ impl App {
                     self.finish_generation();
                     self.transcript.push_error(format!(
                         "{} exited{} before the turn completed",
-                        self.active.short_name(),
+                        self.short_name(),
                         code.map(|c| format!(" with code {c}")).unwrap_or_default()
                     ));
                 }
@@ -904,7 +910,7 @@ impl App {
         self.persist();
         self.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {})",
-            next.display_name(),
+            self.display_name(),
             self.model_label(),
             self.current_effort().unwrap_or("default"),
             self.effective_policy()
@@ -956,7 +962,7 @@ impl App {
         if caps.effort_levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
-                self.active.display_name()
+                self.display_name()
             ));
             return;
         }
@@ -965,7 +971,7 @@ impl App {
             self.transcript.push_error(format!(
                 "unknown effort '{}'; {} supports: {}",
                 effort,
-                self.active.short_name(),
+                self.short_name(),
                 caps.effort_levels.join(", ")
             ));
             return;
@@ -1024,7 +1030,7 @@ impl App {
                 .map(|h| h.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-            self.active.short_name()
+            self.short_name()
         ));
         self.auto_scroll = true;
     }
@@ -1053,7 +1059,7 @@ impl App {
         if !self.caps().multi_provider {
             self.transcript.push_notice(format!(
                 "{} has a single provider ({}); use /harness to change agents or /model to change models",
-                self.active.short_name(),
+                self.short_name(),
                 self.current_provider()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "default".into())
@@ -1062,7 +1068,7 @@ impl App {
         }
         let Some(binary) = self.harness_binary() else {
             self.transcript
-                .push_error(format!("{} binary not found", self.active.short_name()));
+                .push_error(format!("{} binary not found", self.short_name()));
             return;
         };
         let providers = match self.harness().list_providers(&binary) {
@@ -1094,7 +1100,7 @@ impl App {
         }
         let binary = self
             .harness_binary()
-            .ok_or_else(|| format!("{} binary not found", self.active.short_name()))?;
+            .ok_or_else(|| format!("{} binary not found", self.short_name()))?;
         let models = self
             .harness()
             .list_models(&binary, provider)
@@ -1132,7 +1138,7 @@ impl App {
         if levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
-                self.active.display_name()
+                self.display_name()
             ));
             return;
         }
@@ -1405,7 +1411,7 @@ impl App {
         let rest = cmd.trim_start().strip_prefix(name).unwrap_or("").trim();
         match name {
             "/switch" | "/harness" => match arg {
-                Some(a) => match HarnessId::parse(&a) {
+                Some(a) => match self.registry.parse(&a).map(|h| h.descriptor().id) {
                     Some(id) => self.switch_harness(id),
                     None => self.transcript.push_error(format!("unknown harness '{a}'")),
                 },
@@ -1868,7 +1874,7 @@ pub(crate) mod tests {
         use super::super::transcript::Block;
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.keep();
-        let mut app = test_app_in(cwd.clone(), HarnessId::Claude, None, false);
+        let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
         app.submit_prompt("first question".into());
         app.take_actions();
         app.session_alive = true;
@@ -1880,7 +1886,7 @@ pub(crate) mod tests {
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
         });
-        app.switch_harness(HarnessId::Codex);
+        app.switch_harness(HarnessId::CODEX);
         app.take_actions();
         app.session_alive = false;
         app.submit_prompt("second question".into());
@@ -1900,21 +1906,21 @@ pub(crate) mod tests {
         let rows = app.store.list();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, conv_id);
-        assert_eq!(rows[0].harnesses, vec![HarnessId::Claude, HarnessId::Codex]);
+        assert_eq!(rows[0].harnesses, vec![HarnessId::CLAUDE, HarnessId::CODEX]);
         assert_eq!(rows[0].title, "first question");
 
-        let mut again = test_app_in(cwd.clone(), HarnessId::Claude, Some(String::new()), false);
-        assert_eq!(again.active, HarnessId::Codex);
+        let mut again = test_app_in(cwd.clone(), HarnessId::CLAUDE, Some(String::new()), false);
+        assert_eq!(again.active, HarnessId::CODEX);
         assert_eq!(again.conversation.id, conv_id);
         assert_eq!(
             again
                 .session_ids
-                .get(&HarnessId::Claude)
+                .get(&HarnessId::CLAUDE)
                 .map(String::as_str),
             Some("claude-1")
         );
         assert_eq!(
-            again.session_ids.get(&HarnessId::Codex).map(String::as_str),
+            again.session_ids.get(&HarnessId::CODEX).map(String::as_str),
             Some("codex-1")
         );
         assert!(
@@ -1947,7 +1953,7 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
 
-        again.switch_harness(HarnessId::Claude);
+        again.switch_harness(HarnessId::CLAUDE);
         again.take_actions();
         again.session_alive = false;
         again.submit_prompt("fourth".into());
@@ -1966,15 +1972,15 @@ pub(crate) mod tests {
             other => panic!("{other:?}"),
         }
 
-        let forced = test_app_in(cwd, HarnessId::Pi, Some(conv_id[..8].to_string()), true);
-        assert_eq!(forced.active, HarnessId::Pi);
+        let forced = test_app_in(cwd, HarnessId::PI, Some(conv_id[..8].to_string()), true);
+        assert_eq!(forced.active, HarnessId::PI);
         assert_eq!(forced.session_ids.len(), 2);
     }
 
     #[test]
     fn live_capabilities_and_status_events_apply() {
         use crate::core::{CapsUpdate, ContextUsage, PlanEntry, PlanStatus};
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         assert!(app.caps().supports_effort("xhigh"));
         app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
             effort_levels: Some(vec!["low".into()]),
@@ -2029,7 +2035,7 @@ pub(crate) mod tests {
                 }],
             })
         };
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         let base = app.transcript.blocks.len();
         app.on_event(limit(20.0));
         assert_eq!(app.transcript.blocks.len(), base);
@@ -2045,7 +2051,7 @@ pub(crate) mod tests {
     #[test]
     fn subagent_calls_hang_off_their_spawner() {
         use super::super::transcript::Block;
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("delegate".into());
         app.on_event(AgentEvent::ToolCallStarted {
             id: "spawn".into(),
@@ -2101,7 +2107,7 @@ pub(crate) mod tests {
         let done = || AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
         };
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.queue_prompt("first".into());
         assert!(app.is_generating && app.queued.is_empty());
         app.take_actions();
@@ -2133,7 +2139,7 @@ pub(crate) mod tests {
 
     #[test]
     fn steer_goes_into_the_turn_or_falls_back_to_the_queue() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("go".into());
         app.session_alive = true;
         app.take_actions();
@@ -2148,7 +2154,7 @@ pub(crate) mod tests {
         assert!(app.queued.is_empty());
 
         // Antigravity cannot be steered: the message waits for the turn to end.
-        let mut app = test_app(HarnessId::Agy);
+        let mut app = test_app(HarnessId::AGY);
         app.submit_prompt("go".into());
         app.session_alive = true;
         app.take_actions();
@@ -2159,7 +2165,7 @@ pub(crate) mod tests {
 
     #[test]
     fn compact_needs_an_idle_live_session_that_supports_it() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.compact(None);
         assert!(app.take_actions().is_empty());
         app.session_alive = true;
@@ -2176,7 +2182,7 @@ pub(crate) mod tests {
         });
         assert!(!app.is_generating);
 
-        let mut app = test_app(HarnessId::Agy);
+        let mut app = test_app(HarnessId::AGY);
         app.session_alive = true;
         app.compact(None);
         assert!(app.take_actions().is_empty());
@@ -2187,7 +2193,7 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("my shot.png"), b"png").unwrap();
         std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
-        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::Claude, None, false);
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
         app.handle_slash_command("/attach notes.txt");
         app.handle_slash_command("/attach missing.png");
         assert!(app.attachments.is_empty());
@@ -2207,14 +2213,14 @@ pub(crate) mod tests {
         ));
 
         // A harness that takes no images refuses the attachment.
-        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::Agy, None, false);
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
         app.handle_slash_command("/attach my shot.png");
         assert!(app.attachments.is_empty());
     }
 
     #[test]
     fn exit_summary_only_when_saved() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         assert!(app.exit_summary().is_none());
         app.submit_prompt("hello".into());
         app.take_actions();
@@ -2233,14 +2239,14 @@ pub(crate) mod tests {
     fn resume_errors_are_reported_not_fatal() {
         use super::super::transcript::Block;
         let tmp = tempfile::tempdir().unwrap();
-        let app = test_app_in(tmp.keep(), HarnessId::Claude, Some("nope".into()), false);
+        let app = test_app_in(tmp.keep(), HarnessId::CLAUDE, Some("nope".into()), false);
         assert!(
             app.transcript
                 .blocks
                 .iter()
                 .any(|b| matches!(b, Block::Error(e) if e.contains("could not resume")))
         );
-        assert_eq!(app.active, HarnessId::Claude);
+        assert_eq!(app.active, HarnessId::CLAUDE);
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2254,7 +2260,7 @@ pub(crate) mod tests {
 
     #[test]
     fn submit_starts_session_then_sends_turn() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello".into());
         assert!(app.is_generating);
         assert_eq!(
@@ -2272,7 +2278,7 @@ pub(crate) mod tests {
 
     #[test]
     fn switching_harness_bridges_context_once() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("first question".into());
         app.take_actions();
         app.session_alive = true;
@@ -2281,7 +2287,7 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
 
-        app.switch_harness(HarnessId::Agy);
+        app.switch_harness(HarnessId::AGY);
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         app.session_alive = false;
 
@@ -2308,17 +2314,17 @@ pub(crate) mod tests {
 
     #[test]
     fn policy_resolution_per_harness() {
-        let mut app = test_app(HarnessId::Agy);
+        let mut app = test_app(HarnessId::AGY);
         app.set_policy(PermissionPolicy::Auto);
         assert_eq!(app.effective_policy(), PermissionPolicy::AcceptEdits);
-        app.switch_harness(HarnessId::Claude);
+        app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), PermissionPolicy::Auto);
         assert!(app.policy_warning().is_none());
     }
 
     #[test]
     fn permission_modal_allow_and_deny_with_reason() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.session_alive = true;
         let req = |id: &str| PermissionRequest {
             id: id.into(),
@@ -2364,7 +2370,7 @@ pub(crate) mod tests {
 
     #[test]
     fn question_modal_answers() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.session_alive = true;
         app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
             id: "q".into(),
@@ -2395,7 +2401,7 @@ pub(crate) mod tests {
 
     #[test]
     fn local_picker_enter_and_esc() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.open_policy_picker();
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
@@ -2411,7 +2417,7 @@ pub(crate) mod tests {
 
     #[test]
     fn slash_commands_and_suggestions() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         for c in "/pol".chars() {
             app.insert_char(c);
         }
@@ -2429,14 +2435,14 @@ pub(crate) mod tests {
         app.handle_slash_command("/model sonnet");
         assert_eq!(app.model_label(), "anthropic/sonnet");
         app.handle_slash_command("/switch codex");
-        assert_eq!(app.active, HarnessId::Codex);
+        assert_eq!(app.active, HarnessId::CODEX);
         app.handle_slash_command("/quit");
         assert!(app.should_quit);
     }
 
     #[test]
     fn multibyte_input_editing() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         for c in "héllo".chars() {
             app.insert_char(c);
         }
@@ -2451,7 +2457,7 @@ pub(crate) mod tests {
 
     #[test]
     fn usage_accumulates() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.on_event(AgentEvent::Usage(Usage {
             input: 10,
             output: 5,

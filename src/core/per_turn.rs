@@ -245,7 +245,7 @@ mod tests {
     }
     impl PerTurnProtocol for Echo {
         fn harness(&self) -> HarnessId {
-            HarnessId::Codex
+            HarnessId::CODEX
         }
         fn build_turn(
             &self,
@@ -333,7 +333,7 @@ mod tests {
         struct Sleeper;
         impl PerTurnProtocol for Sleeper {
             fn harness(&self) -> HarnessId {
-                HarnessId::Codex
+                HarnessId::CODEX
             }
             fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
                 let mut command = Command::new("sh");

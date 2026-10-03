@@ -103,7 +103,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Codex,
+        harness: HarnessId::CODEX,
         process_model: ProcessModel::LongLived,
     });
     tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));

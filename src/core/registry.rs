@@ -67,8 +67,14 @@ impl Registry {
             .map(|h| h.as_ref())
     }
 
+    /// A registered harness by id, or by a built-in alias (`antigravity`, `claude-code`).
     pub fn parse(&self, alias: &str) -> Option<&dyn Harness> {
-        HarnessId::parse(alias).and_then(|id| self.get(id))
+        let alias = alias.trim().to_lowercase();
+        self.harnesses
+            .iter()
+            .find(|h| h.descriptor().id.as_str() == alias)
+            .map(|h| h.as_ref())
+            .or_else(|| HarnessId::parse(&alias).and_then(|id| self.get(id)))
     }
 
     /// Pick the harness to run: an explicit request, else the configured
@@ -85,7 +91,7 @@ impl Registry {
         };
 
         if let Some(req) = requested {
-            let Some(id) = HarnessId::parse(req) else {
+            let Some(h) = self.parse(req) else {
                 bail!(
                     "Unknown harness '{}'. Supported: {}",
                     req,
@@ -95,9 +101,6 @@ impl Registry {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-            };
-            let Some(h) = self.get(id) else {
-                bail!("Harness '{}' is not available in this build", req);
             };
             return match find_bin(h) {
                 Some(bin) => Ok((h, bin)),

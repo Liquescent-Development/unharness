@@ -27,6 +27,8 @@ pub enum ProviderSource {
 pub struct HarnessDescriptor {
     pub id: HarnessId,
     pub display_name: &'static str,
+    /// Short label for the TUI (sender name, status lines).
+    pub short_name: &'static str,
     /// Executable names to look for on PATH, in order.
     pub binary_names: &'static [&'static str],
     pub providers: ProviderSource,

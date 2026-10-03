@@ -193,7 +193,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
 
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Claude,
+        harness: HarnessId::CLAUDE,
         process_model: ProcessModel::LongLived,
     });
 
@@ -356,7 +356,7 @@ mod tests {
         SessionConfig {
             binary: PathBuf::from("claude"),
             cwd: PathBuf::from("/tmp"),
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "opus")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "opus")),
             effort: Some("high".into()),
             policy,
             resume: None,

@@ -93,7 +93,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Pi,
+        harness: HarnessId::PI,
         process_model: ProcessModel::LongLived,
     });
     tokio::spawn(drive(proc, session_id, cfg.policy, events_tx, cmd_rx));
@@ -276,7 +276,7 @@ mod tests {
             binary: PathBuf::from("pi"),
             cwd: PathBuf::from("/tmp"),
             model: Some(ModelRef::new(
-                HarnessId::Pi,
+                HarnessId::PI,
                 "anthropic",
                 "claude-sonnet-4-5",
             )),

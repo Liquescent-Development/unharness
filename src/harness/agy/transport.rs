@@ -112,7 +112,7 @@ pub fn start_stream(cfg: SessionConfig, transport: AgyTransport) -> Result<Sessi
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Agy,
+        harness: HarnessId::AGY,
         process_model: ProcessModel::LongLived,
     });
     tokio::spawn(drive(proc, cfg, transport, events_tx, cmd_rx));
@@ -275,7 +275,7 @@ pub struct AgyPerTurn;
 
 impl PerTurnProtocol for AgyPerTurn {
     fn harness(&self) -> HarnessId {
-        HarnessId::Agy
+        HarnessId::AGY
     }
 
     fn build_turn(
@@ -338,7 +338,7 @@ mod tests {
             binary: PathBuf::from("agy"),
             cwd: PathBuf::from("/tmp"),
             model: Some(ModelRef::new(
-                HarnessId::Agy,
+                HarnessId::AGY,
                 "google",
                 "gemini-3.8-flash-high",
             )),

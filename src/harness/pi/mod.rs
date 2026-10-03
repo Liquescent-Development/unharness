@@ -23,8 +23,9 @@ use crate::core::{
 pub struct PiHarness;
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Pi,
+    id: HarnessId::PI,
     display_name: "pi",
+    short_name: "pi",
     binary_names: &["pi"],
     providers: ProviderSource::Dynamic,
 };
@@ -133,7 +134,7 @@ impl Harness for PiHarness {
                     .to_string();
                 let reasoning = m.get("reasoning").and_then(Value::as_bool).unwrap_or(false);
                 ModelInfo {
-                    model_ref: ModelRef::new(HarnessId::Pi, provider.clone(), id),
+                    model_ref: ModelRef::new(HarnessId::PI, provider.clone(), id),
                     display_name: m
                         .get("name")
                         .and_then(Value::as_str)
@@ -244,7 +245,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("hi there".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Pi, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::PI, "openai", "gpt-5.5")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Ask),
             format: Some("json".into()),
