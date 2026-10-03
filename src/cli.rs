@@ -84,6 +84,7 @@ pub enum Commands {
     Doctor,
 
     /// Manage skills via the `skills` CLI (e.g. `unharness skills add owner/repo`)
+    #[command(disable_help_flag = true)]
     Skills {
         /// Arguments passed through to `npx skills`
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -140,6 +141,12 @@ mod tests {
         let c = Cli::parse_from(["unharness", "skills", "add", "--global", "x/y"]);
         match c.command {
             Some(Commands::Skills { args }) => assert_eq!(args, vec!["add", "--global", "x/y"]),
+            other => panic!("{other:?}"),
+        }
+        // --help belongs to the skills CLI, not to us.
+        let c = Cli::parse_from(["unharness", "skills", "--help"]);
+        match c.command {
+            Some(Commands::Skills { args }) => assert_eq!(args, vec!["--help"]),
             other => panic!("{other:?}"),
         }
     }
