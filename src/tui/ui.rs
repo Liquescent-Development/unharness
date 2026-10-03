@@ -17,18 +17,26 @@ use super::code::{
 use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
-use crate::core::{HarnessId, PermissionKind, PermissionPolicy};
+use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let warning = app.policy_warning();
     let bottom_height = 1 + 1 + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
+    let pinned = pinned_lines(app);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(bottom_height as u16)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(pinned.len() as u16),
+            Constraint::Length(bottom_height as u16),
+        ])
         .split(frame.area());
 
     render_transcript(frame, app, chunks[0]);
-    let prompt_row = render_bottom(frame, app, chunks[1], warning.as_deref());
+    if !pinned.is_empty() {
+        frame.render_widget(Paragraph::new(pinned), chunks[1]);
+    }
+    let prompt_row = render_bottom(frame, app, chunks[2], warning.as_deref());
 
     if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, prompt_row);
@@ -36,6 +44,50 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.modal.is_some() {
         render_modal(frame, app, frame.area());
     }
+}
+
+/// Most plan rows shown above the prompt; the rest are summarised.
+const PLAN_ROWS: usize = 6;
+
+/// Lines pinned between the transcript and the prompt.
+fn pinned_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.show_plan && !app.plan.is_empty() {
+        // When the plan is long, start at the first unfinished step.
+        let first_open = app
+            .plan
+            .iter()
+            .position(|e| e.status != PlanStatus::Completed)
+            .unwrap_or(0);
+        let start = if app.plan.len() > PLAN_ROWS {
+            first_open.min(app.plan.len() - PLAN_ROWS)
+        } else {
+            0
+        };
+        let done = app
+            .plan
+            .iter()
+            .filter(|e| e.status == PlanStatus::Completed)
+            .count();
+        lines.push(Line::from(Span::styled(
+            format!("  Plan · {done}/{} done", app.plan.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        for entry in app.plan.iter().skip(start).take(PLAN_ROWS) {
+            let style = match entry.status {
+                PlanStatus::Completed => Style::default().fg(Color::DarkGray),
+                PlanStatus::InProgress => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                PlanStatus::Pending => Style::default(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {} {}", entry.status.marker(), sanitize(&entry.text)),
+                style,
+            )));
+        }
+    }
+    lines
 }
 
 fn harness_color(id: HarnessId) -> Color {
@@ -1119,6 +1171,51 @@ mod tests {
             rows[..n - 6].iter().any(|r| r.contains("/model")),
             "suggestions missing"
         );
+    }
+
+    #[test]
+    fn plan_and_context_are_shown() {
+        use crate::core::{AgentEvent, ContextUsage, PlanEntry, PlanStatus};
+        let mut app = test_app(HarnessId::Claude);
+        let entries = (0..9)
+            .map(|i| PlanEntry {
+                text: format!("step {i}"),
+                status: if i < 5 {
+                    PlanStatus::Completed
+                } else {
+                    PlanStatus::Pending
+                },
+            })
+            .collect();
+        app.on_event(AgentEvent::PlanUpdated {
+            entries,
+            explanation: None,
+        });
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(50_000),
+            window: Some(200_000),
+        }));
+        let screen = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..30)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let text = screen(&mut app);
+        assert!(text.contains("Plan · 5/9 done"));
+        // Long plans scroll to the unfinished part.
+        assert!(!text.contains("step 2") && text.contains("[ ] step 8"));
+        assert!(text.contains("ctx 25%"));
+
+        app.handle_slash_command("/plan");
+        assert!(!screen(&mut app).contains("Plan ·"));
     }
 
     #[test]

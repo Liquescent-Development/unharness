@@ -8,8 +8,8 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::core::{
-    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, Question, RateLimitInfo,
-    RateLimitWindow, StopReason, Usage,
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
+    RateLimitInfo, RateLimitWindow, StopReason, Usage,
 };
 
 #[derive(Debug, Default)]
@@ -34,6 +34,8 @@ pub struct ClaudeParser {
     /// Message ids for which we saw streamed deltas (so `assistant` is a dup).
     streamed_messages: HashSet<String>,
     turn_started: bool,
+    /// Tasks created with `TaskCreate`, in creation order: (id, entry).
+    tasks: Vec<(String, PlanEntry)>,
 }
 
 impl ClaudeParser {
@@ -222,7 +224,9 @@ impl ClaudeParser {
                 {
                     let input =
                         serde_json::from_str(&json).unwrap_or(Value::Object(Default::default()));
+                    let plan = todo_write_plan(&name, &input);
                     out.push(AgentEvent::ToolCallStarted { id, name, input });
+                    out.extend(plan);
                 }
             }
             _ => {} // message_delta, message_stop
@@ -249,11 +253,11 @@ impl ClaudeParser {
                 "tool_use" => {
                     let id = str_at(block, "id").to_string();
                     if self.seen_tool_ids.insert(id.clone()) {
-                        out.push(AgentEvent::ToolCallStarted {
-                            id,
-                            name: str_at(block, "name").to_string(),
-                            input: block.get("input").cloned().unwrap_or(Value::Null),
-                        });
+                        let name = str_at(block, "name").to_string();
+                        let input = block.get("input").cloned().unwrap_or(Value::Null);
+                        let plan = todo_write_plan(&name, &input);
+                        out.push(AgentEvent::ToolCallStarted { id, name, input });
+                        out.extend(plan);
                     }
                 }
                 "text" if !streamed => {
@@ -289,6 +293,48 @@ impl ClaudeParser {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             });
+        }
+        if let Some(result) = val.get("tool_use_result")
+            && self.apply_task_result(result)
+        {
+            out.push(AgentEvent::PlanUpdated {
+                entries: self.tasks.iter().map(|(_, e)| e.clone()).collect(),
+                explanation: None,
+            });
+        }
+    }
+
+    /// Track `TaskCreate` / `TaskUpdate` results; true when the task list changed.
+    fn apply_task_result(&mut self, result: &Value) -> bool {
+        if let Some(task) = result.get("task")
+            && let Some(id) = task.get("id").and_then(Value::as_str)
+        {
+            self.tasks.push((
+                id.to_string(),
+                PlanEntry {
+                    text: str_at(task, "subject").to_string(),
+                    status: PlanStatus::Pending,
+                },
+            ));
+            return true;
+        }
+        let (Some(id), Some(to)) = (
+            result.get("taskId").and_then(Value::as_str),
+            result.pointer("/statusChange/to").and_then(Value::as_str),
+        ) else {
+            return false;
+        };
+        if to == "deleted" {
+            let before = self.tasks.len();
+            self.tasks.retain(|(tid, _)| tid != id);
+            return self.tasks.len() != before;
+        }
+        match self.tasks.iter_mut().find(|(tid, _)| tid == id) {
+            Some((_, entry)) => {
+                entry.status = PlanStatus::parse(to);
+                true
+            }
+            None => false,
         }
     }
 
@@ -456,6 +502,26 @@ fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// `TodoWrite` carries the whole list in its input.
+fn todo_write_plan(name: &str, input: &Value) -> Option<AgentEvent> {
+    if name != "TodoWrite" {
+        return None;
+    }
+    let entries = input
+        .get("todos")?
+        .as_array()?
+        .iter()
+        .map(|t| PlanEntry {
+            text: str_at(t, "content").to_string(),
+            status: PlanStatus::parse(str_at(t, "status")),
+        })
+        .collect();
+    Some(AgentEvent::PlanUpdated {
+        entries,
+        explanation: None,
+    })
+}
+
 /// `unifiedWindows` lists every window; older builds only report the active one.
 fn rate_limit_windows(info: &Value) -> Vec<RateLimitWindow> {
     let window = |label: &str, w: &Value| RateLimitWindow {
@@ -502,6 +568,20 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_task_list() {
+        fixture("task_list");
+    }
+
+    #[test]
+    fn todo_write_replaces_the_plan() {
+        let mut p = ClaudeParser::new();
+        let evs = p.feed(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"a","status":"completed","activeForm":"A"},{"content":"b","status":"in_progress","activeForm":"B"}]}}]}}"#,
+        );
+        assert_eq!(evs.last().unwrap().summary(), "PlanUpdated [x] a; [~] b");
     }
 
     #[test]

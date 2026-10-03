@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, StopReason, Usage};
+use crate::core::{AgentEvent, PlanEntry, PlanStatus, StopReason, Usage};
 
 #[derive(Debug, Default)]
 pub struct CodexExecParser {
@@ -160,13 +160,24 @@ impl CodexExecParser {
                     });
                 }
             }
-            "todo_list" | "plan" if completed => {
+            // Sent on start and again on every change, always as the full list.
+            "todo_list" | "plan" => {
                 if let Some(items) = item.get("items").and_then(Value::as_array) {
-                    let plan: Vec<String> = items
+                    let entries = items
                         .iter()
-                        .map(|i| format!("[{}] {}", s(i, "status"), s(i, "text")))
+                        .map(|i| PlanEntry {
+                            text: s(i, "text").to_string(),
+                            status: match i.get("completed").and_then(Value::as_bool) {
+                                Some(true) => PlanStatus::Completed,
+                                Some(false) => PlanStatus::Pending,
+                                None => PlanStatus::parse(s(i, "status")),
+                            },
+                        })
                         .collect();
-                    out.push(AgentEvent::Notice(format!("plan:\n{}", plan.join("\n"))));
+                    out.push(AgentEvent::PlanUpdated {
+                        entries,
+                        explanation: None,
+                    });
                 }
             }
             _ => {}

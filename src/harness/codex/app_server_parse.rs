@@ -9,8 +9,8 @@ use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::{
-    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, Question, RateLimitInfo,
-    RateLimitWindow, StopReason, Usage,
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
+    RateLimitInfo, RateLimitWindow, StopReason, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -150,6 +150,30 @@ impl CodexAppServerParser {
                 if used.is_some() || window.is_some() {
                     out.push(AgentEvent::Context(ContextUsage { used, window }));
                 }
+            }
+            "turn/plan/updated" => {
+                let entries = p
+                    .get("plan")
+                    .and_then(Value::as_array)
+                    .map(|steps| {
+                        steps
+                            .iter()
+                            .map(|st| PlanEntry {
+                                text: s(st.get("step").unwrap_or(&Value::Null)).to_string(),
+                                status: PlanStatus::parse(s(st
+                                    .get("status")
+                                    .unwrap_or(&Value::Null))),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(AgentEvent::PlanUpdated {
+                    entries,
+                    explanation: p
+                        .get("explanation")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
             }
             "account/rateLimits/updated" => {
                 let limits = p.get("rateLimits").unwrap_or(&Value::Null);
@@ -328,19 +352,12 @@ impl CodexAppServerParser {
                 output: String::new(),
                 is_error: false,
             }),
-            "plan" | "todoList" => {
-                if let Some(items) = item.get("items").and_then(Value::as_array) {
-                    let plan: Vec<String> = items
-                        .iter()
-                        .map(|i| {
-                            format!(
-                                "[{}] {}",
-                                s(i.get("status").unwrap_or(&Value::Null)),
-                                s(i.get("text").unwrap_or(&Value::Null))
-                            )
-                        })
-                        .collect();
-                    out.push(AgentEvent::Notice(format!("plan:\n{}", plan.join("\n"))));
+            // A proposed plan (plan mode) is prose; the step list arrives as
+            // `turn/plan/updated`.
+            "plan" => {
+                let text = s(item.get("text").unwrap_or(&Value::Null));
+                if !text.is_empty() {
+                    out.push(AgentEvent::Notice(format!("plan:\n{text}")));
                 }
             }
             _ => {}
@@ -491,6 +508,17 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_two_turns",
+        );
+    }
+
+    #[test]
+    fn plan_update_replaces_the_plan() {
+        // Shape from the 0.157.0 app-server schema (TurnPlanUpdatedNotification).
+        let mut p = CodexAppServerParser::new();
+        let ev = p.feed(r#"{"method":"turn/plan/updated","params":{"threadId":"t","turnId":"u","explanation":"why","plan":[{"step":"say hello","status":"completed"},{"step":"say bye","status":"inProgress"}]}}"#);
+        assert_eq!(ev[0].summary(), "PlanUpdated [x] say hello; [~] say bye");
+        assert!(
+            matches!(&ev[0], AgentEvent::PlanUpdated { explanation: Some(e), .. } if e == "why")
         );
     }
 

@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::event::Usage;
+use super::event::{PlanEntry, Usage};
 use super::ids::HarnessId;
 
 /// Conversations kept in the index; older ones are deleted on save.
@@ -78,6 +78,9 @@ pub struct Conversation {
     /// Harness → that harness's session usage totals.
     #[serde(default)]
     pub usage: HashMap<HarnessId, Usage>,
+    /// The agent's latest plan / todo list.
+    #[serde(default)]
+    pub plan: Vec<PlanEntry>,
 }
 
 impl Conversation {
@@ -93,6 +96,7 @@ impl Conversation {
             bookmarks: HashMap::new(),
             blocks: Vec::new(),
             usage: HashMap::new(),
+            plan: Vec::new(),
         }
     }
 

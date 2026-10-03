@@ -56,6 +56,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
         "List saved conversations in this workspace",
     ),
     ("/usage", "Show token usage and cost"),
+    ("/plan", "Show or hide the agent's plan"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/clear", "Clear the transcript"),
     ("/help", "Show commands and shortcuts"),
@@ -106,6 +107,7 @@ pub struct App {
     pub context: ContextUsage,
     pub rate_limit: Option<RateLimitInfo>,
     pub plan: Vec<PlanEntry>,
+    pub show_plan: bool,
     /// What live sessions reported on top of the declared capabilities.
     live_caps: HashMap<HarnessId, CapsUpdate>,
 
@@ -225,6 +227,7 @@ impl App {
         let transcript = Transcript::from_records(&conversation.blocks);
         let session_usage = conversation.usage.get(&active).cloned().unwrap_or_default();
         let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
+        let plan = conversation.plan.clone();
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
@@ -261,7 +264,8 @@ impl App {
             session_usage,
             context: ContextUsage::default(),
             rate_limit: None,
-            plan: Vec::new(),
+            plan,
+            show_plan: true,
             live_caps: HashMap::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
@@ -328,6 +332,7 @@ impl App {
         c.bookmarks = self.last_active_index.clone();
         c.blocks = self.transcript.to_records();
         c.usage.insert(self.active, self.session_usage.clone());
+        c.plan = self.plan.clone();
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
         {
@@ -808,7 +813,7 @@ impl App {
         self.session_usage = conv.usage.get(&active).cloned().unwrap_or_default();
         self.turn_usage = Usage::default();
         self.context = ContextUsage::default();
-        self.plan.clear();
+        self.plan = conv.plan.clone();
         self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
         self.generation_duration = None;
         self.modal = None;
@@ -1286,6 +1291,16 @@ impl App {
                         .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
                 }
             }
+            "/plan" => {
+                self.show_plan = !self.show_plan;
+                if self.plan.is_empty() {
+                    self.transcript
+                        .push_notice("the agent has not shared a plan");
+                } else if !self.show_plan {
+                    self.transcript
+                        .push_system("Plan hidden (/plan shows it again).");
+                }
+            }
             "/skills" => {
                 let mut list = Vec::new();
                 if let Some(root) = &self.workspace_root {
@@ -1313,6 +1328,7 @@ impl App {
             }
             "/clear" => {
                 self.transcript.clear();
+                self.plan.clear();
                 self.transcript.push_system("Transcript cleared.");
                 self.persist();
             }

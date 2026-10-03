@@ -94,7 +94,7 @@ impl Harness for ClaudeHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: false,
-            plan_updates: false,
+            plan_updates: true,
             subagents: false,
             steer: false,
             compaction: false,
