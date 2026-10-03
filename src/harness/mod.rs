@@ -1,191 +1,136 @@
-pub mod agy;
+// Dead-code warnings are expected until the TUI cutover (plan phase 2).
+#![allow(dead_code)]
+
+//! Harness adapters.
+//!
+//! `legacy` holds the v1 adapters still used by print/raw mode and the v1 TUI
+//! until each harness is ported to the `Harness` trait below (plan phases 1–5).
+
 pub mod claude;
-pub mod codex;
+pub mod legacy;
 
-use anyhow::{Result, bail};
+pub use legacy::{
+    HarnessAdapter, HarnessKind, ModelInfo as LegacyModelInfo, RunOptions, get_adapter,
+    resolve_active_harness, which,
+};
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HarnessKind {
-    Agy,
-    Claude,
-    Codex,
+use anyhow::Result;
+
+use crate::core::{
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
+};
+
+/// Where a harness's provider list comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderSource {
+    /// Fixed list of `(id, display name)`.
+    Static(&'static [(&'static str, &'static str)]),
+    /// Must be queried from the binary (`list_providers`).
+    Dynamic,
 }
 
-impl HarnessKind {
-    pub fn parse_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "agy" | "antigravity" => Some(HarnessKind::Agy),
-            "claude" | "claude-code" => Some(HarnessKind::Claude),
-            "codex" => Some(HarnessKind::Codex),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HarnessKind::Agy => "agy",
-            HarnessKind::Claude => "claude",
-            HarnessKind::Codex => "codex",
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            HarnessKind::Agy => "Antigravity (agy)",
-            HarnessKind::Claude => "Claude Code (claude)",
-            HarnessKind::Codex => "Codex (codex)",
-        }
-    }
-
-    pub fn default_priority() -> &'static [HarnessKind] {
-        &[HarnessKind::Agy, HarnessKind::Claude, HarnessKind::Codex]
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessDescriptor {
+    pub id: HarnessId,
+    pub display_name: &'static str,
+    /// Executable names to look for on PATH, in order.
+    pub binary_names: &'static [&'static str],
+    pub providers: ProviderSource,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelInfo {
-    pub id: String,
-    pub display_name: String,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RunOptions {
-    pub prompt: Option<String>,
-    pub print_mode: bool,
-    pub auto_approve: bool,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub format: Option<String>,
-    pub cwd: Option<PathBuf>,
-    pub extra_args: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AuthInfo {
     pub authenticated: bool,
     pub details: Option<String>,
 }
 
-pub trait HarnessAdapter {
-    fn kind(&self) -> HarnessKind;
-    fn binary_name(&self) -> &'static str;
-    fn display_name(&self) -> &'static str {
-        self.kind().display_name()
-    }
-    fn resolve_binary(&self, override_path: Option<&Path>) -> Option<PathBuf>;
-    fn version(&self, binary: &Path) -> Option<String>;
-    fn auth_status(&self, binary: &Path) -> AuthInfo;
-    fn available_models(&self, binary: Option<&Path>) -> Vec<ModelInfo>;
-    fn build_command(&self, binary: &Path, opts: &RunOptions) -> Result<Command>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Probe {
+    pub binary: Option<PathBuf>,
+    pub version: Option<String>,
+    pub auth: AuthInfo,
 }
 
-pub fn get_adapter(kind: HarnessKind) -> Box<dyn HarnessAdapter> {
-    match kind {
-        HarnessKind::Agy => Box::new(agy::AgyAdapter),
-        HarnessKind::Claude => Box::new(claude::ClaudeAdapter),
-        HarnessKind::Codex => Box::new(codex::CodexAdapter),
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub model_ref: ModelRef,
+    pub display_name: String,
+    pub description: Option<String>,
+    /// Per-model effort levels when the harness reports them.
+    pub effort_levels: Option<Vec<String>>,
 }
 
-pub fn resolve_active_harness(
-    requested: Option<&str>,
-    configured_default: Option<&str>,
-    override_paths: &std::collections::HashMap<HarnessKind, PathBuf>,
-) -> Result<(HarnessKind, PathBuf)> {
-    if let Some(req) = requested {
-        if let Some(kind) = HarnessKind::parse_str(req) {
-            let adapter = get_adapter(kind);
-            let binary_override = override_paths.get(&kind).map(|p| p.as_path());
-            if let Some(bin) = adapter.resolve_binary(binary_override) {
-                return Ok((kind, bin));
-            } else {
-                bail!(
-                    "Requested harness '{}' was not found on PATH (expected executable '{}')",
-                    req,
-                    adapter.binary_name()
-                );
-            }
-        } else {
-            bail!(
-                "Unknown harness '{}'. Supported harnesses: agy, claude, codex",
-                req
-            );
+/// Options for the non-TUI paths (`-p` print mode and `--no-tui` passthrough).
+#[derive(Debug, Clone, Default)]
+pub struct PrintConfig {
+    pub binary: PathBuf,
+    pub cwd: PathBuf,
+    pub prompt: Option<String>,
+    /// `true` = one-shot print mode; `false` = hand the terminal to the vendor TUI.
+    pub print_mode: bool,
+    pub model: Option<ModelRef>,
+    pub effort: Option<String>,
+    pub policy: Option<PermissionPolicy>,
+    pub format: Option<String>,
+    pub resume: Option<String>,
+    pub extra_args: Vec<String>,
+}
+
+/// One vendor CLI. Implementations live in `src/harness/<name>/`.
+///
+/// Adding a harness: add a `HarnessId` variant, implement this trait in a new
+/// module with recorded fixtures under `fixtures/`, and register it in
+/// `core::registry::Registry::new`.
+pub trait Harness: Send + Sync {
+    fn descriptor(&self) -> &'static HarnessDescriptor;
+
+    fn capabilities(&self) -> Capabilities;
+
+    /// Locate the binary, read its version and auth state. Cheap and synchronous.
+    fn probe(&self, binary_override: Option<&Path>) -> Probe;
+
+    /// Providers this harness can route to. Default: the static descriptor list.
+    fn list_providers(&self, _binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+        match self.descriptor().providers {
+            ProviderSource::Static(list) => Ok(list
+                .iter()
+                .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
+                .collect()),
+            ProviderSource::Dynamic => Ok(Vec::new()),
         }
     }
 
-    if let Some(def) = configured_default
-        && let Some(kind) = HarnessKind::parse_str(def)
+    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
+
+    /// Spawn the driver task(s) for an interactive session.
+    fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle>;
+
+    /// Build the vendor command line for print or passthrough mode.
+    fn build_print_command(&self, cfg: &PrintConfig) -> Result<std::process::Command>;
+}
+
+/// Resolve a binary: an explicit override that exists, else the first
+/// descriptor name found on PATH.
+pub fn resolve_binary(desc: &HarnessDescriptor, override_path: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = override_path
+        && p.exists()
     {
-        let adapter = get_adapter(kind);
-        let binary_override = override_paths.get(&kind).map(|p| p.as_path());
-        if let Some(bin) = adapter.resolve_binary(binary_override) {
-            return Ok((kind, bin));
-        }
+        return Some(p.to_path_buf());
     }
-
-    for &kind in HarnessKind::default_priority() {
-        let adapter = get_adapter(kind);
-        let binary_override = override_paths.get(&kind).map(|p| p.as_path());
-        if let Some(bin) = adapter.resolve_binary(binary_override) {
-            return Ok((kind, bin));
-        }
-    }
-
-    bail!(
-        "No supported AI harness found on PATH. Please install either Antigravity (`agy`), Claude Code (`claude`), or Codex (`codex`)."
-    );
+    desc.binary_names.iter().find_map(|name| which(name))
 }
 
-pub fn which(name: &str) -> Option<PathBuf> {
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = candidate.metadata()
-                        && meta.permissions().mode() & 0o111 != 0
-                    {
-                        return Some(candidate);
-                    }
-                }
-                #[cfg(not(unix))]
-                return Some(candidate);
-            }
-        }
+/// Run `<binary> --version` and return trimmed stdout.
+pub fn probe_version(binary: &Path) -> Option<String> {
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-    None
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_harness_str() {
-        assert_eq!(HarnessKind::parse_str("agy"), Some(HarnessKind::Agy));
-        assert_eq!(
-            HarnessKind::parse_str("antigravity"),
-            Some(HarnessKind::Agy)
-        );
-        assert_eq!(HarnessKind::parse_str("claude"), Some(HarnessKind::Claude));
-        assert_eq!(
-            HarnessKind::parse_str("claude-code"),
-            Some(HarnessKind::Claude)
-        );
-        assert_eq!(HarnessKind::parse_str("codex"), Some(HarnessKind::Codex));
-        assert_eq!(HarnessKind::parse_str("unknown"), None);
-    }
-
-    #[test]
-    fn test_priority_order() {
-        assert_eq!(
-            HarnessKind::default_priority(),
-            &[HarnessKind::Agy, HarnessKind::Claude, HarnessKind::Codex]
-        );
-    }
+    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!s.is_empty()).then_some(s)
 }

@@ -77,6 +77,17 @@ pub enum Commands {
         args: Vec<String>,
     },
 
+    /// List providers and models per harness
+    Models {
+        /// Only this harness
+        #[arg(short = 'H', long)]
+        harness: Option<String>,
+
+        /// Only this provider
+        #[arg(long)]
+        provider: Option<String>,
+    },
+
     /// Switch default harness in config (agy, claude, codex)
     Switch {
         /// Target harness name

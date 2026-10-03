@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Replay a recorded fixture as if it were the vendor CLI.
+
+Used by `tests/session_e2e.rs` to exercise the real session drivers without
+network access or vendor binaries. The fixture format is the one produced by
+the `scripts/record-*.py` recorders:
+
+  >> {...}   a line the client is expected to SEND: the fake blocks here until
+             it reads one line from stdin (content is logged, not checked)
+  !! text    written to stderr
+  # ...      ignored
+  {...}      written to stdout
+
+Every stdin line is appended to the file named by $UNHARNESS_FAKE_LOG so the
+test can assert on what the driver sent. All command-line arguments are
+ignored (the driver passes vendor flags). The fixture path comes from
+$UNHARNESS_FAKE_FIXTURE. Set $UNHARNESS_FAKE_EXIT_CODE to control the exit
+status after the fixture is exhausted (default 0). Set $UNHARNESS_FAKE_HANG=1
+to keep running after the fixture until stdin closes (long-lived protocols).
+"""
+import os
+import sys
+
+
+def main() -> int:
+    fixture = os.environ.get("UNHARNESS_FAKE_FIXTURE")
+    if not fixture:
+        sys.stderr.write("UNHARNESS_FAKE_FIXTURE not set\n")
+        return 2
+    log_path = os.environ.get("UNHARNESS_FAKE_LOG")
+    log = open(log_path, "a") if log_path else None
+    hang = os.environ.get("UNHARNESS_FAKE_HANG") == "1"
+    exit_code = int(os.environ.get("UNHARNESS_FAKE_EXIT_CODE", "0"))
+
+    def read_stdin_line():
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        if log:
+            log.write(line if line.endswith("\n") else line + "\n")
+            log.flush()
+        return line
+
+    with open(fixture) as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            if line.startswith(">>"):
+                if read_stdin_line() is None:
+                    return exit_code
+                continue
+            if line.startswith("!!"):
+                sys.stderr.write(line[2:].lstrip() + "\n")
+                sys.stderr.flush()
+                continue
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+
+    if hang:
+        while read_stdin_line() is not None:
+            pass
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

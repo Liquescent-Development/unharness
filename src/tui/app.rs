@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::harness::{HarnessKind, ModelInfo, get_adapter};
+use crate::harness::{HarnessKind, LegacyModelInfo as ModelInfo, get_adapter};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

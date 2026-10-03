@@ -1,25 +1,14 @@
-mod cli;
-mod config;
-mod doctor;
-mod harness;
-mod init;
-mod runner;
-mod skills;
-mod skills_cmd;
-mod switch;
-mod sync;
-mod tui;
-
 use std::env;
 
 use anyhow::Result;
 use clap::Parser;
 use colored::*;
 
-use cli::{Cli, Commands, CommonRunArgs};
-use config::Config;
-use harness::RunOptions;
-use sync::find_workspace_root;
+use unharness::cli::{Cli, Commands, CommonRunArgs};
+use unharness::config::Config;
+use unharness::harness::RunOptions;
+use unharness::sync::find_workspace_root;
+use unharness::{doctor, init, models_cmd, runner, skills_cmd, switch, sync};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +22,9 @@ async fn main() -> Result<()> {
         Some(Commands::Doctor) => doctor::run_doctor(&cwd, &config)?,
         Some(Commands::Sync) => handle_sync(&cwd)?,
         Some(Commands::Skills { args }) => skills_cmd::run_skills(&cwd, &args)?,
+        Some(Commands::Models { harness, provider }) => {
+            models_cmd::list_models(&config, harness.as_deref(), provider.as_deref())?
+        }
         Some(Commands::Switch { harness, global }) => {
             switch::switch_default_harness(&cwd, &harness, global)?
         }
