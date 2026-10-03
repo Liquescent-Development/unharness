@@ -82,6 +82,7 @@ def main() -> int:
     prompts = list(args.prompts)
     send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
 
+    done = False
     last = time.time()
     while proc.poll() is None:
         line = proc.stdout.readline()
@@ -106,13 +107,17 @@ def main() -> int:
             elif method in ("select", "input", "editor"):
                 send({"type": "extension_ui_response", "id": rid, "value": "ok"})
         elif t == "agent_settled":
+            # The driver asks for context usage after every turn.
+            send({"id": next_id(), "type": "get_session_stats"})
             if prompts:
                 send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
             else:
-                proc.stdin.close()
-                for rest in proc.stdout:
-                    record("", rest)
-                break
+                done = True
+        elif t == "response" and done and obj.get("command") == "get_session_stats":
+            proc.stdin.close()
+            for rest in proc.stdout:
+                record("", rest)
+            break
         elif t == "response" and not obj.get("success", True):
             sys.stderr.write(f"[error] {obj.get('command')}: {obj.get('error')}\n")
             if obj.get("command") == "prompt":

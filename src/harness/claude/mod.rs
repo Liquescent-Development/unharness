@@ -98,8 +98,8 @@ impl Harness for ClaudeHarness {
             subagents: false,
             steer: false,
             compaction: false,
-            context_usage: false,
-            rate_limits: false,
+            context_usage: true,
+            rate_limits: true,
             rewind: RewindSupport::default(),
             fork: false,
         }

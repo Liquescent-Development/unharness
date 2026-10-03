@@ -565,9 +565,9 @@ impl App {
             AgentEvent::ToolCallStarted { id, name, input } => {
                 self.transcript.tool_started(&id, &name, input)
             }
-            AgentEvent::ToolCallDelta { .. } => {
-                // Streaming args are not shown; ToolCallStarted carries the final input.
-            }
+            // Live output. Streaming args arrive before the block exists and
+            // are dropped there; ToolCallStarted carries the final input.
+            AgentEvent::ToolCallDelta { id, delta, .. } => self.transcript.tool_delta(&id, &delta),
             AgentEvent::ToolCallResult {
                 id,
                 output,
@@ -596,7 +596,15 @@ impl App {
                 }
             }
             AgentEvent::Context(c) => self.context.merge(c),
-            AgentEvent::RateLimit(r) => self.rate_limit = Some(r),
+            AgentEvent::RateLimit(r) => {
+                // Warn once each time a window crosses the threshold.
+                let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
+                if !was_high && rate_limit_high(&r) {
+                    self.transcript
+                        .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
+                }
+                self.rate_limit = Some(r);
+            }
             AgentEvent::TurnAnchor { .. } => {}
             AgentEvent::CapabilitiesChanged(update) => {
                 if let Some(levels) = &update.effort_levels
@@ -1267,6 +1275,16 @@ impl App {
                     s.total_tokens(),
                     s.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
                 ));
+                if let (Some(used), Some(window)) = (self.context.used, self.context.window) {
+                    self.transcript.push_system(format!(
+                        "Context: {used} of {window} tokens ({}%)",
+                        self.context.percent().unwrap_or(0)
+                    ));
+                }
+                if let Some(r) = &self.rate_limit {
+                    self.transcript
+                        .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
+                }
             }
             "/skills" => {
                 let mut list = Vec::new();
@@ -1540,6 +1558,31 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
     }
 }
 
+/// Percentage of a rate-limit window at which the user is warned.
+const RATE_LIMIT_WARN_PERCENT: f32 = 80.0;
+
+fn rate_limit_high(r: &RateLimitInfo) -> bool {
+    r.windows
+        .iter()
+        .any(|w| w.used_percent.is_some_and(|p| p >= RATE_LIMIT_WARN_PERCENT))
+}
+
+fn rate_limit_summary(r: &RateLimitInfo) -> String {
+    let windows: Vec<String> = r
+        .windows
+        .iter()
+        .map(|w| match w.used_percent {
+            Some(p) => format!("{} {p:.0}% used", w.label),
+            None => w.label.clone(),
+        })
+        .collect();
+    match (&r.status, windows.is_empty()) {
+        (Some(s), true) => s.clone(),
+        (Some(s), false) if s != "allowed" => format!("{s} ({})", windows.join(", ")),
+        _ => windows.join(", "),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1737,6 +1780,32 @@ pub(crate) mod tests {
             }),
         });
         assert_eq!(app.transcript.blocks.len(), before + 1);
+    }
+
+    #[test]
+    fn rate_limit_warns_once_when_a_window_runs_high() {
+        use crate::core::{RateLimitInfo, RateLimitWindow};
+        let limit = |pct: f32| {
+            AgentEvent::RateLimit(RateLimitInfo {
+                status: Some("allowed".into()),
+                windows: vec![RateLimitWindow {
+                    label: "five_hour".into(),
+                    used_percent: Some(pct),
+                    resets_at: None,
+                }],
+            })
+        };
+        let mut app = test_app(HarnessId::Claude);
+        let base = app.transcript.blocks.len();
+        app.on_event(limit(20.0));
+        assert_eq!(app.transcript.blocks.len(), base);
+        app.on_event(limit(85.0));
+        app.on_event(limit(90.0));
+        assert_eq!(app.transcript.blocks.len(), base + 1);
+        assert_eq!(
+            rate_limit_summary(app.rate_limit.as_ref().unwrap()),
+            "five_hour 90% used"
+        );
     }
 
     #[test]

@@ -1,12 +1,16 @@
 SessionStarted id=428a5b95-fd09-4e04-a8e9-0f1630268b34 model=claude-haiku-4-5-20251001
 TurnStarted
+Context used=21708 window=-
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "{\"command\": \"echo spike-ok"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "\", \"description\": \"Run the spike"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "-ok echo"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash " command"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "\"}"
 ToolCallStarted id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash input={"command":"echo spike-ok","description":"Run the spike-o...
+RateLimit status=allowed five_hour=27% seven_day=4%
 ToolCallResult id=toolu_01SccNz2ZVer9C2FALNTmJvR error=false "spike-ok"
+Context used=22853 window=-
 TextDelta "done"
 Usage in=18 out=159 cache_read=35501 cache_write=9042 cost=0.0224 cumulative=false
+Context used=- window=200000
 TurnCompleted Done

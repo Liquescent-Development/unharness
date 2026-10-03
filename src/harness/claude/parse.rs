@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
+use crate::core::{
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, Question, RateLimitInfo,
+    RateLimitWindow, StopReason, Usage,
+};
 
 #[derive(Debug, Default)]
 enum BlockAcc {
@@ -79,13 +82,18 @@ impl ClaudeParser {
                 }
             }
             "rate_limit_event" => {
-                let status = val
-                    .pointer("/rate_limit_info/status")
+                let info = val.get("rate_limit_info").unwrap_or(&Value::Null);
+                let status = info
+                    .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("allowed");
                 if status != "allowed" {
                     out.push(AgentEvent::Notice(format!("rate limit: {status}")));
                 }
+                out.push(AgentEvent::RateLimit(RateLimitInfo {
+                    status: Some(status.to_string()),
+                    windows: rate_limit_windows(info),
+                }));
             }
             _ => {}
         }
@@ -139,6 +147,21 @@ impl ClaudeParser {
                 if !self.turn_started {
                     self.turn_started = true;
                     out.push(AgentEvent::TurnStarted);
+                }
+                // The prompt size of the main agent's latest request is how
+                // full its context is; subagents have their own window.
+                if val.get("parent_tool_use_id").is_none_or(Value::is_null)
+                    && let Some(usage) = event.pointer("/message/usage")
+                {
+                    let used = u64_at(usage, "input_tokens")
+                        + u64_at(usage, "cache_read_input_tokens")
+                        + u64_at(usage, "cache_creation_input_tokens");
+                    if used > 0 {
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: Some(used),
+                            window: None,
+                        }));
+                    }
                 }
             }
             "content_block_start" => {
@@ -279,6 +302,14 @@ impl ClaudeParser {
                 cost_usd: val.get("total_cost_usd").and_then(Value::as_f64),
                 cumulative: false,
             }));
+        }
+        let window = val
+            .get("modelUsage")
+            .and_then(Value::as_object)
+            .and_then(|m| m.values().map(|u| u64_at(u, "contextWindow")).max())
+            .filter(|w| *w > 0);
+        if window.is_some() {
+            out.push(AgentEvent::Context(ContextUsage { used: None, window }));
         }
         if let Some(denials) = val.get("permission_denials").and_then(Value::as_array)
             && !denials.is_empty()
@@ -423,6 +454,26 @@ fn opt_str(v: &Value, key: &str) -> Option<String> {
 
 fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// `unifiedWindows` lists every window; older builds only report the active one.
+fn rate_limit_windows(info: &Value) -> Vec<RateLimitWindow> {
+    let window = |label: &str, w: &Value| RateLimitWindow {
+        label: label.to_string(),
+        used_percent: w
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .map(|u| (u * 100.0) as f32),
+        resets_at: w.get("resetsAt").and_then(Value::as_i64),
+    };
+    match info.get("unifiedWindows").and_then(Value::as_object) {
+        Some(windows) => windows.iter().map(|(k, w)| window(k, w)).collect(),
+        None => info
+            .get("rateLimitType")
+            .and_then(Value::as_str)
+            .map(|label| vec![window(label, info)])
+            .unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]

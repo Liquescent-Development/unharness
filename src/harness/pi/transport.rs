@@ -177,6 +177,10 @@ async fn drive(
                                 }
                                 pending.insert(req.id.clone(), kind);
                             }
+                            // Context usage is only available on request.
+                            if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
+                            }
                             if events.send(ev).await.is_err() {
                                 proc.kill().await;
                                 return;

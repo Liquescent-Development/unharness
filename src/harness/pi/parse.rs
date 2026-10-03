@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, CapsUpdate, PermissionKind, PermissionRequest, StopReason, Usage};
+use crate::core::{
+    AgentEvent, CapsUpdate, ContextUsage, PermissionKind, PermissionRequest, StopReason, Usage,
+};
 
 #[derive(Debug, Default)]
 pub struct PiParser {
@@ -14,6 +16,8 @@ pub struct PiParser {
     /// Tool-call names by id, from `toolcall_start`.
     tool_names: HashMap<String, String>,
     announced_tools: HashSet<String>,
+    /// Latest `partialResult` text per running tool call.
+    partial_output: HashMap<String, String>,
 }
 
 impl PiParser {
@@ -71,7 +75,24 @@ impl PiParser {
                     });
                 }
             }
+            "tool_execution_update" => {
+                // `partialResult` is a snapshot; forward only what extends the
+                // previous one (the final result replaces it anyway).
+                let id = s(v, "toolCallId").to_string();
+                let text = flatten_result(v.get("partialResult"));
+                let seen = self.partial_output.entry(id.clone()).or_default();
+                if text.len() > seen.len() && text.starts_with(seen.as_str()) {
+                    let delta = text[seen.len()..].to_string();
+                    *seen = text;
+                    out.push(AgentEvent::ToolCallDelta {
+                        id,
+                        name: s(v, "toolName").to_string(),
+                        delta,
+                    });
+                }
+            }
             "tool_execution_end" => {
+                self.partial_output.remove(s(v, "toolCallId"));
                 out.push(AgentEvent::ToolCallResult {
                     id: s(v, "toolCallId").to_string(),
                     output: flatten_result(v.get("result")),
@@ -280,6 +301,28 @@ impl PiParser {
                             .map(str::to_string),
                     });
                 }
+                if let Some(model) = data.get("model").filter(|m| m.is_object()) {
+                    if let Some(window) = model.get("contextWindow").and_then(Value::as_u64) {
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: None,
+                            window: Some(window),
+                        }));
+                    }
+                    if let Some(inputs) = model.get("input").and_then(Value::as_array) {
+                        out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                            image_input: Some(inputs.iter().any(|i| i == "image")),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+            "get_session_stats" => {
+                if let Some(c) = v.pointer("/data/contextUsage") {
+                    out.push(AgentEvent::Context(ContextUsage {
+                        used: c.get("tokens").and_then(Value::as_u64),
+                        window: c.get("contextWindow").and_then(Value::as_u64),
+                    }));
+                }
             }
             "get_available_thinking_levels" => {
                 if let Some(levels) = v.pointer("/data/levels").and_then(Value::as_array) {
@@ -343,6 +386,15 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             PiParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_session_stats() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "session_stats",
+        );
     }
 
     #[test]

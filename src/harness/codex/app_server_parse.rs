@@ -8,7 +8,10 @@ use std::collections::HashSet;
 use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
+use crate::core::{
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, Question, RateLimitInfo,
+    RateLimitWindow, StopReason, Usage,
+};
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
 pub const ELICITATION_PREFIX: &str = "MCP ";
@@ -18,6 +21,9 @@ pub struct CodexAppServerParser {
     turn_started: bool,
     /// agentMessage / reasoning item ids that streamed deltas.
     streamed_items: HashSet<String>,
+    /// Rate-limit updates are sparse; a null window keeps its last value.
+    rate_primary: Option<RateLimitWindow>,
+    rate_secondary: Option<RateLimitWindow>,
 }
 
 impl CodexAppServerParser {
@@ -134,6 +140,37 @@ impl CodexAppServerParser {
                         cumulative: false,
                     }));
                 }
+                // The last request's total is what currently sits in the context.
+                let used = p
+                    .pointer("/tokenUsage/last/totalTokens")
+                    .and_then(Value::as_u64);
+                let window = p
+                    .pointer("/tokenUsage/modelContextWindow")
+                    .and_then(Value::as_u64);
+                if used.is_some() || window.is_some() {
+                    out.push(AgentEvent::Context(ContextUsage { used, window }));
+                }
+            }
+            "account/rateLimits/updated" => {
+                let limits = p.get("rateLimits").unwrap_or(&Value::Null);
+                if let Some(w) = rate_window(limits.get("primary")) {
+                    self.rate_primary = Some(w);
+                }
+                if let Some(w) = rate_window(limits.get("secondary")) {
+                    self.rate_secondary = Some(w);
+                }
+                out.push(AgentEvent::RateLimit(RateLimitInfo {
+                    status: limits
+                        .get("rateLimitReachedType")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    windows: self
+                        .rate_primary
+                        .iter()
+                        .chain(self.rate_secondary.iter())
+                        .cloned()
+                        .collect(),
+                }));
             }
             "turn/completed" => {
                 self.turn_started = false;
@@ -172,7 +209,7 @@ impl CodexAppServerParser {
             "autoApprovalReview/strictReviewRequired" => out.push(AgentEvent::Notice(
                 "codex auto-review requires strict review".into(),
             )),
-            // thread/status/changed, mcpServer/startupStatus/updated, account/*,
+            // thread/status/changed, mcpServer/startupStatus/updated, account/updated,
             // remoteControl/*, serverRequest/resolved, item/updated…
             _ => {}
         }
@@ -413,6 +450,25 @@ fn s(v: &Value) -> &str {
 
 fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// A `primary` / `secondary` rate-limit window, labelled by its length (`5h`, `7d`).
+fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
+    let w = w.filter(|w| w.is_object())?;
+    let label = match w.get("windowDurationMins").and_then(Value::as_u64) {
+        Some(m) if m >= 1440 => format!("{}d", m / 1440),
+        Some(m) if m >= 60 => format!("{}h", m / 60),
+        Some(m) => format!("{m}m"),
+        None => "limit".to_string(),
+    };
+    Some(RateLimitWindow {
+        label,
+        used_percent: w
+            .get("usedPercent")
+            .and_then(Value::as_f64)
+            .map(|p| p as f32),
+        resets_at: w.get("resetsAt").and_then(Value::as_i64),
+    })
 }
 
 #[cfg(test)]

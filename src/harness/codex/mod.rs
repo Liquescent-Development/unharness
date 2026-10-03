@@ -151,8 +151,8 @@ impl Harness for CodexHarness {
             subagents: false,
             steer: false,
             compaction: false,
-            context_usage: false,
-            rate_limits: false,
+            context_usage: app_server,
+            rate_limits: app_server,
             rewind: RewindSupport::default(),
             fork: false,
         }

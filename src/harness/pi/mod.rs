@@ -68,7 +68,7 @@ impl Harness for PiHarness {
             subagents: false,
             steer: false,
             compaction: false,
-            context_usage: false,
+            context_usage: true,
             rate_limits: false,
             rewind: RewindSupport::default(),
             fork: false,

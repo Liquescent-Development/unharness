@@ -475,6 +475,9 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     if let Some(c) = s.cost_usd {
         usage.push_str(&format!(" · ${c:.2}"));
     }
+    if let Some(pct) = app.context.percent() {
+        usage.push_str(&format!(" · ctx {pct}%"));
+    }
     let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
     let right2 = Line::from(Span::styled(
         app.session_ids

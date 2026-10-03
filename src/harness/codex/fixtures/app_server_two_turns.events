@@ -2,6 +2,8 @@ SessionStarted id=01a10023-e1c2-7e82-a9e5-4d53ffccb2be model=gpt-6-astra
 TurnStarted
 TextDelta "pong"
 Usage in=14448 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=14453 window=258400
+RateLimit status=- 7d=0%
 TurnCompleted Done
 TurnStarted
 TextDelta "I"
@@ -16,6 +18,10 @@ ToolCallStarted id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 name=shell input={"
 PermissionRequest id=0 ToolUse shell
 ToolCallResult id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 error=false "codex-app-ok\\n"
 Usage in=16977 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=17023 window=258400
+RateLimit status=- 7d=0%
 TextDelta "done"
 Usage in=17083 out=5 cache_read=16768 cache_write=0 cost=- cumulative=false
+Context used=17088 window=258400
+RateLimit status=- 7d=0%
 TurnCompleted Done
