@@ -34,6 +34,9 @@ pub struct ClaudeParser {
     /// Message ids for which we saw streamed deltas (so `assistant` is a dup).
     streamed_messages: HashSet<String>,
     turn_started: bool,
+    /// `total_cost_usd` of the previous result; the field is a running total
+    /// for the process, so a turn's cost is the difference.
+    last_total_cost: f64,
     /// Tasks created with `TaskCreate`, in creation order: (id, entry).
     tasks: Vec<(String, PlanEntry)>,
 }
@@ -339,13 +342,18 @@ impl ClaudeParser {
     }
 
     fn on_result(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let cost_usd = val.get("total_cost_usd").and_then(Value::as_f64).map(|t| {
+            let turn = (t - self.last_total_cost).max(0.0);
+            self.last_total_cost = t;
+            turn
+        });
         if let Some(usage) = val.get("usage") {
             out.push(AgentEvent::Usage(Usage {
                 input: u64_at(usage, "input_tokens"),
                 output: u64_at(usage, "output_tokens"),
                 cache_read: u64_at(usage, "cache_read_input_tokens"),
                 cache_write: u64_at(usage, "cache_creation_input_tokens"),
-                cost_usd: val.get("total_cost_usd").and_then(Value::as_f64),
+                cost_usd,
                 cumulative: false,
             }));
         }

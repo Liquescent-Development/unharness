@@ -49,6 +49,6 @@ TextDelta " you prefer to just"
 TextDelta " tell"
 TextDelta " me your preference directly"
 TextDelta "?"
-Usage in=10 out=423 cache_read=25476 cache_write=246 cost=0.0269 cumulative=false
+Usage in=10 out=423 cache_read=25476 cache_write=246 cost=0.0052 cumulative=false
 Context used=- window=200000
 TurnCompleted Done

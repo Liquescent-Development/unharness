@@ -55,6 +55,6 @@ PermissionRequest id=d2ab7e0a-0194-4759-b4bd-c56e431aabe5 Question n=1
 ToolCallResult id=toolu_01HGSw89Mvoo4czWcapLjTyN error=false "Your questions have been answered: \"Do you prefer red or ..."
 Context used=26592 window=-
 TextDelta "you chose Red"
-Usage in=18 out=273 cache_read=52527 cache_write=375 cost=0.0354 cumulative=false
+Usage in=18 out=273 cache_read=52527 cache_write=375 cost=0.0074 cumulative=false
 Context used=- window=200000
 TurnCompleted Done
