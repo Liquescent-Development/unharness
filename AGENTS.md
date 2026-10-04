@@ -48,6 +48,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   are read from `<config dir>/unharness/workspaces/`, never from the
   workspace; an in-tree `unharness.toml` is only imported by `unharness
   init`. The config and state directories are never writable in the sandbox.
+- **A change to a harness's own configuration is never silent.** The files
+  that decide a CLI's next run are declared in `src/harness/<name>/`
+  (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
+  rewrites by itself is projected away there (Claude's counters in
+  `.claude.json`, Codex's trust entry for the workspace), found by running
+  it, so that a warning means something.
 - **No silent edits to vendor settings.** unharness does not write to
   `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception:
   unless `[harnesses.claude] relocate_config = false`, `~/.claude.json` is
@@ -184,6 +190,10 @@ recorded ones. For anything else:
   With `CLAUDE_CONFIG_DIR` set, the file, its lock and its temp files are
   in that directory instead (checked: no denials, signed in from the
   copied file), which is what `relocate_config` uses.
+  Landlock cannot protect a file in a directory where the CLI creates
+  files, and every CLI does so beside its config (Codex's SQLite files in
+  `~/.codex`, pi's lock files in `~/.pi/agent`, Claude's relocated config),
+  which is why those files are watched and not write-protected.
   Unverified: the macOS backend (`seatbelt.rs`; only the profile text is
   tested), a user-enabled Claude Code sandbox inside ours, agy's and the ACP
   presets' state directories, `--no-tui` passthrough under the sandbox.

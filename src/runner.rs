@@ -10,6 +10,7 @@ use colored::*;
 use crate::cli::CommonRunArgs;
 use crate::config::Config;
 use crate::core::conversations::ConversationStore;
+use crate::core::guard::{self, Watch};
 use crate::core::registry::Registry;
 use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
 use crate::core::{HarnessId, ModelRef, PermissionPolicy, ProviderId, resolve_policy};
@@ -192,7 +193,18 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         }
         let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
         if args.print {
+            let mut watch = Watch::begin(
+                &harness.guarded(ws_root.as_deref().unwrap_or(cwd)),
+                dirs::home_dir().as_deref(),
+            );
             let status = cmd.status()?;
+            for change in watch.changes(&guard::default_keep_dir()) {
+                eprintln!(
+                    "{} {}",
+                    "[unharness]".red().bold(),
+                    change.describe(harness.descriptor().display_name)
+                );
+            }
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }

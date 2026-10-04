@@ -465,6 +465,8 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                     continue;
                 }
                 let prepared = app.harness().prepare();
+                // After `prepare`, which may itself create a watched file.
+                app.arm_guard();
                 if let Ok(Some(note)) = &prepared {
                     app.transcript.push_notice(note.clone());
                 }

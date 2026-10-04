@@ -5,6 +5,7 @@ pub mod caps;
 pub mod checkpoints;
 pub mod conversations;
 pub mod event;
+pub mod guard;
 pub mod ids;
 pub mod jsonrpc;
 pub mod per_turn;

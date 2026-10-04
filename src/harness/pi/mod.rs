@@ -15,6 +15,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
@@ -39,6 +40,18 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 impl Harness for PiHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        let agent = Path::new("~/.pi/agent");
+        let mut guarded: Vec<Guarded> = ["settings.json", "models.json", "trust.json", "AGENTS.md"]
+            .iter()
+            .map(|f| Guarded::File(agent.join(f)))
+            .collect();
+        for tree in ["extensions", "prompts"] {
+            guarded.push(Guarded::Tree(agent.join(tree)));
+        }
+        guarded
     }
 
     fn sandbox_paths(&self) -> SandboxPaths {

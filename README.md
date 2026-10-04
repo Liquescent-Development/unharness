@@ -284,6 +284,15 @@ Things to know:
   given in a confined session are then forgotten after it.
 - A confined Claude Code cannot update itself: its installed binaries are
   not writable.
+- A harness's own state directory has to stay writable, and its settings
+  live there (`~/.claude/settings.json`, `~/.codex/config.toml` and the
+  Codex binary, `~/.pi/agent/settings.json`, skills, hooks, MCP servers).
+  The sandbox cannot stop an agent editing those, so unharness watches
+  them: when one changes during a turn, the transcript (or stderr in print
+  mode) says which, and the version from before the session is saved under
+  `~/.local/state/unharness/guard/`. It cannot tell the CLI's own change
+  (saving an "always allow" rule, say) from the agent's. `--no-tui`
+  passthrough is not watched.
 - A file that is replaced or created directly in the home directory or in
   `~/.config` after the process started is not readable by it until the
   next session (Linux).

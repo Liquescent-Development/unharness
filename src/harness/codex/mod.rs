@@ -19,6 +19,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
 use crate::core::sandbox::{SandboxLevel, SandboxPaths};
 use crate::core::{
@@ -240,6 +241,24 @@ impl Harness for CodexHarness {
             .collect())
     }
 
+    /// `packages` holds the standalone install's binary.
+    fn guarded(&self, workspace: &Path) -> Vec<Guarded> {
+        let home = codex_home();
+        let workspace = workspace.to_path_buf();
+        let mut guarded = vec![
+            Guarded::Projected {
+                path: home.join("config.toml"),
+                project: Arc::new(move |bytes| config_without_own_trust(bytes, &workspace)),
+            },
+            Guarded::File(home.join("hooks.json")),
+            Guarded::File(home.join("AGENTS.md")),
+        ];
+        for tree in ["prompts", "skills", "packages"] {
+            guarded.push(Guarded::Tree(home.join(tree)));
+        }
+        guarded
+    }
+
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
             writable: vec![codex_home()],
@@ -305,6 +324,20 @@ impl Harness for CodexHarness {
         }
         Ok(cmd)
     }
+}
+
+/// `config.toml` without the trust entry of `workspace`, which Codex adds by
+/// itself the first time it runs there. Trust for any other directory, and
+/// everything else in the file, still counts.
+fn config_without_own_trust(bytes: &[u8], workspace: &Path) -> Option<String> {
+    let mut config: toml::Table = toml::from_str(std::str::from_utf8(bytes).ok()?).ok()?;
+    if let Some(toml::Value::Table(projects)) = config.get_mut("projects") {
+        projects.remove(workspace.to_string_lossy().as_ref());
+        if projects.is_empty() {
+            config.remove("projects");
+        }
+    }
+    Some(config.to_string())
 }
 
 /// Where Codex keeps sessions, credentials and logs.
@@ -472,5 +505,21 @@ mod tests {
             Some(CodexTransport::AppServer)
         );
         assert_eq!(CodexTransport::parse("x"), None);
+    }
+
+    #[test]
+    fn own_trust_entry_is_not_a_config_change() {
+        let ws = Path::new("/w/proj");
+        let before = b"model = \"m\"\n";
+        let own = b"model = \"m\"\n\n[projects.\"/w/proj\"]\ntrust_level = \"trusted\"\n";
+        let other = b"model = \"m\"\n\n[projects.\"/elsewhere\"]\ntrust_level = \"trusted\"\n";
+        let base = config_without_own_trust(before, ws).unwrap();
+        assert_eq!(config_without_own_trust(own, ws).unwrap(), base);
+        assert_ne!(config_without_own_trust(other, ws).unwrap(), base);
+        assert_ne!(
+            config_without_own_trust(b"model = \"x\"\n", ws).unwrap(),
+            base
+        );
+        assert_eq!(config_without_own_trust(b"not [toml", ws), None);
     }
 }

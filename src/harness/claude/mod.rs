@@ -13,6 +13,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
@@ -48,6 +49,46 @@ pub fn seed_relocated_config(home: &Path, dir: &Path) -> Result<bool> {
     std::fs::copy(&from, &partial)?;
     std::fs::rename(&partial, &to)?;
     Ok(true)
+}
+
+/// `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn state_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new("~").join(STATE_DIR))
+}
+
+/// The part of `.claude.json` that decides what Claude runs and allows: MCP
+/// servers, and each project's allowed tools, MCP approvals and trust. The
+/// rest is counters and caches that change on every run.
+fn config_that_matters(config: &Value) -> Value {
+    const PER_PROJECT: [&str; 5] = [
+        "allowedTools",
+        "mcpServers",
+        "enabledMcpjsonServers",
+        "disabledMcpjsonServers",
+        "hasTrustDialogAccepted",
+    ];
+    let projects: serde_json::Map<String, Value> = config
+        .get("projects")
+        .and_then(Value::as_object)
+        .map(|projects| {
+            projects
+                .iter()
+                .map(|(dir, project)| {
+                    let kept: serde_json::Map<String, Value> = PER_PROJECT
+                        .iter()
+                        .filter_map(|key| Some((key.to_string(), project.get(*key)?.clone())))
+                        .collect();
+                    (dir.clone(), Value::Object(kept))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "mcpServers": config.get("mcpServers").cloned().unwrap_or(Value::Null),
+        "projects": projects,
+    })
 }
 
 impl ClaudeHarness {
@@ -147,16 +188,32 @@ impl Harness for ClaudeHarness {
         }))
     }
 
+    /// Not `plugins`: Claude rewrites its plugin cache on every start.
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        let state = state_dir();
+        let config = if self.relocate_config || std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+            state.join(CONFIG_FILE)
+        } else {
+            Path::new("~").join(CONFIG_FILE)
+        };
+        let mut guarded = vec![
+            Guarded::File(state.join("settings.json")),
+            Guarded::File(state.join("CLAUDE.md")),
+            Guarded::json(config, config_that_matters),
+        ];
+        for tree in ["agents", "commands", "skills", "hooks"] {
+            guarded.push(Guarded::Tree(state.join(tree)));
+        }
+        guarded
+    }
+
     fn sandbox_paths(&self) -> SandboxPaths {
         // `~/.claude.json` is not here: Claude never writes it in place, so
         // the grant would only let an agent edit it (see `relocate_config`).
-        let state = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| Path::new("~").join(STATE_DIR));
         // Not `~/.local/share/claude`, `~/.local/state/claude` or
         // `~/.cache/claude`: the installed binaries and the updater's
         // staging. A confined Claude does not update itself.
-        let mut writable = vec![state, PathBuf::from("~/.cache/claude-cli-nodejs")];
+        let mut writable = vec![state_dir(), PathBuf::from("~/.cache/claude-cli-nodejs")];
         // The messaging socket of each process.
         if let Some(run) = dirs::runtime_dir() {
             writable.push(run.join("cc-socks"));
@@ -396,5 +453,24 @@ mod tests {
         assert_eq!(ClaudeHarness::default().config_env().unwrap(), None);
         let paths = ClaudeHarness::default().sandbox_paths().writable;
         assert!(!paths.iter().any(|p| p.ends_with(".claude.json")));
+    }
+
+    #[test]
+    fn only_the_deciding_part_of_the_config_is_watched() {
+        let before = serde_json::json!({
+            "numStartups": 1,
+            "mcpServers": {},
+            "projects": {"/w": {"allowedTools": [], "lastCost": 0.1}},
+        });
+        let mut after = before.clone();
+        after["numStartups"] = 2.into();
+        after["projects"]["/w"]["lastCost"] = 0.2.into();
+        assert_eq!(config_that_matters(&before), config_that_matters(&after));
+
+        after["projects"]["/w"]["allowedTools"] = serde_json::json!(["Bash(rm:*)"]);
+        assert_ne!(config_that_matters(&before), config_that_matters(&after));
+        let mut server = before.clone();
+        server["mcpServers"] = serde_json::json!({"x": {"command": "sh"}});
+        assert_ne!(config_that_matters(&before), config_that_matters(&server));
     }
 }

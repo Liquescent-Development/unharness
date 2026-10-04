@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
@@ -112,6 +113,15 @@ pub trait Harness: Send + Sync {
     /// home directory. This is the vendor writing its own files.
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths::default()
+    }
+
+    /// The vendor files that decide how this CLI runs next time (settings,
+    /// hooks, MCP servers, its binary) and that the sandbox has to leave
+    /// writable. unharness tells the user when one changes during a turn.
+    /// `workspace` is where the session runs, for what the CLI records about
+    /// it on its own.
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        Vec::new()
     }
 
     /// The sandbox level when the user set none.

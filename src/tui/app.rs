@@ -22,6 +22,7 @@ use crate::core::conversations::{
     CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
     truncate_title,
 };
+use crate::core::guard::{self, Watch};
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
@@ -180,6 +181,9 @@ pub struct App {
     pub policy_requested: PermissionPolicy,
     /// The sandbox level asked for and the platform's backend, fixed at launch.
     pub sandbox: SandboxSetup,
+    /// The active harness's own configuration files as they were when its
+    /// session started, to notice a change (`core::guard`).
+    pub guard: Option<Watch>,
     pub providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
@@ -512,6 +516,7 @@ impl App {
             harness_options,
             policy_requested: init.policy,
             sandbox: init.sandbox,
+            guard: None,
             providers,
             models,
             efforts,
@@ -723,6 +728,29 @@ impl App {
             &self.config,
             self.workspace_root.as_deref().unwrap_or(&self.cwd),
         )
+    }
+
+    /// Start watching the active harness's configuration files, before its
+    /// process starts.
+    pub fn arm_guard(&mut self) {
+        self.guard = Some(Watch::begin(
+            &self
+                .harness()
+                .guarded(self.workspace_root.as_deref().unwrap_or(&self.cwd)),
+            dirs::home_dir().as_deref(),
+        ));
+    }
+
+    /// Tell the user about configuration files that changed since the last
+    /// check.
+    fn check_guard(&mut self) {
+        let name = self.display_name();
+        let Some(watch) = self.guard.as_mut() else {
+            return;
+        };
+        for change in watch.changes(&guard::default_keep_dir()) {
+            self.transcript.push_error(change.describe(name));
+        }
     }
 
     /// What the status area warns about: a missing sandbox, a degraded policy.
@@ -1746,6 +1774,7 @@ impl App {
                     StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
                     StopReason::Error(e) => self.transcript.push_error(e),
                 }
+                self.check_guard();
                 self.finish_generation();
                 self.persist();
                 // A clean finish moves on to the next queued prompt; after an
