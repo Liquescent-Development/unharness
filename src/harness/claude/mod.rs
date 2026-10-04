@@ -120,6 +120,10 @@ impl Harness for ClaudeHarness {
         }
     }
 
+    fn quick_auth(&self, binary: &Path) -> Option<bool> {
+        Some(auth_status(binary).authenticated)
+    }
+
     fn list_models(&self, _binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "anthropic" {
             return Ok(Vec::new());

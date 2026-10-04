@@ -126,6 +126,10 @@ impl Harness for AgyHarness {
         }
     }
 
+    fn quick_auth(&self, _binary: &Path) -> Option<bool> {
+        Some(auth_status().authenticated)
+    }
+
     fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "google" {
             return Ok(Vec::new());

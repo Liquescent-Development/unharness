@@ -65,6 +65,14 @@ unharness sessions                          # recorded sessions in this workspac
 unharness skills add vercel-labs/agent-skills
 ```
 
+Without `-H` and without `default_harness` in the config, unharness takes
+the first installed harness that is signed in, in the order Antigravity,
+Claude Code, Codex, pi, then ACP agents. Antigravity, Claude Code and Codex
+can say so quickly; pi and ACP agents cannot (pi needs a model query, an ACP
+agent a session), so they are chosen only when none of those three is signed
+in, and ahead of one that is known to be signed out. `unharness doctor` shows
+the result as "Active Default".
+
 ### In the TUI
 
 The transcript fills the window. Everything about the current state sits
