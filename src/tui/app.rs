@@ -160,6 +160,8 @@ pub struct App {
     /// While a drag is held past the transcript's top (-1) or bottom (1)
     /// edge, it keeps scrolling that way.
     drag_edge: i8,
+    /// While the scrollbar's thumb is held: rows from its top to the pointer.
+    scrollbar_grab: Option<u16>,
     /// Selected text waiting for the event loop to put it on the clipboard.
     copy_request: Option<String>,
     /// A short-lived message in the status rule, and when it appeared.
@@ -252,6 +254,69 @@ pub struct TranscriptView {
     pub scroll: usize,
     /// Every rendered line as plain text, scrolled out or not.
     pub lines: Vec<String>,
+    /// The scrollbar, when there is more transcript than fits.
+    pub scrollbar: Option<Scrollbar>,
+    /// The jump-to-bottom label, shown while scrolled away from the end.
+    pub jump: Option<Rect>,
+}
+
+/// The transcript's scrollbar: a thumb on the right border whose size and
+/// place show how much of the transcript is in view, and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scrollbar {
+    pub x: u16,
+    pub y: u16,
+    pub height: u16,
+    /// Rows from the top of the bar to the top of the thumb.
+    pub thumb_top: u16,
+    pub thumb_len: u16,
+    pub max_scroll: u16,
+}
+
+impl Scrollbar {
+    /// The bar for `total` lines seen through `height` rows from line
+    /// `scroll`; `None` when everything fits.
+    pub fn new(x: u16, y: u16, height: u16, total: u16, scroll: u16) -> Option<Self> {
+        if height == 0 || total <= height {
+            return None;
+        }
+        let max_scroll = total - height;
+        let thumb_len = ((height as u32 * height as u32) / total as u32).max(1) as u16;
+        let travel = (height - thumb_len) as u32;
+        let scroll = scroll.min(max_scroll) as u32;
+        // Rounded, but only at the very ends when the view is at the ends.
+        let mut thumb_top = ((scroll * travel + max_scroll as u32 / 2) / max_scroll as u32) as u16;
+        if travel > 1 {
+            if scroll > 0 {
+                thumb_top = thumb_top.max(1);
+            }
+            if scroll < max_scroll as u32 {
+                thumb_top = thumb_top.min(travel as u16 - 1);
+            }
+        }
+        Some(Scrollbar {
+            x,
+            y,
+            height,
+            thumb_top,
+            thumb_len,
+            max_scroll,
+        })
+    }
+
+    /// The scroll offset that puts the thumb's top `top` rows down the bar.
+    pub fn scroll_for(&self, top: i32) -> u16 {
+        let travel = (self.height - self.thumb_len) as i32;
+        if travel == 0 {
+            return 0;
+        }
+        let top = top.clamp(0, travel);
+        ((top * self.max_scroll as i32 + travel / 2) / travel) as u16
+    }
+
+    fn contains(&self, column: u16, row: u16) -> bool {
+        column == self.x && row >= self.y && row < self.y + self.height
+    }
 }
 
 impl App {
@@ -393,6 +458,7 @@ impl App {
             selection: None,
             last_click: None,
             drag_edge: 0,
+            scrollbar_grab: None,
             copy_request: None,
             flash: None,
             edit_requested: false,
@@ -2033,7 +2099,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down or the mouse wheel scroll · End (empty prompt) back to the bottom · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2365,8 +2431,44 @@ impl App {
         })
     }
 
+    /// Scroll so the scrollbar's thumb follows a pointer on `row`.
+    fn scrollbar_follow(&mut self, bar: Scrollbar, row: u16, grab: u16) {
+        let top = row as i32 - bar.y as i32 - grab as i32;
+        // The renderer goes back to following the end if this reaches it.
+        self.auto_scroll = false;
+        self.scroll = bar.scroll_for(top);
+    }
+
+    pub fn scrollbar_held(&self) -> bool {
+        self.scrollbar_grab.is_some()
+    }
+
     fn mouse_press(&mut self, column: u16, row: u16) {
         self.drag_edge = 0;
+        if self
+            .transcript_view
+            .jump
+            .is_some_and(|r| r.contains((column, row).into()))
+        {
+            self.scroll_to_bottom();
+            return;
+        }
+        if let Some(bar) = self.transcript_view.scrollbar
+            && bar.contains(column, row)
+        {
+            // On the thumb: hold it where it was grabbed. On the track:
+            // bring the thumb's middle to the pointer, then hold that.
+            let offset = row - bar.y;
+            let on_thumb = offset >= bar.thumb_top && offset < bar.thumb_top + bar.thumb_len;
+            let grab = if on_thumb {
+                offset - bar.thumb_top
+            } else {
+                bar.thumb_len / 2
+            };
+            self.scrollbar_grab = Some(grab);
+            self.scrollbar_follow(bar, row, grab);
+            return;
+        }
         let Some(point) = self.transcript_point(column, row, false) else {
             self.selection = None;
             self.last_click = None;
@@ -2392,6 +2494,10 @@ impl App {
     }
 
     fn mouse_drag(&mut self, column: u16, row: u16) {
+        if let (Some(grab), Some(bar)) = (self.scrollbar_grab, self.transcript_view.scrollbar) {
+            self.scrollbar_follow(bar, row, grab);
+            return;
+        }
         let Some(point) = self.transcript_point(column, row, true) else {
             return;
         };
@@ -2411,6 +2517,9 @@ impl App {
 
     fn mouse_release(&mut self) {
         self.drag_edge = 0;
+        if self.scrollbar_grab.take().is_some() {
+            return;
+        }
         match self.selected_text() {
             Some(text) if !text.trim().is_empty() => self.copy_request = Some(text),
             _ => {
