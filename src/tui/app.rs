@@ -6,12 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde_json::Value;
 
 use super::history::PromptHistory;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
+use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
@@ -148,6 +150,20 @@ pub struct App {
     pub prompt_scroll: usize,
     /// Prompts sent from this workspace, for Up/Down recall.
     pub history: PromptHistory,
+    /// The transcript as last drawn, for turning a mouse position into
+    /// text; set by the renderer.
+    pub transcript_view: TranscriptView,
+    /// Text selected in the transcript with the mouse.
+    pub selection: Option<Selection>,
+    /// The last press, to tell a double or triple click.
+    last_click: Option<(Instant, Point, u8)>,
+    /// While a drag is held past the transcript's top (-1) or bottom (1)
+    /// edge, it keeps scrolling that way.
+    drag_edge: i8,
+    /// Selected text waiting for the event loop to put it on the clipboard.
+    copy_request: Option<String>,
+    /// A short-lived message in the status rule, and when it appeared.
+    flash: Option<(String, Instant)>,
     /// The user asked to edit the prompt in their editor; the event loop
     /// owns the terminal, so it does the work.
     edit_requested: bool,
@@ -220,6 +236,23 @@ pub struct AppInit {
 
 /// Transcript lines scrolled per wheel notch.
 const WHEEL_LINES: u16 = 3;
+
+/// Presses this close together on one cell count as a double or triple click.
+const MULTI_CLICK: Duration = Duration::from_millis(500);
+
+/// How long a status-rule message stays up.
+const FLASH: Duration = Duration::from_secs(2);
+
+/// What the renderer last drew of the transcript.
+#[derive(Debug, Default)]
+pub struct TranscriptView {
+    /// Where the text is, inside the border.
+    pub area: Rect,
+    /// Index of the line on the first row.
+    pub scroll: usize,
+    /// Every rendered line as plain text, scrolled out or not.
+    pub lines: Vec<String>,
+}
 
 impl App {
     pub fn new(init: AppInit) -> Self {
@@ -356,6 +389,12 @@ impl App {
             prompt_width: 78,
             prompt_scroll: 0,
             history,
+            transcript_view: TranscriptView::default(),
+            selection: None,
+            last_click: None,
+            drag_edge: 0,
+            copy_request: None,
+            flash: None,
             edit_requested: false,
             scroll: 0,
             auto_scroll: true,
@@ -1994,7 +2033,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown or Shift+Up/Down scroll · End (empty prompt) back to the bottom\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down or the mouse wheel scroll · End (empty prompt) back to the bottom · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2292,8 +2331,164 @@ impl App {
         match ev.kind {
             MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
             MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_press(ev.column, ev.row),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(ev.column, ev.row),
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_release(),
             _ => {}
         }
+    }
+
+    /// The transcript cell under a screen position. With `clamp`, a position
+    /// outside the transcript maps to the nearest cell in view.
+    fn transcript_point(&self, column: u16, row: u16, clamp: bool) -> Option<Point> {
+        let view = &self.transcript_view;
+        let area = view.area;
+        if area.width == 0 || area.height == 0 || view.lines.is_empty() {
+            return None;
+        }
+        let inside = column >= area.x
+            && column < area.x + area.width
+            && row >= area.y
+            && row < area.y + area.height;
+        if !inside && !clamp {
+            return None;
+        }
+        let column = column.clamp(area.x, area.x + area.width - 1);
+        let row = row.clamp(area.y, area.y + area.height - 1);
+        let line = view.scroll + (row - area.y) as usize;
+        if line >= view.lines.len() && !clamp {
+            return None;
+        }
+        Some(Point {
+            line: line.min(view.lines.len() - 1),
+            col: (column - area.x) as usize,
+        })
+    }
+
+    fn mouse_press(&mut self, column: u16, row: u16) {
+        self.drag_edge = 0;
+        let Some(point) = self.transcript_point(column, row, false) else {
+            self.selection = None;
+            self.last_click = None;
+            return;
+        };
+        let now = Instant::now();
+        let count = match self.last_click {
+            Some((at, p, n)) if p == point && now.duration_since(at) < MULTI_CLICK && n < 3 => {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, point, count));
+        self.selection = Some(Selection {
+            anchor: point,
+            focus: point,
+            granularity: match count {
+                1 => Granularity::Char,
+                2 => Granularity::Word,
+                _ => Granularity::Line,
+            },
+        });
+    }
+
+    fn mouse_drag(&mut self, column: u16, row: u16) {
+        let Some(point) = self.transcript_point(column, row, true) else {
+            return;
+        };
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        sel.focus = point;
+        let area = self.transcript_view.area;
+        self.drag_edge = if row < area.y {
+            -1
+        } else if row >= area.y + area.height {
+            1
+        } else {
+            0
+        };
+    }
+
+    fn mouse_release(&mut self) {
+        self.drag_edge = 0;
+        match self.selected_text() {
+            Some(text) if !text.trim().is_empty() => self.copy_request = Some(text),
+            _ => {
+                // A plain click, or only blank cells: nothing is selected.
+                if self
+                    .selection
+                    .is_some_and(|s| s.granularity == Granularity::Char)
+                {
+                    self.selection = None;
+                }
+            }
+        }
+    }
+
+    /// The selection as first and last cell, for the highlight.
+    pub fn selection_range(&self) -> Option<(Point, Point)> {
+        self.selection?.range(&self.transcript_view.lines)
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(selection::text(&self.transcript_view.lines, start, end))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_click_forget(&mut self) {
+        self.last_click = None;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.drag_edge = 0;
+    }
+
+    pub fn take_copy_request(&mut self) -> Option<String> {
+        self.copy_request.take()
+    }
+
+    /// Show `message` in the status rule for a moment.
+    pub fn flash(&mut self, message: impl Into<String>) {
+        self.flash = Some((message.into(), Instant::now()));
+    }
+
+    pub fn flash_text(&self) -> Option<&str> {
+        self.flash.as_ref().map(|(m, _)| m.as_str())
+    }
+
+    /// Timed mouse work: keep scrolling while a drag is held past an edge,
+    /// and take down an expired flash. True when the screen changed.
+    pub fn tick_mouse(&mut self) -> bool {
+        let mut changed = false;
+        if self.drag_edge != 0 && self.selection.is_some() {
+            let view = &self.transcript_view;
+            let last = view.lines.len().saturating_sub(1);
+            let line = if self.drag_edge < 0 {
+                view.scroll.saturating_sub(1)
+            } else {
+                (view.scroll + view.area.height as usize).min(last)
+            };
+            if self.drag_edge < 0 {
+                self.scroll_up(1);
+            } else {
+                self.scroll_down(1);
+            }
+            if let Some(sel) = self.selection.as_mut() {
+                sel.focus.line = line;
+            }
+            changed = true;
+        }
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= FLASH)
+        {
+            self.flash = None;
+            changed = true;
+        }
+        changed
     }
 
     pub fn scroll_up(&mut self, n: u16) {

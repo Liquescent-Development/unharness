@@ -93,6 +93,7 @@ capability caveat, and the key hints.
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
 | `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
 | Mouse wheel | Scroll the transcript |
+| Drag, double click, triple click | Select transcript text, a word (paths stay whole) or a row, and copy it on release |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
@@ -121,6 +122,17 @@ Sent prompts and commands are remembered per workspace (the newest 500, in
 `Up` on the prompt's first line recalls them; whatever you had typed comes
 back when you step `Down` past the newest. While the `/` autocomplete list is
 open the arrows move in it instead.
+
+unharness takes the mouse, so the terminal's own selection is replaced by
+its own: drag in the transcript to select, and the text is copied when you
+let go (the status rule says so). Dragging past the top or bottom edge
+scrolls. The copy goes through `wl-copy`, `xclip`, `xsel` or `pbcopy` when
+one is there, and otherwise, or over ssh, through the terminal (OSC 52),
+which some terminals ignore and tmux only passes on with `set-clipboard on`.
+What is copied is the rows as drawn, so a wrapped paragraph comes out with
+its line breaks and indent. Holding Shift while dragging gives the
+terminal's selection back in most terminals, and `mouse = false` in the
+config turns all of this off.
 
 Pasted text goes into the prompt as it is, newlines included, and is never
 sent until you press Enter (this relies on the terminal's bracketed paste,
@@ -200,7 +212,7 @@ Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
-mouse            = true          # wheel scrolls the transcript; false leaves the mouse to the terminal
+mouse            = true          # wheel scrolls, drag selects and copies; false leaves the mouse to the terminal
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)

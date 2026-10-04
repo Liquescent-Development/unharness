@@ -2,12 +2,14 @@
 //! the active harness session's event stream.
 
 pub mod app;
+pub mod clipboard;
 pub mod code;
 pub mod editor;
 pub mod history;
 pub mod markdown;
 pub mod modal;
 pub mod prompt;
+pub mod selection;
 pub mod transcript;
 pub mod ui;
 
@@ -188,6 +190,7 @@ async fn event_loop(
                     app.tick_spinner();
                     needs_redraw = true;
                 }
+                needs_redraw |= app.tick_mouse();
             }
             ev = async {
                 match session.as_mut() {
@@ -218,6 +221,7 @@ async fn event_loop(
                         if key.kind == KeyEventKind::Release {
                             continue;
                         }
+                        app.clear_selection();
                         if app.modal.is_some() {
                             app.handle_modal_key(key);
                         } else {
@@ -229,6 +233,17 @@ async fn event_loop(
                     _ => {}
                 }
             }
+        }
+
+        if let Some(text) = app.take_copy_request() {
+            let rows = text.lines().count().max(1);
+            let message = match clipboard::copy(&text, clipboard::Desktop::detect(), &mut stdout())
+            {
+                Ok(_) if rows == 1 => "Copied".to_string(),
+                Ok(_) => format!("Copied {rows} lines"),
+                Err(e) => format!("Not copied: {e}"),
+            };
+            app.flash(message);
         }
 
         if app.take_edit_request() {

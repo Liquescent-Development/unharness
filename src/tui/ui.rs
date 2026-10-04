@@ -9,7 +9,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::App;
+use super::app::{App, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines, sanitize,
     wrap_words,
@@ -362,10 +362,39 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         app.scroll = max_scroll;
         app.auto_scroll = true;
     }
+    app.transcript_view = TranscriptView {
+        area: inner,
+        scroll: app.scroll as usize,
+        lines: lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect(),
+    };
     frame.render_widget(
         Paragraph::new(lines).block(block).scroll((app.scroll, 0)),
         area,
     );
+
+    // The mouse selection, drawn over the text it covers.
+    if let Some((start, end)) = app.selection_range() {
+        let buf = frame.buffer_mut();
+        for row in 0..inner.height {
+            let line = app.scroll as usize + row as usize;
+            if line < start.line || line > end.line {
+                continue;
+            }
+            let from = if line == start.line { start.col } else { 0 };
+            let to = if line == end.line {
+                end.col
+            } else {
+                usize::MAX
+            };
+            for col in from..=to.min(inner.width.saturating_sub(1) as usize) {
+                buf[(inner.x + col as u16, inner.y + row)]
+                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+            }
+        }
+    }
 }
 
 /// Body of a tool block: file edits as syntax-coloured diffs, file writes and
@@ -463,7 +492,9 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     let rule_style = Style::default().fg(Color::DarkGray);
 
     // Status rule: ── ⠇ Running shell · 12s ─────
-    let status = if app.is_generating {
+    let status = if let Some(message) = app.flash_text() {
+        Span::styled(format!(" {message} "), Style::default().fg(Color::Green))
+    } else if app.is_generating {
         Span::styled(
             format!(
                 " {} {} · {:.0}s ",
@@ -1244,6 +1275,85 @@ mod tests {
         assert_eq!(rows[first], format!("❯ {}", "x".repeat(58)));
         assert_eq!(rows[first + 1], format!("  {}", "x".repeat(12)));
         assert_eq!(cursor, (14, (first + 1) as u16));
+    }
+
+    #[test]
+    fn mouse_selects_transcript_text_and_asks_for_a_copy() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let left = MouseButton::Left;
+
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.transcript
+            .push_user("open src/tui/app.rs please".to_string());
+        app.transcript.push_user("second prompt".to_string());
+        let (rows, _) = screen(&mut app, 80, 24);
+        let y = rows.iter().position(|r| r.contains("open src")).unwrap() as u16;
+        let x = rows[y as usize].find("open").unwrap() as u16 - 2; // "│" is 3 bytes, 1 cell
+
+        // Press and release without moving selects nothing.
+        app.handle_mouse(mouse(MouseEventKind::Down(left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), x, y));
+        assert!(app.selection.is_none() && app.take_copy_request().is_none());
+
+        // Drag across "open src": highlighted while held, copied on release.
+        app.last_click_forget();
+        app.handle_mouse(mouse(MouseEventKind::Down(left), x, y));
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 7, y));
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let reversed = |term: &Terminal<TestBackend>, x: u16| {
+            term.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed(&term, x - 1) && reversed(&term, x) && reversed(&term, x + 7));
+        assert!(!reversed(&term, x + 8));
+        assert!(app.take_copy_request().is_none());
+        app.handle_mouse(mouse(MouseEventKind::Up(left), x + 7, y));
+        assert_eq!(app.take_copy_request().as_deref(), Some("open src"));
+        assert!(app.selection.is_some());
+
+        // Double click: the word, here a whole path. Triple: the line.
+        app.last_click_forget();
+        for _ in 0..2 {
+            app.handle_mouse(mouse(MouseEventKind::Down(left), x + 8, y));
+            app.handle_mouse(mouse(MouseEventKind::Up(left), x + 8, y));
+        }
+        assert_eq!(app.take_copy_request().as_deref(), Some("src/tui/app.rs"));
+        app.handle_mouse(mouse(MouseEventKind::Down(left), x + 8, y));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), x + 8, y));
+        assert_eq!(
+            app.take_copy_request().as_deref(),
+            Some("  open src/tui/app.rs please")
+        );
+
+        // A drag over several rows copies them as rows; one that ends below
+        // the transcript keeps to its last row and starts scrolling.
+        app.last_click_forget();
+        app.handle_mouse(mouse(MouseEventKind::Down(left), x + 5, y));
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, y + 3));
+        assert_eq!(
+            app.selected_text().as_deref(),
+            Some("src/tui/app.rs please\n\n❯ You\n  second")
+        );
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, 23));
+        assert!(app.tick_mouse());
+        app.handle_mouse(mouse(MouseEventKind::Up(left), x + 5, 23));
+        assert!(!app.tick_mouse());
+        assert!(
+            app.take_copy_request()
+                .is_some_and(|t| t.trim_end().ends_with("  second prompt"))
+        );
+
+        // A press outside the transcript, or a key, drops the selection.
+        app.handle_mouse(mouse(MouseEventKind::Down(left), 3, 23));
+        assert!(app.selection.is_none());
+
+        // The copy result shows in the status rule.
+        app.flash("Copied 4 lines");
+        let (rows, _) = screen(&mut app, 80, 24);
+        assert!(rows.iter().any(|r| r.starts_with("── Copied 4 lines ─")));
     }
 
     #[test]

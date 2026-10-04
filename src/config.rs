@@ -23,8 +23,9 @@ pub struct Config {
     /// only) so `/rewind` can restore files. Default: on.
     pub file_checkpoints: Option<bool>,
 
-    /// Take the mouse in the TUI, so the wheel scrolls the transcript. Off
-    /// leaves the mouse to the terminal. Default: on.
+    /// Take the mouse in the TUI: the wheel scrolls the transcript and
+    /// dragging selects and copies text. Off leaves the mouse to the
+    /// terminal. Default: on.
     pub mouse: Option<bool>,
 
     /// Harness-specific settings keyed by harness id.
