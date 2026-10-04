@@ -7,9 +7,12 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Scrollbar, TranscriptView};
+use super::app::{App, Scrollbar};
 use super::code::{
     clamp_lines, code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines, sanitize,
     wrap_words,
@@ -162,6 +165,238 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// The rendered lines of one transcript block. Depends on nothing but its
+/// arguments, so the result can be kept until `block_key` changes.
+fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    match b {
+        TBlock::User { text } => {
+            lines.push(Line::from(Span::styled(
+                "❯ You",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(wrap_prefixed_text("  ", text, width, Style::default()));
+            lines.push(Line::default());
+        }
+        TBlock::Assistant {
+            text,
+            sender,
+            duration,
+        } => {
+            let dur = duration
+                .map(|d| format!(" ({:.1}s)", d.as_secs_f32()))
+                .unwrap_or_default();
+            lines.push(Line::from(Span::styled(
+                format!("● {sender}{dur}"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(render_markdown_to_lines(text, width));
+            lines.push(Line::default());
+        }
+        TBlock::Thought { text, duration } => {
+            let title = match duration {
+                Some(d) => format!("  ┌─ 💭 Thought for {:.1}s ", d.as_secs_f32()),
+                None if thinking_live => format!("  ┌─ 💭 Thinking ({elapsed:.1}s) "),
+                None => "  ┌─ 💭 Thinking ".to_string(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{title}{}",
+                    "─".repeat(width.saturating_sub(title.len()).min(40))
+                ),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+            let inner_w = width.saturating_sub(6).max(10);
+            for raw in text.lines() {
+                for w in wrap_words(raw, inner_w) {
+                    lines.push(Line::from(vec![
+                        Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            w,
+                            Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
+                }
+            }
+            lines.push(Line::from(Span::styled(
+                "  └".to_string() + &"─".repeat(width.saturating_sub(3).min(50)),
+                Style::default().fg(Color::DarkGray),
+            )));
+            lines.push(Line::default());
+        }
+        TBlock::Tool {
+            name,
+            input,
+            output,
+            is_error,
+            done,
+            collapsed,
+            duration,
+            parent,
+            ..
+        } => {
+            let status = if !*done {
+                Span::styled(" ⠿ running", Style::default().fg(Color::Yellow))
+            } else if *is_error {
+                Span::styled(" ✗", Style::default().fg(Color::Red))
+            } else {
+                Span::styled(
+                    format!(
+                        " ✓{}",
+                        duration
+                            .map(|d| format!(" {:.1}s", d.as_secs_f32()))
+                            .unwrap_or_default()
+                    ),
+                    Style::default().fg(Color::Green),
+                )
+            };
+            let summary = tool_summary_full(name, input);
+            let head_width = width.saturating_sub(name.len() + 18).max(10);
+            let mut summary_lines = wrap_words(&summary, head_width).into_iter();
+            let mut first = vec![
+                Span::styled(
+                    // Calls made inside a subagent hang off their spawner.
+                    if parent.is_some() {
+                        "    ↳ "
+                    } else {
+                        "  ⚡ "
+                    },
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    name.clone(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    summary_lines.next().unwrap_or_default(),
+                    Style::default().fg(Color::Gray),
+                ),
+            ];
+            let rest: Vec<String> = summary_lines.collect();
+            if rest.is_empty() {
+                first.push(status);
+                lines.push(Line::from(first));
+            } else {
+                lines.push(Line::from(first));
+                let n = rest.len();
+                for (i, seg) in rest.into_iter().enumerate() {
+                    let mut l = vec![
+                        Span::raw(" ".repeat(name.len() + 7)),
+                        Span::styled(seg, Style::default().fg(Color::Gray)),
+                    ];
+                    if i + 1 == n {
+                        l.push(status.clone());
+                    }
+                    lines.push(Line::from(l));
+                }
+            }
+
+            let body = tool_body_lines(name, input, output, *is_error, width.saturating_sub(2));
+            let limit = if *collapsed { 4 } else { usize::MAX };
+            let total = body.len();
+            lines.extend(body.into_iter().take(limit));
+            if *collapsed && total > limit {
+                lines.push(Line::from(Span::styled(
+                    format!("  │ … {} more lines (Ctrl+O to expand)", total - limit),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        TBlock::System(t) => {
+            lines.extend(wrap_prefixed_text(
+                "  ℹ ",
+                t,
+                width,
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::ITALIC),
+            ));
+            lines.push(Line::default());
+        }
+        TBlock::Notice(t) => {
+            lines.extend(wrap_prefixed_text(
+                "  · ",
+                t,
+                width,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        TBlock::Error(t) => {
+            lines.extend(wrap_prefixed_text(
+                "  ✗ ",
+                t,
+                width,
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::default());
+        }
+    }
+    lines
+}
+
+/// A fingerprint of everything `block_lines` reads from a block.
+fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
+    fn value<H: Hasher>(v: &serde_json::Value, h: &mut H) {
+        use serde_json::Value;
+        std::mem::discriminant(v).hash(h);
+        match v {
+            Value::Null => {}
+            Value::Bool(b) => b.hash(h),
+            Value::Number(n) => n.hash(h),
+            Value::String(s) => s.hash(h),
+            Value::Array(a) => a.iter().for_each(|v| value(v, h)),
+            Value::Object(o) => o.iter().for_each(|(k, v)| {
+                k.hash(h);
+                value(v, h);
+            }),
+        }
+    }
+    let mut h = DefaultHasher::new();
+    std::mem::discriminant(b).hash(&mut h);
+    match b {
+        TBlock::User { text } => text.hash(&mut h),
+        TBlock::Assistant {
+            text,
+            sender,
+            duration,
+        } => (text, sender, duration).hash(&mut h),
+        TBlock::Thought { text, duration } => {
+            (text, duration).hash(&mut h);
+            // A thought in progress shows a running clock.
+            if duration.is_none() && thinking_live {
+                ((elapsed * 10.0) as u32).hash(&mut h);
+            }
+        }
+        TBlock::Tool {
+            name,
+            input,
+            output,
+            is_error,
+            done,
+            collapsed,
+            duration,
+            parent,
+            ..
+        } => {
+            (name, output, is_error, done, collapsed, duration, parent).hash(&mut h);
+            value(input, &mut h);
+        }
+        TBlock::System(t) | TBlock::Notice(t) | TBlock::Error(t) => t.hash(&mut h),
+    }
+    h.finish()
+}
+
 fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -175,223 +410,85 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     let width = (inner.width.saturating_sub(4)).max(10) as usize;
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
     let thinking_live = app.is_thinking();
     let elapsed = app.elapsed_secs();
 
-    for b in &app.transcript.blocks {
-        match b {
-            TBlock::User { text } => {
-                lines.push(Line::from(Span::styled(
-                    "❯ You",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.extend(wrap_prefixed_text("  ", text, width, Style::default()));
-                lines.push(Line::default());
-            }
-            TBlock::Assistant {
-                text,
-                sender,
-                duration,
-            } => {
-                let dur = duration
-                    .map(|d| format!(" ({:.1}s)", d.as_secs_f32()))
-                    .unwrap_or_default();
-                lines.push(Line::from(Span::styled(
-                    format!("● {sender}{dur}"),
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )));
-                lines.extend(render_markdown_to_lines(text, width));
-                lines.push(Line::default());
-            }
-            TBlock::Thought { text, duration } => {
-                let title = match duration {
-                    Some(d) => format!("  ┌─ 💭 Thought for {:.1}s ", d.as_secs_f32()),
-                    None if thinking_live => format!("  ┌─ 💭 Thinking ({elapsed:.1}s) "),
-                    None => "  ┌─ 💭 Thinking ".to_string(),
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{title}{}",
-                        "─".repeat(width.saturating_sub(title.len()).min(40))
-                    ),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::ITALIC),
-                )));
-                let inner_w = width.saturating_sub(6).max(10);
-                for raw in text.lines() {
-                    for w in wrap_words(raw, inner_w) {
-                        lines.push(Line::from(vec![
-                            Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                w,
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        ]));
-                    }
-                }
-                lines.push(Line::from(Span::styled(
-                    "  └".to_string() + &"─".repeat(width.saturating_sub(3).min(50)),
-                    Style::default().fg(Color::DarkGray),
-                )));
-                lines.push(Line::default());
-            }
-            TBlock::Tool {
-                name,
-                input,
-                output,
-                is_error,
-                done,
-                collapsed,
-                duration,
-                parent,
-                ..
-            } => {
-                let status = if !*done {
-                    Span::styled(" ⠿ running", Style::default().fg(Color::Yellow))
-                } else if *is_error {
-                    Span::styled(" ✗", Style::default().fg(Color::Red))
-                } else {
-                    Span::styled(
-                        format!(
-                            " ✓{}",
-                            duration
-                                .map(|d| format!(" {:.1}s", d.as_secs_f32()))
-                                .unwrap_or_default()
-                        ),
-                        Style::default().fg(Color::Green),
-                    )
-                };
-                let summary = tool_summary_full(name, input);
-                let head_width = width.saturating_sub(name.len() + 18).max(10);
-                let mut summary_lines = wrap_words(&summary, head_width).into_iter();
-                let mut first = vec![
-                    Span::styled(
-                        // Calls made inside a subagent hang off their spawner.
-                        if parent.is_some() {
-                            "    ↳ "
-                        } else {
-                            "  ⚡ "
-                        },
-                        Style::default().fg(Color::Yellow),
-                    ),
-                    Span::styled(
-                        name.clone(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(
-                        summary_lines.next().unwrap_or_default(),
-                        Style::default().fg(Color::Gray),
-                    ),
-                ];
-                let rest: Vec<String> = summary_lines.collect();
-                if rest.is_empty() {
-                    first.push(status);
-                    lines.push(Line::from(first));
-                } else {
-                    lines.push(Line::from(first));
-                    let n = rest.len();
-                    for (i, seg) in rest.into_iter().enumerate() {
-                        let mut l = vec![
-                            Span::raw(" ".repeat(name.len() + 7)),
-                            Span::styled(seg, Style::default().fg(Color::Gray)),
-                        ];
-                        if i + 1 == n {
-                            l.push(status.clone());
-                        }
-                        lines.push(Line::from(l));
-                    }
-                }
-
-                let body = tool_body_lines(name, input, output, *is_error, width.saturating_sub(2));
-                let limit = if *collapsed { 4 } else { usize::MAX };
-                let total = body.len();
-                lines.extend(body.into_iter().take(limit));
-                if *collapsed && total > limit {
-                    lines.push(Line::from(Span::styled(
-                        format!("  │ … {} more lines (Ctrl+O to expand)", total - limit),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-            }
-            TBlock::System(t) => {
-                lines.extend(wrap_prefixed_text(
-                    "  ℹ ",
-                    t,
-                    width,
-                    Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::ITALIC),
-                ));
-                lines.push(Line::default());
-            }
-            TBlock::Notice(t) => {
-                lines.extend(wrap_prefixed_text(
-                    "  · ",
-                    t,
-                    width,
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            TBlock::Error(t) => {
-                lines.extend(wrap_prefixed_text(
-                    "  ✗ ",
-                    t,
-                    width,
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ));
-                lines.push(Line::default());
-            }
+    // Rendering a block (markdown, syntax highlighting, diffs) is far too
+    // slow to redo on every frame, so the lines are kept and only blocks
+    // whose content changed, and those after them, are rendered again.
+    let mut view = std::mem::take(&mut app.transcript_view);
+    if view.width != inner.width {
+        view.width = inner.width;
+        view.blocks.clear();
+    }
+    let mut fresh = 0;
+    for (i, b) in app.transcript.blocks.iter().enumerate() {
+        let key = block_key(b, thinking_live, elapsed);
+        if i == fresh && view.blocks.get(i).is_some_and(|(k, _)| *k == key) {
+            fresh += 1;
+            continue;
         }
+        if i == fresh {
+            // First stale block: drop its lines and everything after.
+            let keep = i.checked_sub(1).map_or(0, |p| view.blocks[p].1);
+            view.blocks.truncate(i);
+            view.rendered.truncate(keep);
+            view.lines.truncate(keep);
+        }
+        let mut lines = block_lines(b, width, thinking_live, elapsed);
+        clamp_lines(&mut lines, inner.width as usize);
+        view.lines.extend(lines.iter().map(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        }));
+        view.rendered.extend(lines);
+        view.blocks.push((key, view.rendered.len()));
+    }
+    if fresh == app.transcript.blocks.len() && view.blocks.len() > fresh {
+        // Blocks were removed from the end (rewind, /clear).
+        let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].1);
+        view.blocks.truncate(fresh);
+        view.rendered.truncate(keep);
+        view.lines.truncate(keep);
     }
 
-    clamp_lines(&mut lines, inner.width as usize);
-    let total = lines.len() as u16;
+    let total = view.rendered.len().min(u16::MAX as usize) as u16;
     let max_scroll = total.saturating_sub(inner.height);
     if app.auto_scroll || app.scroll >= max_scroll {
         app.scroll = max_scroll;
         app.auto_scroll = true;
     }
-    app.transcript_view = TranscriptView {
-        area: inner,
-        scroll: app.scroll as usize,
-        lines: lines
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect(),
-        // On the right border, beside the rows of text.
-        scrollbar: Scrollbar::new(
-            area.x + area.width.saturating_sub(1),
-            inner.y,
-            inner.height,
-            total,
-            app.scroll,
-        ),
-        // Only where it can be clicked.
-        jump: (!app.auto_scroll
-            && app.config.mouse.unwrap_or(true)
-            && inner.width >= JUMP_LABEL.width() as u16)
-            .then(|| Rect {
-                x: inner.x + (inner.width - JUMP_LABEL.width() as u16) / 2,
-                y: inner.y + inner.height.saturating_sub(1),
-                width: JUMP_LABEL.width() as u16,
-                height: 1,
-            }),
-    };
-    frame.render_widget(
-        Paragraph::new(lines).block(block).scroll((app.scroll, 0)),
-        area,
+    view.area = inner;
+    view.scroll = app.scroll as usize;
+    // On the right border, beside the rows of text.
+    view.scrollbar = Scrollbar::new(
+        area.x + area.width.saturating_sub(1),
+        inner.y,
+        inner.height,
+        total,
+        app.scroll,
     );
+    // Only where it can be clicked.
+    view.jump = (!app.auto_scroll
+        && app.config.mouse.unwrap_or(true)
+        && inner.width >= JUMP_LABEL.width() as u16)
+        .then(|| Rect {
+            x: inner.x + (inner.width - JUMP_LABEL.width() as u16) / 2,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: JUMP_LABEL.width() as u16,
+            height: 1,
+        });
+    let visible: Vec<Line<'static>> = view
+        .rendered
+        .iter()
+        .skip(app.scroll as usize)
+        .take(inner.height as usize)
+        .cloned()
+        .collect();
+    app.transcript_view = view;
+    frame.render_widget(Paragraph::new(visible).block(block), area);
 
     // The mouse selection, drawn over the text it covers.
     if let Some((start, end)) = app.selection_range() {
@@ -1492,6 +1589,82 @@ mod tests {
         assert_eq!(bar.scroll_for(-3), 0);
         assert_eq!(bar.scroll_for(4), 15);
         assert_eq!(bar.scroll_for(99), 30);
+    }
+
+    #[test]
+    fn kept_transcript_lines_match_a_fresh_render() {
+        // The same frame, from the lines kept since the last one and from
+        // nothing.
+        fn check(app: &mut App, width: u16, what: &str) {
+            let (kept, _) = screen(app, width, 30);
+            app.transcript_view = Default::default();
+            let (fresh, _) = screen(app, width, 30);
+            assert_eq!(kept, fresh, "{what}");
+        }
+        let tool = |app: &mut App, id: &str, output: &str| {
+            app.on_event(crate::core::AgentEvent::ToolCallStarted {
+                id: id.into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": format!("run {id}")}),
+            });
+            app.on_event(crate::core::AgentEvent::ToolCallResult {
+                id: id.into(),
+                output: output.into(),
+                is_error: false,
+            });
+        };
+
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("first".into());
+        app.take_actions();
+        tool(&mut app, "t1", "a\nb\nc\nd\ne\nf\ng");
+        app.on_event(crate::core::AgentEvent::TextDelta("Some **text**".into()));
+        check(&mut app, 70, "first frame");
+        let kept_blocks = app.transcript_view.blocks.clone();
+        assert_eq!(kept_blocks.len(), app.transcript.blocks.len());
+
+        // Nothing changed: every block is reused as it is.
+        screen(&mut app, 70, 30);
+        assert_eq!(app.transcript_view.blocks, kept_blocks);
+
+        // The last block grows while streaming; earlier ones are untouched.
+        app.on_event(crate::core::AgentEvent::TextDelta(
+            " and more\n\n```rust\nfn main() {}\n```\n".into(),
+        ));
+        check(&mut app, 70, "streamed text");
+        let n = kept_blocks.len();
+        assert_eq!(app.transcript_view.blocks[..n - 1], kept_blocks[..n - 1]);
+        assert_ne!(app.transcript_view.blocks[n - 1], kept_blocks[n - 1]);
+
+        // A block in the middle changes height: all after it move.
+        tool(&mut app, "t2", "x\ny");
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        check(&mut app, 70, "second tool and turn end");
+        if let Some(TBlock::Tool { collapsed, .. }) = app
+            .transcript
+            .blocks
+            .iter_mut()
+            .find(|b| matches!(b, TBlock::Tool { output, .. } if output.starts_with('a')))
+        {
+            *collapsed = !*collapsed;
+        }
+        check(&mut app, 70, "tool block expanded");
+
+        // A new width lays everything out again.
+        check(&mut app, 50, "narrower");
+        check(&mut app, 90, "wider");
+
+        // Blocks removed from the end, and all of them.
+        app.transcript.blocks.truncate(2);
+        check(&mut app, 90, "truncated");
+        assert_eq!(app.transcript_view.blocks.len(), 2);
+        app.transcript.clear();
+        check(&mut app, 90, "cleared");
+        assert!(app.transcript_view.lines.is_empty());
+        app.transcript.push_user("again");
+        check(&mut app, 90, "after clear");
     }
 
     #[test]

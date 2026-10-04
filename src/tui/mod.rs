@@ -32,7 +32,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
@@ -216,21 +216,11 @@ async fn event_loop(
             }
             Some(Ok(event)) = input.next() => {
                 needs_redraw = true;
-                match event {
-                    Event::Key(key) => {
-                        if key.kind == KeyEventKind::Release {
-                            continue;
-                        }
-                        app.clear_selection();
-                        if app.modal.is_some() {
-                            app.handle_modal_key(key);
-                        } else {
-                            handle_key(app, key.modifiers, key.code);
-                        }
-                    }
-                    Event::Paste(text) => app.paste(&text),
-                    Event::Mouse(mouse) => app.handle_mouse(mouse),
-                    _ => {}
+                handle_event(app, event);
+                // A drag or a spin of the wheel arrives as a burst: take
+                // everything already waiting and draw once for all of it.
+                while let Some(Some(Ok(event))) = input.next().now_or_never() {
+                    handle_event(app, event);
                 }
             }
         }
@@ -262,6 +252,25 @@ async fn event_loop(
         let _ = s.send(SessionCommand::Shutdown).await;
     }
     Ok(())
+}
+
+fn handle_event(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) => {
+            if key.kind == KeyEventKind::Release {
+                return;
+            }
+            app.clear_selection();
+            if app.modal.is_some() {
+                app.handle_modal_key(key);
+            } else {
+                handle_key(app, key.modifiers, key.code);
+            }
+        }
+        Event::Paste(text) => app.paste(&text),
+        Event::Mouse(mouse) => app.handle_mouse(mouse),
+        _ => {}
+    }
 }
 
 /// Hand the terminal to `$VISUAL` / `$EDITOR` with the prompt in a file, and

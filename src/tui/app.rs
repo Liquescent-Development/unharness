@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use serde_json::Value;
 
 use super::history::PromptHistory;
@@ -254,6 +255,13 @@ pub struct TranscriptView {
     pub scroll: usize,
     /// Every rendered line as plain text, scrolled out or not.
     pub lines: Vec<String>,
+    /// Every rendered line, kept between frames.
+    pub rendered: Vec<Line<'static>>,
+    /// Per transcript block: the fingerprint it was rendered from, and
+    /// where its lines end in `rendered` and `lines`.
+    pub blocks: Vec<(u64, usize)>,
+    /// The width `rendered` was laid out for.
+    pub width: u16,
     /// The scrollbar, when there is more transcript than fits.
     pub scrollbar: Option<Scrollbar>,
     /// The jump-to-bottom label, shown while scrolled away from the end.
