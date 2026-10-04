@@ -92,6 +92,7 @@ capability caveat, and the key hints.
 | `Ctrl+U` | Clear the prompt |
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
 | `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
+| Mouse wheel | Scroll the transcript |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
@@ -199,6 +200,7 @@ Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
+mouse            = true          # wheel scrolls the transcript; false leaves the mouse to the terminal
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)

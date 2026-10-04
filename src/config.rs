@@ -23,6 +23,10 @@ pub struct Config {
     /// only) so `/rewind` can restore files. Default: on.
     pub file_checkpoints: Option<bool>,
 
+    /// Take the mouse in the TUI, so the wheel scrolls the transcript. Off
+    /// leaves the mouse to the terminal. Default: on.
+    pub mouse: Option<bool>,
+
     /// Harness-specific settings keyed by harness id.
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessSettings>,
@@ -144,6 +148,7 @@ impl Config {
             auto_sync: local.auto_sync,
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
+            mouse: local.mouse.or(global.mouse),
             harnesses,
         }
     }

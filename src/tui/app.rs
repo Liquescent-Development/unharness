@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use serde_json::Value;
 
 use super::history::PromptHistory;
@@ -217,6 +217,9 @@ pub struct AppInit {
     /// state directory.
     pub checkpoint_store: Option<PathBuf>,
 }
+
+/// Transcript lines scrolled per wheel notch.
+const WHEEL_LINES: u16 = 3;
 
 impl App {
     pub fn new(init: AppInit) -> Self {
@@ -2281,6 +2284,18 @@ impl App {
         text
     }
 
+    /// Mouse input, when the TUI has the mouse. A dialog keeps it out.
+    pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        if self.modal.is_some() {
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
+            _ => {}
+        }
+    }
+
     pub fn scroll_up(&mut self, n: u16) {
         self.auto_scroll = false;
         self.scroll = self.scroll.saturating_sub(n);
@@ -3310,6 +3325,33 @@ pub(crate) mod tests {
                 decision: PermissionDecision::Deny { reason }, ..
             }) if reason == "not now"
         )));
+    }
+
+    pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn wheel_scrolls_the_transcript_not_the_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.history.push("earlier prompt");
+        app.insert_str("draft");
+        app.scroll = 20;
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!((app.scroll, app.auto_scroll), (17, false));
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(app.scroll, 20);
+        assert_eq!(app.input, "draft");
+
+        // Not while a dialog is open.
+        app.open_policy_picker();
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!(app.scroll, 20);
     }
 
     #[test]

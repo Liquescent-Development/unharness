@@ -11,7 +11,7 @@ pub mod prompt;
 pub mod transcript;
 pub mod ui;
 
-use std::io::{Stdout, stdout};
+use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -75,8 +75,22 @@ fn enter_terminal(out: &mut Stdout) -> Result<()> {
         )?;
         KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
     }
+    if MOUSE.load(Ordering::SeqCst) {
+        out.write_all(ENABLE_MOUSE)?;
+        out.flush()?;
+    }
     Ok(())
 }
+
+/// Whether the TUI takes the mouse (the `mouse` setting).
+static MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// Report presses, releases, the wheel, and motion while a button is held,
+/// in SGR coordinates. Motion without a button is not asked for: nothing
+/// here reacts to hovering, and multiplexers lag when every movement is
+/// forwarded.
+const ENABLE_MOUSE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const DISABLE_MOUSE: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// Whether the kitty keyboard protocol was switched on and has to be
 /// switched off again, including from the panic hook.
@@ -91,9 +105,14 @@ fn restore_terminal() -> std::io::Result<()> {
     } else {
         Ok(())
     };
+    let mouse = if MOUSE.load(Ordering::SeqCst) {
+        out.write_all(DISABLE_MOUSE).and_then(|()| out.flush())
+    } else {
+        Ok(())
+    };
     let left = execute!(out, DisableBracketedPaste, LeaveAlternateScreen);
     disable_raw_mode()?;
-    popped.and(left)
+    popped.and(mouse).and(left)
 }
 
 pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
@@ -110,6 +129,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         default_hook(info);
     }));
 
+    MOUSE.store(launch.config.mouse.unwrap_or(true), Ordering::SeqCst);
     let mut out = stdout();
     enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
@@ -205,6 +225,7 @@ async fn event_loop(
                         }
                     }
                     Event::Paste(text) => app.paste(&text),
+                    Event::Mouse(mouse) => app.handle_mouse(mouse),
                     _ => {}
                 }
             }
