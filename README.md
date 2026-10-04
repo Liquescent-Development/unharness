@@ -231,6 +231,59 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 `*` shown as a warning in the header. A requested policy a harness cannot
 honour falls back to the nearest *less* permissive one it supports.
 
+### Sandbox
+
+unharness confines every harness process itself, whichever agent runs and
+whatever it chooses to ask about. The process and everything it starts (shell
+commands, MCP servers) can:
+
+- **write** only inside the workspace, the harness's own state directories
+  (`~/.claude`, `~/.codex`, `~/.pi`, …; `unharness doctor` lists them) and
+  the temp directories;
+- **read** everything except credential locations: `~/.ssh`, `~/.gnupg`,
+  `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`,
+  `~/.config/gcloud`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`,
+  `~/.git-credentials` and shell history;
+- use the network freely.
+
+| Level | Writes |
+|---|---|
+| `workspace-write` (default) | workspace, harness state, temp |
+| `read-only` | harness state and temp only |
+| `off` | unconfined |
+
+Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX` or `[sandbox] level`.
+The default applies under every policy, `bypass` included; Codex `exec` under
+`ask` defaults to `read-only` because it cannot prompt. The level is on the
+status line and is fixed for a run.
+
+On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
+the process is launched through `sandbox-exec`. Where neither exists the
+default degrades to `off` with a warning in the status area, in `doctor` and
+on stderr in print mode, and an explicitly requested level is an error.
+
+Things to know:
+
+- The vendors' own sandboxes cannot start inside this one, so while it is
+  active Codex is told the sandbox is external (its approvals are
+  unchanged). With `--sandbox off` Codex's sandbox follows the policy as in
+  the table above.
+- Git over ssh from the agent needs `readable = ["~/.ssh"]`.
+- An MCP server or extension that keeps data elsewhere needs its directory
+  in `writable`.
+- Claude Code updates `~/.claude.json` by creating files next to it in the
+  home directory, which is denied: sessions work, but that file is not
+  updated while confined.
+- A file that is replaced or created directly in the home directory or in
+  `~/.config` after the process started is not readable by it until the
+  next session (Linux).
+- In a git worktree the repository's data lives outside the workspace;
+  add the main repository's `.git` to `writable` to commit from the agent.
+- Programs that need to raise privileges (`sudo`) do not work inside
+  (Linux).
+- The workspace's own `unharness.toml` is inside the workspace, so an agent
+  can edit it; what it sets there applies from the next run.
+
 ### Switching harnesses
 
 `/switch` shuts the current session down and starts the next harness lazily on
@@ -250,12 +303,18 @@ auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before e
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
 
+[sandbox]
+level    = "workspace-write"     # read-only | workspace-write | off
+writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
+readable = ["~/.ssh"]            # credential paths to allow reading
+
 [harnesses.claude]
 # binary = "/path/to/claude"
 default_model  = "opus"
 default_effort = "high"
 default_policy = "accept-edits"
 extra_args     = []
+sandbox_writable = []            # extra paths this harness may write inside the sandbox
 
 [harnesses.codex]
 transport = "auto"               # auto | app-server | exec
@@ -289,6 +348,7 @@ mode can be added from config, without a dedicated adapter:
 protocol     = "acp"
 command      = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 display_name = "Claude (ACP)"
+sandbox_writable = ["~/.claude", "~/.npm"]   # the agent's own state, for the sandbox
 ```
 
 The table name is the harness id (`unharness -H claude-acp`, `/harness
