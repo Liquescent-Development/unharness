@@ -16,12 +16,27 @@ use super::code::{
 };
 use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
+use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let warning = app.policy_warning();
-    let bottom_height = 1 + 1 + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
+    let area = frame.area();
+    // The prompt grows with its content up to a cap (less on a short
+    // terminal), then scrolls to keep the cursor's row in view.
+    app.prompt_width = (area.width as usize).saturating_sub(PROMPT_INDENT);
+    let rows = app.prompt_rows();
+    let prompt_height = rows
+        .len()
+        .min(prompt::MAX_ROWS)
+        .min((area.height as usize / 3).max(1));
+    let cursor_row = prompt::cursor_row(&rows, app.cursor);
+    app.prompt_scroll = app
+        .prompt_scroll
+        .clamp((cursor_row + 1).saturating_sub(prompt_height), cursor_row)
+        .min(rows.len() - prompt_height);
+    let bottom_height = 1 + prompt_height + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
     let pinned = pinned_lines(app);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -30,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             Constraint::Length(pinned.len() as u16),
             Constraint::Length(bottom_height as u16),
         ])
-        .split(frame.area());
+        .split(area);
 
     render_transcript(frame, app, chunks[0]);
     if !pinned.is_empty() {
@@ -45,6 +60,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_modal(frame, app, frame.area());
     }
 }
+
+/// Columns taken by the prompt marker.
+const PROMPT_INDENT: usize = 2;
 
 /// Most queued prompts shown above the prompt.
 const QUEUE_ROWS: usize = 3;
@@ -424,12 +442,14 @@ pub fn wrap_prefixed_text(
 /// Status rule, prompt, rule, context lines, optional warning, key hints.
 /// Returns the prompt row's rect (for the suggestions popup).
 fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>) -> Rect {
+    // Everything but the prompt is one row each.
+    let fixed = 5 + u16::from(warning.is_some());
     let mut constraints = vec![
-        Constraint::Length(1), // status rule
-        Constraint::Length(1), // prompt
-        Constraint::Length(1), // rule
-        Constraint::Length(1), // where / what
-        Constraint::Length(1), // usage / session
+        Constraint::Length(1),                                 // status rule
+        Constraint::Length(area.height.saturating_sub(fixed)), // prompt
+        Constraint::Length(1),                                 // rule
+        Constraint::Length(1),                                 // where / what
+        Constraint::Length(1),                                 // usage / session
     ];
     if warning.is_some() {
         constraints.push(Constraint::Length(1));
@@ -487,19 +507,33 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("❯ ", prompt_style),
-            Span::raw(sanitize(&app.input)),
-        ])),
-        rows[1],
-    );
+    let input_rows = app.prompt_rows();
+    let chars: Vec<char> = app.input.chars().collect();
+    let visible = input_rows
+        .iter()
+        .enumerate()
+        .skip(app.prompt_scroll)
+        .take(rows[1].height as usize);
+    let lines: Vec<Line> = visible
+        .map(|(i, r)| {
+            let marker = if i == 0 {
+                Span::styled("❯ ", prompt_style)
+            } else {
+                Span::raw("  ")
+            };
+            let text: String = chars[r.start..r.end].iter().collect();
+            Line::from(vec![marker, Span::raw(sanitize(&text))])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), rows[1]);
     if app.modal.is_none() {
-        let before: String = app.input.chars().take(app.cursor).collect();
-        let x = rows[1].x + 2 + UnicodeWidthStr::width(before.as_str()) as u16;
+        let row = prompt::cursor_row(&input_rows, app.cursor);
+        let col = prompt::width_between(&app.input, input_rows[row].start, app.cursor);
+        let x = rows[1].x + (PROMPT_INDENT + col) as u16;
+        let y = rows[1].y + row.saturating_sub(app.prompt_scroll) as u16;
         frame.set_cursor_position((
             x.min(rows[1].x + rows[1].width.saturating_sub(1)),
-            rows[1].y,
+            y.min(rows[1].y + rows[1].height.saturating_sub(1)),
         ));
     }
 
@@ -604,6 +638,8 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     let footer = Line::from(vec![
         k("Enter", Color::Cyan),
         Span::raw(" send · "),
+        k("^J", Color::Cyan),
+        Span::raw(" newline · "),
         k("^H", Color::Yellow),
         Span::raw(" harness · "),
         k("^M", Color::Magenta),
@@ -1155,6 +1191,61 @@ mod tests {
         assert_eq!(wrap_words("", 10), vec![String::new()]);
     }
 
+    fn screen(app: &mut App, width: u16, height: u16) -> (Vec<String>, (u16, u16)) {
+        let mut term = Terminal::new(TestBackend::new(width, height)).unwrap();
+        term.draw(|f| render(f, app)).unwrap();
+        let cursor = term.get_cursor_position().unwrap();
+        let buf = term.backend().buffer();
+        let rows = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        (rows, (cursor.x, cursor.y))
+    }
+
+    #[test]
+    fn prompt_grows_with_its_lines_then_scrolls() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_str("alpha\nbeta\ngamma");
+        let (rows, cursor) = screen(&mut app, 60, 30);
+        let first = rows.iter().position(|r| r == "❯ alpha").unwrap();
+        assert_eq!(rows[first + 1], "  beta");
+        assert_eq!(rows[first + 2], "  gamma");
+        assert!(rows[first - 1].starts_with("──") && rows[first + 3].starts_with("──"));
+        assert_eq!(cursor, (7, (first + 2) as u16));
+
+        // Past the cap the box stops growing and follows the cursor.
+        for i in 0..20 {
+            app.insert_str(&format!("\nline {i}"));
+        }
+        let (rows, cursor) = screen(&mut app, 60, 30);
+        let last = rows.iter().position(|r| r == "  line 19").unwrap();
+        assert_eq!(rows[last - (prompt::MAX_ROWS - 1)], "  line 12");
+        assert!(rows[last - prompt::MAX_ROWS].starts_with("──"));
+        assert_eq!(cursor.1, last as u16);
+        assert!(!rows.iter().any(|r| r == "❯ alpha"));
+
+        // Moving back up scrolls the first line into view again.
+        while app.move_cursor_up() {}
+        let (rows, cursor) = screen(&mut app, 60, 30);
+        let first = rows.iter().position(|r| r == "❯ alpha").unwrap();
+        assert_eq!(cursor.1, first as u16);
+
+        // A long line wraps instead of running off the edge.
+        app.take_input();
+        app.insert_str(&"x".repeat(70));
+        let (rows, cursor) = screen(&mut app, 60, 30);
+        let first = rows.iter().position(|r| r.starts_with("❯ x")).unwrap();
+        assert_eq!(rows[first], format!("❯ {}", "x".repeat(58)));
+        assert_eq!(rows[first + 1], format!("  {}", "x".repeat(12)));
+        assert_eq!(cursor, (14, (first + 1) as u16));
+    }
+
     #[test]
     fn bottom_cluster_layout() {
         let mut app = test_app(HarnessId::CLAUDE);
@@ -1173,19 +1264,7 @@ mod tests {
         for c in "/mo".chars() {
             app.insert_char(c);
         }
-        let backend = TestBackend::new(110, 24);
-        let mut term = Terminal::new(backend).unwrap();
-        term.draw(|f| render(f, &mut app)).unwrap();
-        let buf = term.backend().buffer().clone();
-        let rows: Vec<String> = (0..buf.area.height)
-            .map(|y| {
-                (0..buf.area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_string()
-            })
-            .collect();
+        let (rows, _) = screen(&mut app, 124, 24);
         if std::env::var("UNHARNESS_DUMP_UI").is_ok() {
             eprintln!("{}", rows.join("\n"));
         }

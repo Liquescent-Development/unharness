@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
+use super::prompt;
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
@@ -140,6 +141,10 @@ pub struct App {
     pub input: String,
     /// Char index into `input`.
     pub cursor: usize,
+    /// Columns the prompt text has to wrap in; set by the renderer.
+    pub prompt_width: usize,
+    /// First visible row of the prompt box once it is taller than its cap.
+    pub prompt_scroll: usize,
     pub scroll: u16,
     pub auto_scroll: bool,
 
@@ -338,6 +343,8 @@ impl App {
             first_prompt,
             input: String::new(),
             cursor: 0,
+            prompt_width: 78,
+            prompt_scroll: 0,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
@@ -1975,7 +1982,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline · Up/Down move between lines · Home/End (Ctrl+A) line start/end · Ctrl+U clear\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -1990,7 +1997,7 @@ impl App {
 
     pub fn update_suggestions(&mut self) {
         self.suggestions.clear();
-        if !self.input.starts_with('/') {
+        if !self.input.starts_with('/') || self.input.contains('\n') {
             self.selected_suggestion = 0;
             return;
         }
@@ -2142,17 +2149,68 @@ impl App {
         self.cursor = (self.cursor + 1).min(self.input.chars().count());
     }
 
-    pub fn move_cursor_home(&mut self) {
-        self.cursor = 0;
+    /// The input's visual rows at the current prompt width.
+    pub fn prompt_rows(&self) -> Vec<prompt::Row> {
+        prompt::rows(&self.input, self.prompt_width)
     }
 
+    /// Insert text at the cursor, newlines included (a paste).
+    pub fn insert_str(&mut self, text: &str) {
+        let text = prompt::clean(text);
+        let idx = self.byte_index(self.cursor);
+        self.input.insert_str(idx, &text);
+        self.cursor += text.chars().count();
+        self.update_suggestions();
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    /// Move to the row above, keeping the column. False on the first row.
+    pub fn move_cursor_up(&mut self) -> bool {
+        self.move_cursor_rows(-1)
+    }
+
+    /// Move to the row below, keeping the column. False on the last row.
+    pub fn move_cursor_down(&mut self) -> bool {
+        self.move_cursor_rows(1)
+    }
+
+    fn move_cursor_rows(&mut self, delta: isize) -> bool {
+        let rows = self.prompt_rows();
+        let row = prompt::cursor_row(&rows, self.cursor);
+        let Some(target) = row
+            .checked_add_signed(delta)
+            .and_then(|r| rows.get(r).copied())
+        else {
+            return false;
+        };
+        let col = prompt::width_between(&self.input, rows[row].start, self.cursor);
+        self.cursor = prompt::index_at_column(&self.input, target, col);
+        true
+    }
+
+    /// Start of the line the cursor is on.
+    pub fn move_cursor_home(&mut self) {
+        let before: Vec<char> = self.input.chars().take(self.cursor).collect();
+        self.cursor = before.iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+    }
+
+    /// End of the line the cursor is on.
     pub fn move_cursor_end(&mut self) {
-        self.cursor = self.input.chars().count();
+        self.cursor += self
+            .input
+            .chars()
+            .skip(self.cursor)
+            .take_while(|c| *c != '\n')
+            .count();
     }
 
     pub fn take_input(&mut self) -> String {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.prompt_scroll = 0;
         self.suggestions.clear();
         text
     }

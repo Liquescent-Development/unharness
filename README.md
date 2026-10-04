@@ -69,7 +69,8 @@ unharness skills add vercel-labs/agent-skills
 
 The transcript fills the window. Everything about the current state sits
 under the prompt: a status rule (what the agent is doing and for how long),
-the prompt line, then the working directory and git branch, the harness,
+the prompt box (it grows with what you type, up to eight rows, then
+scrolls), then the working directory and git branch, the harness,
 provider/model, effort and policy, token usage and cost, the session id, any
 capability caveat, and the key hints.
 
@@ -77,6 +78,11 @@ capability caveat, and the key hints.
 |---|---|
 | `Enter` | Send the prompt; during a turn, queue it for when the turn finishes |
 | `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot) |
+| `Ctrl+J` | New line in the prompt |
+| `Up` / `Down` | Move between the prompt's lines; scroll the transcript when there is no line to move to |
+| `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
+| `Ctrl+U` | Clear the prompt |
+| `PageUp` / `PageDown` | Scroll the transcript |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |

@@ -5,6 +5,7 @@ pub mod app;
 pub mod code;
 pub mod markdown;
 pub mod modal;
+pub mod prompt;
 pub mod transcript;
 pub mod ui;
 
@@ -163,8 +164,13 @@ async fn event_loop(
 fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
     match (ctrl, code) {
         (false, KeyCode::Up) if alt => app.unqueue_last(),
+        // Ctrl+J is a newline everywhere. Shift+Enter only arrives as such
+        // from terminals that report modifiers on Enter.
+        (true, KeyCode::Char('j')) => app.insert_newline(),
+        (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
                 app.interrupt();
@@ -193,14 +199,14 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (_, KeyCode::Up) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_up();
-            } else {
+            } else if !app.move_cursor_up() {
                 app.scroll_up(2);
             }
         }
         (_, KeyCode::Down) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_down();
-            } else {
+            } else if !app.move_cursor_down() {
                 app.scroll_down(2);
             }
         }
@@ -246,7 +252,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 app.queue_prompt(text);
             }
         }
-        (_, KeyCode::Char(c)) => app.insert_char(c),
+        (false, KeyCode::Char(c)) => app.insert_char(c),
         (_, KeyCode::Backspace) => app.delete_backwards(),
         (_, KeyCode::Delete) => app.delete_forwards(),
         (_, KeyCode::Left) => app.move_cursor_left(),
@@ -328,4 +334,89 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         env: Vec::new(),
     };
     harness.start_session(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::tests::test_app;
+
+    const NONE: KeyModifiers = KeyModifiers::NONE;
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_key(app, NONE, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn newline_keys_extend_the_prompt_and_enter_sends_all_of_it() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "one");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
+        type_text(&mut app, "two");
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Enter);
+        type_text(&mut app, "three");
+        assert_eq!(app.input, "one\ntwo\nthree");
+        assert!(!app.is_generating);
+
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.input.is_empty() && app.is_generating);
+        assert!(app.take_actions().iter().any(|a| matches!(
+            a,
+            Action::SendTurn { text, .. } if text == "one\ntwo\nthree"
+        )));
+    }
+
+    #[test]
+    fn arrows_and_home_end_work_by_line() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_str("first line\nab\nthird line");
+        assert_eq!(app.cursor, 24);
+
+        // Up keeps the column where the row is long enough, else its end.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 13);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 2);
+        handle_key(&mut app, NONE, KeyCode::End);
+        assert_eq!(app.cursor, 10);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::Home);
+        assert_eq!(app.cursor, 11);
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('a'));
+        assert_eq!(app.cursor, 11);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::End);
+        assert_eq!(app.cursor, 24);
+
+        // Backspace at a line start joins the lines.
+        handle_key(&mut app, NONE, KeyCode::Home);
+        handle_key(&mut app, NONE, KeyCode::Backspace);
+        assert_eq!(app.input, "first line\nabthird line");
+    }
+
+    #[test]
+    fn arrows_follow_wrapped_rows() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.prompt_width = 4;
+        app.insert_str("abcdefghij");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 6);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 2);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.cursor, 6);
+    }
+
+    #[test]
+    fn slash_suggestions_are_for_single_line_input() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "/pol");
+        assert_eq!(app.suggestions.len(), 1);
+        handle_key(&mut app, NONE, KeyCode::Tab);
+        assert_eq!(app.input, "/policy");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
+        assert!(app.suggestions.is_empty());
+    }
 }
