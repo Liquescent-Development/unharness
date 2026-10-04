@@ -8,6 +8,11 @@ a single ratatui interface with the same transcript, keybindings, permission
 prompts, model/effort pickers and session resume regardless of which agent is
 running. Switch agents mid-conversation and the context follows you.
 
+Every agent runs inside a sandbox that unharness applies itself: by default
+it can write only to your project, its own state and temp, and cannot read
+your cloud and signing credentials, whatever the agent would or would not
+have asked about. See [Sandbox](#sandbox).
+
 ## Why
 
 Agent SDKs churn; the vendor CLIs are the stable surface. Each one already
@@ -24,6 +29,14 @@ speaks a streaming JSON protocol with a permission channel:
 unharness normalises those into one event model and one capability set, so
 the TUI never assumes what a harness can do. Anything a harness lacks is shown
 as a degraded capability rather than failing silently.
+
+The same goes for confinement. Codex sandboxes the commands its model runs,
+tied to the permission policy; Claude Code's sandbox is opt-in; pi,
+Antigravity and ACP agents have none, and under `bypass` nothing holds any
+of them. unharness puts one OS-level sandbox (Landlock on Linux,
+`sandbox-exec` on macOS) around the whole agent process, so the same limits
+apply to every harness, its file tools, its shell commands and its MCP
+servers.
 
 What each harness supports beyond a plain turn:
 
@@ -45,7 +58,7 @@ What each harness supports beyond a plain turn:
 
 ```bash
 cargo install --path .
-unharness doctor          # harnesses, auth, capabilities, skills CLI, rules
+unharness doctor          # harnesses, auth, capabilities, sandbox, skills CLI, rules
 ```
 
 Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
@@ -58,6 +71,7 @@ unharness                                   # TUI with the default harness
 unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
 unharness --policy accept-edits             # ask | accept-edits | auto | bypass
 unharness -y                                # alias for --policy bypass
+unharness --sandbox read-only               # read-only | workspace-write (default) | off
 unharness --resume                          # resume the latest conversation (all harnesses in it)
 unharness --resume 01a1                     # by id prefix; -H overrides which harness continues
 unharness -p "Summarise src/"               # headless print mode
@@ -258,7 +272,8 @@ The default applies under every policy, `bypass` included; Codex `exec` under
 status line and is fixed for a run.
 
 On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
-the process is launched through `sandbox-exec`. Where neither exists the
+the process is launched through `sandbox-exec`. The macOS side has not been
+run on a Mac yet; Linux is what has been tested. Where neither exists the
 default degrades to `off` with a warning in the status area, in `doctor` and
 on stderr in print mode, and an explicitly requested level is an error.
 
@@ -423,9 +438,12 @@ them instead.
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess,
                per-turn driver, JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints
+               file checkpoints, the sandbox (sandbox/: levels, profile,
+               Landlock and Seatbelt backends) and the watch on vendor
+               config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,
-               list_models, start_session, build_print_command
+               list_models, start_session, build_print_command, and what
+               the sandbox must leave writable and watch for it
   claude/      stream-json transport + parser + fixtures/
   codex/       app-server + exec transports + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/
