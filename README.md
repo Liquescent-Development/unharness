@@ -100,6 +100,11 @@ Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, 
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
 
+Pasted text goes into the prompt as it is, newlines included, and is never
+sent until you press Enter (this relies on the terminal's bracketed paste,
+which every current terminal has). A paste while a dialog is open goes into
+the dialog's text field if it has one and is otherwise ignored.
+
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it), prompts waiting in the queue, and images
 attached to the next prompt. The usage line shows how full the model's

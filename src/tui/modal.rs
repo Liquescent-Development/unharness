@@ -292,6 +292,17 @@ impl Modal {
     }
 
     /// True for modals that answer a harness request (vs. local pickers).
+    /// The text field that is taking keystrokes, if any, and whether it
+    /// holds newlines.
+    pub fn text_field(&mut self) -> Option<(&mut String, bool)> {
+        match self {
+            Modal::Permission(m) if m.denying => Some((&mut m.reason, false)),
+            Modal::Question(m) if m.editing_other => Some((&mut m.other[m.idx], false)),
+            Modal::Input(m) => Some((&mut m.text, m.multiline)),
+            _ => None,
+        }
+    }
+
     pub fn is_prompt(&self) -> bool {
         matches!(
             self,

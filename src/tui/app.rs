@@ -2163,6 +2163,24 @@ impl App {
         self.update_suggestions();
     }
 
+    /// A paste goes in whole, into whichever text field has the keyboard.
+    /// It never acts as keystrokes: a modal without a text field ignores
+    /// it rather than treat its letters as answers.
+    pub fn paste(&mut self, text: &str) {
+        let Some(modal) = self.modal.as_mut() else {
+            self.insert_str(text);
+            return;
+        };
+        if let Some((field, multiline)) = modal.text_field() {
+            let text = prompt::clean(text);
+            if multiline {
+                field.push_str(&text);
+            } else {
+                field.push_str(&text.replace('\n', " "));
+            }
+        }
+    }
+
     pub fn insert_newline(&mut self) {
         self.insert_char('\n');
     }
@@ -3197,6 +3215,53 @@ pub(crate) mod tests {
         assert_eq!(app.active, HarnessId::CODEX);
         app.handle_slash_command("/quit");
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_without_submitting() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for c in "ab".chars() {
+            app.insert_char(c);
+        }
+        app.move_cursor_left();
+        app.paste("one\r\ntwo\rthree\n\tfour\x1b[31m");
+        assert_eq!(app.input, "aone\ntwo\nthree\n    four[31mb");
+        assert_eq!(app.cursor, app.input.chars().count() - 1);
+        assert!(!app.is_generating && app.take_actions().is_empty());
+        // Pasted text that starts with a slash is not a command to complete.
+        app.take_input();
+        app.paste("/model\nsonnet");
+        assert!(app.suggestions.is_empty());
+    }
+
+    #[test]
+    fn paste_into_a_modal_fills_its_text_field_or_is_ignored() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "p1".into(),
+            kind: PermissionKind::ToolUse {
+                tool: "Bash".into(),
+                input: serde_json::json!({"command":"ls"}),
+                suggestions: None,
+                description: None,
+            },
+            tool_call_id: None,
+        }));
+        // "y" would allow and "a" would always allow if a paste were keys.
+        app.paste("yes\nalways");
+        assert!(app.modal.is_some() && app.take_actions().is_empty());
+        assert!(app.input.is_empty());
+
+        app.handle_modal_key(key(KeyCode::Char('n')));
+        app.paste("not\nnow");
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.take_actions().iter().any(|a| matches!(
+            a,
+            Action::Command(SessionCommand::RespondPermission {
+                decision: PermissionDecision::Deny { reason }, ..
+            }) if reason == "not now"
+        )));
     }
 
     #[test]

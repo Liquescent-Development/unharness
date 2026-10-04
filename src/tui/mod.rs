@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -50,13 +53,19 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         default_hook(info);
     }));
 
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    // Bracketed paste: a paste arrives as one event instead of as keys, so
+    // its newlines do not submit the prompt.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
@@ -78,7 +87,11 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     if let Some(line) = app.exit_summary() {
@@ -139,15 +152,19 @@ async fn event_loop(
             }
             Some(Ok(event)) = input.next() => {
                 needs_redraw = true;
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Release {
-                        continue;
+                match event {
+                    Event::Key(key) => {
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        if app.modal.is_some() {
+                            app.handle_modal_key(key);
+                        } else {
+                            handle_key(app, key.modifiers, key.code);
+                        }
                     }
-                    if app.modal.is_some() {
-                        app.handle_modal_key(key);
-                    } else {
-                        handle_key(app, key.modifiers, key.code);
-                    }
+                    Event::Paste(text) => app.paste(&text),
+                    _ => {}
                 }
             }
         }
