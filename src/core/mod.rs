@@ -10,6 +10,7 @@ pub mod jsonrpc;
 pub mod per_turn;
 pub mod process;
 pub mod registry;
+pub mod sandbox;
 pub mod session;
 pub mod testing;
 
@@ -23,6 +24,7 @@ pub use event::{
     Usage,
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
+pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
 };
