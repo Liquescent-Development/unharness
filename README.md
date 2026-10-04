@@ -109,13 +109,17 @@ context, and the picker says which will happen. If a harness reports that it
 could not rewind, unharness falls back to the fresh session by itself.
 
 Press `f` instead of Enter in the picker to also put the files back to how
-they were before that prompt. In a git repository unharness checkpoints the
-working tree before every prompt: tracked and untracked files, not ignored
-ones, as commits kept under `refs/unharness/checkpoints/` that never touch
-your index, branch, HEAD or stash. The restore works for any harness, since
-it does not depend on the agent, and `/undo-restore` reverses it. Changes
-outside the repository are not covered. `file_checkpoints = false` turns
-checkpoints off; `unharness sessions --clear` removes them.
+they were before that prompt. For a project that is a git repository,
+unharness checkpoints the working tree before every prompt: tracked and
+untracked files, not ignored ones. The checkpoints go into a shadow
+repository of unharness's own, under your state directory
+(`~/.local/state/unharness/checkpoints/<project>-<hash>.git` on Linux), which
+uses the project as its working tree. Nothing is written to the project's
+own `.git`. The restore works for any harness, since it does not depend on
+the agent, and `/undo-restore` reverses it. Changes outside the project are
+not covered. The first checkpoint copies the project's files once; later
+ones store only what changed. `file_checkpoints = false` turns checkpoints
+off; `unharness sessions --clear` deletes the project's shadow repository.
 
 `/fork` continues in a copy of the conversation and leaves the original as it
 is. Harnesses that can branch a session do, so the copy knows exactly what
@@ -165,7 +169,7 @@ default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
-file_checkpoints = true          # snapshot the working tree before each prompt (git repos)
+file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
 
 [harnesses.claude]
 # binary = "/path/to/claude"

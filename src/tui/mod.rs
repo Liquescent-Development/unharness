@@ -71,6 +71,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         effort: launch.effort,
         resume: launch.resume,
         harness_explicit: launch.harness_explicit,
+        checkpoint_store: None,
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;

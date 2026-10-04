@@ -202,6 +202,9 @@ pub struct AppInit {
     pub resume: Option<String>,
     /// The harness came from the CLI, so it overrides a resumed conversation's.
     pub harness_explicit: bool,
+    /// Where file-checkpoint shadow repositories go; `None` = the user's
+    /// state directory.
+    pub checkpoint_store: Option<PathBuf>,
 }
 
 impl App {
@@ -300,7 +303,12 @@ impl App {
         let file_checkpoints = conversation.checkpoints.clone();
         let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
         let checkpoints = if config.file_checkpoints.unwrap_or(true) {
-            init.workspace_root.as_deref().and_then(Checkpoints::open)
+            let store = init
+                .checkpoint_store
+                .unwrap_or_else(Checkpoints::default_store);
+            init.workspace_root
+                .as_deref()
+                .and_then(|root| Checkpoints::open_in(root, &store))
         } else {
             None
         };
@@ -2257,6 +2265,8 @@ pub(crate) mod tests {
         harness_explicit: bool,
     ) -> App {
         App::new(AppInit {
+            // Tests never write to the real state directory.
+            checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
             cwd: cwd.clone(),
             workspace_root: Some(cwd),
             registry: test_registry(),

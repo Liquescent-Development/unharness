@@ -38,11 +38,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   fixture used by an e2e test must have the same `>>` lines the driver sends.
 - **Sync never destroys user files.** `sync/rules.rs` replaces a file with a
   symlink only when its content is identical; otherwise it warns.
-- **Checkpoints never touch the user's git state.** `core/checkpoints.rs`
-  builds commits through a private index and keeps them under
-  `refs/unharness/checkpoints/`; it must not write the index, HEAD, a
-  branch or the stash, and a restore snapshots the tree first so it can be
-  undone.
+- **Checkpoints never touch the user's repository.** `core/checkpoints.rs`
+  commits into a shadow repository under the user's state directory that
+  uses the project as its work tree; it must not write anything into the
+  project's `.git` (the tests compare refs, status, stash and object count
+  before and after), and a restore snapshots the tree first so it can be
+  undone. Tests pass their own store directory, never the real one.
 - **No silent edits to vendor settings.** unharness does not write to
   `~/.claude`, `~/.codex`, `~/.gemini` or similar.
 - **Processes are reaped.** Child processes go through `core::process::
