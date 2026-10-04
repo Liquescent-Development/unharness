@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
+use super::history::PromptHistory;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
@@ -145,6 +146,8 @@ pub struct App {
     pub prompt_width: usize,
     /// First visible row of the prompt box once it is taller than its cap.
     pub prompt_scroll: usize,
+    /// Prompts sent from this workspace, for Up/Down recall.
+    pub history: PromptHistory,
     pub scroll: u16,
     pub auto_scroll: bool,
 
@@ -270,6 +273,7 @@ impl App {
         }
 
         let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
+        let history = PromptHistory::load(store.history_path());
         let mut resume_error: Option<String> = None;
         let mut loaded: Option<Conversation> = None;
         if let Some(r) = init.resume.as_deref() {
@@ -345,6 +349,7 @@ impl App {
             cursor: 0,
             prompt_width: 78,
             prompt_scroll: 0,
+            history,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
@@ -1982,7 +1987,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline · Up/Down move between lines · Home/End (Ctrl+A) line start/end · Ctrl+U clear\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear\nTranscript: PageUp/PageDown or Shift+Up/Down scroll · End (empty prompt) back to the bottom\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2163,6 +2168,29 @@ impl App {
         self.update_suggestions();
     }
 
+    /// Show the next older sent prompt, keeping what was typed as a draft.
+    pub fn history_older(&mut self) {
+        if let Some(text) = self.history.older(&self.input) {
+            self.input = text.to_string();
+            self.show_recalled();
+        }
+    }
+
+    /// Show the next newer sent prompt, or the draft after the newest.
+    pub fn history_newer(&mut self) {
+        if let Some(text) = self.history.newer() {
+            self.input = text;
+            self.show_recalled();
+        }
+    }
+
+    fn show_recalled(&mut self) {
+        self.cursor = self.input.chars().count();
+        // No suggestion list for a recalled command: it would take over
+        // the arrows that are stepping through history.
+        self.suggestions.clear();
+    }
+
     /// A paste goes in whole, into whichever text field has the keyboard.
     /// It never acts as keystrokes: a modal without a text field ignores
     /// it rather than treat its letters as answers.
@@ -2229,6 +2257,7 @@ impl App {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
         self.prompt_scroll = 0;
+        self.history.reset();
         self.suggestions.clear();
         text
     }

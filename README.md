@@ -79,10 +79,10 @@ capability caveat, and the key hints.
 | `Enter` | Send the prompt; during a turn, queue it for when the turn finishes |
 | `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot) |
 | `Ctrl+J` | New line in the prompt |
-| `Up` / `Down` | Move between the prompt's lines; scroll the transcript when there is no line to move to |
+| `Up` / `Down` | Move between the prompt's lines; on its first / last line, step back / forward through prompts sent from this workspace |
 | `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
 | `Ctrl+U` | Clear the prompt |
-| `PageUp` / `PageDown` | Scroll the transcript |
+| `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
@@ -99,6 +99,12 @@ Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, 
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
+
+Sent prompts and commands are remembered per workspace (the newest 500, in
+`.unharness/prompt_history.jsonl`, removed by `unharness sessions --clear`).
+`Up` on the prompt's first line recalls them; whatever you had typed comes
+back when you step `Down` past the newest. While the `/` autocomplete list is
+open the arrows move in it instead.
 
 Pasted text goes into the prompt as it is, newlines included, and is never
 sent until you press Enter (this relies on the terminal's bracketed paste,

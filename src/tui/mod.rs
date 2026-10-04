@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod code;
+pub mod history;
 pub mod markdown;
 pub mod modal;
 pub mod prompt;
@@ -184,6 +185,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     let shift = modifiers.contains(KeyModifiers::SHIFT);
     match (ctrl, code) {
         (false, KeyCode::Up) if alt => app.unqueue_last(),
+        (false, KeyCode::Up) if shift => app.scroll_up(2),
+        (false, KeyCode::Down) if shift => app.scroll_down(2),
         // Ctrl+J is a newline everywhere. Shift+Enter only arrives as such
         // from terminals that report modifiers on Enter.
         (true, KeyCode::Char('j')) => app.insert_newline(),
@@ -217,14 +220,15 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             if !app.suggestions.is_empty() {
                 app.suggestion_up();
             } else if !app.move_cursor_up() {
-                app.scroll_up(2);
+                // Already on the first row: go back through sent prompts.
+                app.history_older();
             }
         }
         (_, KeyCode::Down) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_down();
             } else if !app.move_cursor_down() {
-                app.scroll_down(2);
+                app.history_newer();
             }
         }
         (_, KeyCode::PageUp) => app.scroll_up(10),
@@ -260,6 +264,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 return;
             }
             let text = app.take_input();
+            app.history.push(&text);
             if text.starts_with('/') {
                 app.handle_slash_command(&text);
             } else if alt {
@@ -435,5 +440,116 @@ mod tests {
         assert_eq!(app.input, "/policy");
         handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
         assert!(app.suggestions.is_empty());
+    }
+
+    fn finish_turn(app: &mut App) {
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+    }
+
+    #[test]
+    fn up_and_down_recall_sent_prompts_around_the_draft() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        // With nothing to recall, Up leaves the prompt and the transcript alone.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert!(app.input.is_empty() && app.auto_scroll);
+
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+        app.insert_str("second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+
+        type_text(&mut app, "draft");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "second\nwith two lines");
+        assert_eq!(app.cursor, app.input.chars().count());
+        // Inside a recalled multi-line prompt Up moves the cursor first.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first");
+
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "draft");
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "draft");
+
+        // A recalled prompt can be edited and sent; it becomes the newest.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        type_text(&mut app, "!");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first!");
+    }
+
+    #[test]
+    fn history_survives_a_restart_in_the_same_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut app =
+            crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
+        type_text(&mut app, "remember me");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        type_text(&mut app, "/plan");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+
+        let mut app = crate::tui::app::tests::test_app_in(dir, HarnessId::CODEX, None, false);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        // A recalled command is shown as sent, without the suggestion list
+        // taking over the arrows.
+        assert_eq!(app.input, "/plan");
+        assert!(app.suggestions.is_empty());
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "remember me");
+    }
+
+    #[test]
+    fn history_leaves_suggestions_the_queue_and_scrolling_alone() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.take_actions();
+
+        // The suggestion list still owns the arrows while it is open.
+        type_text(&mut app, "/");
+        let n = app.suggestions.len();
+        assert!(n > 1);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.selected_suggestion, n - 1);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!((app.selected_suggestion, app.input.as_str()), (0, "/"));
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('u'));
+        assert!(app.input.is_empty() && app.suggestions.is_empty());
+
+        // Enter during the turn queues; Alt+Up takes the prompt back.
+        type_text(&mut app, "queued");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.queued.len(), 1);
+        handle_key(&mut app, KeyModifiers::ALT, KeyCode::Up);
+        assert_eq!(app.input, "queued");
+        assert!(app.queued.is_empty());
+        app.take_input();
+
+        // Scrolling: PageUp/PageDown, and Shift+Up/Down by a couple of lines.
+        app.scroll = 20;
+        handle_key(&mut app, NONE, KeyCode::PageUp);
+        assert_eq!((app.scroll, app.auto_scroll), (10, false));
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Up);
+        assert_eq!(app.scroll, 8);
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::PageDown);
+        assert_eq!(app.scroll, 20);
+        assert!(app.input.is_empty());
     }
 }
