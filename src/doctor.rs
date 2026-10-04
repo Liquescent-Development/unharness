@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::core::PermissionPolicy;
 use crate::core::conversations::ConversationStore;
 use crate::core::registry::Registry;
+use crate::core::sandbox::{SandboxLevel, SandboxSetup};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -19,6 +20,14 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
 
     let registry = Registry::from_config(config);
     let overrides = binary_overrides(&registry, config);
+    // An unknown level in the config is reported by `run`; here it reads as unset.
+    let sandbox = SandboxSetup::detect(
+        config
+            .sandbox
+            .level
+            .as_deref()
+            .and_then(SandboxLevel::parse),
+    );
 
     // 1. Harnesses
     println!("{}", "AI Harnesses:".bold());
@@ -67,6 +76,37 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     policies.join(" "),
                     if caps.resume_by_id { " · resume" } else { "" }
                 );
+
+                let (level, _) = sandbox.level(h.default_sandbox(PermissionPolicy::Ask));
+                let mut own: Vec<String> = h
+                    .sandbox_paths()
+                    .writable
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                if let Some(settings) = config.harness(d.id.as_str()) {
+                    own.extend(
+                        settings
+                            .sandbox_writable
+                            .iter()
+                            .map(|p| p.display().to_string()),
+                    );
+                }
+                println!(
+                    "      {} Sandbox: {}{}",
+                    "↳".dimmed(),
+                    match level {
+                        SandboxLevel::Off => level.to_string().yellow(),
+                        _ => level.to_string().green(),
+                    },
+                    if level == SandboxLevel::Off || own.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · own state: {}", own.join(" "))
+                            .dimmed()
+                            .to_string()
+                    }
+                );
             }
             None => println!(
                 "  {} {} {}",
@@ -94,6 +134,35 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
         "Default Policy: {}",
         config.default_policy.as_deref().unwrap_or("ask").bold()
     );
+    let requested = match sandbox.explicit {
+        Some(level) => level.to_string(),
+        None => format!("{} (default)", SandboxLevel::WorkspaceWrite),
+    };
+    match &sandbox.backend {
+        Ok(backend) => println!(
+            "Sandbox: {} via {} ({})",
+            requested.bold(),
+            backend.name(),
+            backend.detail()
+        ),
+        Err(why) if sandbox.explicit == Some(SandboxLevel::Off) => {
+            println!("Sandbox: {} {}", "off".bold(), format!("({why})").dimmed())
+        }
+        Err(why) => println!(
+            "Sandbox: {} {}",
+            "[!] unavailable, harnesses run unconfined:".yellow().bold(),
+            why
+        ),
+    }
+    for (label, paths) in [
+        ("writable", &config.sandbox.writable),
+        ("readable", &config.sandbox.readable),
+    ] {
+        if !paths.is_empty() {
+            let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+            println!("  {} extra {label}: {}", "↳".dimmed(), list.join(" "));
+        }
+    }
     println!();
 
     // 2. Skills CLI
