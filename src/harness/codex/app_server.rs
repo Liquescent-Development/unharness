@@ -27,7 +27,14 @@ pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
 }
 
 /// `turn/start` sandbox policy object for a policy.
-pub fn sandbox_policy(policy: PermissionPolicy) -> Value {
+///
+/// `confined` says unharness's sandbox is around the process. Codex's own
+/// (bubblewrap) cannot start inside it, so Codex is told the sandbox is
+/// someone else's.
+pub fn sandbox_policy(policy: PermissionPolicy, confined: bool) -> Value {
+    if confined {
+        return json!({"type": "externalSandbox", "networkAccess": "enabled"});
+    }
     match policy {
         PermissionPolicy::Ask => json!({"type": "readOnly"}),
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => json!({"type": "workspaceWrite"}),
@@ -36,11 +43,16 @@ pub fn sandbox_policy(policy: PermissionPolicy) -> Value {
 }
 
 /// `thread/start` parameters for a policy.
-pub fn policy_params(policy: PermissionPolicy) -> (&'static str, &'static str) {
-    match policy {
+pub fn policy_params(policy: PermissionPolicy, confined: bool) -> (&'static str, &'static str) {
+    let (approval, sandbox) = match policy {
         PermissionPolicy::Ask => ("untrusted", "read-only"),
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => ("on-request", "workspace-write"),
         PermissionPolicy::Bypass => ("never", "danger-full-access"),
+    };
+    if confined {
+        (approval, "danger-full-access")
+    } else {
+        (approval, sandbox)
     }
 }
 
@@ -135,6 +147,8 @@ struct Driver {
     model: Option<ModelRef>,
     effort: Option<String>,
     policy: PermissionPolicy,
+    /// unharness's sandbox is around the process.
+    confined: bool,
     /// A turn requested before the thread was ready.
     queued_turn: Option<(String, Vec<Attachment>)>,
 }
@@ -165,9 +179,9 @@ impl Driver {
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
         }
-        let (approval, _) = policy_params(self.policy);
+        let (approval, _) = policy_params(self.policy, self.confined);
         params["approvalPolicy"] = json!(approval);
-        params["sandboxPolicy"] = sandbox_policy(self.policy);
+        params["sandboxPolicy"] = sandbox_policy(self.policy, self.confined);
         self.request("turn/start", params, Outstanding::TurnStart)
             .await?;
         Ok(())
@@ -192,6 +206,7 @@ async fn drive(
         model: cfg.model.clone(),
         effort: cfg.effort.clone(),
         policy: cfg.policy,
+        confined: cfg.sandbox.is_active(),
         queued_turn: None,
     };
     let mut shutting_down = false;
@@ -317,7 +332,7 @@ async fn drive(
                                 match kind {
                                     Some(Outstanding::Initialize) => {
                                         let _ = d.proc.write_line(&jsonrpc::notification("initialized", Value::Null)).await;
-                                        let (approval, sandbox) = policy_params(cfg.policy);
+                                        let (approval, sandbox) = policy_params(cfg.policy, d.confined);
                                         let r = match &cfg.resume {
                                             // A fork answers like a start: with the new thread.
                                             Some(id) => {
@@ -521,8 +536,28 @@ mod tests {
             json!({"answers":{"q1":{"answers":["dev"]},"q2":{"answers":["a","b"]}}})
         );
         assert_eq!(
-            policy_params(PermissionPolicy::Bypass),
+            policy_params(PermissionPolicy::Bypass, false),
             ("never", "danger-full-access")
         );
+    }
+
+    #[test]
+    fn own_sandbox_is_off_inside_ours() {
+        assert_eq!(
+            sandbox_policy(PermissionPolicy::Ask, false),
+            json!({"type": "readOnly"})
+        );
+        // Approvals are untouched; only the sandbox is handed over.
+        for policy in PermissionPolicy::ALL {
+            assert_eq!(
+                sandbox_policy(policy, true),
+                json!({"type": "externalSandbox", "networkAccess": "enabled"})
+            );
+            assert_eq!(
+                policy_params(policy, true).0,
+                policy_params(policy, false).0
+            );
+            assert_eq!(policy_params(policy, true).1, "danger-full-access");
+        }
     }
 }

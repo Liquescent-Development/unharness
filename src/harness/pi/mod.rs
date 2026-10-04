@@ -4,7 +4,7 @@ pub mod parse;
 pub mod transport;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -38,6 +39,12 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 impl Harness for PiHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths {
+            writable: vec![PathBuf::from("~/.pi")],
+        }
     }
 
     fn capabilities(&self) -> Capabilities {

@@ -3,7 +3,7 @@
 pub mod parse;
 pub mod transport;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::Result;
@@ -13,6 +13,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -73,6 +74,25 @@ const MODELS: &[(&str, &str, &str)] = &[
 impl Harness for ClaudeHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    fn sandbox_paths(&self) -> SandboxPaths {
+        let mut writable: Vec<PathBuf> = [
+            "~/.claude",
+            "~/.claude.json",
+            "~/.cache/claude",
+            "~/.cache/claude-cli-nodejs",
+            "~/.local/share/claude",
+            "~/.local/state/claude",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        // The messaging socket of each process.
+        if let Some(run) = dirs::runtime_dir() {
+            writable.push(run.join("cc-socks"));
+        }
+        SandboxPaths { writable }
     }
 
     fn capabilities(&self) -> Capabilities {

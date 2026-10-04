@@ -7,7 +7,7 @@ pub mod exec;
 pub mod exec_parse;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,6 +20,7 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::jsonrpc;
+use crate::core::sandbox::{SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -239,6 +240,20 @@ impl Harness for CodexHarness {
             .collect())
     }
 
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths {
+            writable: vec![codex_home()],
+        }
+    }
+
+    /// `exec` cannot prompt, so `ask` there means read-only.
+    fn default_sandbox(&self, policy: PermissionPolicy) -> SandboxLevel {
+        match (self.transport, policy) {
+            (CodexTransport::Exec, PermissionPolicy::Ask) => SandboxLevel::ReadOnly,
+            _ => SandboxLevel::WorkspaceWrite,
+        }
+    }
+
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
         match self.effective_transport(&cfg.binary) {
             CodexTransport::Exec => crate::core::per_turn::start(cfg, Arc::new(exec::CodexExec)),
@@ -249,6 +264,7 @@ impl Harness for CodexHarness {
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
         let mut cmd = Command::new(&cfg.binary);
         cmd.current_dir(&cfg.cwd);
+        let confined = cfg.sandbox.is_active();
         if cfg.print_mode {
             cmd.arg("exec");
             if let Some(id) = &cfg.resume {
@@ -260,11 +276,11 @@ impl Harness for CodexHarness {
             }
             if let Some(p) = cfg.policy {
                 if cfg.resume.is_some() {
-                    for o in exec::policy_config_overrides(p) {
+                    for o in exec::policy_config_overrides(p, confined) {
                         cmd.arg("-c").arg(o);
                     }
                 } else {
-                    cmd.args(exec::policy_args(p));
+                    cmd.args(exec::policy_args(p, confined));
                 }
             }
         } else {
@@ -274,7 +290,7 @@ impl Harness for CodexHarness {
             if cfg.policy == Some(PermissionPolicy::Bypass) {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             } else if let Some(p) = cfg.policy {
-                cmd.args(exec::policy_args(p));
+                cmd.args(exec::policy_args(p, confined));
             }
         }
         if let Some(m) = &cfg.model {
@@ -289,6 +305,13 @@ impl Harness for CodexHarness {
         }
         Ok(cmd)
     }
+}
+
+/// Where Codex keeps sessions, credentials and logs.
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~/.codex"))
 }
 
 fn auth_status(binary: &Path) -> AuthInfo {
