@@ -464,7 +464,11 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                 if session.is_some() {
                     continue;
                 }
-                match start_session(app, resume) {
+                let prepared = app.harness().prepare();
+                if let Ok(Some(note)) = &prepared {
+                    app.transcript.push_notice(note.clone());
+                }
+                match prepared.and_then(|_| start_session(app, resume)) {
                     Ok(handle) => {
                         *session = Some(handle);
                         app.session_alive = true;

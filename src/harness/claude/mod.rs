@@ -22,10 +22,11 @@ use crate::core::{
 #[derive(Debug, Default)]
 pub struct ClaudeHarness {
     /// Run Claude with `CLAUDE_CONFIG_DIR` set to its state directory, so
-    /// that `.claude.json` lives inside it (`[harnesses.claude]
-    /// relocate_config`). Claude rewrites that file through a lock directory
-    /// and a temp file beside it; in the home directory the sandbox denies
-    /// both, and cannot allow them without opening the whole of it.
+    /// that `.claude.json` lives inside it. Claude rewrites that file through
+    /// a lock directory and a temp file beside it; in the home directory the
+    /// sandbox denies both, and cannot allow them without opening the whole
+    /// of it. On unless `[harnesses.claude] relocate_config = false`; off in
+    /// `default()`, which tests use.
     pub relocate_config: bool,
 }
 
@@ -50,17 +51,24 @@ pub fn seed_relocated_config(home: &Path, dir: &Path) -> Result<bool> {
 }
 
 impl ClaudeHarness {
-    /// The environment that relocates the config, seeding it on first use.
-    /// Nothing when relocation is off or the user already set the variable
-    /// (the file is then inside that directory anyway).
-    fn config_env(&self) -> Result<Option<(String, String)>> {
+    /// Home and the directory the config is relocated to. Nothing when
+    /// relocation is off or the user already set `CLAUDE_CONFIG_DIR` (the
+    /// file is then inside that directory anyway).
+    fn relocation(&self) -> Option<(PathBuf, PathBuf)> {
         if !self.relocate_config || std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
-            return Ok(None);
+            return None;
         }
-        let Some(home) = dirs::home_dir() else {
+        let home = dirs::home_dir()?;
+        let dir = home.join(STATE_DIR);
+        Some((home, dir))
+    }
+
+    /// The environment that relocates the config, seeding it if `prepare`
+    /// has not.
+    fn config_env(&self) -> Result<Option<(String, String)>> {
+        let Some((home, dir)) = self.relocation() else {
             return Ok(None);
         };
-        let dir = home.join(STATE_DIR);
         seed_relocated_config(&home, &dir)?;
         Ok(Some((
             "CLAUDE_CONFIG_DIR".to_string(),
@@ -124,23 +132,31 @@ impl Harness for ClaudeHarness {
         &DESCRIPTOR
     }
 
+    fn prepare(&self) -> Result<Option<String>> {
+        let Some((home, dir)) = self.relocation() else {
+            return Ok(None);
+        };
+        Ok(seed_relocated_config(&home, &dir)?.then(|| {
+            format!(
+                "Claude Code now keeps its config in {dir}/{CONFIG_FILE} when run by unharness \
+                 (copied from ~/{CONFIG_FILE}, which is unchanged), so that it can be updated \
+                 inside the sandbox. Export CLAUDE_CONFIG_DIR={dir} to make plain `claude` \
+                 share it, or set relocate_config = false under [harnesses.claude].",
+                dir = dir.display()
+            )
+        }))
+    }
+
     fn sandbox_paths(&self) -> SandboxPaths {
         // `~/.claude.json` is not here: Claude never writes it in place, so
         // the grant would only let an agent edit it (see `relocate_config`).
         let state = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new("~").join(STATE_DIR));
-        let mut writable = vec![state];
-        writable.extend(
-            [
-                "~/.cache/claude",
-                "~/.cache/claude-cli-nodejs",
-                "~/.local/share/claude",
-                "~/.local/state/claude",
-            ]
-            .iter()
-            .map(PathBuf::from),
-        );
+        // Not `~/.local/share/claude`, `~/.local/state/claude` or
+        // `~/.cache/claude`: the installed binaries and the updater's
+        // staging. A confined Claude does not update itself.
+        let mut writable = vec![state, PathBuf::from("~/.cache/claude-cli-nodejs")];
         // The messaging socket of each process.
         if let Some(run) = dirs::runtime_dir() {
             writable.push(run.join("cc-socks"));

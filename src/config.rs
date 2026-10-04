@@ -86,7 +86,7 @@ pub struct HarnessSettings {
     pub display_name: Option<String>,
     /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
     /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
-    /// existing `~/.claude.json` is copied there once. Default: off.
+    /// existing `~/.claude.json` is copied there once. Default: on.
     pub relocate_config: Option<bool>,
     /// Paths this harness may write inside the sandbox, besides the ones
     /// unharness knows it needs (an ACP agent's state, an MCP server's data).

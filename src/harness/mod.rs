@@ -101,6 +101,12 @@ pub trait Harness: Send + Sync {
 
     fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
 
+    /// Setup this harness needs before its first process of a run. A
+    /// returned line is shown to the user.
+    fn prepare(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// The directories this CLI writes outside the workspace (sessions,
     /// credentials, logs), which the sandbox must leave writable. `~` is the
     /// home directory. This is the vendor writing its own files.

@@ -273,14 +273,17 @@ Things to know:
 - An MCP server or extension that keeps data elsewhere needs its directory
   in `writable`.
 - Claude Code updates `~/.claude.json` by creating files next to it in the
-  home directory, which is denied: sessions work, but that file is not
-  updated while confined, so "always allow" rules, trust and MCP approvals
-  given in a session are forgotten after it. `relocate_config = true` under
-  `[harnesses.claude]` fixes this by running Claude with
-  `CLAUDE_CONFIG_DIR=~/.claude`, which puts the file inside its state
-  directory. Your `~/.claude.json` is copied there once and otherwise left
+  home directory, which the sandbox cannot allow without opening the whole
+  of it. unharness therefore runs Claude with `CLAUDE_CONFIG_DIR=~/.claude`,
+  which puts the file inside its state directory. Your `~/.claude.json` is
+  copied there on the first run (a notice says so) and otherwise left
   alone. A plain `claude` outside unharness keeps using the original, so
   the two drift apart unless you export the same variable in your shell.
+  `relocate_config = false` under `[harnesses.claude]` turns this off:
+  sessions still work, but "always allow" rules, trust and MCP approvals
+  given in a confined session are then forgotten after it.
+- A confined Claude Code cannot update itself: its installed binaries are
+  not writable.
 - A file that is replaced or created directly in the home directory or in
   `~/.config` after the process started is not readable by it until the
   next session (Linux).
@@ -329,7 +332,7 @@ default_effort = "high"
 default_policy = "accept-edits"
 extra_args     = []
 sandbox_writable = []            # extra paths this harness may write inside the sandbox
-relocate_config  = false         # keep .claude.json in ~/.claude so a sandboxed Claude can update it (see Sandbox)
+relocate_config  = true          # keep .claude.json in ~/.claude so a sandboxed Claude can update it (see Sandbox)
 
 [harnesses.codex]
 transport = "auto"               # auto | app-server | exec

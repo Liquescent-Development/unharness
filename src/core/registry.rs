@@ -39,7 +39,7 @@ impl Registry {
                 relocate_config: config
                     .harness("claude")
                     .and_then(|h| h.relocate_config)
-                    .unwrap_or(false),
+                    .unwrap_or(true),
             }),
             Box::new(CodexHarness::new(codex_transport)),
             Box::new(crate::harness::pi::PiHarness),

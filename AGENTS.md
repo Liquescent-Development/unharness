@@ -49,10 +49,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   workspace; an in-tree `unharness.toml` is only imported by `unharness
   init`. The config and state directories are never writable in the sandbox.
 - **No silent edits to vendor settings.** unharness does not write to
-  `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception is
-  asked for in config: `[harnesses.claude] relocate_config` copies
-  `~/.claude.json` to `~/.claude/.claude.json` once and never touches the
-  original.
+  `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception:
+  unless `[harnesses.claude] relocate_config = false`, `~/.claude.json` is
+  copied to `~/.claude/.claude.json` once, with a notice, and the original
+  is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
   bare `tokio::process::Command::spawn` in a transport.

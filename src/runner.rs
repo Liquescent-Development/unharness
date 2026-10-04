@@ -187,6 +187,9 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             extra_args: config.extra_args(id.as_str()).to_vec(),
             sandbox,
         };
+        if let Some(note) = harness.prepare()? {
+            eprintln!("{} {}", "[unharness]".yellow().bold(), note);
+        }
         let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
         if args.print {
             let status = cmd.status()?;
