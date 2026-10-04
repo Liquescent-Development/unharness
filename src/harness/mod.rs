@@ -77,6 +77,13 @@ pub trait Harness: Send + Sync {
     /// Locate the binary, read its version and auth state. Cheap and synchronous.
     fn probe(&self, binary_override: Option<&Path>) -> Probe;
 
+    /// Whether the harness is signed in, for choosing a default at startup.
+    /// Must stay cheap (a file read or a quick status command, no model
+    /// query): `None` when only a slower check or a live session can tell.
+    fn quick_auth(&self, _binary: &Path) -> Option<bool> {
+        None
+    }
+
     /// Providers this harness can route to. Default: the static descriptor list.
     fn list_providers(&self, _binary: &Path) -> Result<Vec<(ProviderId, String)>> {
         match self.descriptor().providers {

@@ -6,10 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 use serde_json::Value;
 
+use super::history::PromptHistory;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
+use super::prompt;
+use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
@@ -140,6 +144,31 @@ pub struct App {
     pub input: String,
     /// Char index into `input`.
     pub cursor: usize,
+    /// Columns the prompt text has to wrap in; set by the renderer.
+    pub prompt_width: usize,
+    /// First visible row of the prompt box once it is taller than its cap.
+    pub prompt_scroll: usize,
+    /// Prompts sent from this workspace, for Up/Down recall.
+    pub history: PromptHistory,
+    /// The transcript as last drawn, for turning a mouse position into
+    /// text; set by the renderer.
+    pub transcript_view: TranscriptView,
+    /// Text selected in the transcript with the mouse.
+    pub selection: Option<Selection>,
+    /// The last press, to tell a double or triple click.
+    last_click: Option<(Instant, Point, u8)>,
+    /// While a drag is held past the transcript's top (-1) or bottom (1)
+    /// edge, it keeps scrolling that way.
+    drag_edge: i8,
+    /// While the scrollbar's thumb is held: rows from its top to the pointer.
+    scrollbar_grab: Option<u16>,
+    /// Selected text waiting for the event loop to put it on the clipboard.
+    copy_request: Option<String>,
+    /// A short-lived message in the status rule, and when it appeared.
+    flash: Option<(String, Instant)>,
+    /// The user asked to edit the prompt in their editor; the event loop
+    /// owns the terminal, so it does the work.
+    edit_requested: bool,
     pub scroll: u16,
     pub auto_scroll: bool,
 
@@ -207,6 +236,89 @@ pub struct AppInit {
     pub checkpoint_store: Option<PathBuf>,
 }
 
+/// Transcript lines scrolled per wheel notch.
+const WHEEL_LINES: u16 = 3;
+
+/// Presses this close together on one cell count as a double or triple click.
+const MULTI_CLICK: Duration = Duration::from_millis(500);
+
+/// How long a status-rule message stays up.
+const FLASH: Duration = Duration::from_secs(2);
+
+/// What the renderer last drew of the transcript.
+#[derive(Debug, Default)]
+pub struct TranscriptView {
+    /// Where the text is, inside the border.
+    pub area: Rect,
+    /// Index of the line on the first row.
+    pub scroll: usize,
+    /// Every rendered line as plain text, scrolled out or not.
+    pub lines: Vec<String>,
+    /// The scrollbar, when there is more transcript than fits.
+    pub scrollbar: Option<Scrollbar>,
+    /// The jump-to-bottom label, shown while scrolled away from the end.
+    pub jump: Option<Rect>,
+}
+
+/// The transcript's scrollbar: a thumb on the right border whose size and
+/// place show how much of the transcript is in view, and where.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scrollbar {
+    pub x: u16,
+    pub y: u16,
+    pub height: u16,
+    /// Rows from the top of the bar to the top of the thumb.
+    pub thumb_top: u16,
+    pub thumb_len: u16,
+    pub max_scroll: u16,
+}
+
+impl Scrollbar {
+    /// The bar for `total` lines seen through `height` rows from line
+    /// `scroll`; `None` when everything fits.
+    pub fn new(x: u16, y: u16, height: u16, total: u16, scroll: u16) -> Option<Self> {
+        if height == 0 || total <= height {
+            return None;
+        }
+        let max_scroll = total - height;
+        let thumb_len = ((height as u32 * height as u32) / total as u32).max(1) as u16;
+        let travel = (height - thumb_len) as u32;
+        let scroll = scroll.min(max_scroll) as u32;
+        // Rounded, but only at the very ends when the view is at the ends.
+        let mut thumb_top = ((scroll * travel + max_scroll as u32 / 2) / max_scroll as u32) as u16;
+        if travel > 1 {
+            if scroll > 0 {
+                thumb_top = thumb_top.max(1);
+            }
+            if scroll < max_scroll as u32 {
+                thumb_top = thumb_top.min(travel as u16 - 1);
+            }
+        }
+        Some(Scrollbar {
+            x,
+            y,
+            height,
+            thumb_top,
+            thumb_len,
+            max_scroll,
+        })
+    }
+
+    /// The scroll offset that puts the thumb's top `top` rows down the bar.
+    pub fn scroll_for(&self, top: i32) -> u16 {
+        let travel = (self.height - self.thumb_len) as i32;
+        if travel == 0 {
+            return 0;
+        }
+        let top = top.clamp(0, travel);
+        ((top * self.max_scroll as i32 + travel / 2) / travel) as u16
+    }
+
+    fn contains(&self, column: u16, row: u16) -> bool {
+        column == self.x && row >= self.y && row < self.y + self.height
+    }
+}
+
 impl App {
     pub fn new(init: AppInit) -> Self {
         let registry = init.registry;
@@ -265,6 +377,7 @@ impl App {
         }
 
         let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
+        let history = PromptHistory::load(store.history_path());
         let mut resume_error: Option<String> = None;
         let mut loaded: Option<Conversation> = None;
         if let Some(r) = init.resume.as_deref() {
@@ -338,6 +451,17 @@ impl App {
             first_prompt,
             input: String::new(),
             cursor: 0,
+            prompt_width: 78,
+            prompt_scroll: 0,
+            history,
+            transcript_view: TranscriptView::default(),
+            selection: None,
+            last_click: None,
+            drag_edge: 0,
+            scrollbar_grab: None,
+            copy_request: None,
+            flash: None,
+            edit_requested: false,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
@@ -1975,7 +2099,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -1990,7 +2114,7 @@ impl App {
 
     pub fn update_suggestions(&mut self) {
         self.suggestions.clear();
-        if !self.input.starts_with('/') {
+        if !self.input.starts_with('/') || self.input.contains('\n') {
             self.selected_suggestion = 0;
             return;
         }
@@ -2142,19 +2266,338 @@ impl App {
         self.cursor = (self.cursor + 1).min(self.input.chars().count());
     }
 
-    pub fn move_cursor_home(&mut self) {
-        self.cursor = 0;
+    /// The input's visual rows at the current prompt width.
+    pub fn prompt_rows(&self) -> Vec<prompt::Row> {
+        prompt::rows(&self.input, self.prompt_width)
     }
 
-    pub fn move_cursor_end(&mut self) {
+    /// Insert text at the cursor, newlines included (a paste).
+    pub fn insert_str(&mut self, text: &str) {
+        let text = prompt::clean(text);
+        let idx = self.byte_index(self.cursor);
+        self.input.insert_str(idx, &text);
+        self.cursor += text.chars().count();
+        self.update_suggestions();
+    }
+
+    /// Show the next older sent prompt, keeping what was typed as a draft.
+    pub fn history_older(&mut self) {
+        if let Some(text) = self.history.older(&self.input) {
+            self.input = text.to_string();
+            self.show_recalled();
+        }
+    }
+
+    /// Show the next newer sent prompt, or the draft after the newest.
+    pub fn history_newer(&mut self) {
+        if let Some(text) = self.history.newer() {
+            self.input = text;
+            self.show_recalled();
+        }
+    }
+
+    fn show_recalled(&mut self) {
         self.cursor = self.input.chars().count();
+        // No suggestion list for a recalled command: it would take over
+        // the arrows that are stepping through history.
+        self.suggestions.clear();
+    }
+
+    /// A paste goes in whole, into whichever text field has the keyboard.
+    /// It never acts as keystrokes: a modal without a text field ignores
+    /// it rather than treat its letters as answers.
+    pub fn paste(&mut self, text: &str) {
+        let Some(modal) = self.modal.as_mut() else {
+            self.insert_str(text);
+            return;
+        };
+        if let Some((field, multiline)) = modal.text_field() {
+            let text = prompt::clean(text);
+            if multiline {
+                field.push_str(&text);
+            } else {
+                field.push_str(&text.replace('\n', " "));
+            }
+        }
+    }
+
+    pub fn request_edit(&mut self) {
+        self.edit_requested = true;
+    }
+
+    pub fn take_edit_request(&mut self) -> bool {
+        std::mem::take(&mut self.edit_requested)
+    }
+
+    /// Replace the prompt's text, leaving the cursor at its end.
+    pub fn set_input(&mut self, text: &str) {
+        self.input = prompt::clean(text);
+        self.cursor = self.input.chars().count();
+        self.update_suggestions();
+    }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    /// Move to the row above, keeping the column. False on the first row.
+    pub fn move_cursor_up(&mut self) -> bool {
+        self.move_cursor_rows(-1)
+    }
+
+    /// Move to the row below, keeping the column. False on the last row.
+    pub fn move_cursor_down(&mut self) -> bool {
+        self.move_cursor_rows(1)
+    }
+
+    fn move_cursor_rows(&mut self, delta: isize) -> bool {
+        let rows = self.prompt_rows();
+        let row = prompt::cursor_row(&rows, self.cursor);
+        let Some(target) = row
+            .checked_add_signed(delta)
+            .and_then(|r| rows.get(r).copied())
+        else {
+            return false;
+        };
+        let col = prompt::width_between(&self.input, rows[row].start, self.cursor);
+        self.cursor = prompt::index_at_column(&self.input, target, col);
+        true
+    }
+
+    /// Start of the line the cursor is on.
+    pub fn move_cursor_home(&mut self) {
+        let before: Vec<char> = self.input.chars().take(self.cursor).collect();
+        self.cursor = before.iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+    }
+
+    /// End of the line the cursor is on.
+    pub fn move_cursor_end(&mut self) {
+        self.cursor += self
+            .input
+            .chars()
+            .skip(self.cursor)
+            .take_while(|c| *c != '\n')
+            .count();
     }
 
     pub fn take_input(&mut self) -> String {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.prompt_scroll = 0;
+        self.history.reset();
         self.suggestions.clear();
         text
+    }
+
+    /// Mouse input, when the TUI has the mouse. A dialog keeps it out.
+    pub fn handle_mouse(&mut self, ev: MouseEvent) {
+        if self.modal.is_some() {
+            return;
+        }
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
+            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_press(ev.column, ev.row),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(ev.column, ev.row),
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_release(),
+            _ => {}
+        }
+    }
+
+    /// The transcript cell under a screen position. With `clamp`, a position
+    /// outside the transcript maps to the nearest cell in view.
+    fn transcript_point(&self, column: u16, row: u16, clamp: bool) -> Option<Point> {
+        let view = &self.transcript_view;
+        let area = view.area;
+        if area.width == 0 || area.height == 0 || view.lines.is_empty() {
+            return None;
+        }
+        let inside = column >= area.x
+            && column < area.x + area.width
+            && row >= area.y
+            && row < area.y + area.height;
+        if !inside && !clamp {
+            return None;
+        }
+        let column = column.clamp(area.x, area.x + area.width - 1);
+        let row = row.clamp(area.y, area.y + area.height - 1);
+        let line = view.scroll + (row - area.y) as usize;
+        if line >= view.lines.len() && !clamp {
+            return None;
+        }
+        Some(Point {
+            line: line.min(view.lines.len() - 1),
+            col: (column - area.x) as usize,
+        })
+    }
+
+    /// Scroll so the scrollbar's thumb follows a pointer on `row`.
+    fn scrollbar_follow(&mut self, bar: Scrollbar, row: u16, grab: u16) {
+        let top = row as i32 - bar.y as i32 - grab as i32;
+        // The renderer goes back to following the end if this reaches it.
+        self.auto_scroll = false;
+        self.scroll = bar.scroll_for(top);
+    }
+
+    pub fn scrollbar_held(&self) -> bool {
+        self.scrollbar_grab.is_some()
+    }
+
+    fn mouse_press(&mut self, column: u16, row: u16) {
+        self.drag_edge = 0;
+        if self
+            .transcript_view
+            .jump
+            .is_some_and(|r| r.contains((column, row).into()))
+        {
+            self.scroll_to_bottom();
+            return;
+        }
+        if let Some(bar) = self.transcript_view.scrollbar
+            && bar.contains(column, row)
+        {
+            // On the thumb: hold it where it was grabbed. On the track:
+            // bring the thumb's middle to the pointer, then hold that.
+            let offset = row - bar.y;
+            let on_thumb = offset >= bar.thumb_top && offset < bar.thumb_top + bar.thumb_len;
+            let grab = if on_thumb {
+                offset - bar.thumb_top
+            } else {
+                bar.thumb_len / 2
+            };
+            self.scrollbar_grab = Some(grab);
+            self.scrollbar_follow(bar, row, grab);
+            return;
+        }
+        let Some(point) = self.transcript_point(column, row, false) else {
+            self.selection = None;
+            self.last_click = None;
+            return;
+        };
+        let now = Instant::now();
+        let count = match self.last_click {
+            Some((at, p, n)) if p == point && now.duration_since(at) < MULTI_CLICK && n < 3 => {
+                n + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((now, point, count));
+        self.selection = Some(Selection {
+            anchor: point,
+            focus: point,
+            granularity: match count {
+                1 => Granularity::Char,
+                2 => Granularity::Word,
+                _ => Granularity::Line,
+            },
+        });
+    }
+
+    fn mouse_drag(&mut self, column: u16, row: u16) {
+        if let (Some(grab), Some(bar)) = (self.scrollbar_grab, self.transcript_view.scrollbar) {
+            self.scrollbar_follow(bar, row, grab);
+            return;
+        }
+        let Some(point) = self.transcript_point(column, row, true) else {
+            return;
+        };
+        let Some(sel) = self.selection.as_mut() else {
+            return;
+        };
+        sel.focus = point;
+        let area = self.transcript_view.area;
+        self.drag_edge = if row < area.y {
+            -1
+        } else if row >= area.y + area.height {
+            1
+        } else {
+            0
+        };
+    }
+
+    fn mouse_release(&mut self) {
+        self.drag_edge = 0;
+        if self.scrollbar_grab.take().is_some() {
+            return;
+        }
+        match self.selected_text() {
+            Some(text) if !text.trim().is_empty() => self.copy_request = Some(text),
+            _ => {
+                // A plain click, or only blank cells: nothing is selected.
+                if self
+                    .selection
+                    .is_some_and(|s| s.granularity == Granularity::Char)
+                {
+                    self.selection = None;
+                }
+            }
+        }
+    }
+
+    /// The selection as first and last cell, for the highlight.
+    pub fn selection_range(&self) -> Option<(Point, Point)> {
+        self.selection?.range(&self.transcript_view.lines)
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(selection::text(&self.transcript_view.lines, start, end))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_click_forget(&mut self) {
+        self.last_click = None;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+        self.drag_edge = 0;
+    }
+
+    pub fn take_copy_request(&mut self) -> Option<String> {
+        self.copy_request.take()
+    }
+
+    /// Show `message` in the status rule for a moment.
+    pub fn flash(&mut self, message: impl Into<String>) {
+        self.flash = Some((message.into(), Instant::now()));
+    }
+
+    pub fn flash_text(&self) -> Option<&str> {
+        self.flash.as_ref().map(|(m, _)| m.as_str())
+    }
+
+    /// Timed mouse work: keep scrolling while a drag is held past an edge,
+    /// and take down an expired flash. True when the screen changed.
+    pub fn tick_mouse(&mut self) -> bool {
+        let mut changed = false;
+        if self.drag_edge != 0 && self.selection.is_some() {
+            let view = &self.transcript_view;
+            let last = view.lines.len().saturating_sub(1);
+            let line = if self.drag_edge < 0 {
+                view.scroll.saturating_sub(1)
+            } else {
+                (view.scroll + view.area.height as usize).min(last)
+            };
+            if self.drag_edge < 0 {
+                self.scroll_up(1);
+            } else {
+                self.scroll_down(1);
+            }
+            if let Some(sel) = self.selection.as_mut() {
+                sel.focus.line = line;
+            }
+            changed = true;
+        }
+        if self
+            .flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= FLASH)
+        {
+            self.flash = None;
+            changed = true;
+        }
+        changed
     }
 
     pub fn scroll_up(&mut self, n: u16) {
@@ -3139,6 +3582,80 @@ pub(crate) mod tests {
         assert_eq!(app.active, HarnessId::CODEX);
         app.handle_slash_command("/quit");
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_without_submitting() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for c in "ab".chars() {
+            app.insert_char(c);
+        }
+        app.move_cursor_left();
+        app.paste("one\r\ntwo\rthree\n\tfour\x1b[31m");
+        assert_eq!(app.input, "aone\ntwo\nthree\n    four[31mb");
+        assert_eq!(app.cursor, app.input.chars().count() - 1);
+        assert!(!app.is_generating && app.take_actions().is_empty());
+        // Pasted text that starts with a slash is not a command to complete.
+        app.take_input();
+        app.paste("/model\nsonnet");
+        assert!(app.suggestions.is_empty());
+    }
+
+    #[test]
+    fn paste_into_a_modal_fills_its_text_field_or_is_ignored() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "p1".into(),
+            kind: PermissionKind::ToolUse {
+                tool: "Bash".into(),
+                input: serde_json::json!({"command":"ls"}),
+                suggestions: None,
+                description: None,
+            },
+            tool_call_id: None,
+        }));
+        // "y" would allow and "a" would always allow if a paste were keys.
+        app.paste("yes\nalways");
+        assert!(app.modal.is_some() && app.take_actions().is_empty());
+        assert!(app.input.is_empty());
+
+        app.handle_modal_key(key(KeyCode::Char('n')));
+        app.paste("not\nnow");
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.take_actions().iter().any(|a| matches!(
+            a,
+            Action::Command(SessionCommand::RespondPermission {
+                decision: PermissionDecision::Deny { reason }, ..
+            }) if reason == "not now"
+        )));
+    }
+
+    pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn wheel_scrolls_the_transcript_not_the_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.history.push("earlier prompt");
+        app.insert_str("draft");
+        app.scroll = 20;
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!((app.scroll, app.auto_scroll), (17, false));
+        app.handle_mouse(mouse(MouseEventKind::ScrollDown, 5, 5));
+        assert_eq!(app.scroll, 20);
+        assert_eq!(app.input, "draft");
+
+        // Not while a dialog is open.
+        app.open_policy_picker();
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5));
+        assert_eq!(app.scroll, 20);
     }
 
     #[test]

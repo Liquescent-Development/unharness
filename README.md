@@ -65,11 +65,20 @@ unharness sessions                          # recorded sessions in this workspac
 unharness skills add vercel-labs/agent-skills
 ```
 
+Without `-H` and without `default_harness` in the config, unharness takes
+the first installed harness that is signed in, in the order Antigravity,
+Claude Code, Codex, pi, then ACP agents. Antigravity, Claude Code and Codex
+can say so quickly; pi and ACP agents cannot (pi needs a model query, an ACP
+agent a session), so they are chosen only when none of those three is signed
+in, and ahead of one that is known to be signed out. `unharness doctor` shows
+the result as "Active Default".
+
 ### In the TUI
 
 The transcript fills the window. Everything about the current state sits
 under the prompt: a status rule (what the agent is doing and for how long),
-the prompt line, then the working directory and git branch, the harness,
+the prompt box (it grows with what you type, up to eight rows, then
+scrolls), then the working directory and git branch, the harness,
 provider/model, effort and policy, token usage and cost, the session id, any
 capability caveat, and the key hints.
 
@@ -77,6 +86,16 @@ capability caveat, and the key hints.
 |---|---|
 | `Enter` | Send the prompt; during a turn, queue it for when the turn finishes |
 | `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot) |
+| `Ctrl+J`, `Shift+Enter` | New line in the prompt. `Ctrl+J` works everywhere; `Shift+Enter` only on terminals with the kitty keyboard protocol (see below) |
+| `Up` / `Down` | Move between the prompt's lines; on its first / last line, step back / forward through prompts sent from this workspace |
+| `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
+| `Ctrl+U` | Clear the prompt |
+| `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
+| `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
+| Mouse wheel | Scroll the transcript |
+| Scrollbar (right edge of the transcript) | Drag the thumb, or click the track, to move through the transcript |
+| `↓ Jump to bottom` | Shown while scrolled up; click it to return to the end and follow new output again |
+| Drag, double click, triple click | Select transcript text, a word (paths stay whole) or a row, and copy it on release |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |
 | `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
@@ -93,6 +112,34 @@ Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, 
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
+
+Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`,
+so on those `Shift+Enter` sends the prompt and `Ctrl+M` cannot open the model
+picker (use `/model`). Terminals that implement the kitty keyboard protocol
+(kitty, foot, Ghostty, WezTerm, Alacritty, recent iTerm2 among them) are
+asked to tell the keys apart, and there both work as listed.
+
+Sent prompts and commands are remembered per workspace (the newest 500, in
+`.unharness/prompt_history.jsonl`, removed by `unharness sessions --clear`).
+`Up` on the prompt's first line recalls them; whatever you had typed comes
+back when you step `Down` past the newest. While the `/` autocomplete list is
+open the arrows move in it instead.
+
+unharness takes the mouse, so the terminal's own selection is replaced by
+its own: drag in the transcript to select, and the text is copied when you
+let go (the status rule says so). Dragging past the top or bottom edge
+scrolls. The copy goes through `wl-copy`, `xclip`, `xsel` or `pbcopy` when
+one is there, and otherwise, or over ssh, through the terminal (OSC 52),
+which some terminals ignore and tmux only passes on with `set-clipboard on`.
+What is copied is the rows as drawn, so a wrapped paragraph comes out with
+its line breaks and indent. Holding Shift while dragging gives the
+terminal's selection back in most terminals, and `mouse = false` in the
+config turns all of this off.
+
+Pasted text goes into the prompt as it is, newlines included, and is never
+sent until you press Enter (this relies on the terminal's bracketed paste,
+which every current terminal has). A paste while a dialog is open goes into
+the dialog's text field if it has one and is otherwise ignored.
 
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it), prompts waiting in the queue, and images
@@ -167,6 +214,7 @@ Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
+mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to select and copy; false leaves the mouse to the terminal
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)

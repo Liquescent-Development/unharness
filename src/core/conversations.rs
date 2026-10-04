@@ -208,6 +208,11 @@ impl ConversationStore {
         self.dir().join(format!("{id}.json"))
     }
 
+    /// Prompts sent from this workspace (the TUI's Up/Down recall).
+    pub fn history_path(&self) -> PathBuf {
+        self.root.join("prompt_history.jsonl")
+    }
+
     fn read_index(&self) -> Index {
         std::fs::read_to_string(self.index_path())
             .ok()
@@ -296,6 +301,7 @@ impl ConversationStore {
     pub fn clear(&self) -> Result<()> {
         let _ = std::fs::remove_dir_all(self.dir());
         let _ = std::fs::remove_file(self.index_path());
+        let _ = std::fs::remove_file(self.history_path());
         Ok(())
     }
 }

@@ -78,7 +78,9 @@ recorded ones. For anything else:
 1. Add a `HarnessId` constant in `src/core/ids.rs` (ids are interned names;
    the constant is only for built-ins).
 2. Create `src/harness/<name>/{mod.rs, transport.rs, parse.rs, fixtures/}`
-   implementing `Harness` and declaring honest `Capabilities`.
+   implementing `Harness` and declaring honest `Capabilities`. Override
+   `quick_auth` only if sign-in can be checked in well under a second; it
+   runs at startup to choose the default harness.
 3. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events` with `UNHARNESS_UPDATE_FIXTURES=1`.
 4. Register it in `Registry::from_config`.

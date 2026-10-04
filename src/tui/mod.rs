@@ -2,22 +2,35 @@
 //! the active harness session's event stream.
 
 pub mod app;
+pub mod clipboard;
 pub mod code;
+pub mod editor;
+pub mod history;
 pub mod markdown;
 pub mod modal;
+pub mod prompt;
+pub mod selection;
 pub mod transcript;
 pub mod ui;
 
-use std::io::{Stdout, stdout};
+use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -43,19 +56,84 @@ pub struct TuiLaunch {
     pub initial_prompt: Option<String>,
 }
 
+/// Take over the terminal: raw mode, alternate screen, paste and key
+/// reporting. `restore_terminal` is the reverse.
+fn enter_terminal(out: &mut Stdout) -> Result<()> {
+    enable_raw_mode()?;
+    // Bracketed paste: a paste arrives as one event instead of as keys, so
+    // its newlines do not submit the prompt.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Where the terminal speaks the kitty keyboard protocol, ask it to
+    // report modified keys unambiguously: Shift+Enter then differs from
+    // Enter, and Ctrl+M / Ctrl+H from Enter / Backspace. Elsewhere the
+    // terminal sends what it always did.
+    // Asked once: the answer cannot change, and asking again after the
+    // event reader was stopped for an editor fails.
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    if *SUPPORTED.get_or_init(|| supports_keyboard_enhancement().unwrap_or(false)) {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    }
+    if MOUSE.load(Ordering::SeqCst) {
+        out.write_all(ENABLE_MOUSE)?;
+        out.flush()?;
+    }
+    Ok(())
+}
+
+/// Whether the TUI takes the mouse (the `mouse` setting).
+static MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// Report presses, releases, the wheel, and motion while a button is held,
+/// in SGR coordinates. Motion without a button is not asked for: nothing
+/// here reacts to hovering, and multiplexers lag when every movement is
+/// forwarded.
+const ENABLE_MOUSE: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const DISABLE_MOUSE: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+
+/// Whether the kitty keyboard protocol was switched on and has to be
+/// switched off again, including from the panic hook.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Undo everything `enter_terminal` did. Every step is tried even
+/// if an earlier one fails.
+fn restore_terminal() -> std::io::Result<()> {
+    let mut out = stdout();
+    let popped = if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        execute!(out, PopKeyboardEnhancementFlags)
+    } else {
+        Ok(())
+    };
+    let mouse = if MOUSE.load(Ordering::SeqCst) {
+        out.write_all(DISABLE_MOUSE).and_then(|()| out.flush())
+    } else {
+        Ok(())
+    };
+    let left = execute!(out, DisableBracketedPaste, LeaveAlternateScreen);
+    disable_raw_mode()?;
+    popped.and(mouse).and(left)
+}
+
 pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     // Restore the terminal before the panic message prints, otherwise a panic
     // leaves the user's shell in raw mode on the alternate screen.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         default_hook(info);
     }));
 
-    enable_raw_mode()?;
+    MOUSE.store(launch.config.mouse.unwrap_or(true), Ordering::SeqCst);
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
+    enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
@@ -76,8 +154,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;
 
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    restore_terminal()?;
     terminal.show_cursor()?;
 
     if let Some(line) = app.exit_summary() {
@@ -113,6 +190,7 @@ async fn event_loop(
                     app.tick_spinner();
                     needs_redraw = true;
                 }
+                needs_redraw |= app.tick_mouse();
             }
             ev = async {
                 match session.as_mut() {
@@ -138,17 +216,43 @@ async fn event_loop(
             }
             Some(Ok(event)) = input.next() => {
                 needs_redraw = true;
-                if let Event::Key(key) = event {
-                    if key.kind == KeyEventKind::Release {
-                        continue;
+                match event {
+                    Event::Key(key) => {
+                        if key.kind == KeyEventKind::Release {
+                            continue;
+                        }
+                        app.clear_selection();
+                        if app.modal.is_some() {
+                            app.handle_modal_key(key);
+                        } else {
+                            handle_key(app, key.modifiers, key.code);
+                        }
                     }
-                    if app.modal.is_some() {
-                        app.handle_modal_key(key);
-                    } else {
-                        handle_key(app, key.modifiers, key.code);
-                    }
+                    Event::Paste(text) => app.paste(&text),
+                    Event::Mouse(mouse) => app.handle_mouse(mouse),
+                    _ => {}
                 }
             }
+        }
+
+        if let Some(text) = app.take_copy_request() {
+            let rows = text.lines().count().max(1);
+            let message = match clipboard::copy(&text, clipboard::Desktop::detect(), &mut stdout())
+            {
+                Ok(_) if rows == 1 => "Copied".to_string(),
+                Ok(_) => format!("Copied {rows} lines"),
+                Err(e) => format!("Not copied: {e}"),
+            };
+            app.flash(message);
+        }
+
+        if app.take_edit_request() {
+            // The editor needs the keyboard to itself: stop our reader for
+            // as long as it runs.
+            drop(input);
+            edit_prompt(terminal, app)?;
+            input = EventStream::new();
+            needs_redraw = true;
         }
 
         run_actions(app, &mut session).await;
@@ -160,11 +264,43 @@ async fn event_loop(
     Ok(())
 }
 
+/// Hand the terminal to `$VISUAL` / `$EDITOR` with the prompt in a file, and
+/// take back what it saved.
+fn edit_prompt(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+    let Some(command) = editor::command() else {
+        app.transcript
+            .push_notice("set $EDITOR (or $VISUAL) to edit the prompt in an editor");
+        return Ok(());
+    };
+    restore_terminal()?;
+    let edited = editor::edit(&command, &app.input, &std::env::temp_dir());
+    enter_terminal(&mut stdout())?;
+    terminal.clear()?;
+    match edited {
+        Ok(Some(text)) => app.set_input(&text),
+        Ok(None) => app.transcript.push_notice(format!(
+            "`{command}` exited with an error; prompt unchanged"
+        )),
+        Err(e) => app
+            .transcript
+            .push_error(format!("could not edit the prompt: {e:#}")),
+    }
+    Ok(())
+}
+
 fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
+    let shift = modifiers.contains(KeyModifiers::SHIFT);
     match (ctrl, code) {
         (false, KeyCode::Up) if alt => app.unqueue_last(),
+        (false, KeyCode::Up) if shift => app.scroll_up(2),
+        (false, KeyCode::Down) if shift => app.scroll_down(2),
+        // Ctrl+J is a newline everywhere. Shift+Enter only arrives as such
+        // from terminals that report modifiers on Enter.
+        (true, KeyCode::Char('j')) => app.insert_newline(),
+        (true, KeyCode::Char('g')) => app.request_edit(),
+        (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
                 app.interrupt();
@@ -193,15 +329,16 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (_, KeyCode::Up) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_up();
-            } else {
-                app.scroll_up(2);
+            } else if !app.move_cursor_up() {
+                // Already on the first row: go back through sent prompts.
+                app.history_older();
             }
         }
         (_, KeyCode::Down) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_down();
-            } else {
-                app.scroll_down(2);
+            } else if !app.move_cursor_down() {
+                app.history_newer();
             }
         }
         (_, KeyCode::PageUp) => app.scroll_up(10),
@@ -237,6 +374,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 return;
             }
             let text = app.take_input();
+            app.history.push(&text);
             if text.starts_with('/') {
                 app.handle_slash_command(&text);
             } else if alt {
@@ -246,7 +384,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 app.queue_prompt(text);
             }
         }
-        (_, KeyCode::Char(c)) => app.insert_char(c),
+        (false, KeyCode::Char(c)) => app.insert_char(c),
         (_, KeyCode::Backspace) => app.delete_backwards(),
         (_, KeyCode::Delete) => app.delete_forwards(),
         (_, KeyCode::Left) => app.move_cursor_left(),
@@ -328,4 +466,216 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         env: Vec::new(),
     };
     harness.start_session(cfg)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::app::tests::test_app;
+
+    const NONE: KeyModifiers = KeyModifiers::NONE;
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_key(app, NONE, KeyCode::Char(c));
+        }
+    }
+
+    #[test]
+    fn newline_keys_extend_the_prompt_and_enter_sends_all_of_it() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "one");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
+        type_text(&mut app, "two");
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Enter);
+        type_text(&mut app, "three");
+        assert_eq!(app.input, "one\ntwo\nthree");
+        assert!(!app.is_generating);
+
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.input.is_empty() && app.is_generating);
+        assert!(app.take_actions().iter().any(|a| matches!(
+            a,
+            Action::SendTurn { text, .. } if text == "one\ntwo\nthree"
+        )));
+    }
+
+    #[test]
+    fn arrows_and_home_end_work_by_line() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_str("first line\nab\nthird line");
+        assert_eq!(app.cursor, 24);
+
+        // Up keeps the column where the row is long enough, else its end.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 13);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 2);
+        handle_key(&mut app, NONE, KeyCode::End);
+        assert_eq!(app.cursor, 10);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::Home);
+        assert_eq!(app.cursor, 11);
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('a'));
+        assert_eq!(app.cursor, 11);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::End);
+        assert_eq!(app.cursor, 24);
+
+        // Backspace at a line start joins the lines.
+        handle_key(&mut app, NONE, KeyCode::Home);
+        handle_key(&mut app, NONE, KeyCode::Backspace);
+        assert_eq!(app.input, "first line\nabthird line");
+    }
+
+    #[test]
+    fn arrows_follow_wrapped_rows() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.prompt_width = 4;
+        app.insert_str("abcdefghij");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 6);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.cursor, 2);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.cursor, 6);
+    }
+
+    #[test]
+    fn slash_suggestions_are_for_single_line_input() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "/pol");
+        assert_eq!(app.suggestions.len(), 1);
+        handle_key(&mut app, NONE, KeyCode::Tab);
+        assert_eq!(app.input, "/policy");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
+        assert!(app.suggestions.is_empty());
+    }
+
+    fn finish_turn(app: &mut App) {
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+    }
+
+    #[test]
+    fn up_and_down_recall_sent_prompts_around_the_draft() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        // With nothing to recall, Up leaves the prompt and the transcript alone.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert!(app.input.is_empty() && app.auto_scroll);
+
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+        app.insert_str("second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+
+        type_text(&mut app, "draft");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "second\nwith two lines");
+        assert_eq!(app.cursor, app.input.chars().count());
+        // Inside a recalled multi-line prompt Up moves the cursor first.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first");
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first");
+
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "second\nwith two lines");
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "draft");
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.input, "draft");
+
+        // A recalled prompt can be edited and sent; it becomes the newest.
+        handle_key(&mut app, NONE, KeyCode::Up);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        type_text(&mut app, "!");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        finish_turn(&mut app);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "first!");
+    }
+
+    #[test]
+    fn history_survives_a_restart_in_the_same_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        let mut app =
+            crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
+        type_text(&mut app, "remember me");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        type_text(&mut app, "/plan");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+
+        let mut app = crate::tui::app::tests::test_app_in(dir, HarnessId::CODEX, None, false);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        // A recalled command is shown as sent, without the suggestion list
+        // taking over the arrows.
+        assert_eq!(app.input, "/plan");
+        assert!(app.suggestions.is_empty());
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "remember me");
+    }
+
+    #[test]
+    fn history_leaves_suggestions_the_queue_and_scrolling_alone() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.take_actions();
+
+        // The suggestion list still owns the arrows while it is open.
+        type_text(&mut app, "/");
+        let n = app.suggestions.len();
+        assert!(n > 1);
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.selected_suggestion, n - 1);
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!((app.selected_suggestion, app.input.as_str()), (0, "/"));
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('u'));
+        assert!(app.input.is_empty() && app.suggestions.is_empty());
+
+        // Enter during the turn queues; Alt+Up takes the prompt back.
+        type_text(&mut app, "queued");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.queued.len(), 1);
+        handle_key(&mut app, KeyModifiers::ALT, KeyCode::Up);
+        assert_eq!(app.input, "queued");
+        assert!(app.queued.is_empty());
+        app.take_input();
+
+        // Scrolling: PageUp/PageDown, and Shift+Up/Down by a couple of lines.
+        app.scroll = 20;
+        handle_key(&mut app, NONE, KeyCode::PageUp);
+        assert_eq!((app.scroll, app.auto_scroll), (10, false));
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Up);
+        assert_eq!(app.scroll, 8);
+        handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Down);
+        handle_key(&mut app, NONE, KeyCode::PageDown);
+        assert_eq!(app.scroll, 20);
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn ctrl_g_asks_for_the_editor_and_its_text_replaces_the_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "/mo");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('g'));
+        assert_eq!(app.input, "/mo");
+        assert!(app.take_edit_request() && !app.take_edit_request());
+
+        app.set_input("written\r\nin an editor\twith a tab");
+        assert_eq!(app.input, "written\nin an editor    with a tab");
+        assert_eq!(app.cursor, app.input.chars().count());
+        assert!(app.suggestions.is_empty());
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.is_generating);
+    }
 }
