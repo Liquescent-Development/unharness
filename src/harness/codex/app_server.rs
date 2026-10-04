@@ -109,6 +109,11 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
 pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
     cmd.arg("app-server").current_dir(&cfg.cwd);
+    if cfg.sandbox.is_active() {
+        // Without this the server probes bubblewrap at startup and warns
+        // that it cannot create user namespaces.
+        cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    }
     cmd.args(&cfg.extra_args);
     for (k, v) in &cfg.env {
         cmd.env(k, v);
