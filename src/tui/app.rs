@@ -148,6 +148,9 @@ pub struct App {
     pub prompt_scroll: usize,
     /// Prompts sent from this workspace, for Up/Down recall.
     pub history: PromptHistory,
+    /// The user asked to edit the prompt in their editor; the event loop
+    /// owns the terminal, so it does the work.
+    edit_requested: bool,
     pub scroll: u16,
     pub auto_scroll: bool,
 
@@ -350,6 +353,7 @@ impl App {
             prompt_width: 78,
             prompt_scroll: 0,
             history,
+            edit_requested: false,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
@@ -1987,7 +1991,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear\nTranscript: PageUp/PageDown or Shift+Up/Down scroll · End (empty prompt) back to the bottom\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown or Shift+Up/Down scroll · End (empty prompt) back to the bottom\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2207,6 +2211,21 @@ impl App {
                 field.push_str(&text.replace('\n', " "));
             }
         }
+    }
+
+    pub fn request_edit(&mut self) {
+        self.edit_requested = true;
+    }
+
+    pub fn take_edit_request(&mut self) -> bool {
+        std::mem::take(&mut self.edit_requested)
+    }
+
+    /// Replace the prompt's text, leaving the cursor at its end.
+    pub fn set_input(&mut self, text: &str) {
+        self.input = prompt::clean(text);
+        self.cursor = self.input.chars().count();
+        self.update_suggestions();
     }
 
     pub fn insert_newline(&mut self) {

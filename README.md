@@ -90,6 +90,7 @@ capability caveat, and the key hints.
 | `Up` / `Down` | Move between the prompt's lines; on its first / last line, step back / forward through prompts sent from this workspace |
 | `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
 | `Ctrl+U` | Clear the prompt |
+| `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
 | `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Ctrl+H` | Harness picker |

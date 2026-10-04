@@ -3,6 +3,7 @@
 
 pub mod app;
 pub mod code;
+pub mod editor;
 pub mod history;
 pub mod markdown;
 pub mod modal;
@@ -12,8 +13,8 @@ pub mod ui;
 
 use std::io::{Stdout, stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -53,11 +54,35 @@ pub struct TuiLaunch {
     pub initial_prompt: Option<String>,
 }
 
+/// Take over the terminal: raw mode, alternate screen, paste and key
+/// reporting. `restore_terminal` is the reverse.
+fn enter_terminal(out: &mut Stdout) -> Result<()> {
+    enable_raw_mode()?;
+    // Bracketed paste: a paste arrives as one event instead of as keys, so
+    // its newlines do not submit the prompt.
+    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Where the terminal speaks the kitty keyboard protocol, ask it to
+    // report modified keys unambiguously: Shift+Enter then differs from
+    // Enter, and Ctrl+M / Ctrl+H from Enter / Backspace. Elsewhere the
+    // terminal sends what it always did.
+    // Asked once: the answer cannot change, and asking again after the
+    // event reader was stopped for an editor fails.
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    if *SUPPORTED.get_or_init(|| supports_keyboard_enhancement().unwrap_or(false)) {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
 /// Whether the kitty keyboard protocol was switched on and has to be
 /// switched off again, including from the panic hook.
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
-/// Undo everything `run_tui` did to the terminal. Every step is tried even
+/// Undo everything `enter_terminal` did. Every step is tried even
 /// if an earlier one fails.
 fn restore_terminal() -> std::io::Result<()> {
     let mut out = stdout();
@@ -85,22 +110,8 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         default_hook(info);
     }));
 
-    enable_raw_mode()?;
     let mut out = stdout();
-    // Bracketed paste: a paste arrives as one event instead of as keys, so
-    // its newlines do not submit the prompt.
-    execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
-    // Where the terminal speaks the kitty keyboard protocol, ask it to
-    // report modified keys unambiguously: Shift+Enter then differs from
-    // Enter, and Ctrl+M / Ctrl+H from Enter / Backspace. Elsewhere the
-    // terminal sends what it always did.
-    if supports_keyboard_enhancement().unwrap_or(false) {
-        execute!(
-            out,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-        )?;
-        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
-    }
+    enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
@@ -199,11 +210,44 @@ async fn event_loop(
             }
         }
 
+        if app.take_edit_request() {
+            // The editor needs the keyboard to itself: stop our reader for
+            // as long as it runs.
+            drop(input);
+            edit_prompt(terminal, app)?;
+            input = EventStream::new();
+            needs_redraw = true;
+        }
+
         run_actions(app, &mut session).await;
     }
 
     if let Some(s) = session.take() {
         let _ = s.send(SessionCommand::Shutdown).await;
+    }
+    Ok(())
+}
+
+/// Hand the terminal to `$VISUAL` / `$EDITOR` with the prompt in a file, and
+/// take back what it saved.
+fn edit_prompt(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+    let Some(command) = editor::command() else {
+        app.transcript
+            .push_notice("set $EDITOR (or $VISUAL) to edit the prompt in an editor");
+        return Ok(());
+    };
+    restore_terminal()?;
+    let edited = editor::edit(&command, &app.input, &std::env::temp_dir());
+    enter_terminal(&mut stdout())?;
+    terminal.clear()?;
+    match edited {
+        Ok(Some(text)) => app.set_input(&text),
+        Ok(None) => app.transcript.push_notice(format!(
+            "`{command}` exited with an error; prompt unchanged"
+        )),
+        Err(e) => app
+            .transcript
+            .push_error(format!("could not edit the prompt: {e:#}")),
     }
     Ok(())
 }
@@ -219,6 +263,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         // Ctrl+J is a newline everywhere. Shift+Enter only arrives as such
         // from terminals that report modifiers on Enter.
         (true, KeyCode::Char('j')) => app.insert_newline(),
+        (true, KeyCode::Char('g')) => app.request_edit(),
         (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
@@ -580,5 +625,21 @@ mod tests {
         handle_key(&mut app, NONE, KeyCode::PageDown);
         assert_eq!(app.scroll, 20);
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn ctrl_g_asks_for_the_editor_and_its_text_replaces_the_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "/mo");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('g'));
+        assert_eq!(app.input, "/mo");
+        assert!(app.take_edit_request() && !app.take_edit_request());
+
+        app.set_input("written\r\nin an editor\twith a tab");
+        assert_eq!(app.input, "written\nin an editor    with a tab");
+        assert_eq!(app.cursor, app.input.chars().count());
+        assert!(app.suggestions.is_empty());
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.is_generating);
     }
 }
