@@ -23,6 +23,7 @@ use crate::core::conversations::{
     truncate_title,
 };
 use crate::core::registry::Registry;
+use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
     PermissionDecision, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo,
@@ -177,6 +178,8 @@ pub struct App {
     pub harness_options: Vec<HarnessOption>,
     /// The policy the user asked for; the effective one is per harness.
     pub policy_requested: PermissionPolicy,
+    /// The sandbox level asked for and the platform's backend, fixed at launch.
+    pub sandbox: SandboxSetup,
     pub providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
@@ -287,6 +290,7 @@ pub struct AppInit {
     pub config: Config,
     pub harness: HarnessId,
     pub policy: PermissionPolicy,
+    pub sandbox: SandboxSetup,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -507,6 +511,7 @@ impl App {
             active,
             harness_options,
             policy_requested: init.policy,
+            sandbox: init.sandbox,
             providers,
             models,
             efforts,
@@ -570,11 +575,15 @@ impl App {
 
         let res = resolve_policy(&app.caps(), app.policy_requested);
         app.transcript.push_system(format!(
-            "Welcome to unharness. Harness: {}  Policy: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
+            "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
             app.display_name(),
-            res.effective
+            res.effective,
+            app.sandbox_level().0
         ));
         if let Some(w) = res.warning {
+            app.transcript.push_notice(w);
+        }
+        if let Some(w) = app.sandbox_level().1 {
             app.transcript.push_notice(w);
         }
         if let Some(e) = resume_error {
@@ -689,6 +698,32 @@ impl App {
 
     pub fn policy_warning(&self) -> Option<String> {
         resolve_policy(&self.caps(), self.policy_requested).warning
+    }
+
+    /// The sandbox level the active harness runs at, and why it is off if
+    /// that was not asked for.
+    pub fn sandbox_level(&self) -> (SandboxLevel, Option<String>) {
+        self.sandbox
+            .level(self.harness().default_sandbox(self.effective_policy()))
+    }
+
+    /// What confines the next process of the active harness.
+    pub fn session_sandbox(&self) -> anyhow::Result<Sandbox> {
+        crate::runner::session_sandbox(
+            self.harness(),
+            self.effective_policy(),
+            &self.sandbox,
+            &self.config,
+            self.workspace_root.as_deref().unwrap_or(&self.cwd),
+        )
+    }
+
+    /// What the status area warns about: a missing sandbox, a degraded policy.
+    pub fn status_warning(&self) -> Option<String> {
+        match (self.sandbox_level().1, self.policy_warning()) {
+            (Some(s), Some(p)) => Some(format!("{s}; {p}")),
+            (s, p) => s.or(p),
+        }
     }
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
@@ -1803,11 +1838,12 @@ impl App {
         self.anchor_pending.clear();
         self.persist();
         self.transcript.push_system(format!(
-            "Switched to {} (model: {}, effort: {}, policy: {})",
+            "Switched to {} (model: {}, effort: {}, policy: {}, sandbox: {})",
             self.display_name(),
             self.model_label(),
             self.current_effort().unwrap_or("default"),
-            self.effective_policy()
+            self.effective_policy(),
+            self.sandbox_level().0
         ));
         if let Some(w) = self.policy_warning() {
             self.transcript.push_notice(w);
@@ -1815,12 +1851,27 @@ impl App {
     }
 
     pub fn set_policy(&mut self, p: PermissionPolicy) {
+        let sandbox_before = self.sandbox_level().0;
         self.policy_requested = p;
         let res = resolve_policy(&self.caps(), p);
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
             self.transcript.push_notice(w);
+        }
+        let sandbox = self.sandbox_level().0;
+        if sandbox != sandbox_before {
+            // A process cannot leave its sandbox: the next prompt starts a
+            // new one and resumes the session.
+            self.transcript.push_system(format!("Sandbox: {sandbox}"));
+            if self.is_generating {
+                self.transcript.push_notice(format!(
+                    "the running session stays at sandbox {sandbox_before} until it restarts"
+                ));
+            } else if self.session_alive {
+                self.shutdown_session();
+                return;
+            }
         }
         if self.session_alive {
             self.actions
@@ -3149,6 +3200,7 @@ pub(crate) mod tests {
             config: Config::default(),
             harness,
             policy: PermissionPolicy::Ask,
+            sandbox: SandboxSetup::off(),
             provider: None,
             model: None,
             effort: None,

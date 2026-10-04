@@ -21,6 +21,7 @@ use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
+use crate::core::SandboxLevel;
 use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -28,7 +29,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.viewing.is_some() && app.viewed().is_none() {
         app.close_subagent_view();
     }
-    let warning = app.policy_warning();
+    let warning = app.status_warning();
     let area = frame.area();
     // The prompt grows with its content up to a cap (less on a short
     // terminal), then scrolls to keep the cursor's row in view.
@@ -241,6 +242,22 @@ fn policy_color(p: PermissionPolicy) -> Color {
         PermissionPolicy::AcceptEdits => Color::Cyan,
         PermissionPolicy::Auto => Color::Yellow,
         PermissionPolicy::Bypass => Color::Red,
+    }
+}
+
+fn sandbox_color(level: SandboxLevel) -> Color {
+    match level {
+        SandboxLevel::ReadOnly => Color::Green,
+        SandboxLevel::WorkspaceWrite => Color::Cyan,
+        SandboxLevel::Off => Color::Red,
+    }
+}
+
+/// The level as the status line has room for it.
+fn sandbox_label(level: SandboxLevel) -> &'static str {
+    match level {
+        SandboxLevel::WorkspaceWrite => "ws-write",
+        other => other.as_str(),
     }
 }
 
@@ -917,6 +934,7 @@ fn render_bottom(
         ),
     ]);
     let effective = app.effective_policy();
+    let sandbox = app.sandbox_level().0;
     let policy_text = if effective == app.policy_requested {
         format!("policy {effective}")
     } else {
@@ -937,6 +955,10 @@ fn render_bottom(
         Span::styled(
             format!(" · {policy_text}"),
             Style::default().fg(policy_color(effective)),
+        ),
+        Span::styled(
+            format!(" · sandbox {}", sandbox_label(sandbox)),
+            Style::default().fg(sandbox_color(sandbox)),
         ),
     ]);
     render_split(frame, rows[4], left1, right1);

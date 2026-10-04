@@ -224,6 +224,44 @@ impl Sandbox {
     }
 }
 
+/// What the user asked for and what the platform offers, fixed at launch.
+#[derive(Debug, Clone)]
+pub struct SandboxSetup {
+    /// The level from the flag or the config, if any.
+    pub explicit: Option<SandboxLevel>,
+    pub backend: std::result::Result<Arc<dyn SandboxBackend>, String>,
+}
+
+impl SandboxSetup {
+    pub fn detect(explicit: Option<SandboxLevel>) -> Self {
+        SandboxSetup {
+            explicit,
+            backend: detect(),
+        }
+    }
+
+    /// Sandbox off by choice; what tests use.
+    pub fn off() -> Self {
+        SandboxSetup {
+            explicit: Some(SandboxLevel::Off),
+            backend: Err("off".to_string()),
+        }
+    }
+
+    /// The level a session gets when `default` is its harness's, and why it
+    /// is off if that is not what was wanted.
+    pub fn level(&self, default: SandboxLevel) -> (SandboxLevel, Option<String>) {
+        let level = self.explicit.unwrap_or(default);
+        match &self.backend {
+            Err(why) if level != SandboxLevel::Off => (
+                SandboxLevel::Off,
+                Some(format!("sandbox unavailable, running unconfined: {why}")),
+            ),
+            _ => (level, None),
+        }
+    }
+}
+
 /// Everything `resolve` needs to know about one session.
 #[derive(Debug, Clone)]
 pub struct SandboxRequest<'a> {
@@ -270,7 +308,8 @@ pub fn resolve(
 }
 
 fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Result<SandboxProfile> {
-    let expand = |p: &Path| expand_home(p, env.home.as_deref());
+    let workspace = canonical(req.workspace).unwrap_or_else(|| req.workspace.to_path_buf());
+    let expand = |p: &Path| workspace.join(expand_home(p, env.home.as_deref()));
     let protected: Vec<PathBuf> = env.protected.iter().filter_map(|p| canonical(p)).collect();
 
     for extra in req.extra_writable {
@@ -286,7 +325,16 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         }
     }
 
-    let workspace = canonical(req.workspace).unwrap_or_else(|| req.workspace.to_path_buf());
+    if level == SandboxLevel::WorkspaceWrite
+        && let Some(hit) = protected.iter().find(|p| p.starts_with(&workspace))
+    {
+        bail!(
+            "the workspace {} contains unharness's own state ({}); run from a project \
+             directory, or with --sandbox read-only or --sandbox off",
+            workspace.display(),
+            hit.display()
+        );
+    }
     let mut writable: Vec<PathBuf> = Vec::new();
     let mut add = |p: PathBuf| {
         if let Some(c) = canonical(&p)

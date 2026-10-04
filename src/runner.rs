@@ -11,8 +11,9 @@ use crate::cli::CommonRunArgs;
 use crate::config::Config;
 use crate::core::conversations::ConversationStore;
 use crate::core::registry::Registry;
+use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
 use crate::core::{HarnessId, ModelRef, PermissionPolicy, ProviderId, resolve_policy};
-use crate::harness::{PrintConfig, ProviderSource};
+use crate::harness::{Harness, PrintConfig, ProviderSource};
 use crate::sync::{find_workspace_root, sync_workspace_rules};
 use crate::tui::{self, TuiLaunch};
 
@@ -57,6 +58,44 @@ pub fn requested_policy(
     }
 }
 
+/// The sandbox level the user set: CLI flag, then `[sandbox].level`.
+pub fn requested_sandbox(args: &CommonRunArgs, config: &Config) -> Result<Option<SandboxLevel>> {
+    let (value, origin) = match (&args.sandbox, &config.sandbox.level) {
+        (Some(s), _) => (s, ""),
+        (None, Some(s)) => (s, " in config"),
+        (None, None) => return Ok(None),
+    };
+    SandboxLevel::parse(value).map(Some).ok_or_else(|| {
+        anyhow::anyhow!("unknown sandbox level '{value}'{origin} (read-only, workspace-write, off)")
+    })
+}
+
+/// What confines `harness` for a session under `policy` in `workspace`.
+pub fn session_sandbox(
+    harness: &dyn Harness,
+    policy: PermissionPolicy,
+    setup: &SandboxSetup,
+    config: &Config,
+    workspace: &Path,
+) -> Result<Sandbox> {
+    let mut extra_writable = config.sandbox.writable.clone();
+    if let Some(settings) = config.harness(harness.descriptor().id.as_str()) {
+        extra_writable.extend(settings.sandbox_writable.iter().cloned());
+    }
+    sandbox::resolve(
+        &SandboxRequest {
+            explicit: setup.explicit,
+            default: harness.default_sandbox(policy),
+            workspace,
+            harness: &harness.sandbox_paths(),
+            extra_writable: &extra_writable,
+            extra_readable: &config.sandbox.readable,
+        },
+        &setup.backend,
+        &SandboxEnv::current(),
+    )
+}
+
 pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()> {
     let ws_root = find_workspace_root(cwd);
 
@@ -81,6 +120,12 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let settings = config.harness(id.as_str());
 
     let policy = requested_policy(&args, config, id)?;
+    let sandbox_setup = SandboxSetup::detect(requested_sandbox(&args, config)?);
+    if let (Some(level), Err(why)) = (sandbox_setup.explicit, &sandbox_setup.backend)
+        && level != SandboxLevel::Off
+    {
+        bail!("sandbox '{level}' was requested but is unavailable: {why}");
+    }
     let provider = args
         .provider
         .clone()
@@ -111,6 +156,17 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         if let Some(w) = res.warning {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
+        let sandbox = session_sandbox(
+            harness,
+            res.effective,
+            &sandbox_setup,
+            config,
+            ws_root.as_deref().unwrap_or(cwd),
+        )?;
+        match sandbox.warning() {
+            Some(w) => eprintln!("{} {}", "[unharness]".yellow().bold(), w),
+            None => eprintln!("{} sandbox: {}", "[unharness]".dimmed(), sandbox.level()),
+        }
         let model_ref = model.map(|m| {
             ModelRef::new(
                 id,
@@ -129,7 +185,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             format: args.format.clone(),
             resume: print_resume,
             extra_args: config.extra_args(id.as_str()).to_vec(),
-            sandbox: crate::core::Sandbox::off(),
+            sandbox,
         };
         let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
         if args.print {
@@ -163,6 +219,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         config: config.clone(),
         harness: id,
         policy,
+        sandbox: sandbox_setup,
         provider,
         model,
         effort,

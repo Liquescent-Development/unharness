@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use crate::core::sandbox::Sandbox;
+use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
 use crate::core::{
@@ -100,6 +100,18 @@ pub trait Harness: Send + Sync {
     }
 
     fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
+
+    /// The directories this CLI writes outside the workspace (sessions,
+    /// credentials, logs), which the sandbox must leave writable. `~` is the
+    /// home directory. This is the vendor writing its own files.
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths::default()
+    }
+
+    /// The sandbox level when the user set none.
+    fn default_sandbox(&self, _policy: PermissionPolicy) -> SandboxLevel {
+        SandboxLevel::WorkspaceWrite
+    }
 
     /// Spawn the driver task(s) for an interactive session.
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle>;

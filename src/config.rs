@@ -28,9 +28,34 @@ pub struct Config {
     /// terminal. Default: on.
     pub mouse: Option<bool>,
 
+    /// The OS-level sandbox around every harness process.
+    #[serde(default, skip_serializing_if = "SandboxSettings::is_empty")]
+    pub sandbox: SandboxSettings,
+
     /// Harness-specific settings keyed by harness id.
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SandboxSettings {
+    /// read-only, workspace-write or off. Default: workspace-write wherever
+    /// the platform has a sandbox.
+    pub level: Option<String>,
+    /// Paths a harness may write besides the workspace and its own state.
+    /// `~` is the home directory; a relative path is under the workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable: Vec<PathBuf>,
+    /// Credential paths a harness may read although they are denied by
+    /// default (e.g. `~/.ssh` for git over ssh).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readable: Vec<PathBuf>,
+}
+
+impl SandboxSettings {
+    fn is_empty(&self) -> bool {
+        *self == SandboxSettings::default()
+    }
 }
 
 fn default_true() -> bool {
@@ -57,6 +82,10 @@ pub struct HarnessSettings {
     pub command: Vec<String>,
     /// Name shown in the TUI for a config-defined harness.
     pub display_name: Option<String>,
+    /// Paths this harness may write inside the sandbox, besides the ones
+    /// unharness knows it needs (an ACP agent's state, an MCP server's data).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_writable: Vec<PathBuf>,
 }
 
 impl Config {
@@ -150,6 +179,11 @@ impl Config {
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
             mouse: local.mouse.or(global.mouse),
+            sandbox: SandboxSettings {
+                level: local.sandbox.level.or(global.sandbox.level),
+                writable: [global.sandbox.writable, local.sandbox.writable].concat(),
+                readable: [global.sandbox.readable, local.sandbox.readable].concat(),
+            },
             harnesses,
         }
     }
@@ -175,6 +209,7 @@ impl Config {
                 global.command
             },
             display_name: local.display_name.or(global.display_name),
+            sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }
     }
 }
@@ -218,6 +253,10 @@ default_harness = "pi"
 default_policy = "accept-edits"
 bridge_max_chars = 1000
 
+[sandbox]
+level = "workspace-write"
+readable = ["~/.ssh"]
+
 [harnesses.pi]
 default_provider = "anthropic"
 default_model = "claude-sonnet-4-5"
@@ -239,6 +278,11 @@ transport = "rpc"
             default_harness: Some("claude".to_string()),
             default_policy: Some("ask".to_string()),
             auto_sync: true,
+            sandbox: SandboxSettings {
+                level: Some("off".to_string()),
+                writable: vec![PathBuf::from("~/.cache/a")],
+                readable: vec![],
+            },
             ..Default::default()
         };
         global.harnesses.insert(
@@ -259,6 +303,11 @@ transport = "rpc"
         let mut local = Config {
             default_harness: Some("agy".to_string()),
             auto_sync: true,
+            sandbox: SandboxSettings {
+                level: Some("read-only".to_string()),
+                writable: vec![PathBuf::from("target-shared")],
+                readable: vec![],
+            },
             ..Default::default()
         };
         local.harnesses.insert(
@@ -277,6 +326,11 @@ transport = "rpc"
         );
 
         let merged = Config::merge(global, local);
+        assert_eq!(merged.sandbox.level.as_deref(), Some("read-only")); // local wins
+        assert_eq!(
+            merged.sandbox.writable,
+            vec![PathBuf::from("~/.cache/a"), PathBuf::from("target-shared")]
+        ); // both
         assert_eq!(merged.default_harness.as_deref(), Some("agy")); // local wins
         assert_eq!(merged.default_policy.as_deref(), Some("ask")); // inherited
         assert_eq!(merged.default_model("agy"), Some("global-model")); // inherited
