@@ -78,7 +78,7 @@ capability caveat, and the key hints.
 |---|---|
 | `Enter` | Send the prompt; during a turn, queue it for when the turn finishes |
 | `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot) |
-| `Ctrl+J` | New line in the prompt |
+| `Ctrl+J`, `Shift+Enter` | New line in the prompt. `Ctrl+J` works everywhere; `Shift+Enter` only on terminals with the kitty keyboard protocol (see below) |
 | `Up` / `Down` | Move between the prompt's lines; on its first / last line, step back / forward through prompts sent from this workspace |
 | `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
 | `Ctrl+U` | Clear the prompt |
@@ -99,6 +99,12 @@ Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, 
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
+
+Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`,
+so on those `Shift+Enter` sends the prompt and `Ctrl+M` cannot open the model
+picker (use `/model`). Terminals that implement the kitty keyboard protocol
+(kitty, foot, Ghostty, WezTerm, Alacritty, recent iTerm2 among them) are
+asked to tell the keys apart, and there both work as listed.
 
 Sent prompts and commands are remembered per workspace (the newest 500, in
 `.unharness/prompt_history.jsonl`, removed by `unharness sessions --clear`).

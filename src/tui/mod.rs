@@ -13,16 +13,21 @@ pub mod ui;
 use std::io::{Stdout, stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
         DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
@@ -48,6 +53,24 @@ pub struct TuiLaunch {
     pub initial_prompt: Option<String>,
 }
 
+/// Whether the kitty keyboard protocol was switched on and has to be
+/// switched off again, including from the panic hook.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Undo everything `run_tui` did to the terminal. Every step is tried even
+/// if an earlier one fails.
+fn restore_terminal() -> std::io::Result<()> {
+    let mut out = stdout();
+    let popped = if KEYBOARD_ENHANCED.swap(false, Ordering::SeqCst) {
+        execute!(out, PopKeyboardEnhancementFlags)
+    } else {
+        Ok(())
+    };
+    let left = execute!(out, DisableBracketedPaste, LeaveAlternateScreen);
+    disable_raw_mode()?;
+    popped.and(left)
+}
+
 pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     // Restore the terminal before the panic message prints, otherwise a panic
     // leaves the user's shell in raw mode on the alternate screen.
@@ -67,6 +90,17 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     // Bracketed paste: a paste arrives as one event instead of as keys, so
     // its newlines do not submit the prompt.
     execute!(out, EnterAlternateScreen, EnableBracketedPaste)?;
+    // Where the terminal speaks the kitty keyboard protocol, ask it to
+    // report modified keys unambiguously: Shift+Enter then differs from
+    // Enter, and Ctrl+M / Ctrl+H from Enter / Backspace. Elsewhere the
+    // terminal sends what it always did.
+    if supports_keyboard_enhancement().unwrap_or(false) {
+        execute!(
+            out,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+        KEYBOARD_ENHANCED.store(true, Ordering::SeqCst);
+    }
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
@@ -87,12 +121,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;
 
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        LeaveAlternateScreen
-    )?;
+    restore_terminal()?;
     terminal.show_cursor()?;
 
     if let Some(line) = app.exit_summary() {
