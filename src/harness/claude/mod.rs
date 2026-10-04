@@ -19,7 +19,55 @@ use crate::core::{
     SessionConfig, SessionHandle, SubagentSupport,
 };
 
-pub struct ClaudeHarness;
+#[derive(Debug, Default)]
+pub struct ClaudeHarness {
+    /// Run Claude with `CLAUDE_CONFIG_DIR` set to its state directory, so
+    /// that `.claude.json` lives inside it (`[harnesses.claude]
+    /// relocate_config`). Claude rewrites that file through a lock directory
+    /// and a temp file beside it; in the home directory the sandbox denies
+    /// both, and cannot allow them without opening the whole of it.
+    pub relocate_config: bool,
+}
+
+/// Claude's state directory when `CLAUDE_CONFIG_DIR` does not name another.
+const STATE_DIR: &str = ".claude";
+const CONFIG_FILE: &str = ".claude.json";
+
+/// Copy `~/.claude.json` to `<dir>/.claude.json` unless that exists, so a
+/// relocated Claude starts from the user's account, trust and MCP settings.
+/// The original is left alone. Returns whether a copy was made.
+pub fn seed_relocated_config(home: &Path, dir: &Path) -> Result<bool> {
+    let (from, to) = (home.join(CONFIG_FILE), dir.join(CONFIG_FILE));
+    if to.exists() || !from.exists() {
+        return Ok(false);
+    }
+    std::fs::create_dir_all(dir)?;
+    // Copy then rename, so Claude never sees half a file.
+    let partial = dir.join(format!("{CONFIG_FILE}.unharness-import"));
+    std::fs::copy(&from, &partial)?;
+    std::fs::rename(&partial, &to)?;
+    Ok(true)
+}
+
+impl ClaudeHarness {
+    /// The environment that relocates the config, seeding it on first use.
+    /// Nothing when relocation is off or the user already set the variable
+    /// (the file is then inside that directory anyway).
+    fn config_env(&self) -> Result<Option<(String, String)>> {
+        if !self.relocate_config || std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+            return Ok(None);
+        }
+        let Some(home) = dirs::home_dir() else {
+            return Ok(None);
+        };
+        let dir = home.join(STATE_DIR);
+        seed_relocated_config(&home, &dir)?;
+        Ok(Some((
+            "CLAUDE_CONFIG_DIR".to_string(),
+            dir.to_string_lossy().into_owned(),
+        )))
+    }
+}
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::CLAUDE,
@@ -77,17 +125,22 @@ impl Harness for ClaudeHarness {
     }
 
     fn sandbox_paths(&self) -> SandboxPaths {
-        let mut writable: Vec<PathBuf> = [
-            "~/.claude",
-            "~/.claude.json",
-            "~/.cache/claude",
-            "~/.cache/claude-cli-nodejs",
-            "~/.local/share/claude",
-            "~/.local/state/claude",
-        ]
-        .iter()
-        .map(PathBuf::from)
-        .collect();
+        // `~/.claude.json` is not here: Claude never writes it in place, so
+        // the grant would only let an agent edit it (see `relocate_config`).
+        let state = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new("~").join(STATE_DIR));
+        let mut writable = vec![state];
+        writable.extend(
+            [
+                "~/.cache/claude",
+                "~/.cache/claude-cli-nodejs",
+                "~/.local/share/claude",
+                "~/.local/state/claude",
+            ]
+            .iter()
+            .map(PathBuf::from),
+        );
         // The messaging socket of each process.
         if let Some(run) = dirs::runtime_dir() {
             writable.push(run.join("cc-socks"));
@@ -165,13 +218,17 @@ impl Harness for ClaudeHarness {
             .collect())
     }
 
-    fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
+    fn start_session(&self, mut cfg: SessionConfig) -> Result<SessionHandle> {
+        cfg.env.extend(self.config_env()?);
         transport::start(cfg)
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
         let mut cmd = Command::new(&cfg.binary);
         cmd.current_dir(&cfg.cwd);
+        if let Some((key, value)) = self.config_env()? {
+            cmd.env(key, value);
+        }
         if let Some(policy) = cfg.policy {
             cmd.args(transport::policy_args(policy));
         }
@@ -257,7 +314,7 @@ mod tests {
             extra_args: vec![],
             sandbox: crate::core::Sandbox::off(),
         };
-        let a = args(&ClaudeHarness.build_print_command(&cfg).unwrap());
+        let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
         assert_eq!(a.last().unwrap(), "run tests");
         assert!(a.contains(&"-p".to_string()));
         assert!(a.contains(&"--dangerously-skip-permissions".to_string()));
@@ -276,25 +333,52 @@ mod tests {
             print_mode: false,
             ..Default::default()
         };
-        let a = args(&ClaudeHarness.build_print_command(&cfg).unwrap());
+        let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
         assert!(a.is_empty());
     }
 
     #[test]
     fn capabilities_and_models() {
-        let caps = ClaudeHarness.capabilities();
+        let caps = ClaudeHarness::default().capabilities();
         assert!(caps.interactive_permissions);
         assert_eq!(caps.permission_policies.len(), 4);
         assert!(caps.supports_effort("xhigh"));
-        let models = ClaudeHarness
+        let models = ClaudeHarness::default()
             .list_models(Path::new("claude"), &ProviderId::from("anthropic"))
             .unwrap();
         assert!(models.iter().any(|m| m.model_ref.model == "opus"));
         assert!(
-            ClaudeHarness
+            ClaudeHarness::default()
                 .list_models(Path::new("claude"), &ProviderId::from("openai"))
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn relocated_config_is_seeded_once_and_the_original_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (home, dir) = (tmp.path(), tmp.path().join(".claude"));
+        // Nothing to copy yet.
+        assert!(!seed_relocated_config(home, &dir).unwrap());
+
+        std::fs::write(home.join(".claude.json"), "{\"a\":1}").unwrap();
+        assert!(seed_relocated_config(home, &dir).unwrap());
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap();
+        assert_eq!(read(&dir.join(".claude.json")), "{\"a\":1}");
+        assert_eq!(read(&home.join(".claude.json")), "{\"a\":1}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+        // What Claude wrote since is not overwritten.
+        std::fs::write(dir.join(".claude.json"), "{\"a\":2}").unwrap();
+        assert!(!seed_relocated_config(home, &dir).unwrap());
+        assert_eq!(read(&dir.join(".claude.json")), "{\"a\":2}");
+    }
+
+    #[test]
+    fn config_stays_put_unless_asked() {
+        assert_eq!(ClaudeHarness::default().config_env().unwrap(), None);
+        let paths = ClaudeHarness::default().sandbox_paths().writable;
+        assert!(!paths.iter().any(|p| p.ends_with(".claude.json")));
     }
 }

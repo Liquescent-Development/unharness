@@ -84,6 +84,10 @@ pub struct HarnessSettings {
     pub command: Vec<String>,
     /// Name shown in the TUI for a config-defined harness.
     pub display_name: Option<String>,
+    /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
+    /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
+    /// existing `~/.claude.json` is copied there once. Default: off.
+    pub relocate_config: Option<bool>,
     /// Paths this harness may write inside the sandbox, besides the ones
     /// unharness knows it needs (an ACP agent's state, an MCP server's data).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -256,6 +260,7 @@ impl Config {
                 global.command
             },
             display_name: local.display_name.or(global.display_name),
+            relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }
     }

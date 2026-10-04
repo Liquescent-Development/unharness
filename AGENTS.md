@@ -49,7 +49,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   workspace; an in-tree `unharness.toml` is only imported by `unharness
   init`. The config and state directories are never writable in the sandbox.
 - **No silent edits to vendor settings.** unharness does not write to
-  `~/.claude`, `~/.codex`, `~/.gemini` or similar.
+  `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception is
+  asked for in config: `[harnesses.claude] relocate_config` copies
+  `~/.claude.json` to `~/.claude/.claude.json` once and never touches the
+  original.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
   bare `tokio::process::Command::spawn` in a transport.
@@ -178,6 +181,9 @@ recorded ones. For anything else:
   (without it the server warns at startup). Claude Code writes
   `~/.claude.json` through a lock directory and a temp file created in the
   home directory, both denied: it carries on without updating the file.
+  With `CLAUDE_CONFIG_DIR` set, the file, its lock and its temp files are
+  in that directory instead (checked: no denials, signed in from the
+  copied file), which is what `relocate_config` uses.
   Unverified: the macOS backend (`seatbelt.rs`; only the profile text is
   tested), a user-enabled Claude Code sandbox inside ours, agy's and the ACP
   presets' state directories, `--no-tui` passthrough under the sandbox.

@@ -3184,7 +3184,7 @@ pub(crate) mod tests {
         Arc::new(
             Registry::empty()
                 .with(Box::new(AgyHarness::default()))
-                .with(Box::new(ClaudeHarness))
+                .with(Box::new(ClaudeHarness::default()))
                 .with(Box::new(crate::harness::codex::CodexHarness::new(
                     crate::harness::codex::CodexTransport::Exec,
                 )))

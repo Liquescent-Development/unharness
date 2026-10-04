@@ -126,7 +126,7 @@ async fn claude_basic_turn_streams_tool_and_text() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -193,7 +193,7 @@ async fn claude_permission_round_trip_and_question() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/permission_and_question.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -272,7 +272,7 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
 
     // Without HANG the fake exits once the fixture is exhausted.
     let mut handle = harness
@@ -603,7 +603,7 @@ async fn claude_stops_the_chosen_subagent_by_its_task() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/subagent_stop_task.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -1212,7 +1212,7 @@ async fn sandbox_confines_a_long_lived_harness() {
         return;
     };
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(confined.config(&fixture, true))
         .unwrap();
