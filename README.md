@@ -266,6 +266,17 @@ commands, MCP servers) can:
 | `read-only` | harness state and temp only |
 | `off` | unconfined |
 
+Everything else your user can read, the agent can read, other projects
+included. `deny_read` under `[sandbox]` adds paths to the denied list. The
+workspace, the harness's own state and `readable` paths stay readable inside
+a denied path, so `deny_read = ["~/code"]` hides the sibling projects of the
+one you are working in, and `deny_read = ["~"]` with a `readable` list of
+your toolchains (and the agent's own binary, if it is installed under the
+home directory) is a strict mode. A `deny_read` path inside a readable or
+writable one, such as a file in the workspace or anything under `/tmp`,
+cannot be enforced and is refused at startup. On Linux the names inside a
+denied directory can still be listed; the contents cannot be read.
+
 Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX` or `[sandbox] level`.
 The default applies under every policy, `bypass` included; Codex `exec` under
 `ask` defaults to `read-only` because it cannot prompt. The level is on the
@@ -347,7 +358,8 @@ file_checkpoints = true          # snapshot the working tree before each prompt 
 [sandbox]
 level    = "workspace-write"     # read-only | workspace-write | off
 writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
-readable = ["~/.config/gh"]      # credential paths to allow reading
+readable = ["~/.config/gh"]      # credential paths to allow reading; also reopens paths inside deny_read
+deny_read = ["~/Documents"]      # more paths no harness may read
 
 [harnesses.claude]
 # binary = "/path/to/claude"

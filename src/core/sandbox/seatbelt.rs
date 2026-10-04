@@ -81,6 +81,15 @@ pub fn seatbelt_profile(profile: &SandboxProfile) -> String {
             "(deny file-read*{})\n",
             subpaths(&profile.deny_read)
         ));
+        let inside: Vec<_> = profile
+            .allow_read
+            .iter()
+            .filter(|a| profile.deny_read.iter().any(|d| a.starts_with(d)))
+            .cloned()
+            .collect();
+        if !inside.is_empty() {
+            out.push_str(&format!("(allow file-read*{})\n", subpaths(&inside)));
+        }
     }
     out
 }
@@ -108,6 +117,7 @@ mod tests {
                 PathBuf::from("/private/tmp"),
             ],
             deny_read: vec![PathBuf::from("/Users/u/.ssh")],
+            allow_read: vec![PathBuf::from("/Users/u/code")],
             protected: vec![PathBuf::from("/Users/u/Library/unharness")],
         }
     }
@@ -123,6 +133,17 @@ mod tests {
              (deny file-write* (subpath \"/Users/u/Library/unharness\"))\n\
              (deny file-read* (subpath \"/Users/u/.ssh\"))\n"
         );
+    }
+
+    #[test]
+    fn readable_paths_inside_a_denied_one_are_reopened_after_it() {
+        let mut p = profile();
+        p.deny_read = vec![PathBuf::from("/Users/u")];
+        let text = seatbelt_profile(&p);
+        assert!(text.ends_with(
+            "(deny file-read* (subpath \"/Users/u\"))\n\
+             (allow file-read* (subpath \"/Users/u/code\"))\n"
+        ));
     }
 
     #[test]

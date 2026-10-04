@@ -157,6 +157,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     for (label, paths) in [
         ("writable", &config.sandbox.writable),
         ("readable", &config.sandbox.readable),
+        ("denied reads", &config.sandbox.deny_read),
     ] {
         if !paths.is_empty() {
             let list: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();

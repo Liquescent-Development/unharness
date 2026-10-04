@@ -104,6 +104,11 @@ fn ruleset(profile: &SandboxProfile) -> Result<OwnedFd> {
     for path in &listed {
         created = allow(created, path, AccessFs::ReadDir.into())?;
     }
+    // What stays readable inside a denied path; elsewhere this repeats
+    // what the grants above already give.
+    for path in &profile.allow_read {
+        created = allow(created, path, read)?;
+    }
     for path in &profile.writable {
         created = allow(created, path, all)?;
     }
@@ -226,7 +231,7 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        for d in ["ws", "outside", "secret"] {
+        for d in ["ws", "outside", "secret", "code/proj", "code/other"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         std::fs::write(root.join("secret/key"), "k").unwrap();
@@ -235,7 +240,8 @@ mod tests {
             level: SandboxLevel::WorkspaceWrite,
             workspace: root.join("ws"),
             writable: vec![root.join("ws"), PathBuf::from("/dev")],
-            deny_read: vec![root.join("secret")],
+            deny_read: vec![root.join("secret"), root.join("code")],
+            allow_read: vec![root.join("code/proj")],
             protected: vec![],
         };
         let at = |p: &str| root.join(p).display().to_string();
@@ -272,6 +278,26 @@ mod tests {
         );
         assert_ne!(
             run(&profile, &format!("cat {} 2>/dev/null", at("secret/key"))),
+            Some(0)
+        );
+
+        // A denied directory hides its other entries, not the allowed one.
+        std::fs::write(root.join("code/proj/a"), "a").unwrap();
+        std::fs::write(root.join("code/other/b"), "b").unwrap();
+        assert_eq!(
+            run(&profile, &format!("cat {} > /dev/null", at("code/proj/a"))),
+            Some(0)
+        );
+        assert_ne!(
+            run(&profile, &format!("cat {} 2>/dev/null", at("code/other/b"))),
+            Some(0)
+        );
+        // Not writable there, though.
+        assert_ne!(
+            run(
+                &profile,
+                &format!("echo x > {} 2>/dev/null", at("code/proj/a"))
+            ),
             Some(0)
         );
 
