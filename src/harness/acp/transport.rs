@@ -76,7 +76,7 @@ pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Resul
     for (k, v) in &cfg.env {
         command.env(k, v);
     }
-    let proc = LineProcess::spawn(command)?;
+    let proc = LineProcess::spawn(command, &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness,
         process_model: ProcessModel::LongLived,

@@ -64,6 +64,7 @@ impl Fake {
             fork: false,
             extra_args: vec![],
             env,
+            sandbox: unharness::core::Sandbox::off(),
         }
     }
 
@@ -125,7 +126,7 @@ async fn claude_basic_turn_streams_tool_and_text() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -192,7 +193,7 @@ async fn claude_permission_round_trip_and_question() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/permission_and_question.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -271,7 +272,7 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
 
     // Without HANG the fake exits once the fixture is exhausted.
     let mut handle = harness
@@ -602,7 +603,7 @@ async fn claude_stops_the_chosen_subagent_by_its_task() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/claude/fixtures/subagent_stop_task.jsonl");
-    let harness = unharness::harness::claude::ClaudeHarness;
+    let harness = unharness::harness::claude::ClaudeHarness::default();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -1081,5 +1082,188 @@ async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
             .as_str()
             .is_some_and(|t| t.starts_with("01a103fc"))
     );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A workspace, a harness state directory holding the fake's log, a
+/// directory outside both and a home with credentials, plus the sandbox
+/// that confines a fake harness to them.
+struct Confined {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    sandbox: unharness::core::Sandbox,
+}
+
+impl Confined {
+    /// `None` when this machine has no sandbox backend.
+    fn new(level: unharness::core::SandboxLevel) -> Option<Self> {
+        use unharness::core::sandbox::{self, SandboxEnv, SandboxPaths, SandboxRequest};
+        let backend = sandbox::detect();
+        if let Err(why) = &backend {
+            eprintln!("no sandbox backend ({why}); skipping");
+            return None;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for dir in ["ws", "state", "outside", "home/.gnupg"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(root.join("home/.gnupg/id_key"), "secret").unwrap();
+        std::fs::write(root.join("outside/notes"), "plain").unwrap();
+        let sandbox = sandbox::resolve(
+            &SandboxRequest {
+                explicit: Some(level),
+                default: level,
+                workspace: &root.join("ws"),
+                harness: &SandboxPaths {
+                    writable: vec![root.join("state")],
+                },
+                extra_writable: &[],
+                extra_readable: &[],
+            },
+            &backend,
+            &SandboxEnv {
+                home: Some(root.join("home")),
+                scratch: vec![PathBuf::from("/dev")],
+                protected: vec![],
+            },
+        )
+        .unwrap();
+        Some(Confined {
+            _tmp: tmp,
+            root,
+            sandbox,
+        })
+    }
+
+    fn config(&self, fixture: &Path, hang: bool) -> SessionConfig {
+        let at = |p: &str| self.root.join(p).display().to_string();
+        let mut env = vec![
+            (
+                "UNHARNESS_FAKE_FIXTURE".to_string(),
+                fixture.to_string_lossy().to_string(),
+            ),
+            ("UNHARNESS_FAKE_LOG".to_string(), at("state/sent.log")),
+            (
+                "UNHARNESS_FAKE_PROBE".to_string(),
+                format!(
+                    "write:{};write:{};read:{};read:{}",
+                    at("ws/new"),
+                    at("outside/new"),
+                    at("outside/notes"),
+                    at("home/.gnupg/id_key")
+                ),
+            ),
+        ];
+        if hang {
+            env.push(("UNHARNESS_FAKE_HANG".to_string(), "1".to_string()));
+        }
+        SessionConfig {
+            binary: fake_harness(),
+            cwd: self.root.join("ws"),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
+            effort: None,
+            policy: PermissionPolicy::AcceptEdits,
+            resume: None,
+            fork: false,
+            extra_args: vec![],
+            env,
+            sandbox: self.sandbox.clone(),
+        }
+    }
+
+    /// What the fake managed to do, in order: (kind, file name, ok).
+    fn probes(&self) -> Vec<(String, String, bool)> {
+        std::fs::read_to_string(self.root.join("state/sent.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                let path = Path::new(v["path"].as_str()?);
+                Some((
+                    v["probe"].as_str()?.to_string(),
+                    path.file_name()?.to_string_lossy().into_owned(),
+                    v["ok"].as_bool()?,
+                ))
+            })
+            .collect()
+    }
+}
+
+fn probe_results(ws_write: bool) -> Vec<(String, String, bool)> {
+    [
+        ("write", "new", ws_write),
+        ("write", "new", false),
+        ("read", "notes", true),
+        ("read", "id_key", false),
+    ]
+    .iter()
+    .map(|(k, f, ok)| (k.to_string(), f.to_string(), *ok))
+    .collect()
+}
+
+#[tokio::test]
+async fn sandbox_confines_a_long_lived_harness() {
+    use unharness::core::SandboxLevel;
+    if !python_available() {
+        return;
+    }
+    let Some(confined) = Confined::new(SandboxLevel::WorkspaceWrite) else {
+        return;
+    };
+    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(confined.config(&fixture, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("run echo")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    // The workspace is writable and the rest readable, except credentials.
+    assert_eq!(confined.probes(), probe_results(true));
+    assert!(confined.root.join("ws/new").exists());
+    assert!(!confined.root.join("outside/new").exists());
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn sandbox_confines_every_turn_of_a_per_turn_harness() {
+    use unharness::core::SandboxLevel;
+    if !python_available() {
+        return;
+    }
+    let Some(confined) = Confined::new(SandboxLevel::ReadOnly) else {
+        return;
+    };
+    let fixture = repo().join("src/harness/codex/fixtures/exec_resume_command.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::Exec,
+    );
+    let mut handle = harness
+        .start_session(confined.config(&fixture, false))
+        .unwrap();
+    for prompt in ["one", "two"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done
+            })
+        ));
+    }
+
+    // Read-only: not even the workspace, and each turn's process is confined.
+    let twice = [probe_results(false), probe_results(false)].concat();
+    assert_eq!(confined.probes(), twice);
+    assert!(!confined.root.join("ws/new").exists());
+
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }

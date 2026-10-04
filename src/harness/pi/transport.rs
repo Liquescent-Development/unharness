@@ -105,7 +105,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let proc = LineProcess::spawn(cmd)?;
+    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness: HarnessId::PI,
         process_model: ProcessModel::LongLived,
@@ -338,6 +338,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--no-extensions".into()],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let (args, sid) = session_args(&cfg);
         let s = args.join(" ");

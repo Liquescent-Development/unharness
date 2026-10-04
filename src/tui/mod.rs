@@ -37,6 +37,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
 use crate::core::registry::Registry;
+use crate::core::sandbox::SandboxSetup;
 use crate::core::{HarnessId, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle};
 use crate::harness::resolve_binary;
 use app::{Action, App, AppInit};
@@ -48,6 +49,7 @@ pub struct TuiLaunch {
     pub config: Config,
     pub harness: HarnessId,
     pub policy: PermissionPolicy,
+    pub sandbox: SandboxSetup,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -144,6 +146,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         config: launch.config,
         harness: launch.harness,
         policy: launch.policy,
+        sandbox: launch.sandbox,
         provider: launch.provider,
         model: launch.model,
         effort: launch.effort,
@@ -461,7 +464,13 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                 if session.is_some() {
                     continue;
                 }
-                match start_session(app, resume) {
+                let prepared = app.harness().prepare();
+                // After `prepare`, which may itself create a watched file.
+                app.arm_guard();
+                if let Ok(Some(note)) = &prepared {
+                    app.transcript.push_notice(note.clone());
+                }
+                match prepared.and_then(|_| start_session(app, resume)) {
                     Ok(handle) => {
                         *session = Some(handle);
                         app.session_alive = true;
@@ -525,6 +534,7 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         },
         extra_args: app.config.extra_args(desc.id.as_str()).to_vec(),
         env: Vec::new(),
+        sandbox: app.session_sandbox()?,
     };
     harness.start_session(cfg)
 }

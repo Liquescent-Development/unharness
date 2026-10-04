@@ -7,7 +7,7 @@ pub mod exec;
 pub mod exec_parse;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,9 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
+use crate::core::sandbox::{SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -239,6 +241,38 @@ impl Harness for CodexHarness {
             .collect())
     }
 
+    /// `packages` holds the standalone install's binary.
+    fn guarded(&self, workspace: &Path) -> Vec<Guarded> {
+        let home = codex_home();
+        let workspace = workspace.to_path_buf();
+        let mut guarded = vec![
+            Guarded::Projected {
+                path: home.join("config.toml"),
+                project: Arc::new(move |bytes| config_without_own_trust(bytes, &workspace)),
+            },
+            Guarded::File(home.join("hooks.json")),
+            Guarded::File(home.join("AGENTS.md")),
+        ];
+        for tree in ["prompts", "skills", "packages"] {
+            guarded.push(Guarded::Tree(home.join(tree)));
+        }
+        guarded
+    }
+
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths {
+            writable: vec![codex_home()],
+        }
+    }
+
+    /// `exec` cannot prompt, so `ask` there means read-only.
+    fn default_sandbox(&self, policy: PermissionPolicy) -> SandboxLevel {
+        match (self.transport, policy) {
+            (CodexTransport::Exec, PermissionPolicy::Ask) => SandboxLevel::ReadOnly,
+            _ => SandboxLevel::WorkspaceWrite,
+        }
+    }
+
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
         match self.effective_transport(&cfg.binary) {
             CodexTransport::Exec => crate::core::per_turn::start(cfg, Arc::new(exec::CodexExec)),
@@ -249,6 +283,7 @@ impl Harness for CodexHarness {
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
         let mut cmd = Command::new(&cfg.binary);
         cmd.current_dir(&cfg.cwd);
+        let confined = cfg.sandbox.is_active();
         if cfg.print_mode {
             cmd.arg("exec");
             if let Some(id) = &cfg.resume {
@@ -260,11 +295,11 @@ impl Harness for CodexHarness {
             }
             if let Some(p) = cfg.policy {
                 if cfg.resume.is_some() {
-                    for o in exec::policy_config_overrides(p) {
+                    for o in exec::policy_config_overrides(p, confined) {
                         cmd.arg("-c").arg(o);
                     }
                 } else {
-                    cmd.args(exec::policy_args(p));
+                    cmd.args(exec::policy_args(p, confined));
                 }
             }
         } else {
@@ -274,7 +309,7 @@ impl Harness for CodexHarness {
             if cfg.policy == Some(PermissionPolicy::Bypass) {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             } else if let Some(p) = cfg.policy {
-                cmd.args(exec::policy_args(p));
+                cmd.args(exec::policy_args(p, confined));
             }
         }
         if let Some(m) = &cfg.model {
@@ -289,6 +324,27 @@ impl Harness for CodexHarness {
         }
         Ok(cmd)
     }
+}
+
+/// `config.toml` without the trust entry of `workspace`, which Codex adds by
+/// itself the first time it runs there. Trust for any other directory, and
+/// everything else in the file, still counts.
+fn config_without_own_trust(bytes: &[u8], workspace: &Path) -> Option<String> {
+    let mut config: toml::Table = toml::from_str(std::str::from_utf8(bytes).ok()?).ok()?;
+    if let Some(toml::Value::Table(projects)) = config.get_mut("projects") {
+        projects.remove(workspace.to_string_lossy().as_ref());
+        if projects.is_empty() {
+            config.remove("projects");
+        }
+    }
+    Some(config.to_string())
+}
+
+/// Where Codex keeps sessions, credentials and logs.
+fn codex_home() -> PathBuf {
+    std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("~/.codex"))
 }
 
 fn auth_status(binary: &Path) -> AuthInfo {
@@ -400,6 +456,7 @@ mod tests {
             format: None,
             resume: None,
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let h = CodexHarness::default();
         assert_eq!(
@@ -448,5 +505,21 @@ mod tests {
             Some(CodexTransport::AppServer)
         );
         assert_eq!(CodexTransport::parse("x"), None);
+    }
+
+    #[test]
+    fn own_trust_entry_is_not_a_config_change() {
+        let ws = Path::new("/w/proj");
+        let before = b"model = \"m\"\n";
+        let own = b"model = \"m\"\n\n[projects.\"/w/proj\"]\ntrust_level = \"trusted\"\n";
+        let other = b"model = \"m\"\n\n[projects.\"/elsewhere\"]\ntrust_level = \"trusted\"\n";
+        let base = config_without_own_trust(before, ws).unwrap();
+        assert_eq!(config_without_own_trust(own, ws).unwrap(), base);
+        assert_ne!(config_without_own_trust(other, ws).unwrap(), base);
+        assert_ne!(
+            config_without_own_trust(b"model = \"x\"\n", ws).unwrap(),
+            base
+        );
+        assert_eq!(config_without_own_trust(b"not [toml", ws), None);
     }
 }

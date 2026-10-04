@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::core::guard::Guarded;
+use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
+
 pub use crate::core::ModelInfo;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
@@ -62,6 +65,8 @@ pub struct PrintConfig {
     pub format: Option<String>,
     pub resume: Option<String>,
     pub extra_args: Vec<String>,
+    /// Applied by the caller to the command `build_print_command` returns.
+    pub sandbox: Sandbox,
 }
 
 /// One vendor CLI. Implementations live in `src/harness/<name>/`.
@@ -96,6 +101,33 @@ pub trait Harness: Send + Sync {
     }
 
     fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
+
+    /// Setup this harness needs before its first process of a run. A
+    /// returned line is shown to the user.
+    fn prepare(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// The directories this CLI writes outside the workspace (sessions,
+    /// credentials, logs), which the sandbox must leave writable. `~` is the
+    /// home directory. This is the vendor writing its own files.
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths::default()
+    }
+
+    /// The vendor files that decide how this CLI runs next time (settings,
+    /// hooks, MCP servers, its binary) and that the sandbox has to leave
+    /// writable. unharness tells the user when one changes during a turn.
+    /// `workspace` is where the session runs, for what the CLI records about
+    /// it on its own.
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        Vec::new()
+    }
+
+    /// The sandbox level when the user set none.
+    fn default_sandbox(&self, _policy: PermissionPolicy) -> SandboxLevel {
+        SandboxLevel::WorkspaceWrite
+    }
 
     /// Spawn the driver task(s) for an interactive session.
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle>;

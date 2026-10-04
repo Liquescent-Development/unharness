@@ -4,7 +4,7 @@ pub mod parse;
 pub mod transport;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,8 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -38,6 +40,24 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 impl Harness for PiHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        let agent = Path::new("~/.pi/agent");
+        let mut guarded: Vec<Guarded> = ["settings.json", "models.json", "trust.json", "AGENTS.md"]
+            .iter()
+            .map(|f| Guarded::File(agent.join(f)))
+            .collect();
+        for tree in ["extensions", "prompts"] {
+            guarded.push(Guarded::Tree(agent.join(tree)));
+        }
+        guarded
+    }
+
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths {
+            writable: vec![PathBuf::from("~/.pi")],
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -254,6 +274,7 @@ mod tests {
             format: Some("json".into()),
             resume: Some("s1".into()),
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let cmd = PiHarness.build_print_command(&cfg).unwrap();
         let a: Vec<String> = cmd

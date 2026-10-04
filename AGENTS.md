@@ -44,11 +44,33 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   project's `.git` (the tests compare refs, status, stash and object count
   before and after), and a restore snapshots the tree first so it can be
   undone. Tests pass their own store directory, never the real one.
+- **Nothing an agent can write decides how it is run.** Workspace settings
+  are read from `<config dir>/unharness/workspaces/`, never from the
+  workspace; an in-tree `unharness.toml` is only imported by `unharness
+  init`. The config and state directories are never writable in the sandbox.
+- **A change to a harness's own configuration is never silent.** The files
+  that decide a CLI's next run are declared in `src/harness/<name>/`
+  (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
+  rewrites by itself is projected away there (Claude's counters in
+  `.claude.json`, Codex's trust entry for the workspace), found by running
+  it, so that a warning means something.
 - **No silent edits to vendor settings.** unharness does not write to
-  `~/.claude`, `~/.codex`, `~/.gemini` or similar.
+  `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception:
+  unless `[harnesses.claude] relocate_config = false`, `~/.claude.json` is
+  copied to `~/.claude/.claude.json` once, with a notice, and the original
+  is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
   bare `tokio::process::Command::spawn` in a transport.
+- **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
+  session's `Sandbox` and `runner.rs` wraps the print command with it; probes
+  (`--version`, auth, model lists) and unharness's own `git` stay outside.
+  The paths a vendor CLI writes are declared in `src/harness/<name>/`
+  (`sandbox_paths`), found by tracing the CLI (`strace -f -e trace=file -e
+  status=failed` shows what a confined run was denied), not guessed. Where
+  a vendor has its own sandbox it is switched off while ours is active,
+  also in `src/harness/<name>/`. The checkpoint store is never writable
+  from inside.
 
 ## Conversations
 
@@ -80,7 +102,8 @@ recorded ones. For anything else:
 2. Create `src/harness/<name>/{mod.rs, transport.rs, parse.rs, fixtures/}`
    implementing `Harness` and declaring honest `Capabilities`. Override
    `quick_auth` only if sign-in can be checked in well under a second; it
-   runs at startup to choose the default harness.
+   runs at startup to choose the default harness. Declare the CLI's own
+   state directories in `sandbox_paths`, and run a turn with the sandbox on.
 3. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events` with `UNHARNESS_UPDATE_FIXTURES=1`.
 4. Register it in `Registry::from_config`.
@@ -151,6 +174,29 @@ recorded ones. For anything else:
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.
+
+- Sandbox (`src/core/sandbox/`), checked on Linux 7.2 (Landlock ABI 10) with
+  Claude Code 2.1.289, Codex 0.157.0 (app-server and exec) and pi 0.87.1: a
+  workspace write succeeds, a write to the home directory and a read of
+  a denied credential directory fail, sessions resume. Landlock only allows, so reads are granted
+  on everything around the denied paths (`linux::read_grants`); directory
+  listing reaches into them, file contents do not. Codex's bubblewrap fails
+  inside a Landlock domain ("setting up uid map: Permission denied"), hence
+  `externalSandbox` on `turn/start`, `danger-full-access` for exec, and
+  `-c sandbox_mode="danger-full-access"` on the app-server command line
+  (without it the server warns at startup). Claude Code writes
+  `~/.claude.json` through a lock directory and a temp file created in the
+  home directory, both denied: it carries on without updating the file.
+  With `CLAUDE_CONFIG_DIR` set, the file, its lock and its temp files are
+  in that directory instead (checked: no denials, signed in from the
+  copied file), which is what `relocate_config` uses.
+  Landlock cannot protect a file in a directory where the CLI creates
+  files, and every CLI does so beside its config (Codex's SQLite files in
+  `~/.codex`, pi's lock files in `~/.pi/agent`, Claude's relocated config),
+  which is why those files are watched and not write-protected.
+  Unverified: the macOS backend (`seatbelt.rs`; only the profile text is
+  tested), a user-enabled Claude Code sandbox inside ours, agy's and the ACP
+  presets' state directories, `--no-tui` passthrough under the sandbox.
 
 ## Commit style
 

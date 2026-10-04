@@ -10,7 +10,7 @@
 pub mod parse;
 pub mod transport;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
@@ -18,6 +18,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary, which,
 };
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -36,6 +37,31 @@ pub const PRESETS: &[(&str, &str, &[&str])] = &[
     ("qwen", "Qwen Code", &["qwen", "--acp"]),
     ("kiro", "Kiro", &["kiro-cli", "acp"]),
 ];
+
+/// Where each preset's agent keeps its own state, for the sandbox. As
+/// unverified as the presets; a config-defined agent lists its directories
+/// in `[harnesses.<name>].sandbox_writable`.
+fn preset_state(name: &str) -> &'static [&'static str] {
+    match name {
+        "gemini" => &["~/.gemini"],
+        "opencode" => &[
+            "~/.config/opencode",
+            "~/.local/share/opencode",
+            "~/.local/state/opencode",
+            "~/.cache/opencode",
+        ],
+        "goose" => &[
+            "~/.config/goose",
+            "~/.local/share/goose",
+            "~/.local/state/goose",
+        ],
+        "copilot" => &["~/.copilot"],
+        "cursor" => &["~/.cursor"],
+        "qwen" => &["~/.qwen"],
+        "kiro" => &["~/.kiro"],
+        _ => &[],
+    }
+}
 
 const PROVIDERS: &[(&str, &str)] = &[(parse::PROVIDER, "ACP agent")];
 
@@ -90,6 +116,17 @@ impl AcpHarness {
 impl Harness for AcpHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         self.descriptor
+    }
+
+    fn sandbox_paths(&self) -> SandboxPaths {
+        let state: &[&str] = if self.preset {
+            preset_state(self.descriptor.id.as_str())
+        } else {
+            &[]
+        };
+        SandboxPaths {
+            writable: state.iter().map(PathBuf::from).collect(),
+        }
     }
 
     fn capabilities(&self) -> Capabilities {

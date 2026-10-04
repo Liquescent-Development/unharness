@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, PermissionDecision};
 use super::ids::{HarnessId, ModelRef};
+use super::sandbox::Sandbox;
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -28,6 +29,8 @@ pub struct SessionConfig {
     pub fork: bool,
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// What confines the harness process, every time it is spawned.
+    pub sandbox: Sandbox,
 }
 
 /// Something sent along with a turn's text.

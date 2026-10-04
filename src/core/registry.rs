@@ -35,7 +35,12 @@ impl Registry {
             .unwrap_or_default();
         let mut harnesses: Vec<Box<dyn Harness>> = vec![
             Box::new(AgyHarness::new(agy_transport)),
-            Box::new(crate::harness::claude::ClaudeHarness),
+            Box::new(crate::harness::claude::ClaudeHarness {
+                relocate_config: config
+                    .harness("claude")
+                    .and_then(|h| h.relocate_config)
+                    .unwrap_or(true),
+            }),
             Box::new(CodexHarness::new(codex_transport)),
             Box::new(crate::harness::pi::PiHarness),
         ];

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::core::checkpoints::project_key;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
     /// Preferred default harness (agy, claude, codex, pi).
@@ -28,9 +30,34 @@ pub struct Config {
     /// terminal. Default: on.
     pub mouse: Option<bool>,
 
+    /// The OS-level sandbox around every harness process.
+    #[serde(default, skip_serializing_if = "SandboxSettings::is_empty")]
+    pub sandbox: SandboxSettings,
+
     /// Harness-specific settings keyed by harness id.
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessSettings>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct SandboxSettings {
+    /// read-only, workspace-write or off. Default: workspace-write wherever
+    /// the platform has a sandbox.
+    pub level: Option<String>,
+    /// Paths a harness may write besides the workspace and its own state.
+    /// `~` is the home directory; a relative path is under the workspace.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable: Vec<PathBuf>,
+    /// Credential paths a harness may read although they are denied by
+    /// default (e.g. `~/.config/gh`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readable: Vec<PathBuf>,
+}
+
+impl SandboxSettings {
+    fn is_empty(&self) -> bool {
+        *self == SandboxSettings::default()
+    }
 }
 
 fn default_true() -> bool {
@@ -57,17 +84,79 @@ pub struct HarnessSettings {
     pub command: Vec<String>,
     /// Name shown in the TUI for a config-defined harness.
     pub display_name: Option<String>,
+    /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
+    /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
+    /// existing `~/.claude.json` is copied there once. Default: on.
+    pub relocate_config: Option<bool>,
+    /// Paths this harness may write inside the sandbox, besides the ones
+    /// unharness knows it needs (an ACP agent's state, an MCP server's data).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_writable: Vec<PathBuf>,
 }
 
 impl Config {
+    /// The global config with the workspace's overrides merged over it.
+    ///
+    /// Both live under the user's config directory. Nothing is read from the
+    /// workspace itself: an agent can write there, and a config it edited
+    /// would decide its own sandbox and permissions on the next run.
     pub fn load_effective(workspace_root: Option<&Path>) -> Self {
         let global_config = Self::load_global().unwrap_or_default();
-        let workspace_config = workspace_root.and_then(|root| Self::load_from_dir(root).ok());
+        let workspace_config = workspace_root
+            .zip(Self::workspace_store())
+            .and_then(|(root, store)| Self::load_workspace_in(&store, root));
 
         match workspace_config {
             Some(local) => Self::merge(global_config, local),
             None => global_config,
         }
+    }
+
+    /// Where workspace overrides are kept: `<config dir>/unharness/workspaces`.
+    pub fn workspace_store() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("unharness").join("workspaces"))
+    }
+
+    /// The overrides file for the workspace at `root`, under `store`.
+    pub fn workspace_path_in(store: &Path, root: &Path) -> PathBuf {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        store.join(format!("{}.toml", project_key(&root)))
+    }
+
+    pub fn load_workspace_in(store: &Path, root: &Path) -> Option<Self> {
+        let content = std::fs::read_to_string(Self::workspace_path_in(store, root)).ok()?;
+        toml::from_str(&content).ok()
+    }
+
+    pub fn save_workspace_in(&self, store: &Path, root: &Path) -> Result<PathBuf> {
+        let path = Self::workspace_path_in(store, root);
+        std::fs::create_dir_all(store)?;
+        std::fs::write(&path, toml::to_string_pretty(self)?)?;
+        Ok(path)
+    }
+
+    /// An `unharness.toml` inside the workspace, from before overrides moved
+    /// out of it. It is not read; `unharness init` imports it.
+    pub fn legacy_workspace_file(root: &Path) -> Option<PathBuf> {
+        ["unharness.toml", ".unharness.toml"]
+            .iter()
+            .map(|name| root.join(name))
+            .find(|p| p.exists())
+    }
+
+    /// What to tell the user when the workspace has a config file that is
+    /// being ignored because it was never imported.
+    pub fn legacy_warning(root: &Path) -> Option<String> {
+        let legacy = Self::legacy_workspace_file(root)?;
+        let store = Self::workspace_store()?;
+        if Self::workspace_path_in(&store, root).exists() {
+            return None;
+        }
+        Some(format!(
+            "{} is not read any more (workspace settings are kept outside the workspace, \
+             where an agent cannot edit them); run `unharness init` to import it",
+            legacy.display()
+        ))
     }
 
     pub fn global_path() -> Option<PathBuf> {
@@ -84,21 +173,12 @@ impl Config {
         Ok(Config::default())
     }
 
-    pub fn load_from_dir(dir: &Path) -> Result<Self> {
-        for candidate in ["unharness.toml", ".unharness.toml"] {
-            let path = dir.join(candidate);
-            if path.exists() {
-                let content = std::fs::read_to_string(&path)?;
-                return Ok(toml::from_str(&content)?);
-            }
-        }
-        anyhow::bail!("No unharness configuration found in {}", dir.display())
-    }
-
-    pub fn save_to_dir(&self, dir: &Path) -> Result<PathBuf> {
-        let path = dir.join("unharness.toml");
-        std::fs::write(&path, toml::to_string_pretty(self)?)?;
-        Ok(path)
+    /// Parse the workspace's old in-tree config, for importing it.
+    pub fn load_legacy(root: &Path) -> Result<Self> {
+        let path = Self::legacy_workspace_file(root).ok_or_else(|| {
+            anyhow::anyhow!("No unharness configuration found in {}", root.display())
+        })?;
+        Ok(toml::from_str(&std::fs::read_to_string(&path)?)?)
     }
 
     pub fn save_global(&self) -> Result<PathBuf> {
@@ -150,6 +230,11 @@ impl Config {
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
             mouse: local.mouse.or(global.mouse),
+            sandbox: SandboxSettings {
+                level: local.sandbox.level.or(global.sandbox.level),
+                writable: [global.sandbox.writable, local.sandbox.writable].concat(),
+                readable: [global.sandbox.readable, local.sandbox.readable].concat(),
+            },
             harnesses,
         }
     }
@@ -175,6 +260,8 @@ impl Config {
                 global.command
             },
             display_name: local.display_name.or(global.display_name),
+            relocate_config: local.relocate_config.or(global.relocate_config),
+            sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }
     }
 }
@@ -218,6 +305,10 @@ default_harness = "pi"
 default_policy = "accept-edits"
 bridge_max_chars = 1000
 
+[sandbox]
+level = "workspace-write"
+readable = ["~/.ssh"]
+
 [harnesses.pi]
 default_provider = "anthropic"
 default_model = "claude-sonnet-4-5"
@@ -234,11 +325,64 @@ transport = "rpc"
     }
 
     #[test]
+    fn workspace_overrides_live_outside_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, root) = (tmp.path().join("store"), tmp.path().join("proj"));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Config::load_workspace_in(&store, &root).is_none());
+
+        let cfg = Config {
+            default_harness: Some("pi".into()),
+            ..Default::default()
+        };
+        let path = cfg.save_workspace_in(&store, &root).unwrap();
+        assert!(path.starts_with(&store));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("proj-") && name.ends_with(".toml"),
+            "{name}"
+        );
+        assert_eq!(
+            Config::load_workspace_in(&store, &root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("pi")
+        );
+
+        // A file in the workspace is found for import, never loaded.
+        std::fs::write(root.join("unharness.toml"), "default_harness = \"codex\"\n").unwrap();
+        assert_eq!(
+            Config::legacy_workspace_file(&root),
+            Some(root.join("unharness.toml"))
+        );
+        assert_eq!(
+            Config::load_legacy(&root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            Config::load_workspace_in(&store, &root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("pi")
+        );
+    }
+
+    #[test]
     fn test_config_merge() {
         let mut global = Config {
             default_harness: Some("claude".to_string()),
             default_policy: Some("ask".to_string()),
             auto_sync: true,
+            sandbox: SandboxSettings {
+                level: Some("off".to_string()),
+                writable: vec![PathBuf::from("~/.cache/a")],
+                readable: vec![],
+            },
             ..Default::default()
         };
         global.harnesses.insert(
@@ -259,6 +403,11 @@ transport = "rpc"
         let mut local = Config {
             default_harness: Some("agy".to_string()),
             auto_sync: true,
+            sandbox: SandboxSettings {
+                level: Some("read-only".to_string()),
+                writable: vec![PathBuf::from("target-shared")],
+                readable: vec![],
+            },
             ..Default::default()
         };
         local.harnesses.insert(
@@ -277,6 +426,11 @@ transport = "rpc"
         );
 
         let merged = Config::merge(global, local);
+        assert_eq!(merged.sandbox.level.as_deref(), Some("read-only")); // local wins
+        assert_eq!(
+            merged.sandbox.writable,
+            vec![PathBuf::from("~/.cache/a"), PathBuf::from("target-shared")]
+        ); // both
         assert_eq!(merged.default_harness.as_deref(), Some("agy")); // local wins
         assert_eq!(merged.default_policy.as_deref(), Some("ask")); // inherited
         assert_eq!(merged.default_model("agy"), Some("global-model")); // inherited

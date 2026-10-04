@@ -5,7 +5,7 @@
 pub mod parse;
 pub mod transport;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
     SessionConfig, SessionHandle, SubagentSupport,
@@ -80,6 +81,13 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 impl Harness for AgyHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    /// Seen on agy 1.2.15 without an account: `~/.gemini/antigravity-cli`.
+    fn sandbox_paths(&self) -> SandboxPaths {
+        SandboxPaths {
+            writable: vec![PathBuf::from("~/.gemini")],
+        }
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -323,6 +331,7 @@ mod tests {
             format: Some("stream-json".into()),
             resume: Some("c1".into()),
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let h = AgyHarness::default();
         assert_eq!(

@@ -18,9 +18,31 @@ $UNHARNESS_FAKE_FIXTURE. Set $UNHARNESS_FAKE_EXIT_CODE to control the exit
 status after the fixture is exhausted (default 0; a `# exit=N` line in the
 fixture overrides it). Set $UNHARNESS_FAKE_HANG=1
 to keep running after the fixture until stdin closes (long-lived protocols).
+
+$UNHARNESS_FAKE_PROBE makes the fake try the filesystem before it replays,
+for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
+`;`. Each result is appended to the log as `{"probe", "path", "ok"}`.
 """
+import json
 import os
 import sys
+
+
+def probe(spec, log):
+    for entry in filter(None, spec.split(";")):
+        kind, _, path = entry.partition(":")
+        try:
+            if kind == "write":
+                with open(path, "w") as f:
+                    f.write("probe\n")
+            else:
+                with open(path) as f:
+                    f.read()
+            ok = True
+        except OSError:
+            ok = False
+        log.write(json.dumps({"probe": kind, "path": path, "ok": ok}) + "\n")
+        log.flush()
 
 
 def main() -> int:
@@ -32,6 +54,8 @@ def main() -> int:
     log = open(log_path, "a") if log_path else None
     hang = os.environ.get("UNHARNESS_FAKE_HANG") == "1"
     exit_code = int(os.environ.get("UNHARNESS_FAKE_EXIT_CODE", "0"))
+    if log and os.environ.get("UNHARNESS_FAKE_PROBE"):
+        probe(os.environ["UNHARNESS_FAKE_PROBE"], log)
 
     def read_stdin_line():
         line = sys.stdin.readline()

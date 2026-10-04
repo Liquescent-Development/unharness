@@ -35,9 +35,11 @@ pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<
         );
     } else {
         let root = ws_root.unwrap_or_else(|| cwd.to_path_buf());
-        let mut cfg = Config::load_from_dir(&root).unwrap_or_default();
+        let store = Config::workspace_store()
+            .ok_or_else(|| anyhow::anyhow!("Could not determine user config directory"))?;
+        let mut cfg = Config::load_workspace_in(&store, &root).unwrap_or_default();
         cfg.default_harness = Some(kind.id.as_str().to_string());
-        let path = cfg.save_to_dir(&root)?;
+        let path = cfg.save_workspace_in(&store, &root)?;
         println!(
             "{} Set workspace default harness to {} in {}",
             "[✓]".green().bold(),

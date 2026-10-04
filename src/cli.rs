@@ -34,6 +34,10 @@ pub struct CommonRunArgs {
     #[arg(long, env = "UNHARNESS_POLICY")]
     pub policy: Option<String>,
 
+    /// Sandbox around the harness: read-only, workspace-write, off
+    #[arg(long, env = "UNHARNESS_SANDBOX")]
+    pub sandbox: Option<String>,
+
     /// Shorthand for --policy bypass (dangerously skip all permissions)
     #[arg(
         short = 'y',

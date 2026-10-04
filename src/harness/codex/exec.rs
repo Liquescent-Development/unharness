@@ -10,7 +10,14 @@ use crate::core::{AgentEvent, Attachment, HarnessId, PermissionPolicy};
 pub struct CodexExec;
 
 /// Flags for a fresh `codex exec` (not accepted by `exec resume`).
-pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
+///
+/// `confined` says unharness's sandbox is around the process. Codex's own
+/// (bubblewrap) cannot start inside it, so it is switched off and ours is
+/// the one that holds.
+pub fn policy_args(policy: PermissionPolicy, confined: bool) -> Vec<&'static str> {
+    if confined && policy != PermissionPolicy::Bypass {
+        return vec!["-s", "danger-full-access"];
+    }
     match policy {
         PermissionPolicy::Ask => vec!["-s", "read-only"],
         PermissionPolicy::AcceptEdits => vec!["-s", "workspace-write"],
@@ -20,7 +27,13 @@ pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
 }
 
 /// Equivalent `-c key=value` overrides, usable on `exec resume`.
-pub fn policy_config_overrides(policy: PermissionPolicy) -> Vec<String> {
+pub fn policy_config_overrides(policy: PermissionPolicy, confined: bool) -> Vec<String> {
+    if confined {
+        return vec![
+            "sandbox_mode=\"danger-full-access\"".into(),
+            "approval_policy=\"never\"".into(),
+        ];
+    }
     match policy {
         PermissionPolicy::Ask => vec![
             "sandbox_mode=\"read-only\"".into(),
@@ -63,7 +76,7 @@ impl PerTurnProtocol for CodexExec {
                 command.arg("resume").arg(id);
                 image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
-                for o in policy_config_overrides(state.policy) {
+                for o in policy_config_overrides(state.policy, state.sandbox.is_active()) {
                     command.arg("-c").arg(o);
                 }
                 if state.policy == PermissionPolicy::Bypass {
@@ -74,7 +87,7 @@ impl PerTurnProtocol for CodexExec {
                 image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
                 command.arg("-C").arg(&state.cwd);
-                command.args(policy_args(state.policy));
+                command.args(policy_args(state.policy, state.sandbox.is_active()));
             }
         }
         if let Some(m) = &state.model {
@@ -128,6 +141,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             extra_args: vec![],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
             turn_index: 0,
         }
     }
@@ -168,6 +182,29 @@ mod tests {
             "exec --json --skip-git-repo-check -C /work --approve-for-me -m gpt-5.5 -c model_reasoning_effort=\"high\" -"
         );
         assert_eq!(spec.stdin.as_deref(), Some("p"));
+    }
+
+    #[test]
+    fn own_sandbox_is_off_inside_ours() {
+        for policy in [
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Auto,
+        ] {
+            assert_eq!(policy_args(policy, true), ["-s", "danger-full-access"]);
+            assert_eq!(
+                policy_config_overrides(policy, true)[0],
+                "sandbox_mode=\"danger-full-access\""
+            );
+        }
+        assert_eq!(
+            policy_args(PermissionPolicy::Bypass, true),
+            policy_args(PermissionPolicy::Bypass, false)
+        );
+        assert_eq!(
+            policy_args(PermissionPolicy::Ask, false),
+            ["-s", "read-only"]
+        );
     }
 
     #[test]

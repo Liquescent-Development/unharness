@@ -8,6 +8,11 @@ a single ratatui interface with the same transcript, keybindings, permission
 prompts, model/effort pickers and session resume regardless of which agent is
 running. Switch agents mid-conversation and the context follows you.
 
+Every agent runs inside a sandbox that unharness applies itself: by default
+it can write only to your project, its own state and temp, and cannot read
+your cloud and signing credentials, whatever the agent would or would not
+have asked about. See [Sandbox](#sandbox).
+
 ## Why
 
 Agent SDKs churn; the vendor CLIs are the stable surface. Each one already
@@ -24,6 +29,14 @@ speaks a streaming JSON protocol with a permission channel:
 unharness normalises those into one event model and one capability set, so
 the TUI never assumes what a harness can do. Anything a harness lacks is shown
 as a degraded capability rather than failing silently.
+
+The same goes for confinement. Codex sandboxes the commands its model runs,
+tied to the permission policy; Claude Code's sandbox is opt-in; pi,
+Antigravity and ACP agents have none, and under `bypass` nothing holds any
+of them. unharness puts one OS-level sandbox (Landlock on Linux,
+`sandbox-exec` on macOS) around the whole agent process, so the same limits
+apply to every harness, its file tools, its shell commands and its MCP
+servers.
 
 What each harness supports beyond a plain turn:
 
@@ -45,7 +58,7 @@ What each harness supports beyond a plain turn:
 
 ```bash
 cargo install --path .
-unharness doctor          # harnesses, auth, capabilities, skills CLI, rules
+unharness doctor          # harnesses, auth, capabilities, sandbox, skills CLI, rules
 ```
 
 Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
@@ -58,6 +71,7 @@ unharness                                   # TUI with the default harness
 unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
 unharness --policy accept-edits             # ask | accept-edits | auto | bypass
 unharness -y                                # alias for --policy bypass
+unharness --sandbox read-only               # read-only | workspace-write (default) | off
 unharness --resume                          # resume the latest conversation (all harnesses in it)
 unharness --resume 01a1                     # by id prefix; -H overrides which harness continues
 unharness -p "Summarise src/"               # headless print mode
@@ -231,6 +245,80 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 `*` shown as a warning in the header. A requested policy a harness cannot
 honour falls back to the nearest *less* permissive one it supports.
 
+### Sandbox
+
+unharness confines every harness process itself, whichever agent runs and
+whatever it chooses to ask about. The process and everything it starts (shell
+commands, MCP servers) can:
+
+- **write** only inside the workspace, the harness's own state directories
+  (`~/.claude`, `~/.codex`, `~/.pi`, …; `unharness doctor` lists them) and
+  the temp directories (and herdr's runtime directory);
+- **read** everything except credential locations: `~/.gnupg`,
+  `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`,
+  `~/.config/gcloud`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`,
+  `~/.git-credentials` and shell history;
+- use the network freely.
+
+| Level | Writes |
+|---|---|
+| `workspace-write` (default) | workspace, harness state, temp |
+| `read-only` | harness state and temp only |
+| `off` | unconfined |
+
+Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX` or `[sandbox] level`.
+The default applies under every policy, `bypass` included; Codex `exec` under
+`ask` defaults to `read-only` because it cannot prompt. The level is on the
+status line and is fixed for a run.
+
+On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
+the process is launched through `sandbox-exec`. The macOS side has not been
+run on a Mac yet; Linux is what has been tested. Where neither exists the
+default degrades to `off` with a warning in the status area, in `doctor` and
+on stderr in print mode, and an explicitly requested level is an error.
+
+Things to know:
+
+- The vendors' own sandboxes cannot start inside this one, so while it is
+  active Codex is told the sandbox is external (its approvals are
+  unchanged). With `--sandbox off` Codex's sandbox follows the policy as in
+  the table above.
+- `~/.ssh` stays readable, since git over ssh and commit signing need it;
+  keep keys in an agent or protect them with a passphrase if that matters.
+- An MCP server or extension that keeps data elsewhere needs its directory
+  in `writable`.
+- Claude Code updates `~/.claude.json` by creating files next to it in the
+  home directory, which the sandbox cannot allow without opening the whole
+  of it. unharness therefore runs Claude with `CLAUDE_CONFIG_DIR=~/.claude`,
+  which puts the file inside its state directory. Your `~/.claude.json` is
+  copied there on the first run (a notice says so) and otherwise left
+  alone. A plain `claude` outside unharness keeps using the original, so
+  the two drift apart unless you export the same variable in your shell.
+  `relocate_config = false` under `[harnesses.claude]` turns this off:
+  sessions still work, but "always allow" rules, trust and MCP approvals
+  given in a confined session are then forgotten after it.
+- A confined Claude Code cannot update itself: its installed binaries are
+  not writable.
+- A harness's own state directory has to stay writable, and its settings
+  live there (`~/.claude/settings.json`, `~/.codex/config.toml` and the
+  Codex binary, `~/.pi/agent/settings.json`, skills, hooks, MCP servers).
+  The sandbox cannot stop an agent editing those, so unharness watches
+  them: when one changes during a turn, the transcript (or stderr in print
+  mode) says which, and the version from before the session is saved under
+  `~/.local/state/unharness/guard/`. It cannot tell the CLI's own change
+  (saving an "always allow" rule, say) from the agent's. `--no-tui`
+  passthrough is not watched.
+- A file that is replaced or created directly in the home directory or in
+  `~/.config` after the process started is not readable by it until the
+  next session (Linux).
+- In a git worktree the repository's data lives outside the workspace;
+  add the main repository's `.git` to `writable` to commit from the agent.
+- Programs that need to raise privileges (`sudo`) do not work inside
+  (Linux).
+- unharness's own configuration, the workspace's included, is kept in
+  `~/.config/unharness`, which is never writable from inside: an agent
+  cannot change the settings its next run starts with.
+
 ### Switching harnesses
 
 `/switch` shuts the current session down and starts the next harness lazily on
@@ -240,7 +328,13 @@ harness resumes its own session and bridges only what happened since.
 
 ## Configuration
 
-Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
+Settings come from `~/.config/unharness/config.toml`, with the workspace's
+overrides merged over it. The overrides are kept outside the workspace, in
+`~/.config/unharness/workspaces/<name>-<hash>.toml` (`unharness doctor`
+prints the path, `unharness init` creates it), because a file inside the
+workspace could be edited by the agent it is meant to configure. An
+`unharness.toml` left in a workspace from an earlier version is not read;
+`unharness init` imports it once.
 
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
@@ -250,12 +344,19 @@ auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before e
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
 
+[sandbox]
+level    = "workspace-write"     # read-only | workspace-write | off
+writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
+readable = ["~/.config/gh"]      # credential paths to allow reading
+
 [harnesses.claude]
 # binary = "/path/to/claude"
 default_model  = "opus"
 default_effort = "high"
 default_policy = "accept-edits"
 extra_args     = []
+sandbox_writable = []            # extra paths this harness may write inside the sandbox
+relocate_config  = true          # keep .claude.json in ~/.claude so a sandboxed Claude can update it (see Sandbox)
 
 [harnesses.codex]
 transport = "auto"               # auto | app-server | exec
@@ -289,6 +390,7 @@ mode can be added from config, without a dedicated adapter:
 protocol     = "acp"
 command      = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 display_name = "Claude (ACP)"
+sandbox_writable = ["~/.claude", "~/.npm"]   # the agent's own state, for the sandbox
 ```
 
 The table name is the harness id (`unharness -H claude-acp`, `/harness
@@ -336,9 +438,12 @@ them instead.
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess,
                per-turn driver, JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints
+               file checkpoints, the sandbox (sandbox/: levels, profile,
+               Landlock and Seatbelt backends) and the watch on vendor
+               config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,
-               list_models, start_session, build_print_command
+               list_models, start_session, build_print_command, and what
+               the sandbox must leave writable and watch for it
   claude/      stream-json transport + parser + fixtures/
   codex/       app-server + exec transports + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/

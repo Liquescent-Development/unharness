@@ -8,6 +8,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
 
+use super::sandbox::Sandbox;
+
 /// Maximum bytes accepted for a single stdout/stderr line before truncation.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// Capacity of the raw line channel; sends await so backpressure reaches the child.
@@ -34,7 +36,11 @@ pub struct LineProcess {
 impl LineProcess {
     /// Spawn `cmd` with piped stdio and start reader tasks. `kill_on_drop` is
     /// set so a crashed TUI never leaves an orphaned agent behind.
-    pub fn spawn(mut cmd: Command) -> Result<Self> {
+    ///
+    /// The command is confined by `sandbox` first; taking it as an argument
+    /// keeps a transport from spawning an unconfined agent by omission.
+    pub fn spawn(cmd: Command, sandbox: &Sandbox) -> Result<Self> {
+        let mut cmd = Command::from(sandbox.wrap(cmd.into_std())?);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -166,7 +172,7 @@ mod tests {
     async fn spawn_echo_and_read_lines() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("cat; echo done >&2; exit 3");
-        let mut p = LineProcess::spawn(cmd).unwrap();
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
         p.write_line("hello").await.unwrap();
         p.write_line("world\n").await.unwrap();
         p.close_stdin();
@@ -184,7 +190,7 @@ mod tests {
         // still arrive within the drain timeout.
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("sleep 30");
-        let mut p = LineProcess::spawn(cmd).unwrap();
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
         assert!(p.pid().is_some());
         p.kill().await;
         let got = tokio::time::timeout(Duration::from_secs(5), drain(&mut p))
@@ -196,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_missing_binary_errors() {
         let cmd = Command::new("/definitely/not/a/binary");
-        assert!(LineProcess::spawn(cmd).is_err());
+        assert!(LineProcess::spawn(cmd, &Sandbox::off()).is_err());
     }
 
     #[test]
