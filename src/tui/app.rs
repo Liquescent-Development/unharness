@@ -1,7 +1,7 @@
 //! TUI state. Pure with respect to I/O: key handling mutates state and queues
 //! `Action`s that the event loop in `mod.rs` executes against the session.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,14 +9,19 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption};
+use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
 use crate::config::Config;
-use crate::core::conversations::{Conversation, ConversationStore, now_rfc3339, truncate_title};
+use crate::core::checkpoints::Checkpoints;
+use crate::core::conversations::{
+    CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
+    truncate_title,
+};
 use crate::core::registry::Registry;
 use crate::core::{
-    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionPolicy, PermissionRequest,
-    ProviderId, SessionCommand, StopReason, Usage, resolve_policy,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
+    PermissionDecision, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo,
+    SessionCommand, StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
 
@@ -27,10 +32,30 @@ pub enum Action {
     StartSession {
         resume: Option<String>,
     },
-    SendTurn(String),
+    SendTurn {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
     Command(SessionCommand),
     /// Shut the active session down (harness switch, resume, quit).
     Shutdown,
+}
+
+/// A prompt waiting for the running turn to finish.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedPrompt {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+}
+
+impl Action {
+    /// A text-only turn.
+    pub fn turn(text: impl Into<String>) -> Self {
+        Action::SendTurn {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -55,6 +80,29 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
         "List saved conversations in this workspace",
     ),
     ("/usage", "Show token usage and cost"),
+    ("/plan", "Show or hide the agent's plan"),
+    (
+        "/steer",
+        "Send a message into the running turn: /steer <text>",
+    ),
+    ("/rewind", "Go back to before an earlier prompt and edit it"),
+    (
+        "/undo-restore",
+        "Reverse the last file restore made by /rewind",
+    ),
+    (
+        "/fork",
+        "Continue in a copy of this conversation, leaving the original as it is",
+    ),
+    (
+        "/compact",
+        "Summarise the context now: /compact [instructions]",
+    ),
+    (
+        "/attach",
+        "Attach an image to the next prompt: /attach <path>",
+    ),
+    ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/clear", "Clear the transcript"),
     ("/help", "Show commands and shortcuts"),
@@ -101,6 +149,35 @@ pub struct App {
     pub spinner_frame: usize,
     pub turn_usage: Usage,
     pub session_usage: Usage,
+    /// Context-window fill of the active harness's session.
+    pub context: ContextUsage,
+    pub rate_limit: Option<RateLimitInfo>,
+    pub plan: Vec<PlanEntry>,
+    pub show_plan: bool,
+    /// Images that go out with the next prompt.
+    pub attachments: Vec<Attachment>,
+    /// Where each harness can rewind its session to (see `TurnAnchor`).
+    anchors: Vec<TurnAnchorRecord>,
+    /// Harnesses whose stored session id must be branched, not reattached
+    /// (set by `/fork` until the branch exists).
+    fork_pending: HashSet<HarnessId>,
+    /// File checkpoints of the workspace; `None` outside a git repository
+    /// or when switched off.
+    checkpoints: Option<Checkpoints>,
+    file_checkpoints: Vec<CheckpointRecord>,
+    checkpoint_failed: bool,
+    /// The tree as it was before the last file restore, for `/undo-restore`.
+    restore_undo: Option<String>,
+    restore_seq: usize,
+    /// User blocks whose anchor has not arrived yet, oldest first. A harness
+    /// that can rewind reports one anchor per turn, in order, but not
+    /// always before the next turn starts (pi lists it after the turn).
+    anchor_pending: VecDeque<usize>,
+    /// Prompts entered during a turn; one is sent each time a turn completes.
+    pub queued: VecDeque<QueuedPrompt>,
+    compacting: bool,
+    /// What live sessions reported on top of the declared capabilities.
+    live_caps: HashMap<HarnessId, CapsUpdate>,
 
     pub modal: Option<Modal>,
     pending_prompts: VecDeque<PermissionRequest>,
@@ -125,6 +202,9 @@ pub struct AppInit {
     pub resume: Option<String>,
     /// The harness came from the CLI, so it overrides a resumed conversation's.
     pub harness_explicit: bool,
+    /// Where file-checkpoint shadow repositories go; `None` = the user's
+    /// state directory.
+    pub checkpoint_store: Option<PathBuf>,
 }
 
 impl App {
@@ -218,6 +298,20 @@ impl App {
         let transcript = Transcript::from_records(&conversation.blocks);
         let session_usage = conversation.usage.get(&active).cloned().unwrap_or_default();
         let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
+        let plan = conversation.plan.clone();
+        let anchors = conversation.anchors.clone();
+        let file_checkpoints = conversation.checkpoints.clone();
+        let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
+        let checkpoints = if config.file_checkpoints.unwrap_or(true) {
+            let store = init
+                .checkpoint_store
+                .unwrap_or_else(Checkpoints::default_store);
+            init.workspace_root
+                .as_deref()
+                .and_then(|root| Checkpoints::open_in(root, &store))
+        } else {
+            None
+        };
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
         let mut app = App {
@@ -252,6 +346,22 @@ impl App {
             spinner_frame: 0,
             turn_usage: Usage::default(),
             session_usage,
+            context: ContextUsage::default(),
+            rate_limit: None,
+            plan,
+            show_plan: true,
+            attachments: Vec::new(),
+            anchors,
+            fork_pending,
+            checkpoints,
+            file_checkpoints,
+            checkpoint_failed: false,
+            restore_undo: None,
+            restore_seq: 0,
+            anchor_pending: VecDeque::new(),
+            queued: VecDeque::new(),
+            compacting: false,
+            live_caps: HashMap::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
             suggestions: Vec::new(),
@@ -260,10 +370,10 @@ impl App {
             actions: VecDeque::new(),
         };
 
-        let res = resolve_policy(&app.harness().capabilities(), app.policy_requested);
+        let res = resolve_policy(&app.caps(), app.policy_requested);
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
-            app.active.display_name(),
+            app.display_name(),
             res.effective
         ));
         if let Some(w) = res.warning {
@@ -283,7 +393,7 @@ impl App {
                     .map(|h| h.as_str())
                     .collect::<Vec<_>>()
                     .join(", "),
-                app.active.short_name()
+                app.short_name()
             ));
         }
         app
@@ -317,6 +427,11 @@ impl App {
         c.bookmarks = self.last_active_index.clone();
         c.blocks = self.transcript.to_records();
         c.usage.insert(self.active, self.session_usage.clone());
+        c.plan = self.plan.clone();
+        c.anchors = self.anchors.clone();
+        c.checkpoints = self.file_checkpoints.clone();
+        c.fork_pending = self.fork_pending.iter().copied().collect();
+        c.fork_pending.sort_by_key(|h| h.as_str());
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
         {
@@ -348,17 +463,34 @@ impl App {
             .expect("active harness is registered")
     }
 
+    pub fn short_name(&self) -> &'static str {
+        self.harness().descriptor().short_name
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        self.harness().descriptor().display_name
+    }
+
+    /// Declared capabilities of the active harness plus what its session reported.
+    pub fn caps(&self) -> Capabilities {
+        let mut caps = self.harness().capabilities();
+        if let Some(update) = self.live_caps.get(&self.active) {
+            caps.apply(update);
+        }
+        caps
+    }
+
     pub fn harness_binary(&self) -> Option<PathBuf> {
         let d = self.harness().descriptor();
         resolve_binary(d, self.config.binary_override(d.id.as_str()))
     }
 
     pub fn effective_policy(&self) -> PermissionPolicy {
-        resolve_policy(&self.harness().capabilities(), self.policy_requested).effective
+        resolve_policy(&self.caps(), self.policy_requested).effective
     }
 
     pub fn policy_warning(&self) -> Option<String> {
-        resolve_policy(&self.harness().capabilities(), self.policy_requested).warning
+        resolve_policy(&self.caps(), self.policy_requested).warning
     }
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
@@ -408,6 +540,9 @@ impl App {
         if self.modal.as_ref().is_some_and(Modal::is_prompt) {
             return "Waiting for you".to_string();
         }
+        if self.compacting {
+            return "Compacting".to_string();
+        }
         if let Some(super::transcript::Block::Tool {
             name, done: false, ..
         }) = self
@@ -454,6 +589,7 @@ impl App {
             return;
         }
         self.is_generating = false;
+        self.compacting = false;
         let dur = self
             .generation_start
             .take()
@@ -492,13 +628,23 @@ impl App {
         };
         self.last_active_index.remove(&self.active);
 
-        self.transcript.push_user(text.clone());
+        let attachments = std::mem::take(&mut self.attachments);
+        let mut shown = text.clone();
+        for a in &attachments {
+            shown.push_str(&format!("\n[image: {}]", a.label()));
+        }
+        self.transcript.push_user(shown);
+        let block = self.transcript.blocks.len() - 1;
+        if self.caps().rewind.conversation {
+            self.anchor_pending.push_back(block);
+        }
+        self.checkpoint_files(block);
         self.start_generation();
 
         let outgoing = match bridge {
             Some(ctx) => format!(
                 "[Context: earlier conversation in this unharness session, possibly with other agents]\n{ctx}\n\n[Current task for {}]:\n{text}",
-                self.active.short_name()
+                self.short_name()
             ),
             None => text,
         };
@@ -507,7 +653,428 @@ impl App {
             let resume = self.session_ids.get(&self.active).cloned();
             self.actions.push_back(Action::StartSession { resume });
         }
-        self.actions.push_back(Action::SendTurn(outgoing));
+        self.actions.push_back(Action::SendTurn {
+            text: outgoing,
+            attachments,
+        });
+    }
+
+    /// Record the working tree as it is before the turn at `block` runs.
+    fn checkpoint_files(&mut self, block: usize) {
+        let Some(cp) = self.checkpoints.clone() else {
+            return;
+        };
+        match cp.snapshot(&self.checkpoint_name(&block.to_string())) {
+            Ok(commit) => {
+                self.file_checkpoints.retain(|c| c.block != block);
+                self.file_checkpoints
+                    .push(CheckpointRecord { block, commit });
+            }
+            Err(e) if !self.checkpoint_failed => {
+                self.checkpoint_failed = true;
+                self.transcript.push_notice(format!(
+                    "could not checkpoint files (rewind will not be able to restore them): {e:#}"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// Hold a prompt until the running turn finishes.
+    pub fn queue_prompt(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.is_generating {
+            self.submit_prompt(text);
+            return;
+        }
+        self.queued.push_back(QueuedPrompt {
+            text,
+            attachments: std::mem::take(&mut self.attachments),
+        });
+    }
+
+    /// Send the oldest queued prompt, if idle. Returns whether one was sent.
+    pub fn send_next_queued(&mut self) -> bool {
+        if self.is_generating {
+            return false;
+        }
+        let Some(q) = self.queued.pop_front() else {
+            return false;
+        };
+        let pending = std::mem::replace(&mut self.attachments, q.attachments);
+        self.submit_prompt(q.text);
+        self.attachments = pending;
+        true
+    }
+
+    /// Put the newest queued prompt back in the prompt box for editing.
+    pub fn unqueue_last(&mut self) {
+        if !self.input.is_empty() {
+            return;
+        }
+        if let Some(q) = self.queued.pop_back() {
+            self.cursor = q.text.chars().count();
+            self.input = q.text;
+            self.attachments.extend(q.attachments);
+        }
+    }
+
+    /// Inject a message into the running turn, where the harness can; queue it otherwise.
+    pub fn steer(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.is_generating || self.compacting {
+            self.queue_prompt(text);
+            return;
+        }
+        if !self.caps().steer || !self.session_alive {
+            self.transcript.push_notice(format!(
+                "{} cannot be steered mid-turn; queued for when it finishes",
+                self.short_name()
+            ));
+            self.queue_prompt(text);
+            return;
+        }
+        let attachments = std::mem::take(&mut self.attachments);
+        let mut shown = text.clone();
+        for a in &attachments {
+            shown.push_str(&format!("\n[image: {}]", a.label()));
+        }
+        self.transcript.push_user(shown);
+        self.actions
+            .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
+    }
+
+    /// The harness's own id for the user turn at `block`, when its session
+    /// (running or resumable) can be rewound to it.
+    fn native_anchor(&self, block: usize) -> Option<&str> {
+        if !self.caps().rewind.conversation || !self.session_ids.contains_key(&self.active) {
+            return None;
+        }
+        // Going back to before the session's first turn leaves nothing of
+        // it: a fresh session is the same thing, and Claude refuses to
+        // rewind to its first message ("stale target").
+        let mut mine = self.anchors.iter().filter(|a| a.harness == self.active);
+        if !mine.clone().any(|a| a.block < block) {
+            return None;
+        }
+        mine.find(|a| a.block == block).map(|a| a.id.as_str())
+    }
+
+    /// The file checkpoint taken just before the user block at `block`.
+    fn checkpoint_at(&self, block: usize) -> Option<&str> {
+        self.file_checkpoints
+            .iter()
+            .find(|c| c.block == block)
+            .map(|c| c.commit.as_str())
+    }
+
+    /// Name of a checkpoint ref for this conversation (see `core::checkpoints`).
+    fn checkpoint_name(&self, suffix: &str) -> String {
+        let id = &self.conversation.id;
+        format!("{}/{suffix}", &id[..8.min(id.len())])
+    }
+
+    /// Whether the active harness's next session must branch the stored
+    /// session id (it belongs to the conversation this one was forked from).
+    pub fn fork_pending(&self) -> bool {
+        self.fork_pending.contains(&self.active)
+    }
+
+    pub fn open_rewind_picker(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before rewinding");
+            return;
+        }
+        let items: Vec<RewindOption> = self
+            .transcript
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(block, b)| match b {
+                super::transcript::Block::User { text } => Some(RewindOption {
+                    block,
+                    text: text.clone(),
+                    native: self.native_anchor(block).is_some(),
+                    files: self.checkpoint_at(block).is_some(),
+                }),
+                _ => None,
+            })
+            .collect();
+        if items.is_empty() {
+            self.transcript.push_notice("nothing to rewind to yet");
+            return;
+        }
+        let last = items.len() - 1;
+        self.modal = Some(Modal::Rewind(
+            ListPicker::new(items).with_selected(Some(last)),
+        ));
+    }
+
+    /// Drop the user turn at `block` and everything after it, and put its
+    /// text back in the prompt box. The active harness's session is rewound
+    /// natively where it can be; any session that saw the dropped turns and
+    /// cannot be rewound is replaced by a fresh one that gets the remaining
+    /// conversation as context. With `restore_files`, the working tree is
+    /// first put back to how it was before that turn.
+    pub fn rewind_to(&mut self, block: usize, restore_files: bool) {
+        if self.is_generating {
+            return;
+        }
+        let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
+        else {
+            return;
+        };
+        // The attachment markers are display only.
+        let prompt: String = text
+            .lines()
+            .filter(|l| !(l.starts_with("[image: ") && l.ends_with(']')))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Files first: if they cannot be restored, nothing else changes.
+        let mut files_note = "files on disk are unchanged".to_string();
+        if restore_files {
+            let (Some(cp), Some(commit)) = (
+                self.checkpoints.clone(),
+                self.checkpoint_at(block).map(str::to_string),
+            ) else {
+                self.transcript
+                    .push_error("there is no file checkpoint for that prompt");
+                return;
+            };
+            self.restore_seq += 1;
+            let undo_name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
+            match cp.restore(&commit, &undo_name) {
+                Ok(report) => {
+                    files_note = format!(
+                        "{} file(s) put back to how they were before that prompt (/undo-restore reverses this)",
+                        report.changed
+                    );
+                    self.restore_undo = Some(report.undo);
+                }
+                Err(e) => {
+                    self.transcript.push_error(format!(
+                        "could not restore files, nothing was rewound: {e:#}"
+                    ));
+                    return;
+                }
+            }
+        }
+
+        let native = self.native_anchor(block).map(str::to_string);
+        let active = self.active;
+        match &native {
+            Some(anchor) => {
+                // A session that is not running is reattached first.
+                if !self.session_alive {
+                    let resume = self.session_ids.get(&active).cloned();
+                    self.actions.push_back(Action::StartSession { resume });
+                }
+                self.actions
+                    .push_back(Action::Command(SessionCommand::Rewind {
+                        anchor: anchor.clone(),
+                    }));
+            }
+            None => self.forget_session(active),
+        }
+        // Other harnesses that were active after the rewind point saw turns
+        // that no longer exist.
+        let stale: Vec<HarnessId> = self
+            .last_active_index
+            .iter()
+            .filter(|(h, seen)| **h != active && **seen > block)
+            .map(|(h, _)| *h)
+            .collect();
+        for h in stale {
+            self.forget_session(h);
+        }
+
+        self.transcript.blocks.truncate(block);
+        self.anchors.retain(|a| a.block < block);
+        self.file_checkpoints.retain(|c| c.block < block);
+        self.anchor_pending.clear();
+        self.queued.clear();
+        self.cursor = prompt.chars().count();
+        self.input = prompt;
+        self.transcript.push_system(match native {
+            Some(_) => format!(
+                "Rewound. {} forgot the later turns; {files_note}.",
+                self.short_name()
+            ),
+            None => format!(
+                "Rewound. {} will start a fresh session with the conversation so far; {files_note}.",
+                self.short_name()
+            ),
+        });
+        self.auto_scroll = true;
+        self.persist();
+    }
+
+    /// Stop using `harness`'s vendor session: its next turn starts a fresh
+    /// one and gets the conversation so far as context.
+    fn forget_session(&mut self, harness: HarnessId) {
+        if harness == self.active && self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        self.session_ids.remove(&harness);
+        self.last_active_index.remove(&harness);
+        self.fork_pending.remove(&harness);
+        self.anchors.retain(|a| a.harness != harness);
+    }
+
+    /// Reverse the last file restore (itself reversible the same way).
+    pub fn undo_restore(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn first");
+            return;
+        }
+        let (Some(cp), Some(undo)) = (self.checkpoints.clone(), self.restore_undo.clone()) else {
+            self.transcript.push_notice("no file restore to undo");
+            return;
+        };
+        self.restore_seq += 1;
+        let name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
+        match cp.restore(&undo, &name) {
+            Ok(report) => {
+                self.restore_undo = Some(report.undo);
+                self.transcript.push_system(format!(
+                    "{} file(s) put back to how they were before the restore.",
+                    report.changed
+                ));
+            }
+            Err(e) => self
+                .transcript
+                .push_error(format!("could not undo the restore: {e:#}")),
+        }
+    }
+
+    /// Continue in a copy of this conversation. Each harness's session is
+    /// branched natively where the harness can (the copy then knows exactly
+    /// what the original knew); the others start fresh with the transcript
+    /// as context. The original and its sessions are left untouched.
+    pub fn fork_conversation(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before forking");
+            return;
+        }
+        if !self.conversation.has_content() {
+            self.transcript.push_notice("nothing to fork yet");
+            return;
+        }
+        self.persist();
+        let original = self.conversation.id.clone();
+        if self.session_alive {
+            self.actions.push_back(Action::Shutdown);
+        }
+        let mut fork = Conversation::new(self.active);
+        fork.title = self.conversation.title.clone();
+        self.conversation = fork;
+
+        let mut branched = Vec::new();
+        let mut fresh = Vec::new();
+        let harnesses: Vec<HarnessId> = self.session_ids.keys().copied().collect();
+        for h in harnesses {
+            let caps = self.registry.get(h).map(|x| x.capabilities());
+            match caps {
+                Some(c) if c.fork && c.resume_by_id => {
+                    self.fork_pending.insert(h);
+                    if !c.rewind.anchors_survive_fork {
+                        self.anchors.retain(|a| a.harness != h);
+                    }
+                    branched.push(h.as_str());
+                }
+                _ => {
+                    self.session_ids.remove(&h);
+                    self.last_active_index.remove(&h);
+                    self.anchors.retain(|a| a.harness != h);
+                    fresh.push(h.as_str());
+                }
+            }
+        }
+        branched.sort_unstable();
+        fresh.sort_unstable();
+        self.anchor_pending.clear();
+        self.session_usage = Usage::default();
+        self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
+        let mut note = format!(
+            "Forked from conversation {}; the original is unchanged.",
+            &original[..8.min(original.len())]
+        );
+        if !branched.is_empty() {
+            note.push_str(&format!(" Sessions branched: {}.", branched.join(", ")));
+        }
+        if !fresh.is_empty() {
+            note.push_str(&format!(
+                " Fresh sessions with the transcript as context: {}.",
+                fresh.join(", ")
+            ));
+        }
+        self.transcript.push_system(note);
+        self.persist();
+    }
+
+    /// Ask the harness to summarise its context now.
+    pub fn compact(&mut self, instructions: Option<String>) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before compacting");
+            return;
+        }
+        if !self.caps().compaction {
+            self.transcript
+                .push_error(format!("{} cannot compact on request", self.short_name()));
+            return;
+        }
+        if !self.session_alive {
+            self.transcript
+                .push_notice("no live session to compact; send a prompt first");
+            return;
+        }
+        self.start_generation();
+        self.compacting = true;
+        self.actions
+            .push_back(Action::Command(SessionCommand::Compact { instructions }));
+    }
+
+    /// Queue an image for the next prompt.
+    pub fn attach(&mut self, path: &str) {
+        if !self.caps().image_input {
+            self.transcript.push_error(format!(
+                "{} does not accept images with the current model",
+                self.short_name()
+            ));
+            return;
+        }
+        let path = path.trim().trim_matches(['"', '\'']);
+        let path = match path.strip_prefix("~/") {
+            Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+            None => self.cwd.join(path),
+        };
+        if !path.is_file() {
+            self.transcript
+                .push_error(format!("no such file: {}", path.display()));
+            return;
+        }
+        match Attachment::image(&path) {
+            Some(a) => {
+                self.transcript
+                    .push_system(format!("Attached {} to the next prompt.", a.label()));
+                self.attachments.push(a);
+            }
+            None => self
+                .transcript
+                .push_error("only png, jpg, gif and webp images can be attached"),
+        }
     }
 
     pub fn interrupt(&mut self) {
@@ -521,10 +1088,14 @@ impl App {
     // ------------------------------------------------------------- session events
 
     pub fn on_event(&mut self, ev: AgentEvent) {
-        let sender = self.active.short_name().to_string();
+        let sender = self.short_name().to_string();
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
                 let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+                // A branch of the forked-from session now exists under its own id.
+                if is_new {
+                    self.fork_pending.remove(&self.active);
+                }
                 self.session_ids.insert(self.active, session_id.clone());
                 self.persist();
                 if is_new {
@@ -545,9 +1116,9 @@ impl App {
             AgentEvent::ToolCallStarted { id, name, input } => {
                 self.transcript.tool_started(&id, &name, input)
             }
-            AgentEvent::ToolCallDelta { .. } => {
-                // Streaming args are not shown; ToolCallStarted carries the final input.
-            }
+            // Live output. Streaming args arrive before the block exists and
+            // are dropped there; ToolCallStarted carries the final input.
+            AgentEvent::ToolCallDelta { id, delta, .. } => self.transcript.tool_delta(&id, &delta),
             AgentEvent::ToolCallResult {
                 id,
                 output,
@@ -562,11 +1133,78 @@ impl App {
                     self.turn_usage = u;
                 }
             }
-            AgentEvent::CapabilitiesChanged { effort_levels } => {
-                self.transcript
-                    .push_notice(format!("effort levels now: {}", effort_levels.join(", ")));
+            AgentEvent::PlanUpdated { entries, .. } => self.plan = entries,
+            AgentEvent::Sub { parent, event } => match *event {
+                AgentEvent::ToolCallStarted { id, name, input } => {
+                    self.transcript
+                        .tool_started_in(Some(&parent), &id, &name, input)
+                }
+                // The subagent's prose streams into its spawning call while
+                // that is still running; the call's result replaces it.
+                AgentEvent::TextDelta(t) => self.transcript.tool_delta(&parent, &t),
+                ev @ (AgentEvent::ToolCallDelta { .. }
+                | AgentEvent::ToolCallResult { .. }
+                | AgentEvent::PermissionRequest(_)
+                | AgentEvent::Sub { .. }
+                | AgentEvent::Notice(_)
+                | AgentEvent::Error(_)) => self.on_event(ev),
+                _ => {}
+            },
+            AgentEvent::Context(c) => self.context.merge(c),
+            AgentEvent::RateLimit(r) => {
+                // Warn once each time a window crosses the threshold.
+                let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
+                if !was_high && rate_limit_high(&r) {
+                    self.transcript
+                        .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
+                }
+                self.rate_limit = Some(r);
+            }
+            AgentEvent::RewindFailed { reason } => {
+                let name = self.short_name();
+                if self.is_generating {
+                    // The edited prompt is already running in the old session.
+                    self.transcript.push_error(format!(
+                        "{name} could not rewind its session ({reason}): it still remembers the turns you removed"
+                    ));
+                } else {
+                    self.transcript.push_notice(format!(
+                        "{name} could not rewind its session ({reason}); it will start a fresh one with the conversation so far"
+                    ));
+                    self.forget_session(self.active);
+                    self.persist();
+                }
+            }
+            // An empty id means the turn never reached the harness.
+            AgentEvent::TurnAnchor { id } => {
+                if let Some(block) = self.anchor_pending.pop_front()
+                    && !id.is_empty()
+                {
+                    let harness = self.active;
+                    self.anchors
+                        .retain(|a| !(a.block == block && a.harness == harness));
+                    self.anchors.push(TurnAnchorRecord { block, harness, id });
+                }
+            }
+            AgentEvent::CapabilitiesChanged(update) => {
+                if let Some(levels) = &update.effort_levels
+                    && self.caps().effort_levels != *levels
+                {
+                    self.transcript
+                        .push_notice(format!("effort levels now: {}", levels.join(", ")));
+                }
+                if let Some(models) = &update.models {
+                    let provider = self
+                        .current_provider()
+                        .map(|p| p.0.clone())
+                        .unwrap_or_else(|| "default".into());
+                    self.model_cache
+                        .insert((self.active, provider), models.clone());
+                }
+                self.live_caps.entry(self.active).or_default().merge(update);
             }
             AgentEvent::TurnCompleted { stop_reason } => {
+                let done = stop_reason == StopReason::Done;
                 match stop_reason {
                     StopReason::Done => {}
                     StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
@@ -574,6 +1212,16 @@ impl App {
                 }
                 self.finish_generation();
                 self.persist();
+                // A clean finish moves on to the next queued prompt; after an
+                // interrupt or error the user decides (Enter sends it).
+                if done {
+                    self.send_next_queued();
+                } else if !self.queued.is_empty() {
+                    self.transcript.push_notice(format!(
+                        "{} queued prompt(s) held; press Enter to send the next",
+                        self.queued.len()
+                    ));
+                }
             }
             AgentEvent::Notice(n) => self.transcript.push_notice(n),
             AgentEvent::Error(e) => self.transcript.push_error(e),
@@ -583,7 +1231,7 @@ impl App {
                     self.finish_generation();
                     self.transcript.push_error(format!(
                         "{} exited{} before the turn completed",
-                        self.active.short_name(),
+                        self.short_name(),
                         code.map(|c| format!(" with code {c}")).unwrap_or_default()
                     ));
                 }
@@ -644,10 +1292,12 @@ impl App {
             .cloned()
             .unwrap_or_default();
         self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
+        self.anchor_pending.clear();
         self.persist();
         self.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {})",
-            next.display_name(),
+            self.display_name(),
             self.model_label(),
             self.current_effort().unwrap_or("default"),
             self.effective_policy()
@@ -659,7 +1309,7 @@ impl App {
 
     pub fn set_policy(&mut self, p: PermissionPolicy) {
         self.policy_requested = p;
-        let res = resolve_policy(&self.harness().capabilities(), p);
+        let res = resolve_policy(&self.caps(), p);
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
@@ -695,11 +1345,11 @@ impl App {
     }
 
     pub fn set_effort(&mut self, effort: String) {
-        let caps = self.harness().capabilities();
+        let caps = self.caps();
         if caps.effort_levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
-                self.active.display_name()
+                self.display_name()
             ));
             return;
         }
@@ -708,7 +1358,7 @@ impl App {
             self.transcript.push_error(format!(
                 "unknown effort '{}'; {} supports: {}",
                 effort,
-                self.active.short_name(),
+                self.short_name(),
                 caps.effort_levels.join(", ")
             ));
             return;
@@ -749,6 +1399,13 @@ impl App {
         self.transcript = Transcript::from_records(&conv.blocks);
         self.session_usage = conv.usage.get(&active).cloned().unwrap_or_default();
         self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
+        self.plan = conv.plan.clone();
+        self.anchors = conv.anchors.clone();
+        self.file_checkpoints = conv.checkpoints.clone();
+        self.fork_pending = conv.fork_pending.iter().copied().collect();
+        self.restore_undo = None;
+        self.anchor_pending.clear();
         self.first_prompt = (!conv.title.is_empty()).then(|| conv.title.clone());
         self.generation_duration = None;
         self.modal = None;
@@ -765,7 +1422,7 @@ impl App {
                 .map(|h| h.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-            self.active.short_name()
+            self.short_name()
         ));
         self.auto_scroll = true;
     }
@@ -791,10 +1448,10 @@ impl App {
     }
 
     pub fn open_provider_picker(&mut self) {
-        if !self.harness().capabilities().multi_provider {
+        if !self.caps().multi_provider {
             self.transcript.push_notice(format!(
                 "{} has a single provider ({}); use /harness to change agents or /model to change models",
-                self.active.short_name(),
+                self.short_name(),
                 self.current_provider()
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| "default".into())
@@ -803,7 +1460,7 @@ impl App {
         }
         let Some(binary) = self.harness_binary() else {
             self.transcript
-                .push_error(format!("{} binary not found", self.active.short_name()));
+                .push_error(format!("{} binary not found", self.short_name()));
             return;
         };
         let providers = match self.harness().list_providers(&binary) {
@@ -835,7 +1492,7 @@ impl App {
         }
         let binary = self
             .harness_binary()
-            .ok_or_else(|| format!("{} binary not found", self.active.short_name()))?;
+            .ok_or_else(|| format!("{} binary not found", self.short_name()))?;
         let models = self
             .harness()
             .list_models(&binary, provider)
@@ -846,7 +1503,7 @@ impl App {
 
     pub fn open_model_picker(&mut self) {
         let Some(provider) = self.current_provider().cloned() else {
-            if self.harness().capabilities().multi_provider {
+            if self.caps().multi_provider {
                 self.open_provider_picker();
             } else {
                 self.transcript
@@ -869,11 +1526,11 @@ impl App {
     }
 
     pub fn open_effort_picker(&mut self) {
-        let levels = self.harness().capabilities().effort_levels;
+        let levels = self.caps().effort_levels;
         if levels.is_empty() {
             self.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
-                self.active.display_name()
+                self.display_name()
             ));
             return;
         }
@@ -938,6 +1595,16 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
             Modal::Resume(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Resume(r.id.clone())))),
+            // Enter rewinds the conversation; `f` also restores the files.
+            Modal::Rewind(p) => match key.code {
+                KeyCode::Char('f') => match p.current() {
+                    Some(r) if r.files => Some(Some(ModalChoice::Rewind(r.block, true))),
+                    _ => None,
+                },
+                code => picker_nav(p, code).map(|c| {
+                    c.and_then(|_| p.current().map(|r| ModalChoice::Rewind(r.block, false)))
+                }),
+            },
             Modal::Permission(m) => {
                 if m.denying {
                     match key.code {
@@ -1128,6 +1795,10 @@ impl App {
                         self.modal = None;
                         self.resume_conversation(id);
                     }
+                    ModalChoice::Rewind(block, restore_files) => {
+                        self.modal = None;
+                        self.rewind_to(block, restore_files);
+                    }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
                     ModalChoice::Dismiss => self.close_modal(),
                 }
@@ -1141,9 +1812,12 @@ impl App {
         let mut parts = cmd.split_whitespace();
         let name = parts.next().unwrap_or("");
         let arg = parts.next().map(str::to_string);
+        // Everything after the command, for commands that take free text
+        // (a path or a message may contain spaces).
+        let rest = cmd.trim_start().strip_prefix(name).unwrap_or("").trim();
         match name {
             "/switch" | "/harness" => match arg {
-                Some(a) => match HarnessId::parse(&a) {
+                Some(a) => match self.registry.parse(&a).map(|h| h.descriptor().id) {
                     Some(id) => self.switch_harness(id),
                     None => self.transcript.push_error(format!("unknown harness '{a}'")),
                 },
@@ -1215,6 +1889,49 @@ impl App {
                     s.total_tokens(),
                     s.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
                 ));
+                if let (Some(used), Some(window)) = (self.context.used, self.context.window) {
+                    self.transcript.push_system(format!(
+                        "Context: {used} of {window} tokens ({}%)",
+                        self.context.percent().unwrap_or(0)
+                    ));
+                }
+                if let Some(r) = &self.rate_limit {
+                    self.transcript
+                        .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
+                }
+            }
+            "/steer" => match rest {
+                "" => self.transcript.push_notice("usage: /steer <message>"),
+                text => self.steer(text.to_string()),
+            },
+            "/rewind" => self.open_rewind_picker(),
+            "/undo-restore" => self.undo_restore(),
+            "/fork" => self.fork_conversation(),
+            "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
+            "/attach" => match rest {
+                path if !path.is_empty() => self.attach(path),
+                _ if self.attachments.is_empty() => {
+                    self.transcript.push_notice("usage: /attach <image path>")
+                }
+                _ => {
+                    let names: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
+                    self.transcript
+                        .push_system(format!("Attached: {}", names.join(", ")));
+                }
+            },
+            "/detach" => {
+                self.attachments.clear();
+                self.transcript.push_system("Attachments cleared.");
+            }
+            "/plan" => {
+                self.show_plan = !self.show_plan;
+                if self.plan.is_empty() {
+                    self.transcript
+                        .push_notice("the agent has not shared a plan");
+                } else if !self.show_plan {
+                    self.transcript
+                        .push_system("Plan hidden (/plan shows it again).");
+                }
             }
             "/skills" => {
                 let mut list = Vec::new();
@@ -1243,16 +1960,22 @@ impl App {
             }
             "/clear" => {
                 self.transcript.clear();
+                self.plan.clear();
+                self.queued.clear();
+                self.anchors.clear();
+                self.file_checkpoints.clear();
+                self.fork_pending.clear();
+                self.anchor_pending.clear();
                 self.transcript.push_system("Transcript cleared.");
                 self.persist();
             }
             "/help" => {
                 let mut help = String::from("Commands:\n");
                 for (c, d) in BASE_COMMANDS {
-                    help.push_str(&format!("  {c:<10} {d}\n"));
+                    help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -1294,7 +2017,7 @@ impl App {
                 }
             }
             ("/effort" | "/think", Some(s)) => {
-                for l in self.harness().capabilities().effort_levels {
+                for l in self.caps().effort_levels {
                     if l.starts_with(s) {
                         out.push((format!("{cmd} {l}"), "Reasoning effort".to_string()));
                     }
@@ -1465,6 +2188,8 @@ enum ModalChoice {
     Effort(String),
     Policy(PermissionPolicy),
     Resume(String),
+    /// (user block, also restore files)
+    Rewind(usize, bool),
     Decision(PermissionDecision),
     Dismiss,
 }
@@ -1485,6 +2210,31 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
         KeyCode::Enter => Some(Some(())),
         KeyCode::Esc | KeyCode::Char('q') => Some(None),
         _ => None,
+    }
+}
+
+/// Percentage of a rate-limit window at which the user is warned.
+const RATE_LIMIT_WARN_PERCENT: f32 = 80.0;
+
+fn rate_limit_high(r: &RateLimitInfo) -> bool {
+    r.windows
+        .iter()
+        .any(|w| w.used_percent.is_some_and(|p| p >= RATE_LIMIT_WARN_PERCENT))
+}
+
+fn rate_limit_summary(r: &RateLimitInfo) -> String {
+    let windows: Vec<String> = r
+        .windows
+        .iter()
+        .map(|w| match w.used_percent {
+            Some(p) => format!("{} {p:.0}% used", w.label),
+            None => w.label.clone(),
+        })
+        .collect();
+    match (&r.status, windows.is_empty()) {
+        (Some(s), true) => s.clone(),
+        (Some(s), false) if s != "allowed" => format!("{s} ({})", windows.join(", ")),
+        _ => windows.join(", "),
     }
 }
 
@@ -1515,6 +2265,8 @@ pub(crate) mod tests {
         harness_explicit: bool,
     ) -> App {
         App::new(AppInit {
+            // Tests never write to the real state directory.
+            checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
             cwd: cwd.clone(),
             workspace_root: Some(cwd),
             registry: test_registry(),
@@ -1539,7 +2291,7 @@ pub(crate) mod tests {
         use super::super::transcript::Block;
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.keep();
-        let mut app = test_app_in(cwd.clone(), HarnessId::Claude, None, false);
+        let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
         app.submit_prompt("first question".into());
         app.take_actions();
         app.session_alive = true;
@@ -1551,7 +2303,7 @@ pub(crate) mod tests {
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
         });
-        app.switch_harness(HarnessId::Codex);
+        app.switch_harness(HarnessId::CODEX);
         app.take_actions();
         app.session_alive = false;
         app.submit_prompt("second question".into());
@@ -1571,21 +2323,21 @@ pub(crate) mod tests {
         let rows = app.store.list();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, conv_id);
-        assert_eq!(rows[0].harnesses, vec![HarnessId::Claude, HarnessId::Codex]);
+        assert_eq!(rows[0].harnesses, vec![HarnessId::CLAUDE, HarnessId::CODEX]);
         assert_eq!(rows[0].title, "first question");
 
-        let mut again = test_app_in(cwd.clone(), HarnessId::Claude, Some(String::new()), false);
-        assert_eq!(again.active, HarnessId::Codex);
+        let mut again = test_app_in(cwd.clone(), HarnessId::CLAUDE, Some(String::new()), false);
+        assert_eq!(again.active, HarnessId::CODEX);
         assert_eq!(again.conversation.id, conv_id);
         assert_eq!(
             again
                 .session_ids
-                .get(&HarnessId::Claude)
+                .get(&HarnessId::CLAUDE)
                 .map(String::as_str),
             Some("claude-1")
         );
         assert_eq!(
-            again.session_ids.get(&HarnessId::Codex).map(String::as_str),
+            again.session_ids.get(&HarnessId::CODEX).map(String::as_str),
             Some("codex-1")
         );
         assert!(
@@ -1610,7 +2362,7 @@ pub(crate) mod tests {
                 Action::StartSession {
                     resume: Some("codex-1".into())
                 },
-                Action::SendTurn("third".into())
+                Action::turn("third")
             ]
         );
         again.session_alive = true;
@@ -1618,7 +2370,7 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
 
-        again.switch_harness(HarnessId::Claude);
+        again.switch_harness(HarnessId::CLAUDE);
         again.take_actions();
         again.session_alive = false;
         again.submit_prompt("fourth".into());
@@ -1630,21 +2382,546 @@ pub(crate) mod tests {
             }
         );
         match &actions[1] {
-            Action::SendTurn(t) => {
+            Action::SendTurn { text: t, .. } => {
                 assert!(t.contains("second question") && t.contains("third"), "{t}");
                 assert!(!t.contains("first question"), "{t}");
             }
             other => panic!("{other:?}"),
         }
 
-        let forced = test_app_in(cwd, HarnessId::Pi, Some(conv_id[..8].to_string()), true);
-        assert_eq!(forced.active, HarnessId::Pi);
+        let forced = test_app_in(cwd, HarnessId::PI, Some(conv_id[..8].to_string()), true);
+        assert_eq!(forced.active, HarnessId::PI);
         assert_eq!(forced.session_ids.len(), 2);
     }
 
     #[test]
+    fn live_capabilities_and_status_events_apply() {
+        use crate::core::{CapsUpdate, ContextUsage, PlanEntry, PlanStatus};
+        let mut app = test_app(HarnessId::CLAUDE);
+        assert!(app.caps().supports_effort("xhigh"));
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            effort_levels: Some(vec!["low".into()]),
+            image_input: Some(true),
+            ..Default::default()
+        }));
+        let caps = app.caps();
+        assert!(caps.image_input && !caps.supports_effort("xhigh"));
+
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(10),
+            window: Some(100),
+        }));
+        assert_eq!(app.context.percent(), Some(10));
+        app.on_event(AgentEvent::PlanUpdated {
+            entries: vec![PlanEntry {
+                text: "step".into(),
+                status: PlanStatus::InProgress,
+            }],
+            explanation: None,
+        });
+        assert_eq!(app.plan.len(), 1);
+
+        // Subagent tool calls land in the transcript; subagent prose does not.
+        let before = app.transcript.blocks.len();
+        app.on_event(AgentEvent::Sub {
+            parent: "p".into(),
+            event: Box::new(AgentEvent::TextDelta("inner".into())),
+        });
+        assert_eq!(app.transcript.blocks.len(), before);
+        app.on_event(AgentEvent::Sub {
+            parent: "p".into(),
+            event: Box::new(AgentEvent::ToolCallStarted {
+                id: "c".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            }),
+        });
+        assert_eq!(app.transcript.blocks.len(), before + 1);
+    }
+
+    #[test]
+    fn rate_limit_warns_once_when_a_window_runs_high() {
+        use crate::core::{RateLimitInfo, RateLimitWindow};
+        let limit = |pct: f32| {
+            AgentEvent::RateLimit(RateLimitInfo {
+                status: Some("allowed".into()),
+                windows: vec![RateLimitWindow {
+                    label: "five_hour".into(),
+                    used_percent: Some(pct),
+                    resets_at: None,
+                }],
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        let base = app.transcript.blocks.len();
+        app.on_event(limit(20.0));
+        assert_eq!(app.transcript.blocks.len(), base);
+        app.on_event(limit(85.0));
+        app.on_event(limit(90.0));
+        assert_eq!(app.transcript.blocks.len(), base + 1);
+        assert_eq!(
+            rate_limit_summary(app.rate_limit.as_ref().unwrap()),
+            "five_hour 90% used"
+        );
+    }
+
+    #[test]
+    fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
+        use super::super::transcript::Block;
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2"), ("three", "a3")] {
+            app.submit_prompt(prompt.into());
+            app.session_alive = true;
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TextDelta(format!("re {prompt}")));
+            app.on_event(done());
+        }
+        app.take_actions();
+        let block_of = |app: &App, want: &str| {
+            app.transcript
+                .blocks
+                .iter()
+                .position(|b| matches!(b, Block::User { text } if text == want))
+                .unwrap()
+        };
+
+        // Live session with an anchor: the harness drops the turns itself.
+        let three = block_of(&app, "three");
+        app.rewind_to(three, false);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Rewind {
+                anchor: "a3".into()
+            })]
+        );
+        assert_eq!(app.input, "three");
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert!(
+            !app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::User { text } if text == "three"))
+        );
+        assert_eq!(app.anchors.len(), 2);
+        app.take_input();
+
+        // The session is not running: it is reattached, then rewound.
+        app.session_alive = false;
+        let two = block_of(&app, "two");
+        app.rewind_to(two, false);
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("s1".into())
+                },
+                Action::Command(SessionCommand::Rewind {
+                    anchor: "a2".into()
+                })
+            ]
+        );
+        assert_eq!(app.input, "two");
+        app.take_input();
+
+        // The harness reports that it did not rewind: fall back to a fresh
+        // session that gets the remaining conversation as context.
+        app.session_alive = true;
+        app.on_event(AgentEvent::RewindFailed {
+            reason: "stale target".into(),
+        });
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+
+        // Back to before a session's first turn nothing of it remains, so a
+        // fresh session is used rather than a native rewind.
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s2".into(),
+            model: None,
+        });
+        app.submit_prompt("one".into());
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnAnchor { id: "b1".into() });
+        app.on_event(done());
+        app.take_actions();
+        let one = block_of(&app, "one");
+        app.rewind_to(one, false);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+
+        // A harness that cannot rewind at all goes straight to the fallback.
+        let mut app = test_app(HarnessId::AGY);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "g1".into(),
+            model: None,
+        });
+        app.submit_prompt("one".into());
+        app.on_event(done());
+        app.take_actions();
+        let one = block_of(&app, "one");
+        app.rewind_to(one, false);
+        assert!(app.take_actions().is_empty());
+        assert!(!app.session_ids.contains_key(&HarnessId::AGY));
+    }
+
+    #[test]
+    fn rewind_drops_sessions_that_saw_the_removed_turns() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(done());
+        let after_one = app.transcript.blocks.len();
+        app.switch_harness(HarnessId::CODEX);
+        app.submit_prompt("two".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.on_event(done());
+        app.switch_harness(HarnessId::PI);
+        app.submit_prompt("three".into());
+        app.on_event(done());
+        app.take_actions();
+
+        // Rewinding to before "two": Codex saw it and is reset; Claude's
+        // session ended before it and stays.
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(
+                |b| matches!(b, super::super::transcript::Block::User { text } if text == "two"),
+            )
+            .unwrap();
+        assert!(two >= after_one);
+        app.rewind_to(two, false);
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert!(!app.session_ids.contains_key(&HarnessId::CODEX));
+    }
+
+    #[test]
+    fn anchors_attach_in_order_even_when_they_arrive_late() {
+        // pi reports a turn's anchor after the turn, when a queued prompt may
+        // already have started the next one.
+        let mut app = test_app(HarnessId::PI);
+        app.submit_prompt("one".into());
+        app.session_alive = true;
+        app.queue_prompt("two".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.on_event(AgentEvent::TurnAnchor { id: "e1".into() });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        // A turn that never reached the harness reports an empty anchor.
+        app.submit_prompt("three".into());
+        app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
+        app.on_event(AgentEvent::TurnAnchor { id: String::new() });
+        let ids: Vec<(&str, usize)> = app
+            .anchors
+            .iter()
+            .map(|a| (a.id.as_str(), a.block))
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0].0 == "e1" && ids[1].0 == "e2" && ids[0].1 < ids[1].1);
+    }
+
+    #[test]
+    fn fork_branches_sessions_where_the_harness_can() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "agy-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("answer".into()));
+        app.on_event(done());
+        app.switch_harness(HarnessId::CLAUDE);
+        app.submit_prompt("two".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnAnchor { id: "u2".into() });
+        app.on_event(done());
+        app.take_actions();
+        app.session_alive = false;
+
+        let original = app.conversation.id.clone();
+        app.fork_conversation();
+        assert_ne!(app.conversation.id, original);
+        // Claude can branch a session: the id is kept, to be forked on next
+        // use. Its rewind ids do not carry over into a branch. Antigravity
+        // cannot, so the copy starts it fresh.
+        assert_eq!(app.session_ids.get(&HarnessId::CLAUDE).unwrap(), "claude-1");
+        assert!(app.fork_pending());
+        assert!(app.anchors.is_empty());
+        assert!(!app.session_ids.contains_key(&HarnessId::AGY));
+
+        // The original is on disk untouched; the copy remembers what is pending.
+        let saved = app.store.load(&original).unwrap();
+        assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
+        assert!(saved.fork_pending.is_empty());
+        let copy = app.store.load(&app.conversation.id).unwrap();
+        assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
+
+        // The branch knows the whole conversation: nothing is re-sent as text.
+        app.submit_prompt("three".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("claude-1".into())
+                },
+                Action::turn("three")
+            ]
+        );
+        // Once the branch reports its own id, it is an ordinary session.
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        assert!(!app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-2");
+    }
+
+    #[test]
+    fn rewind_can_restore_files_and_undo_it() {
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git(root, &["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "before\n").unwrap();
+
+        let mut app = test_app_in(root.to_path_buf(), HarnessId::AGY, None, false);
+        app.submit_prompt("change it".into());
+        // The agent edits a file and creates another during the turn.
+        std::fs::write(root.join("a.txt"), "after\n").unwrap();
+        std::fs::write(root.join("new.txt"), "made by the agent\n").unwrap();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        app.open_rewind_picker();
+        assert!(matches!(&app.modal, Some(Modal::Rewind(p)) if p.items[0].files));
+        app.handle_modal_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(app.input, "change it");
+
+        app.handle_slash_command("/undo-restore");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(root.join("new.txt").exists());
+    }
+
+    #[test]
+    fn subagent_calls_hang_off_their_spawner() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("delegate".into());
+        app.on_event(AgentEvent::ToolCallStarted {
+            id: "spawn".into(),
+            name: "Agent".into(),
+            input: serde_json::json!({"description": "look around"}),
+        });
+        let sub = |event| AgentEvent::Sub {
+            parent: "spawn".into(),
+            event: Box::new(event),
+        };
+        app.on_event(sub(AgentEvent::ToolCallStarted {
+            id: "inner".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": "a.txt"}),
+        }));
+        app.on_event(sub(AgentEvent::ToolCallResult {
+            id: "inner".into(),
+            output: "contents".into(),
+            is_error: false,
+        }));
+        // The subagent's prose shows as the spawning call's live output.
+        app.on_event(sub(AgentEvent::TextDelta("found it".into())));
+        let find = |app: &App, want: &str| {
+            app.transcript
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    Block::Tool {
+                        id, parent, output, ..
+                    } if id == want => Some((parent.clone(), output.clone())),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            find(&app, "inner"),
+            (Some("spawn".into()), "contents".into())
+        );
+        assert_eq!(find(&app, "spawn"), (None, "found it".into()));
+
+        // Saved and restored with the link; left out of the bridge.
+        let records = app.transcript.to_records();
+        let back = Transcript::from_records(&records);
+        assert!(back.blocks.iter().any(
+            |b| matches!(b, Block::Tool { id, parent: Some(p), .. } if id == "inner" && p == "spawn")
+        ));
+        let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
+        assert!(bridge.contains("[tool Agent") && !bridge.contains("[tool Read"));
+    }
+
+    #[test]
+    fn prompts_queue_during_a_turn_and_drain_on_completion() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.queue_prompt("first".into());
+        assert!(app.is_generating && app.queued.is_empty());
+        app.take_actions();
+
+        app.queue_prompt("second".into());
+        app.queue_prompt("third".into());
+        assert_eq!(app.queued.len(), 2);
+        assert!(app.take_actions().is_empty());
+
+        // The newest one can be pulled back for editing.
+        app.unqueue_last();
+        assert_eq!(app.input, "third");
+        app.take_input();
+
+        app.session_alive = true;
+        app.on_event(done());
+        assert!(app.is_generating && app.queued.is_empty());
+        assert_eq!(app.take_actions(), vec![Action::turn("second")]);
+
+        // After an interrupt the queue is held until the user presses Enter.
+        app.queue_prompt("fourth".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert!(!app.is_generating && app.queued.len() == 1);
+        assert!(app.send_next_queued());
+        assert_eq!(app.take_actions(), vec![Action::turn("fourth")]);
+    }
+
+    #[test]
+    fn steer_goes_into_the_turn_or_falls_back_to_the_queue() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.session_alive = true;
+        app.take_actions();
+        app.steer("left a bit".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Steer {
+                text: "left a bit".into(),
+                attachments: Vec::new()
+            })]
+        );
+        assert!(app.queued.is_empty());
+
+        // Antigravity cannot be steered: the message waits for the turn to end.
+        let mut app = test_app(HarnessId::AGY);
+        app.submit_prompt("go".into());
+        app.session_alive = true;
+        app.take_actions();
+        app.steer("left a bit".into());
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.queued.len(), 1);
+    }
+
+    #[test]
+    fn compact_needs_an_idle_live_session_that_supports_it() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.compact(None);
+        assert!(app.take_actions().is_empty());
+        app.session_alive = true;
+        app.handle_slash_command("/compact keep the API notes");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Compact {
+                instructions: Some("keep the API notes".into())
+            })]
+        );
+        assert_eq!(app.status_label(), "Compacting");
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(!app.is_generating);
+
+        let mut app = test_app(HarnessId::AGY);
+        app.session_alive = true;
+        app.compact(None);
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn attachments_go_out_with_the_next_prompt() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("my shot.png"), b"png").unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        app.handle_slash_command("/attach notes.txt");
+        app.handle_slash_command("/attach missing.png");
+        assert!(app.attachments.is_empty());
+        app.handle_slash_command("/attach my shot.png");
+        assert_eq!(app.attachments.len(), 1);
+
+        app.submit_prompt("what is this?".into());
+        assert!(app.attachments.is_empty());
+        let sent = app.take_actions().into_iter().find_map(|a| match a {
+            Action::SendTurn { attachments, .. } => Some(attachments),
+            _ => None,
+        });
+        assert_eq!(sent.unwrap()[0].label(), "my shot.png");
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(super::super::transcript::Block::User { text }) if text.ends_with("[image: my shot.png]")
+        ));
+
+        // A harness that takes no images refuses the attachment.
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
+        app.handle_slash_command("/attach my shot.png");
+        assert!(app.attachments.is_empty());
+    }
+
+    #[test]
     fn exit_summary_only_when_saved() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         assert!(app.exit_summary().is_none());
         app.submit_prompt("hello".into());
         app.take_actions();
@@ -1663,14 +2940,14 @@ pub(crate) mod tests {
     fn resume_errors_are_reported_not_fatal() {
         use super::super::transcript::Block;
         let tmp = tempfile::tempdir().unwrap();
-        let app = test_app_in(tmp.keep(), HarnessId::Claude, Some("nope".into()), false);
+        let app = test_app_in(tmp.keep(), HarnessId::CLAUDE, Some("nope".into()), false);
         assert!(
             app.transcript
                 .blocks
                 .iter()
                 .any(|b| matches!(b, Block::Error(e) if e.contains("could not resume")))
         );
-        assert_eq!(app.active, HarnessId::Claude);
+        assert_eq!(app.active, HarnessId::CLAUDE);
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1684,15 +2961,12 @@ pub(crate) mod tests {
 
     #[test]
     fn submit_starts_session_then_sends_turn() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello".into());
         assert!(app.is_generating);
         assert_eq!(
             app.take_actions(),
-            vec![
-                Action::StartSession { resume: None },
-                Action::SendTurn("hello".into())
-            ]
+            vec![Action::StartSession { resume: None }, Action::turn("hello")]
         );
         app.session_alive = true;
         app.on_event(AgentEvent::TurnCompleted {
@@ -1700,12 +2974,12 @@ pub(crate) mod tests {
         });
         assert!(!app.is_generating);
         app.submit_prompt("again".into());
-        assert_eq!(app.take_actions(), vec![Action::SendTurn("again".into())]);
+        assert_eq!(app.take_actions(), vec![Action::turn("again")]);
     }
 
     #[test]
     fn switching_harness_bridges_context_once() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("first question".into());
         app.take_actions();
         app.session_alive = true;
@@ -1714,7 +2988,7 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
 
-        app.switch_harness(HarnessId::Agy);
+        app.switch_harness(HarnessId::AGY);
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         app.session_alive = false;
 
@@ -1722,7 +2996,7 @@ pub(crate) mod tests {
         let actions = app.take_actions();
         assert!(matches!(actions[0], Action::StartSession { resume: None }));
         match &actions[1] {
-            Action::SendTurn(t) => {
+            Action::SendTurn { text: t, .. } => {
                 assert!(t.contains("first question"));
                 assert!(t.contains("Claude: first answer"));
                 assert!(t.ends_with("second question"));
@@ -1736,22 +3010,22 @@ pub(crate) mod tests {
 
         // A second turn on the same harness is not bridged.
         app.submit_prompt("third".into());
-        assert_eq!(app.take_actions(), vec![Action::SendTurn("third".into())]);
+        assert_eq!(app.take_actions(), vec![Action::turn("third")]);
     }
 
     #[test]
     fn policy_resolution_per_harness() {
-        let mut app = test_app(HarnessId::Agy);
+        let mut app = test_app(HarnessId::AGY);
         app.set_policy(PermissionPolicy::Auto);
         assert_eq!(app.effective_policy(), PermissionPolicy::AcceptEdits);
-        app.switch_harness(HarnessId::Claude);
+        app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), PermissionPolicy::Auto);
         assert!(app.policy_warning().is_none());
     }
 
     #[test]
     fn permission_modal_allow_and_deny_with_reason() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.session_alive = true;
         let req = |id: &str| PermissionRequest {
             id: id.into(),
@@ -1797,7 +3071,7 @@ pub(crate) mod tests {
 
     #[test]
     fn question_modal_answers() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.session_alive = true;
         app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
             id: "q".into(),
@@ -1828,7 +3102,7 @@ pub(crate) mod tests {
 
     #[test]
     fn local_picker_enter_and_esc() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.open_policy_picker();
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
@@ -1844,7 +3118,7 @@ pub(crate) mod tests {
 
     #[test]
     fn slash_commands_and_suggestions() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         for c in "/pol".chars() {
             app.insert_char(c);
         }
@@ -1862,14 +3136,14 @@ pub(crate) mod tests {
         app.handle_slash_command("/model sonnet");
         assert_eq!(app.model_label(), "anthropic/sonnet");
         app.handle_slash_command("/switch codex");
-        assert_eq!(app.active, HarnessId::Codex);
+        assert_eq!(app.active, HarnessId::CODEX);
         app.handle_slash_command("/quit");
         assert!(app.should_quit);
     }
 
     #[test]
     fn multibyte_input_editing() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         for c in "héllo".chars() {
             app.insert_char(c);
         }
@@ -1884,7 +3158,7 @@ pub(crate) mod tests {
 
     #[test]
     fn usage_accumulates() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.on_event(AgentEvent::Usage(Usage {
             input: 10,
             output: 5,

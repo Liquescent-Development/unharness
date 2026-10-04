@@ -20,6 +20,7 @@ impl Registry {
 
     /// Build the registry, honouring per-harness transport settings.
     pub fn from_config(config: &crate::config::Config) -> Self {
+        use crate::harness::acp::AcpHarness;
         use crate::harness::agy::{AgyHarness, AgyTransport};
         use crate::harness::codex::{CodexHarness, CodexTransport};
         let agy_transport = config
@@ -32,12 +33,36 @@ impl Registry {
             .and_then(|h| h.transport.as_deref())
             .and_then(CodexTransport::parse)
             .unwrap_or_default();
-        let harnesses: Vec<Box<dyn Harness>> = vec![
+        let mut harnesses: Vec<Box<dyn Harness>> = vec![
             Box::new(AgyHarness::new(agy_transport)),
             Box::new(crate::harness::claude::ClaudeHarness),
             Box::new(CodexHarness::new(codex_transport)),
             Box::new(crate::harness::pi::PiHarness),
         ];
+
+        // ACP agents: the ones defined in config (by name, for a stable
+        // order), then the presets found on PATH. Neither may take a
+        // built-in harness's name.
+        let mut defined: Vec<(&String, &crate::config::HarnessSettings)> = config
+            .harnesses
+            .iter()
+            .filter(|(name, s)| {
+                s.protocol.as_deref() == Some("acp") && HarnessId::parse(name).is_none()
+            })
+            .collect();
+        defined.sort_by_key(|(name, _)| name.as_str());
+        for (name, settings) in defined {
+            // A definition without a command is reported by `doctor`.
+            if let Ok(h) =
+                AcpHarness::new(name, settings.display_name.as_deref(), &settings.command)
+            {
+                harnesses.push(Box::new(h));
+            }
+        }
+        let taken: Vec<HarnessId> = harnesses.iter().map(|h| h.descriptor().id).collect();
+        for preset in AcpHarness::installed_presets(&taken) {
+            harnesses.push(Box::new(preset));
+        }
         Registry { harnesses }
     }
 
@@ -67,8 +92,14 @@ impl Registry {
             .map(|h| h.as_ref())
     }
 
+    /// A registered harness by id, or by a built-in alias (`antigravity`, `claude-code`).
     pub fn parse(&self, alias: &str) -> Option<&dyn Harness> {
-        HarnessId::parse(alias).and_then(|id| self.get(id))
+        let alias = alias.trim().to_lowercase();
+        self.harnesses
+            .iter()
+            .find(|h| h.descriptor().id.as_str() == alias)
+            .map(|h| h.as_ref())
+            .or_else(|| HarnessId::parse(&alias).and_then(|id| self.get(id)))
     }
 
     /// Pick the harness to run: an explicit request, else the configured
@@ -85,7 +116,7 @@ impl Registry {
         };
 
         if let Some(req) = requested {
-            let Some(id) = HarnessId::parse(req) else {
+            let Some(h) = self.parse(req) else {
                 bail!(
                     "Unknown harness '{}'. Supported: {}",
                     req,
@@ -95,9 +126,6 @@ impl Registry {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-            };
-            let Some(h) = self.get(id) else {
-                bail!("Harness '{}' is not available in this build", req);
             };
             return match find_bin(h) {
                 Some(bin) => Ok((h, bin)),

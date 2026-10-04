@@ -1,5 +1,6 @@
 SessionStarted id=7a2917a7-0043-46ef-8667-68c8942c80dc model=claude-haiku-4-5-20251001
 TurnStarted
+Context used=21771 window=-
 ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "{\"file_path\": \"/tmp/"
 ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "claude-1002/-home"
 ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "-user-code-"
@@ -15,11 +16,15 @@ ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "\"}"
 ToolCallStarted id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write input={"content":"hello","file_path":"/WORKSPACE/spike.txt"}
 Notice "permission denied for Write (no prompt available in this ..."
 ToolCallResult id=toolu_01NWbUzXmddzNpqwyaHRv714 error=true "Claude requested permissions to write to /WORKSPACE/spike..."
+RateLimit status=allowed five_hour=28% seven_day=4%
+Context used=25484 window=-
 TextDelta "created"
 Usage in=18 out=491 cache_read=39576 cache_write=7661 cost=0.0218 cumulative=false
+Context used=- window=200000
 Notice "1 permission denial(s): Write"
 TurnCompleted Done
 TurnStarted
+Context used=25732 window=-
 TextDelta "I don't have"
 TextDelta " access to an"
 TextDelta " \""
@@ -44,5 +49,6 @@ TextDelta " you prefer to just"
 TextDelta " tell"
 TextDelta " me your preference directly"
 TextDelta "?"
-Usage in=10 out=423 cache_read=25476 cache_write=246 cost=0.0269 cumulative=false
+Usage in=10 out=423 cache_read=25476 cache_write=246 cost=0.0052 cumulative=false
+Context used=- window=200000
 TurnCompleted Done

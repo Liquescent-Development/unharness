@@ -16,15 +16,16 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 
 pub struct PiHarness;
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Pi,
+    id: HarnessId::PI,
     display_name: "pi",
+    short_name: "pi",
     binary_names: &["pi"],
     providers: ProviderSource::Dynamic,
 };
@@ -63,6 +64,18 @@ impl Harness for PiHarness {
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
+            image_input: false,
+            plan_updates: false,
+            subagents: false,
+            steer: true,
+            compaction: true,
+            context_usage: true,
+            rate_limits: false,
+            rewind: RewindSupport {
+                conversation: true,
+                anchors_survive_fork: true,
+            },
+            fork: true,
         }
     }
 
@@ -124,7 +137,7 @@ impl Harness for PiHarness {
                     .to_string();
                 let reasoning = m.get("reasoning").and_then(Value::as_bool).unwrap_or(false);
                 ModelInfo {
-                    model_ref: ModelRef::new(HarnessId::Pi, provider.clone(), id),
+                    model_ref: ModelRef::new(HarnessId::PI, provider.clone(), id),
                     display_name: m
                         .get("name")
                         .and_then(Value::as_str)
@@ -235,7 +248,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("hi there".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Pi, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::PI, "openai", "gpt-5.5")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Ask),
             format: Some("json".into()),

@@ -32,7 +32,14 @@ def main() -> int:
     ap.add_argument("--model")
     ap.add_argument("--thinking")
     ap.add_argument("--no-models", action="store_true", help="skip get_available_models")
+    ap.add_argument("--thinking-levels", action="store_true",
+                    help="also ask for the thinking levels (the driver only does after a model switch)")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--rewind", action="store_true",
+                    help="after the second prompt, rewind to before it, then send the remaining prompts")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -77,11 +84,27 @@ def main() -> int:
     send({"id": next_id(), "type": "get_state"})
     if not args.no_models:
         send({"id": next_id(), "type": "get_available_models"})
-    send({"id": next_id(), "type": "get_available_thinking_levels"})
+    if args.thinking_levels:
+        send({"id": next_id(), "type": "get_available_thinking_levels"})
 
     prompts = list(args.prompts)
-    send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
+    first = {"id": next_id(), "type": "prompt", "message": prompts.pop(0)}
+    if args.image:
+        import base64
+        import mimetypes
+        with open(args.image, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        first["images"] = [{
+            "type": "image",
+            "data": data,
+            "mimeType": mimetypes.guess_type(args.image)[0] or "image/png",
+        }]
+    send(first)
 
+    steered = False
+    compacting = False
+    rewound = False
+    turns = 0
     last = time.time()
     while proc.poll() is None:
         line = proc.stdout.readline()
@@ -98,6 +121,9 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
+        if args.steer and not steered and t == "tool_execution_start":
+            steered = True
+            send({"id": next_id(), "type": "steer", "message": args.steer})
         if t == "extension_ui_request":
             method = obj.get("method")
             rid = obj.get("id")
@@ -106,18 +132,40 @@ def main() -> int:
             elif method in ("select", "input", "editor"):
                 send({"type": "extension_ui_response", "id": rid, "value": "ok"})
         elif t == "agent_settled":
-            if prompts:
+            # After every turn the driver asks for context usage and for the
+            # user messages (their entry ids are what a rewind targets).
+            turns += 1
+            send({"id": next_id(), "type": "get_session_stats"})
+            send({"id": next_id(), "type": "get_fork_messages"})
+        elif t == "response" and obj.get("command") == "get_fork_messages" and obj.get("success", True):
+            messages = (obj.get("data") or {}).get("messages") or []
+            if args.rewind and not rewound and turns == 2 and len(messages) >= 2:
+                # Rewind = fork a new session from before the second message.
+                rewound = True
+                send({"id": next_id(), "type": "fork", "entryId": messages[1]["entryId"]})
+            elif prompts:
                 send({"id": next_id(), "type": "prompt", "message": prompts.pop(0)})
+            elif args.compact and not compacting:
+                compacting = True
+                send({"id": next_id(), "type": "compact"})
             else:
-                proc.stdin.close()
-                for rest in proc.stdout:
-                    record("", rest)
                 break
+        elif t == "response" and obj.get("command") == "fork":
+            # The fork is only in place once it answers (other commands sent
+            # meanwhile still see the old session); then re-read the new
+            # session's state and message list.
+            send({"id": next_id(), "type": "get_state"})
+            send({"id": next_id(), "type": "get_fork_messages"})
+        elif t == "response" and obj.get("command") == "compact":
+            break
         elif t == "response" and not obj.get("success", True):
             sys.stderr.write(f"[error] {obj.get('command')}: {obj.get('error')}\n")
             if obj.get("command") == "prompt":
-                proc.stdin.close()
                 break
+
+    proc.stdin.close()
+    for rest in proc.stdout:
+        record("", rest)
 
     try:
         proc.wait(timeout=15)

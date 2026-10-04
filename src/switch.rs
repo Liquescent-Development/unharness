@@ -3,37 +3,45 @@ use colored::*;
 use std::path::Path;
 
 use crate::config::Config;
-use crate::core::HarnessId;
+use crate::core::registry::Registry;
 use crate::sync::find_workspace_root;
 
 pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<()> {
-    let kind = match HarnessId::parse(target) {
-        Some(k) => k,
-        None => bail!(
-            "Unknown harness '{}'. Supported: agy, claude, codex, pi",
-            target
-        ),
+    let ws_root = find_workspace_root(cwd);
+    let registry = Registry::from_config(&Config::load_effective(ws_root.as_deref()));
+    let Some(harness) = registry.parse(target) else {
+        bail!(
+            "Unknown harness '{}'. Supported: {}",
+            target,
+            registry
+                .ids()
+                .iter()
+                .map(|i| i.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     };
+    let kind = harness.descriptor();
 
     if global {
         let mut cfg = Config::load_global().unwrap_or_default();
-        cfg.default_harness = Some(kind.as_str().to_string());
+        cfg.default_harness = Some(kind.id.as_str().to_string());
         let path = cfg.save_global()?;
         println!(
             "{} Set global default harness to {} in {}",
             "[✓]".green().bold(),
-            kind.display_name().bold(),
+            kind.display_name.bold(),
             path.display()
         );
     } else {
-        let root = find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+        let root = ws_root.unwrap_or_else(|| cwd.to_path_buf());
         let mut cfg = Config::load_from_dir(&root).unwrap_or_default();
-        cfg.default_harness = Some(kind.as_str().to_string());
+        cfg.default_harness = Some(kind.id.as_str().to_string());
         let path = cfg.save_to_dir(&root)?;
         println!(
             "{} Set workspace default harness to {} in {}",
             "[✓]".green().bold(),
-            kind.display_name().bold(),
+            kind.display_name.bold(),
             path.display()
         );
     }

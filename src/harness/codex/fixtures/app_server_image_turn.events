@@ -1,0 +1,7 @@
+SessionStarted id=01a103c3-dc69-7c01-8759-080b37f6a2d8 model=gpt-6-astra
+TurnStarted
+TextDelta "red"
+Usage in=14516 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=14521 window=258400
+RateLimit status=- 7d=1%
+TurnCompleted Done

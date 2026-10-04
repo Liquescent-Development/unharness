@@ -1,0 +1,20 @@
+SessionStarted id=e066bec1-8381-4714-8f3a-8f9e3cc9469e model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=21768 window=-
+ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "{\"command\": \"sleep 4 "
+ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "&& echo first-"
+ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "ok"
+ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "\"}"
+ToolCallStarted id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash input={"command":"sleep 4 && echo first-ok"}
+RateLimit status=allowed five_hour=40% seven_day=20%
+ToolCallResult id=toolu_01DhRpdfjN9hS7rNRNxLtizb error=false "first-ok"
+Context used=22895 window=-
+TextDelta "done"
+TextDelta " STEERED"
+Usage in=18 out=194 cache_read=35561 cache_write=9084 cost=0.0227 cumulative=false
+Context used=- window=200000
+TurnCompleted Done
+Notice "context compacted"
+Usage in=0 out=0 cache_read=0 cache_write=0 cost=0.0119 cumulative=false
+Context used=- window=200000
+TurnCompleted Done

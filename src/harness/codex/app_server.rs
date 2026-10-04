@@ -12,9 +12,19 @@ use super::app_server_parse::ELICITATION_PREFIX;
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, ModelRef, PermissionDecision, PermissionKind,
+    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason,
 };
+
+/// `turn/start` input items: the text, then each image by path (codex reads the file).
+pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
+    let mut items = vec![json!({"type":"text","text": text})];
+    for a in attachments {
+        items.push(json!({"type":"localImage","path": a.path()}));
+    }
+    Value::Array(items)
+}
 
 /// `turn/start` sandbox policy object for a policy.
 pub fn sandbox_policy(policy: PermissionPolicy) -> Value {
@@ -93,7 +103,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Codex,
+        harness: HarnessId::CODEX,
         process_model: ProcessModel::LongLived,
     });
     tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));
@@ -106,6 +116,9 @@ enum Outstanding {
     ThreadStart,
     TurnStart,
     Interrupt,
+    /// Steer, compact: only an error response matters, and the parser reports it.
+    Other,
+    Revert,
 }
 
 struct Driver {
@@ -121,7 +134,7 @@ struct Driver {
     effort: Option<String>,
     policy: PermissionPolicy,
     /// A turn requested before the thread was ready.
-    queued_turn: Option<String>,
+    queued_turn: Option<(String, Vec<Attachment>)>,
 }
 
 impl Driver {
@@ -135,14 +148,14 @@ impl Driver {
         Ok(id)
     }
 
-    async fn start_turn(&mut self, text: String) -> Result<()> {
+    async fn start_turn(&mut self, text: String, attachments: Vec<Attachment>) -> Result<()> {
         let Some(thread_id) = self.thread_id.clone() else {
-            self.queued_turn = Some(text);
+            self.queued_turn = Some((text, attachments));
             return Ok(());
         };
         let mut params = json!({
             "threadId": thread_id,
-            "input": [{"type":"text","text": text}],
+            "input": turn_input(&text, &attachments),
         });
         if let Some(m) = &self.model {
             params["model"] = json!(m.model);
@@ -199,7 +212,41 @@ async fn drive(
                     return;
                 };
                 let res: Result<()> = match cmd {
-                    SessionCommand::SendTurn { text } => d.start_turn(text).await,
+                    SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
+                    SessionCommand::Steer { text, attachments } => {
+                        match (d.thread_id.clone(), d.turn_id.clone()) {
+                            (Some(t), Some(turn)) => {
+                                let params = json!({
+                                    "threadId": t,
+                                    "expectedTurnId": turn,
+                                    "input": turn_input(&text, &attachments),
+                                });
+                                d.request("turn/steer", params, Outstanding::Other).await.map(|_| ())
+                            }
+                            // Nothing is running: it is simply the next turn.
+                            _ => d.start_turn(text, attachments).await,
+                        }
+                    }
+                    SessionCommand::Rewind { anchor } => match d.thread_id.clone() {
+                        Some(t) => d
+                            .request("thread/revert", json!({"threadId": t, "beforeTurnId": anchor}), Outstanding::Revert)
+                            .await
+                            .map(|_| ()),
+                        None => Ok(()),
+                    },
+                    SessionCommand::Compact { .. } => match d.thread_id.clone() {
+                        // Runs as a turn of its own (turn/started … turn/completed).
+                        Some(t) => d
+                            .request("thread/compact/start", json!({"threadId": t}), Outstanding::Other)
+                            .await
+                            .map(|_| ()),
+                        None => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error("codex: no thread to compact yet".into()),
+                            }).await;
+                            Ok(())
+                        }
+                    },
                     SessionCommand::Interrupt => {
                         match (&d.thread_id, &d.turn_id) {
                             (Some(t), Some(turn)) => {
@@ -254,7 +301,15 @@ async fn drive(
                                         let _ = d.proc.write_line(&jsonrpc::notification("initialized", Value::Null)).await;
                                         let (approval, sandbox) = policy_params(cfg.policy);
                                         let r = match &cfg.resume {
-                                            Some(id) => d.request("thread/resume", json!({"threadId": id}), Outstanding::ThreadStart).await,
+                                            // A fork answers like a start: with the new thread.
+                                            Some(id) => {
+                                                // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                if cfg.fork {
+                                                    d.request("thread/fork", json!({"threadId": id, "excludeTurns": true}), Outstanding::ThreadStart).await
+                                                } else {
+                                                    d.request("thread/resume", json!({"threadId": id}), Outstanding::ThreadStart).await
+                                                }
+                                            }
                                             None => {
                                                 let mut params = json!({
                                                     "cwd": cfg.cwd,
@@ -274,6 +329,8 @@ async fn drive(
                                     Some(Outstanding::ThreadStart) => {
                                         if let Some(err) = error {
                                             let msg = err.get("message").and_then(Value::as_str).unwrap_or("thread start failed");
+                                            // No turn id to rewind to: keep the anchor sequence aligned.
+                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
                                             let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
                                         } else {
                                             d.thread_id = result
@@ -281,16 +338,24 @@ async fn drive(
                                                 .and_then(|r| r.pointer("/thread/id").or_else(|| r.get("threadId")))
                                                 .and_then(Value::as_str)
                                                 .map(str::to_string);
-                                            if let Some(t) = d.queued_turn.take()
-                                                && let Err(e) = d.start_turn(t).await
+                                            if let Some((t, a)) = d.queued_turn.take()
+                                                && let Err(e) = d.start_turn(t, a).await
                                             {
                                                 let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
                                             }
                                         }
                                     }
+                                    Some(Outstanding::Revert) => {
+                                        if let Some(err) = error {
+                                            let reason = err.get("message").and_then(Value::as_str).unwrap_or("revert failed").to_string();
+                                            let _ = events.send(AgentEvent::RewindFailed { reason }).await;
+                                        }
+                                    }
                                     Some(Outstanding::TurnStart) => {
                                         if let Some(err) = error {
                                             let msg = err.get("message").and_then(Value::as_str).unwrap_or("turn start failed");
+                                            // No turn id to rewind to: keep the anchor sequence aligned.
+                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
                                             let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
                                         } else {
                                             d.turn_id = result
@@ -298,8 +363,25 @@ async fn drive(
                                                 .and_then(|r| r.pointer("/turn/id"))
                                                 .and_then(Value::as_str)
                                                 .map(str::to_string);
+                                            // `thread/revert` takes this id to drop the turn later.
+                                            if let Some(id) = d.turn_id.clone() {
+                                                let _ = events.send(AgentEvent::TurnAnchor { id }).await;
+                                            }
                                         }
                                     }
+                                    _ => {}
+                                }
+                            }
+                            // Track the running turn: steer and interrupt need its id.
+                            // Sub-agent threads share the stream; only the main thread's turn counts.
+                            Some(RpcMessage::Notification { method, params })
+                                if params.get("threadId").and_then(Value::as_str) == d.thread_id.as_deref() =>
+                            {
+                                match method.as_str() {
+                                    "turn/started" => {
+                                        d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                                    }
+                                    "turn/completed" => d.turn_id = None,
                                     _ => {}
                                 }
                             }
@@ -321,7 +403,12 @@ async fn drive(
                             _ => {}
                         }
                         for ev in d.parser.feed(&line) {
-                            if let AgentEvent::PermissionRequest(req) = &ev
+                            // A sub-agent's request arrives wrapped in `Sub`.
+                            let mut inner = &ev;
+                            while let AgentEvent::Sub { event, .. } = inner {
+                                inner = event;
+                            }
+                            if let AgentEvent::PermissionRequest(req) = inner
                                 && let Some((rpc_id, _)) = d.pending.remove(&req.id)
                             {
                                 d.pending.insert(req.id.clone(), (rpc_id, req.kind.clone()));
@@ -355,6 +442,16 @@ async fn drive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_input_adds_local_images() {
+        // Shape confirmed by fixtures/app_server_image_turn.jsonl.
+        let a = Attachment::image("/w/a.png").unwrap();
+        assert_eq!(
+            turn_input("hi", &[a]),
+            json!([{"type":"text","text":"hi"},{"type":"localImage","path":"/w/a.png"}])
+        );
+    }
 
     #[test]
     fn decisions() {

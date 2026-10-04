@@ -85,6 +85,12 @@ fn handle_sessions(
     if clear {
         store.clear()?;
         println!("Cleared saved conversations in {}", store.root().display());
+        // Their file checkpoints go with them.
+        if let Some(cp) = ws_root.and_then(unharness::core::checkpoints::Checkpoints::open)
+            && cp.destroy()?
+        {
+            println!("Removed file checkpoints in {}", cp.shadow_dir().display());
+        }
         return Ok(());
     }
     let rows = store.list();

@@ -1,5 +1,6 @@
 SessionStarted id=0a49f897-b9f7-4d0d-951f-b5d8e255b662 model=claude-haiku-4-5-20251001
 TurnStarted
+Context used=22569 window=-
 ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "{\"file_path\": \"/tmp/"
 ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "claude-1002/-home"
 ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "-user-code-"
@@ -15,11 +16,15 @@ ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "\", \"content\": \"h
 ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "\"}"
 ToolCallStarted id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write input={"content":"hello","file_path":"/WORKSPACE/spike3.txt"}
 PermissionRequest id=5a656780-8efd-44dc-b6bb-fbbdc3aba39f ToolUse Write
+RateLimit status=allowed five_hour=29% seven_day=4%
 ToolCallResult id=toolu_013a1yYJFYShRFQFVWxvHdKQ error=false "File created successfully at: /WORKSPACE/spike3.txt (file..."
+Context used=26217 window=-
 TextDelta "created"
 Usage in=18 out=290 cache_read=37377 cache_write=11391 cost=0.0280 cumulative=false
+Context used=- window=200000
 TurnCompleted Done
 TurnStarted
+Context used=26328 window=-
 ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "{\"questions\": ["
 ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "\\n  {"
 ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "\\n    \"question\": \""
@@ -48,6 +53,8 @@ ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "}"
 ToolCallStarted id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion input={"questions":[{"header":"Color Preference","multiSelect":...
 PermissionRequest id=d2ab7e0a-0194-4759-b4bd-c56e431aabe5 Question n=1
 ToolCallResult id=toolu_01HGSw89Mvoo4czWcapLjTyN error=false "Your questions have been answered: \"Do you prefer red or ..."
+Context used=26592 window=-
 TextDelta "you chose Red"
-Usage in=18 out=273 cache_read=52527 cache_write=375 cost=0.0354 cumulative=false
+Usage in=18 out=273 cache_read=52527 cache_write=375 cost=0.0074 cumulative=false
+Context used=- window=200000
 TurnCompleted Done

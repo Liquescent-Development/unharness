@@ -18,8 +18,8 @@ use super::parse::AgyParser;
 use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, PermissionPolicy, ProcessModel, SessionCommand,
+    SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,7 +112,7 @@ pub fn start_stream(cfg: SessionConfig, transport: AgyTransport) -> Result<Sessi
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Agy,
+        harness: HarnessId::AGY,
         process_model: ProcessModel::LongLived,
     });
     tokio::spawn(drive(proc, cfg, transport, events_tx, cmd_rx));
@@ -160,7 +160,14 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::SendTurn { text } => {
+                    SessionCommand::Steer { .. }
+                    | SessionCommand::Compact { .. }
+                    | SessionCommand::Rewind { .. } => {
+                        let _ = events.send(AgentEvent::Error(
+                            "agy cannot steer, compact or rewind a session".into(),
+                        )).await;
+                    }
+                    SessionCommand::SendTurn { text, .. } => {
                         if restart_needed {
                             restart_needed = false;
                             proc.kill().await;
@@ -270,10 +277,15 @@ pub struct AgyPerTurn;
 
 impl PerTurnProtocol for AgyPerTurn {
     fn harness(&self) -> HarnessId {
-        HarnessId::Agy
+        HarnessId::AGY
     }
 
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+    fn build_turn(
+        &self,
+        state: &TurnState,
+        text: &str,
+        _attachments: &[Attachment],
+    ) -> Result<TurnSpec> {
         let mut command = Command::new(&state.binary);
         command.current_dir(&state.cwd);
         command.arg(format!("--print={text}"));
@@ -328,13 +340,14 @@ mod tests {
             binary: PathBuf::from("agy"),
             cwd: PathBuf::from("/tmp"),
             model: Some(ModelRef::new(
-                HarnessId::Agy,
+                HarnessId::AGY,
                 "google",
                 "gemini-3.8-flash-high",
             )),
             effort: Some("high".into()),
             policy: PermissionPolicy::AcceptEdits,
             resume: Some("conv-1".into()),
+            fork: false,
             extra_args: vec!["--add-dir".into(), "/x".into()],
             env: vec![],
         }
@@ -369,7 +382,7 @@ mod tests {
     #[test]
     fn per_turn_args() {
         let argv = |state: &TurnState| -> String {
-            let spec = AgyPerTurn.build_turn(state, "do it").unwrap();
+            let spec = AgyPerTurn.build_turn(state, "do it", &[]).unwrap();
             spec.command
                 .as_std()
                 .get_args()

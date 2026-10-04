@@ -14,15 +14,16 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 
 pub struct ClaudeHarness;
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Claude,
+    id: HarnessId::CLAUDE,
     display_name: "Claude Code (claude)",
+    short_name: "Claude",
     binary_names: &["claude"],
     providers: ProviderSource::Static(&[("anthropic", "Anthropic")]),
 };
@@ -93,6 +94,18 @@ impl Harness for ClaudeHarness {
             ask_user_question: true,
             interrupt: true,
             usage_reporting: true,
+            image_input: true,
+            plan_updates: true,
+            subagents: true,
+            steer: true,
+            compaction: true,
+            context_usage: true,
+            rate_limits: true,
+            rewind: RewindSupport {
+                conversation: true,
+                anchors_survive_fork: false,
+            },
+            fork: true,
         }
     }
 
@@ -114,7 +127,7 @@ impl Harness for ClaudeHarness {
         Ok(MODELS
             .iter()
             .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::Claude, "anthropic", *id),
+                model_ref: ModelRef::new(HarnessId::CLAUDE, "anthropic", *id),
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
@@ -206,7 +219,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("run tests".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "sonnet")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "sonnet")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Bypass),
             format: Some("stream-json".into()),

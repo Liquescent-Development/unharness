@@ -1,88 +1,90 @@
 //! Identifiers for the three-level model: Harness → Provider → Model.
 
+use std::collections::BTreeSet;
 use std::fmt;
-use std::str::FromStr;
+use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// A harness is the vendor CLI that runs the agent loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum HarnessId {
-    Agy,
-    Claude,
-    Codex,
-    Pi,
-}
+/// A harness is the CLI that runs the agent loop: one of the built-in
+/// adapters, or one defined in config (e.g. an ACP agent). Ids are interned
+/// lowercase names, so the type stays `Copy` and compares by value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HarnessId(&'static str);
 
 impl HarnessId {
-    /// Default resolution priority when no harness is requested or configured.
-    pub const ALL: [HarnessId; 4] = [
-        HarnessId::Agy,
-        HarnessId::Claude,
-        HarnessId::Codex,
-        HarnessId::Pi,
+    pub const AGY: HarnessId = HarnessId("agy");
+    pub const CLAUDE: HarnessId = HarnessId("claude");
+    pub const CODEX: HarnessId = HarnessId("codex");
+    pub const PI: HarnessId = HarnessId("pi");
+
+    /// The harnesses with a dedicated adapter, in default resolution order.
+    pub const BUILTIN: [HarnessId; 4] = [
+        HarnessId::AGY,
+        HarnessId::CLAUDE,
+        HarnessId::CODEX,
+        HarnessId::PI,
     ];
 
+    /// A built-in harness by name or alias. Config-defined harnesses are
+    /// resolved through the registry.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
-            "agy" | "antigravity" => Some(HarnessId::Agy),
-            "claude" | "claude-code" => Some(HarnessId::Claude),
-            "codex" => Some(HarnessId::Codex),
-            "pi" => Some(HarnessId::Pi),
+            "agy" | "antigravity" => Some(HarnessId::AGY),
+            "claude" | "claude-code" => Some(HarnessId::CLAUDE),
+            "codex" => Some(HarnessId::CODEX),
+            "pi" => Some(HarnessId::PI),
             _ => None,
         }
     }
 
+    /// The id for `name`, built-in or not. Names are few and live for the
+    /// whole run, so new ones are leaked once and reused.
+    pub fn intern(name: &str) -> Self {
+        let name = name.trim().to_lowercase();
+        if let Some(builtin) = HarnessId::BUILTIN.iter().find(|b| b.0 == name) {
+            return *builtin;
+        }
+        static NAMES: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
+        let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = names.get(name.as_str()) {
+            return HarnessId(existing);
+        }
+        let leaked: &'static str = Box::leak(name.into_boxed_str());
+        names.insert(leaked);
+        HarnessId(leaked)
+    }
+
     pub fn as_str(&self) -> &'static str {
-        match self {
-            HarnessId::Agy => "agy",
-            HarnessId::Claude => "claude",
-            HarnessId::Codex => "codex",
-            HarnessId::Pi => "pi",
-        }
-    }
-
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            HarnessId::Agy => "Antigravity (agy)",
-            HarnessId::Claude => "Claude Code (claude)",
-            HarnessId::Codex => "Codex (codex)",
-            HarnessId::Pi => "pi",
-        }
-    }
-
-    /// Short label for the TUI header.
-    pub fn short_name(&self) -> &'static str {
-        match self {
-            HarnessId::Agy => "Antigravity",
-            HarnessId::Claude => "Claude",
-            HarnessId::Codex => "Codex",
-            HarnessId::Pi => "pi",
-        }
+        self.0
     }
 }
 
 impl fmt::Display for HarnessId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        f.write_str(self.0)
     }
 }
 
-impl FromStr for HarnessId {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        HarnessId::parse(s).ok_or_else(|| {
-            format!(
-                "Unknown harness '{}'. Supported: {}",
-                s,
-                HarnessId::ALL
-                    .iter()
-                    .map(|h| h.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
+impl Serialize for HarnessId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HarnessId {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct IdVisitor;
+        impl serde::de::Visitor<'_> for IdVisitor {
+            type Value = HarnessId;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a harness name")
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<HarnessId, E> {
+                Ok(HarnessId::intern(v))
+            }
+        }
+        deserializer.deserialize_str(IdVisitor)
     }
 }
 
@@ -145,29 +147,51 @@ impl fmt::Display for ModelRef {
     }
 }
 
+/// A model a harness offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub model_ref: ModelRef,
+    pub display_name: String,
+    pub description: Option<String>,
+    /// Per-model effort levels when the harness reports them.
+    pub effort_levels: Option<Vec<String>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_aliases() {
-        assert_eq!(HarnessId::parse("agy"), Some(HarnessId::Agy));
-        assert_eq!(HarnessId::parse("Antigravity"), Some(HarnessId::Agy));
-        assert_eq!(HarnessId::parse("claude-code"), Some(HarnessId::Claude));
-        assert_eq!(HarnessId::parse("CODEX"), Some(HarnessId::Codex));
-        assert_eq!(HarnessId::parse("pi"), Some(HarnessId::Pi));
+        assert_eq!(HarnessId::parse("agy"), Some(HarnessId::AGY));
+        assert_eq!(HarnessId::parse("Antigravity"), Some(HarnessId::AGY));
+        assert_eq!(HarnessId::parse("claude-code"), Some(HarnessId::CLAUDE));
+        assert_eq!(HarnessId::parse("CODEX"), Some(HarnessId::CODEX));
+        assert_eq!(HarnessId::parse("pi"), Some(HarnessId::PI));
         assert_eq!(HarnessId::parse("gemini"), None);
-        assert!(
-            "gemini"
-                .parse::<HarnessId>()
-                .unwrap_err()
-                .contains("Supported")
-        );
+    }
+
+    #[test]
+    fn interned_ids_compare_by_name() {
+        assert_eq!(HarnessId::intern("Claude"), HarnessId::CLAUDE);
+        let a = HarnessId::intern("gemini");
+        let b = HarnessId::intern(" GEMINI ");
+        assert_eq!(a, b);
+        assert_eq!(a.as_str(), "gemini");
+        assert_ne!(a, HarnessId::intern("opencode"));
+        // A saved conversation naming a harness this build lacks still loads.
+        let back: HarnessId = serde_json::from_str("\"gemini\"").unwrap();
+        assert_eq!(back, a);
+        let map: std::collections::HashMap<HarnessId, u8> =
+            serde_json::from_str(r#"{"gemini":1,"pi":2}"#).unwrap();
+        assert_eq!(map[&a], 1);
+        assert_eq!(map[&HarnessId::PI], 2);
+        assert_eq!(serde_json::to_string(&HarnessId::PI).unwrap(), "\"pi\"");
     }
 
     #[test]
     fn serde_roundtrip() {
-        let m = ModelRef::new(HarnessId::Pi, "anthropic", "claude-sonnet-4-5");
+        let m = ModelRef::new(HarnessId::PI, "anthropic", "claude-sonnet-4-5");
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"harness\":\"pi\""));
         assert!(json.contains("\"provider\":\"anthropic\""));

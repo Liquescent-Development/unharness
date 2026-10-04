@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 use super::parse::PiParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
+    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -23,7 +23,13 @@ pub fn session_args(cfg: &SessionConfig) -> (Vec<String>, String) {
     let mut args = vec![
         "--mode".to_string(),
         "rpc".to_string(),
-        "--session-id".to_string(),
+        // `--fork` branches the named session into a new one, whose id pi
+        // reports in `get_state`.
+        if cfg.fork && cfg.resume.is_some() {
+            "--fork".to_string()
+        } else {
+            "--session-id".to_string()
+        },
         session_id.clone(),
     ];
     if let Some(m) = &cfg.model {
@@ -47,6 +53,32 @@ pub enum PendingKind {
     Confirm,
     Select,
     Input,
+}
+
+/// Whether `line` is pi's response to `command`.
+fn is_response_to(line: &str, command: &str) -> bool {
+    serde_json::from_str::<Value>(line).is_ok_and(|v| {
+        v.get("type").and_then(Value::as_str) == Some("response")
+            && v.get("command").and_then(Value::as_str) == Some(command)
+    })
+}
+
+/// A `prompt` or `steer` command; images are inlined as base64.
+pub fn encode_message(
+    kind: &str,
+    id: &str,
+    text: &str,
+    attachments: &[Attachment],
+) -> Result<String> {
+    let mut cmd = json!({"id": id, "type": kind, "message": text});
+    if !attachments.is_empty() {
+        let images = attachments
+            .iter()
+            .map(|a| Ok(json!({"type":"image","data": a.read_base64()?,"mimeType": a.mime()})))
+            .collect::<Result<Vec<Value>>>()?;
+        cmd["images"] = Value::Array(images);
+    }
+    Ok(cmd.to_string())
 }
 
 pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDecision) -> String {
@@ -75,16 +107,20 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     }
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Pi,
+        harness: HarnessId::PI,
         process_model: ProcessModel::LongLived,
     });
-    tokio::spawn(drive(proc, session_id, cfg.policy, events_tx, cmd_rx));
+    let resumed = cfg.resume.is_some();
+    tokio::spawn(drive(
+        proc, session_id, resumed, cfg.policy, events_tx, cmd_rx,
+    ));
     Ok(handle)
 }
 
 async fn drive(
     mut proc: LineProcess,
     session_id: String,
+    resumed: bool,
     mut policy: PermissionPolicy,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
@@ -97,10 +133,21 @@ async fn drive(
         format!("u{seq}")
     };
     let mut shutting_down = false;
+    // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
+    let mut forking = false;
+    let mut held_turn: Option<String> = None;
 
     let _ = proc
         .write_line(&json!({"id": next_id(), "type":"get_state"}).to_string())
         .await;
+    if resumed {
+        // Learn which user messages predate this run, so later listings
+        // can tell which one is new.
+        parser.expect_fork_baseline();
+        let _ = proc
+            .write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string())
+            .await;
+    }
 
     loop {
         tokio::select! {
@@ -109,9 +156,36 @@ async fn drive(
                     proc.kill().await;
                     break;
                 };
+                let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
                 let line = match cmd {
-                    SessionCommand::SendTurn { text } => {
-                        Some(json!({"id": next_id(), "type":"prompt","message": text}).to_string())
+                    SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error(e.to_string()),
+                            }).await;
+                            None
+                        }
+                    },
+                    SessionCommand::Steer { text, attachments } => match encode_message("steer", &next_id(), &text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
+                            None
+                        }
+                    },
+                    // `fork` branches a new session from before that message. It
+                    // is only in place once it answers, so turns wait for that.
+                    SessionCommand::Rewind { anchor } => {
+                        forking = true;
+                        Some(json!({"id": next_id(), "type":"fork","entryId": anchor}).to_string())
+                    }
+                    SessionCommand::Compact { instructions } => {
+                        let mut cmd = json!({"id": next_id(), "type":"compact"});
+                        if let Some(i) = instructions {
+                            cmd["customInstructions"] = json!(i);
+                        }
+                        Some(cmd.to_string())
                     }
                     SessionCommand::Interrupt => Some(json!({"id": next_id(), "type":"abort"}).to_string()),
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
@@ -126,6 +200,9 @@ async fn drive(
                             "id": next_id(), "type":"set_model",
                             "provider": m.provider.as_str(), "modelId": m.model
                         }).to_string()).await;
+                        // The new model may differ in thinking levels, context
+                        // window and image support.
+                        let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
                         Some(json!({"id": next_id(), "type":"get_available_thinking_levels"}).to_string())
                     }
                     SessionCommand::SetEffort(e) => Some(json!({
@@ -142,7 +219,9 @@ async fn drive(
                         None
                     }
                 };
-                if let Some(line) = line
+                if forking && is_turn {
+                    held_turn = line;
+                } else if let Some(line) = line
                     && let Err(e) = proc.write_line(&line).await
                 {
                     let _ = events.send(AgentEvent::Error(format!("pi: {e}"))).await;
@@ -151,6 +230,16 @@ async fn drive(
             raw = proc.lines.recv() => {
                 match raw {
                     Some(RawLine::Stdout(line)) => {
+                        if forking && is_response_to(&line, "fork") {
+                            // The fork is a new session: re-read its id and
+                            // message list, then send what was waiting.
+                            forking = false;
+                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
+                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
+                            if let Some(turn) = held_turn.take() {
+                                let _ = proc.write_line(&turn).await;
+                            }
+                        }
                         for ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let kind = match &req.kind {
@@ -172,6 +261,12 @@ async fn drive(
                                     continue;
                                 }
                                 pending.insert(req.id.clone(), kind);
+                            }
+                            // Context usage is only available on request.
+                            if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
+                                // The turn's user message now has an entry id to rewind to.
+                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
                             }
                             if events.send(ev).await.is_err() {
                                 proc.kill().await;
@@ -206,18 +301,39 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn prompt_inlines_images() {
+        // Shape confirmed by fixtures/image_turn.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jpg");
+        std::fs::write(&path, b"abc").unwrap();
+        let a = Attachment::image(&path).unwrap();
+        let v: Value =
+            serde_json::from_str(&encode_message("prompt", "u1", "hi", &[a]).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            json!({"id":"u1","type":"prompt","message":"hi",
+                   "images":[{"type":"image","data":"YWJj","mimeType":"image/jpeg"}]})
+        );
+        let v: Value =
+            serde_json::from_str(&encode_message("steer", "u2", "hi", &[]).unwrap()).unwrap();
+        assert!(v.get("images").is_none());
+        assert_eq!(v["type"], "steer");
+    }
+
+    #[test]
     fn session_args_shape() {
         let cfg = SessionConfig {
             binary: PathBuf::from("pi"),
             cwd: PathBuf::from("/tmp"),
             model: Some(ModelRef::new(
-                HarnessId::Pi,
+                HarnessId::PI,
                 "anthropic",
                 "claude-sonnet-4-5",
             )),
             effort: Some("high".into()),
             policy: PermissionPolicy::Ask,
             resume: None,
+            fork: false,
             extra_args: vec!["--no-extensions".into()],
             env: vec![],
         };
@@ -227,6 +343,20 @@ mod tests {
         assert!(s.contains("--provider anthropic --model claude-sonnet-4-5"));
         assert!(s.contains("--thinking high"));
         assert!(s.ends_with("--no-extensions"));
+
+        // Checked live: `--fork` branches the session into a new one whose
+        // id pi reports in get_state; entry ids are kept.
+        let fork = SessionConfig {
+            resume: Some("abc".into()),
+            fork: true,
+            ..cfg.clone()
+        };
+        assert!(
+            session_args(&fork)
+                .0
+                .join(" ")
+                .starts_with("--mode rpc --fork abc")
+        );
 
         let mut r = cfg.clone();
         r.resume = Some("abc".into());

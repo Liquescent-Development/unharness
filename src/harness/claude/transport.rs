@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
+    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -55,6 +55,7 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
         "stream-json",
         "--verbose",
         "--include-partial-messages",
+        "--forward-subagent-text",
         "--permission-prompts",
         "host",
         "--permission-prompt-tool",
@@ -76,6 +77,9 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
         Some(id) => {
             args.push("--resume".into());
             args.push(id.clone());
+            if cfg.fork {
+                args.push("--fork-session".into());
+            }
         }
         None => {
             args.push("--session-id".into());
@@ -89,6 +93,37 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
 
 pub fn user_message(text: &str) -> String {
     json!({"type":"user","message":{"role":"user","content":text}}).to_string()
+}
+
+/// A user turn; images ride along as base64 content blocks.
+pub fn user_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
+    if attachments.is_empty() {
+        return Ok(user_message(text));
+    }
+    let mut content = vec![json!({"type":"text","text":text})];
+    for a in attachments {
+        content.push(json!({
+            "type": "image",
+            "source": {"type":"base64","media_type": a.mime(),"data": a.read_base64()?},
+        }));
+    }
+    Ok(json!({"type":"user","message":{"role":"user","content":content}}).to_string())
+}
+
+/// A user turn tagged with a fresh uuid: `(uuid, line)`. `rewind_conversation`
+/// takes that uuid to drop the turn and everything after it.
+pub fn anchored_turn(text: &str, attachments: &[Attachment]) -> Result<(String, String)> {
+    let anchor = uuid::Uuid::new_v4().to_string();
+    let mut v: Value = serde_json::from_str(&user_turn(text, attachments)?)?;
+    v["uuid"] = json!(anchor);
+    Ok((anchor, v.to_string()))
+}
+
+/// A user message merged into the running turn once its tool calls finish.
+pub fn steer_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
+    let mut v: Value = serde_json::from_str(&user_turn(text, attachments)?)?;
+    v["priority"] = json!("next");
+    Ok(v.to_string())
 }
 
 pub fn control_request(subtype: &str, extra: Value) -> (String, String) {
@@ -170,7 +205,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
 
     let proc = LineProcess::spawn(cmd)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::Claude,
+        harness: HarnessId::CLAUDE,
         process_model: ProcessModel::LongLived,
     });
 
@@ -210,7 +245,34 @@ async fn drive(
                     break;
                 };
                 let line = match cmd {
-                    SessionCommand::SendTurn { text } => Some(user_message(&text)),
+                    // Each turn carries a uuid of ours, so it can be rewound to later.
+                    SessionCommand::SendTurn { text, attachments } => match anchored_turn(&text, &attachments) {
+                        Ok((anchor, line)) => {
+                            let _ = events.send(AgentEvent::TurnAnchor { id: anchor }).await;
+                            Some(line)
+                        }
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error(e.to_string()),
+                            }).await;
+                            None
+                        }
+                    },
+                    SessionCommand::Steer { text, attachments } => match steer_turn(&text, &attachments) {
+                        Ok(line) => Some(line),
+                        Err(e) => {
+                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
+                            None
+                        }
+                    },
+                    SessionCommand::Rewind { anchor } => Some(
+                        control_request("rewind_conversation", json!({"target_message_uuid": anchor})).1,
+                    ),
+                    // `-p` mode accepts the slash command as a message; it ends
+                    // with a `result`, like a turn.
+                    SessionCommand::Compact { instructions } => Some(user_message(
+                        format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
+                    )),
                     SessionCommand::Interrupt => Some(control_request("interrupt", json!({})).1),
                     SessionCommand::RespondPermission { id, decision } => {
                         match pending.remove(&id) {
@@ -313,10 +375,11 @@ mod tests {
         SessionConfig {
             binary: PathBuf::from("claude"),
             cwd: PathBuf::from("/tmp"),
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "opus")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "opus")),
             effort: Some("high".into()),
             policy,
             resume: None,
+            fork: false,
             extra_args: vec!["--bare".into()],
             env: vec![],
         }
@@ -326,7 +389,7 @@ mod tests {
     fn session_args_shape() {
         let a = session_args(&cfg(PermissionPolicy::Ask));
         let s = a.join(" ");
-        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompts host --permission-prompt-tool stdio"));
+        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text --permission-prompts host --permission-prompt-tool stdio"));
         assert!(s.contains("--model opus"));
         assert!(s.contains("--effort high"));
         assert!(s.contains("--session-id "));
@@ -389,6 +452,58 @@ mod tests {
         assert_eq!(v["type"], "control_response");
         assert_eq!(v["response"]["subtype"], "success");
         assert_eq!(v["response"]["request_id"], "r1");
+    }
+
+    #[test]
+    fn user_turn_inlines_images() {
+        // Shape confirmed by fixtures/image_turn.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.png");
+        std::fs::write(&path, b"abc").unwrap();
+        let a = Attachment::image(&path).unwrap();
+        let v: Value = serde_json::from_str(&user_turn("hi", &[a]).unwrap()).unwrap();
+        assert_eq!(
+            v["message"]["content"],
+            json!([
+                {"type":"text","text":"hi"},
+                {"type":"image","source":{"type":"base64","media_type":"image/png","data":"YWJj"}}
+            ])
+        );
+        assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
+        let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
+        assert!(user_turn("hi", &[gone]).is_err());
+    }
+
+    #[test]
+    fn fork_branches_the_resumed_session() {
+        // Checked live: the branch gets a new session id and keeps the history.
+        let mut cfg = cfg(PermissionPolicy::Ask);
+        cfg.resume = Some("abc".into());
+        cfg.fork = true;
+        let s = session_args(&cfg).join(" ");
+        assert!(s.contains("--resume abc --fork-session"));
+        cfg.fork = false;
+        assert!(!session_args(&cfg).join(" ").contains("--fork-session"));
+    }
+
+    #[test]
+    fn turns_carry_their_own_uuid() {
+        // Shape confirmed by fixtures/rewind.jsonl.
+        let (anchor, line) = anchored_turn("hi", &[]).unwrap();
+        let v: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["uuid"], anchor.as_str());
+        assert_eq!(v["message"]["content"], "hi");
+        assert_ne!(anchor, anchored_turn("hi", &[]).unwrap().0);
+    }
+
+    #[test]
+    fn steer_is_a_prioritised_user_message() {
+        // Shape confirmed by fixtures/steer_and_compact.jsonl.
+        let v: Value = serde_json::from_str(&steer_turn("more", &[]).unwrap()).unwrap();
+        assert_eq!(
+            v,
+            json!({"type":"user","message":{"role":"user","content":"more"},"priority":"next"})
+        );
     }
 
     #[test]

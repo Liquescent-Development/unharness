@@ -16,7 +16,9 @@ use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, StopReason};
 use super::ids::{HarnessId, ModelRef};
 use super::process::{LineProcess, RawLine};
-use super::session::{ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo};
+use super::session::{
+    Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+};
 
 /// Mutable per-session state a protocol needs to build the next turn.
 #[derive(Debug, Clone)]
@@ -50,7 +52,12 @@ pub trait TurnParser: Send {
 
 pub trait PerTurnProtocol: Send + Sync {
     fn harness(&self) -> HarnessId;
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec>;
+    fn build_turn(
+        &self,
+        state: &TurnState,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<TurnSpec>;
     fn new_parser(&self) -> Box<dyn TurnParser>;
 }
 
@@ -102,7 +109,14 @@ async fn drive(
                     return;
                 };
                 match cmd {
-                    SessionCommand::SendTurn { text } => {
+                    SessionCommand::Steer { .. }
+                    | SessionCommand::Compact { .. }
+                    | SessionCommand::Rewind { .. } => {
+                        let _ = events.send(AgentEvent::Error(
+                            "this harness cannot steer, compact or rewind a session".into(),
+                        )).await;
+                    }
+                    SessionCommand::SendTurn { text, attachments } => {
                         if current.is_some() {
                             if turn_completed {
                                 // The parser saw the turn end but the child has
@@ -117,7 +131,7 @@ async fn drive(
                                 continue;
                             }
                         }
-                        match protocol.build_turn(&state, &text) {
+                        match protocol.build_turn(&state, &text, &attachments) {
                             Ok(spec) => match LineProcess::spawn(spec.command) {
                                 Ok(mut proc) => {
                                     if let Some(input) = spec.stdin
@@ -233,9 +247,14 @@ mod tests {
     }
     impl PerTurnProtocol for Echo {
         fn harness(&self) -> HarnessId {
-            HarnessId::Codex
+            HarnessId::CODEX
         }
-        fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+        fn build_turn(
+            &self,
+            state: &TurnState,
+            text: &str,
+            _attachments: &[Attachment],
+        ) -> Result<TurnSpec> {
             let mut command = Command::new("sh");
             // Prints the resume id (if any), then echoes stdin.
             command.arg("-c").arg(format!(
@@ -263,6 +282,7 @@ mod tests {
             effort: None,
             policy: PermissionPolicy::Ask,
             resume: None,
+            fork: false,
             extra_args: vec![],
             env: vec![],
         }
@@ -287,9 +307,7 @@ mod tests {
     #[tokio::test]
     async fn two_turns_resume_by_captured_session_id() {
         let mut h = start(cfg(), Arc::new(Echo)).unwrap();
-        h.send(SessionCommand::SendTurn { text: "one".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("one")).await.unwrap();
         let t1 = collect_turn(&mut h).await;
         assert_eq!(t1[0], AgentEvent::TurnStarted);
         assert!(t1.contains(&AgentEvent::SessionStarted {
@@ -304,9 +322,7 @@ mod tests {
             })
         ));
 
-        h.send(SessionCommand::SendTurn { text: "two".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("two")).await.unwrap();
         let t2 = collect_turn(&mut h).await;
         assert!(t2.contains(&AgentEvent::TextDelta("resumed s1".into())));
 
@@ -320,9 +336,9 @@ mod tests {
         struct Sleeper;
         impl PerTurnProtocol for Sleeper {
             fn harness(&self) -> HarnessId {
-                HarnessId::Codex
+                HarnessId::CODEX
             }
-            fn build_turn(&self, _s: &TurnState, _t: &str) -> Result<TurnSpec> {
+            fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
                 let mut command = Command::new("sh");
                 command.arg("-c").arg("sleep 30");
                 Ok(TurnSpec {
@@ -335,9 +351,7 @@ mod tests {
             }
         }
         let mut h = start(cfg(), Arc::new(Sleeper)).unwrap();
-        h.send(SessionCommand::SendTurn { text: "x".into() })
-            .await
-            .unwrap();
+        h.send(SessionCommand::turn("x")).await.unwrap();
         assert_eq!(h.events.recv().await.unwrap(), AgentEvent::TurnStarted);
         h.send(SessionCommand::Interrupt).await.unwrap();
         let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())

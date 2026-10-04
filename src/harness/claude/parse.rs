@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
+use crate::core::{
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
+    RateLimitInfo, RateLimitWindow, StopReason, Usage,
+};
 
 #[derive(Debug, Default)]
 enum BlockAcc {
@@ -31,6 +34,11 @@ pub struct ClaudeParser {
     /// Message ids for which we saw streamed deltas (so `assistant` is a dup).
     streamed_messages: HashSet<String>,
     turn_started: bool,
+    /// `total_cost_usd` of the previous result; the field is a running total
+    /// for the process, so a turn's cost is the difference.
+    last_total_cost: f64,
+    /// Tasks created with `TaskCreate`, in creation order: (id, entry).
+    tasks: Vec<(String, PlanEntry)>,
 }
 
 impl ClaudeParser {
@@ -59,6 +67,10 @@ impl ClaudeParser {
     }
 
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        // Messages produced inside a subagent name the tool call that spawned it.
+        if let Some(parent) = val.get("parent_tool_use_id").and_then(Value::as_str) {
+            return self.feed_sub(parent, val);
+        }
         let mut out = Vec::new();
         match str_at(val, "type") {
             "system" => self.on_system(val, &mut out),
@@ -77,19 +89,62 @@ impl ClaudeParser {
                 if let Some(err) = val.pointer("/response/error").and_then(Value::as_str) {
                     out.push(AgentEvent::Error(format!("control error: {err}")));
                 }
+                // The answer to `rewind_conversation` is a "success" either
+                // way; `rewound` says whether it happened.
+                let answer = val.pointer("/response/response");
+                if answer
+                    .and_then(|a| a.get("rewound"))
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    out.push(AgentEvent::RewindFailed {
+                        reason: answer
+                            .and_then(|a| a.get("error"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("the session did not rewind")
+                            .to_string(),
+                    });
+                }
             }
             "rate_limit_event" => {
-                let status = val
-                    .pointer("/rate_limit_info/status")
+                let info = val.get("rate_limit_info").unwrap_or(&Value::Null);
+                let status = info
+                    .get("status")
                     .and_then(Value::as_str)
                     .unwrap_or("allowed");
                 if status != "allowed" {
                     out.push(AgentEvent::Notice(format!("rate limit: {status}")));
                 }
+                out.push(AgentEvent::RateLimit(RateLimitInfo {
+                    status: Some(status.to_string()),
+                    windows: rate_limit_windows(info),
+                }));
             }
             _ => {}
         }
         out
+    }
+
+    /// A subagent's message: same shapes as the main agent's, attributed to
+    /// `parent`, and never part of the main turn's bookkeeping.
+    fn feed_sub(&mut self, parent: &str, val: &Value) -> Vec<AgentEvent> {
+        let mut inner = Vec::new();
+        let turn_started = std::mem::replace(&mut self.turn_started, true);
+        match str_at(val, "type") {
+            "assistant" => self.on_assistant(val, &mut inner),
+            "user" => self.on_user(val, &mut inner),
+            // Partial subagent messages would clobber the main stream's
+            // block state; the complete message follows anyway.
+            _ => {}
+        }
+        self.turn_started = turn_started;
+        inner
+            .into_iter()
+            .map(|event| AgentEvent::Sub {
+                parent: parent.to_string(),
+                event: Box::new(event),
+            })
+            .collect()
     }
 
     fn on_system(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
@@ -139,6 +194,19 @@ impl ClaudeParser {
                 if !self.turn_started {
                     self.turn_started = true;
                     out.push(AgentEvent::TurnStarted);
+                }
+                // The prompt size of the latest request is how full the
+                // context is (subagent messages never reach this handler).
+                if let Some(usage) = event.pointer("/message/usage") {
+                    let used = u64_at(usage, "input_tokens")
+                        + u64_at(usage, "cache_read_input_tokens")
+                        + u64_at(usage, "cache_creation_input_tokens");
+                    if used > 0 {
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: Some(used),
+                            window: None,
+                        }));
+                    }
                 }
             }
             "content_block_start" => {
@@ -199,7 +267,9 @@ impl ClaudeParser {
                 {
                     let input =
                         serde_json::from_str(&json).unwrap_or(Value::Object(Default::default()));
+                    let plan = todo_write_plan(&name, &input);
                     out.push(AgentEvent::ToolCallStarted { id, name, input });
+                    out.extend(plan);
                 }
             }
             _ => {} // message_delta, message_stop
@@ -226,11 +296,11 @@ impl ClaudeParser {
                 "tool_use" => {
                     let id = str_at(block, "id").to_string();
                     if self.seen_tool_ids.insert(id.clone()) {
-                        out.push(AgentEvent::ToolCallStarted {
-                            id,
-                            name: str_at(block, "name").to_string(),
-                            input: block.get("input").cloned().unwrap_or(Value::Null),
-                        });
+                        let name = str_at(block, "name").to_string();
+                        let input = block.get("input").cloned().unwrap_or(Value::Null);
+                        let plan = todo_write_plan(&name, &input);
+                        out.push(AgentEvent::ToolCallStarted { id, name, input });
+                        out.extend(plan);
                     }
                 }
                 "text" if !streamed => {
@@ -267,18 +337,73 @@ impl ClaudeParser {
                     .unwrap_or(false),
             });
         }
+        if let Some(result) = val.get("tool_use_result")
+            && self.apply_task_result(result)
+        {
+            out.push(AgentEvent::PlanUpdated {
+                entries: self.tasks.iter().map(|(_, e)| e.clone()).collect(),
+                explanation: None,
+            });
+        }
+    }
+
+    /// Track `TaskCreate` / `TaskUpdate` results; true when the task list changed.
+    fn apply_task_result(&mut self, result: &Value) -> bool {
+        if let Some(task) = result.get("task")
+            && let Some(id) = task.get("id").and_then(Value::as_str)
+        {
+            self.tasks.push((
+                id.to_string(),
+                PlanEntry {
+                    text: str_at(task, "subject").to_string(),
+                    status: PlanStatus::Pending,
+                },
+            ));
+            return true;
+        }
+        let (Some(id), Some(to)) = (
+            result.get("taskId").and_then(Value::as_str),
+            result.pointer("/statusChange/to").and_then(Value::as_str),
+        ) else {
+            return false;
+        };
+        if to == "deleted" {
+            let before = self.tasks.len();
+            self.tasks.retain(|(tid, _)| tid != id);
+            return self.tasks.len() != before;
+        }
+        match self.tasks.iter_mut().find(|(tid, _)| tid == id) {
+            Some((_, entry)) => {
+                entry.status = PlanStatus::parse(to);
+                true
+            }
+            None => false,
+        }
     }
 
     fn on_result(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let cost_usd = val.get("total_cost_usd").and_then(Value::as_f64).map(|t| {
+            let turn = (t - self.last_total_cost).max(0.0);
+            self.last_total_cost = t;
+            turn
+        });
         if let Some(usage) = val.get("usage") {
             out.push(AgentEvent::Usage(Usage {
                 input: u64_at(usage, "input_tokens"),
                 output: u64_at(usage, "output_tokens"),
                 cache_read: u64_at(usage, "cache_read_input_tokens"),
                 cache_write: u64_at(usage, "cache_creation_input_tokens"),
-                cost_usd: val.get("total_cost_usd").and_then(Value::as_f64),
+                cost_usd,
                 cumulative: false,
             }));
+        }
+        let window = val
+            .get("modelUsage")
+            .and_then(Value::as_object)
+            .and_then(|m| m.values().map(|u| u64_at(u, "contextWindow")).max())
+            .filter(|w| *w > 0);
+        if window.is_some() {
+            out.push(AgentEvent::Context(ContextUsage { used: None, window }));
         }
         if let Some(denials) = val.get("permission_denials").and_then(Value::as_array)
             && !denials.is_empty()
@@ -425,6 +550,46 @@ fn u64_at(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// `TodoWrite` carries the whole list in its input.
+fn todo_write_plan(name: &str, input: &Value) -> Option<AgentEvent> {
+    if name != "TodoWrite" {
+        return None;
+    }
+    let entries = input
+        .get("todos")?
+        .as_array()?
+        .iter()
+        .map(|t| PlanEntry {
+            text: str_at(t, "content").to_string(),
+            status: PlanStatus::parse(str_at(t, "status")),
+        })
+        .collect();
+    Some(AgentEvent::PlanUpdated {
+        entries,
+        explanation: None,
+    })
+}
+
+/// `unifiedWindows` lists every window; older builds only report the active one.
+fn rate_limit_windows(info: &Value) -> Vec<RateLimitWindow> {
+    let window = |label: &str, w: &Value| RateLimitWindow {
+        label: label.to_string(),
+        used_percent: w
+            .get("utilization")
+            .and_then(Value::as_f64)
+            .map(|u| (u * 100.0) as f32),
+        resets_at: w.get("resetsAt").and_then(Value::as_i64),
+    };
+    match info.get("unifiedWindows").and_then(Value::as_object) {
+        Some(windows) => windows.iter().map(|(k, w)| window(k, w)).collect(),
+        None => info
+            .get("rateLimitType")
+            .and_then(Value::as_str)
+            .map(|label| vec![window(label, info)])
+            .unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +616,56 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_rewind() {
+        fixture("rewind");
+    }
+
+    #[test]
+    fn fixture_subagent() {
+        fixture("subagent");
+    }
+
+    #[test]
+    fn fixture_steer_and_compact() {
+        fixture("steer_and_compact");
+    }
+
+    #[test]
+    fn fixture_image_turn() {
+        fixture("image_turn");
+    }
+
+    #[test]
+    fn fixture_task_list() {
+        fixture("task_list");
+    }
+
+    #[test]
+    fn a_rewind_that_did_not_happen_is_reported() {
+        // Seen live when the target uuid belongs to the session a fork came from.
+        let mut p = ClaudeParser::new();
+        let evs = p.feed(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"r","response":{"rewound":false,"prefillText":null,"precedingAssistantUuid":null,"error":"stale target","reason":"stale_target"}}}"#,
+        );
+        assert_eq!(
+            evs,
+            vec![AgentEvent::RewindFailed {
+                reason: "stale target".into()
+            }]
+        );
+        assert!(p.feed(r#"{"type":"control_response","response":{"subtype":"success","request_id":"r","response":{"rewound":true}}}"#).is_empty());
+    }
+
+    #[test]
+    fn todo_write_replaces_the_plan() {
+        let mut p = ClaudeParser::new();
+        let evs = p.feed(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"t1","name":"TodoWrite","input":{"todos":[{"content":"a","status":"completed","activeForm":"A"},{"content":"b","status":"in_progress","activeForm":"B"}]}}]}}"#,
+        );
+        assert_eq!(evs.last().unwrap().summary(), "PlanUpdated [x] a; [~] b");
     }
 
     #[test]

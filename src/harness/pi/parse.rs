@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, StopReason, Usage};
+use crate::core::{
+    AgentEvent, CapsUpdate, ContextUsage, PermissionKind, PermissionRequest, StopReason, Usage,
+};
 
 #[derive(Debug, Default)]
 pub struct PiParser {
@@ -14,14 +16,27 @@ pub struct PiParser {
     /// Tool-call names by id, from `toolcall_start`.
     tool_names: HashMap<String, String>,
     announced_tools: HashSet<String>,
+    /// Latest `partialResult` text per running tool call.
+    partial_output: HashMap<String, String>,
+    /// User messages already seen in `get_fork_messages`; `None` until the
+    /// first listing of a session, which only sets the baseline.
+    fork_messages_seen: Option<usize>,
 }
 
 impl PiParser {
     pub fn new(session_id: Option<String>) -> Self {
         PiParser {
             session_id,
+            // A new session has no user messages yet.
+            fork_messages_seen: Some(0),
             ..Default::default()
         }
+    }
+
+    /// The session already has history (it was resumed): the next
+    /// `get_fork_messages` listing is a baseline, not a finished turn.
+    pub fn expect_fork_baseline(&mut self) {
+        self.fork_messages_seen = None;
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -71,7 +86,24 @@ impl PiParser {
                     });
                 }
             }
+            "tool_execution_update" => {
+                // `partialResult` is a snapshot; forward only what extends the
+                // previous one (the final result replaces it anyway).
+                let id = s(v, "toolCallId").to_string();
+                let text = flatten_result(v.get("partialResult"));
+                let seen = self.partial_output.entry(id.clone()).or_default();
+                if text.len() > seen.len() && text.starts_with(seen.as_str()) {
+                    let delta = text[seen.len()..].to_string();
+                    *seen = text;
+                    out.push(AgentEvent::ToolCallDelta {
+                        id,
+                        name: s(v, "toolName").to_string(),
+                        delta,
+                    });
+                }
+            }
             "tool_execution_end" => {
+                self.partial_output.remove(s(v, "toolCallId"));
                 out.push(AgentEvent::ToolCallResult {
                     id: s(v, "toolCallId").to_string(),
                     output: flatten_result(v.get("result")),
@@ -103,9 +135,16 @@ impl PiParser {
             "compaction_start" => out.push(AgentEvent::Notice("compacting context…".into())),
             "compaction_end" => {
                 if let Some(msg) = v.get("errorMessage").and_then(Value::as_str) {
-                    out.push(AgentEvent::Error(format!("compaction failed: {msg}")));
+                    out.push(AgentEvent::Error(msg.to_string()));
                 } else {
                     out.push(AgentEvent::Notice("context compacted".into()));
+                }
+                // A requested compaction is its own unit of work; automatic
+                // ones happen inside a turn that ends by itself.
+                if s(v, "reason") == "manual" {
+                    out.push(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Done,
+                    });
                 }
             }
             "thinking_level_changed" => out.push(AgentEvent::Notice(format!(
@@ -254,6 +293,16 @@ impl PiParser {
                 command,
                 s(v, "error")
             )));
+            if command == "fork" {
+                out.pop();
+                out.push(AgentEvent::RewindFailed {
+                    reason: s(v, "error").to_string(),
+                });
+            }
+            // compaction_end already reported the failure and closed the unit.
+            if command == "compact" {
+                out.pop();
+            }
             if command == "prompt" {
                 self.turn_started = false;
                 out.push(AgentEvent::TurnCompleted {
@@ -280,16 +329,67 @@ impl PiParser {
                             .map(str::to_string),
                     });
                 }
+                if let Some(model) = data.get("model").filter(|m| m.is_object()) {
+                    if let Some(window) = model.get("contextWindow").and_then(Value::as_u64) {
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: None,
+                            window: Some(window),
+                        }));
+                    }
+                    if let Some(inputs) = model.get("input").and_then(Value::as_array) {
+                        out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                            image_input: Some(inputs.iter().any(|i| i == "image")),
+                            ..Default::default()
+                        }));
+                    }
+                }
+            }
+            // The first user message that is new since the last listing is the
+            // turn that just ran (steering messages come after it).
+            "get_fork_messages" => {
+                let messages = v
+                    .pointer("/data/messages")
+                    .and_then(Value::as_array)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                if let Some(seen) = self.fork_messages_seen
+                    && let Some(id) = messages
+                        .get(seen)
+                        .and_then(|m| m.get("entryId"))
+                        .and_then(Value::as_str)
+                {
+                    out.push(AgentEvent::TurnAnchor { id: id.to_string() });
+                }
+                self.fork_messages_seen = Some(messages.len());
+            }
+            // The fork is a new session: the listing that follows is its baseline.
+            "fork" => {
+                // An extension can veto a fork.
+                if v.pointer("/data/cancelled").and_then(Value::as_bool) == Some(true) {
+                    out.push(AgentEvent::RewindFailed {
+                        reason: "the fork was cancelled by a pi extension".into(),
+                    });
+                } else {
+                    self.fork_messages_seen = None;
+                }
+            }
+            "get_session_stats" => {
+                if let Some(c) = v.pointer("/data/contextUsage") {
+                    out.push(AgentEvent::Context(ContextUsage {
+                        used: c.get("tokens").and_then(Value::as_u64),
+                        window: c.get("contextWindow").and_then(Value::as_u64),
+                    }));
+                }
             }
             "get_available_thinking_levels" => {
                 if let Some(levels) = v.pointer("/data/levels").and_then(Value::as_array) {
-                    out.push(AgentEvent::CapabilitiesChanged {
-                        effort_levels: levels
+                    out.push(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(
+                        levels
                             .iter()
                             .filter_map(Value::as_str)
                             .map(str::to_string)
                             .collect(),
-                    });
+                    )));
                 }
             }
             "set_model" => {
@@ -343,6 +443,42 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             PiParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_rewind() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "rewind",
+        );
+    }
+
+    #[test]
+    fn fixture_steer_and_compact() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "steer_and_compact",
+        );
+    }
+
+    #[test]
+    fn fixture_image_turn() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "image_turn",
+        );
+    }
+
+    #[test]
+    fn fixture_session_stats() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "session_stats",
+        );
     }
 
     #[test]

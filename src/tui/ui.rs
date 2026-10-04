@@ -17,18 +17,26 @@ use super::code::{
 use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
-use crate::core::{HarnessId, PermissionKind, PermissionPolicy};
+use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     let warning = app.policy_warning();
     let bottom_height = 1 + 1 + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
+    let pinned = pinned_lines(app);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(bottom_height as u16)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(pinned.len() as u16),
+            Constraint::Length(bottom_height as u16),
+        ])
         .split(frame.area());
 
     render_transcript(frame, app, chunks[0]);
-    let prompt_row = render_bottom(frame, app, chunks[1], warning.as_deref());
+    if !pinned.is_empty() {
+        frame.render_widget(Paragraph::new(pinned), chunks[1]);
+    }
+    let prompt_row = render_bottom(frame, app, chunks[2], warning.as_deref());
 
     if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, prompt_row);
@@ -38,12 +46,82 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
+/// Most queued prompts shown above the prompt.
+const QUEUE_ROWS: usize = 3;
+
+/// Most plan rows shown above the prompt; the rest are summarised.
+const PLAN_ROWS: usize = 6;
+
+/// Lines pinned between the transcript and the prompt.
+fn pinned_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    if app.show_plan && !app.plan.is_empty() {
+        // When the plan is long, start at the first unfinished step.
+        let first_open = app
+            .plan
+            .iter()
+            .position(|e| e.status != PlanStatus::Completed)
+            .unwrap_or(0);
+        let start = if app.plan.len() > PLAN_ROWS {
+            first_open.min(app.plan.len() - PLAN_ROWS)
+        } else {
+            0
+        };
+        let done = app
+            .plan
+            .iter()
+            .filter(|e| e.status == PlanStatus::Completed)
+            .count();
+        lines.push(Line::from(Span::styled(
+            format!("  Plan · {done}/{} done", app.plan.len()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        for entry in app.plan.iter().skip(start).take(PLAN_ROWS) {
+            let style = match entry.status {
+                PlanStatus::Completed => Style::default().fg(Color::DarkGray),
+                PlanStatus::InProgress => Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                PlanStatus::Pending => Style::default(),
+            };
+            lines.push(Line::from(Span::styled(
+                format!("  {} {}", entry.status.marker(), sanitize(&entry.text)),
+                style,
+            )));
+        }
+    }
+    for (i, q) in app.queued.iter().enumerate() {
+        if i == QUEUE_ROWS {
+            lines.push(Line::from(Span::styled(
+                format!("  … {} more queued", app.queued.len() - QUEUE_ROWS),
+                Style::default().fg(Color::DarkGray),
+            )));
+            break;
+        }
+        let first_line = q.text.lines().next().unwrap_or("");
+        lines.push(Line::from(Span::styled(
+            format!("  Queued: {}", sanitize(&truncate_chars(first_line, 90))),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if !app.attachments.is_empty() {
+        let names: Vec<String> = app.attachments.iter().map(|a| a.label()).collect();
+        lines.push(Line::from(Span::styled(
+            format!("  Attached: {}", sanitize(&names.join(", "))),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    lines
+}
+
 fn harness_color(id: HarnessId) -> Color {
     match id {
-        HarnessId::Agy => Color::Cyan,
-        HarnessId::Claude => Color::Magenta,
-        HarnessId::Codex => Color::Green,
-        HarnessId::Pi => Color::Yellow,
+        HarnessId::AGY => Color::Cyan,
+        HarnessId::CLAUDE => Color::Magenta,
+        HarnessId::CODEX => Color::Green,
+        HarnessId::PI => Color::Yellow,
+        // Config-defined harnesses share one colour.
+        _ => Color::Blue,
     }
 }
 
@@ -155,6 +233,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 done,
                 collapsed,
                 duration,
+                parent,
                 ..
             } => {
                 let status = if !*done {
@@ -176,7 +255,15 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 let head_width = width.saturating_sub(name.len() + 18).max(10);
                 let mut summary_lines = wrap_words(&summary, head_width).into_iter();
                 let mut first = vec![
-                    Span::styled("  ⚡ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        // Calls made inside a subagent hang off their spawner.
+                        if parent.is_some() {
+                            "    ↳ "
+                        } else {
+                            "  ⚡ "
+                        },
+                        Style::default().fg(Color::Yellow),
+                    ),
                     Span::styled(
                         name.clone(),
                         Style::default()
@@ -446,7 +533,7 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     };
     let right1 = Line::from(vec![
         Span::styled(
-            format!("[{}] ", app.active.short_name()),
+            format!("[{}] ", app.short_name()),
             Style::default()
                 .fg(harness_color(app.active))
                 .add_modifier(Modifier::BOLD),
@@ -474,6 +561,9 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     );
     if let Some(c) = s.cost_usd {
         usage.push_str(&format!(" · ${c:.2}"));
+    }
+    if let Some(pct) = app.context.percent() {
+        usage.push_str(&format!(" · ctx {pct}%"));
     }
     let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
     let right2 = Line::from(Span::styled(
@@ -704,7 +794,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         Modal::Model(p) => (
             centered_rect(80, 60, area),
             modal_block(
-                format!(" Model for {} ({NAV}) ", app.active.short_name()),
+                format!(" Model for {} ({NAV}) ", app.short_name()),
                 Color::Magenta,
             ),
             picker_lines(p, Color::Magenta, |m| {
@@ -735,7 +825,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ),
         Modal::Policy(p) => {
-            let caps = app.harness().capabilities();
+            let caps = app.caps();
             (
                 centered_rect(80, 50, area),
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
@@ -771,6 +861,28 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                         truncate_chars(&r.title, 50)
                     ),
                     r.id == app.conversation.id,
+                )
+            }),
+        ),
+        Modal::Rewind(p) => (
+            centered_rect(85, 60, area),
+            modal_block(
+                format!(" Rewind to before… ({NAV} · f = also restore files) "),
+                Color::Blue,
+            ),
+            picker_lines(p, Color::Blue, |r| {
+                (
+                    truncate_chars(r.text.lines().next().unwrap_or(""), 60),
+                    format!(
+                        "{}{}",
+                        if r.native {
+                            "session rewound"
+                        } else {
+                            "fresh session, context re-sent"
+                        },
+                        if r.files { " · files: f" } else { "" }
+                    ),
+                    false,
                 )
             }),
         ),
@@ -1045,7 +1157,7 @@ mod tests {
 
     #[test]
     fn bottom_cluster_layout() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello".into());
         app.take_actions();
         app.on_event(crate::core::AgentEvent::TextDelta("hi there".into()));
@@ -1119,8 +1231,53 @@ mod tests {
     }
 
     #[test]
+    fn plan_and_context_are_shown() {
+        use crate::core::{AgentEvent, ContextUsage, PlanEntry, PlanStatus};
+        let mut app = test_app(HarnessId::CLAUDE);
+        let entries = (0..9)
+            .map(|i| PlanEntry {
+                text: format!("step {i}"),
+                status: if i < 5 {
+                    PlanStatus::Completed
+                } else {
+                    PlanStatus::Pending
+                },
+            })
+            .collect();
+        app.on_event(AgentEvent::PlanUpdated {
+            entries,
+            explanation: None,
+        });
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(50_000),
+            window: Some(200_000),
+        }));
+        let screen = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            term.draw(|f| render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..30)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let text = screen(&mut app);
+        assert!(text.contains("Plan · 5/9 done"));
+        // Long plans scroll to the unfinished part.
+        assert!(!text.contains("step 2") && text.contains("[ ] step 8"));
+        assert!(text.contains("ctx 25%"));
+
+        app.handle_slash_command("/plan");
+        assert!(!screen(&mut app).contains("Plan ·"));
+    }
+
+    #[test]
     fn renders_without_panicking_in_every_modal() {
-        let mut app = test_app(HarnessId::Claude);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("hello **world**".into());
         app.take_actions();
         app.on_event(crate::core::AgentEvent::ThinkingDelta("hmm".into()));

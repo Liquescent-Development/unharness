@@ -5,7 +5,7 @@ use tokio::process::Command;
 
 use super::exec_parse::CodexExecParser;
 use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
-use crate::core::{AgentEvent, HarnessId, PermissionPolicy};
+use crate::core::{AgentEvent, Attachment, HarnessId, PermissionPolicy};
 
 pub struct CodexExec;
 
@@ -37,18 +37,31 @@ pub fn policy_config_overrides(policy: PermissionPolicy) -> Vec<String> {
     }
 }
 
+/// `-i <FILE>...` accepts several values, so callers must put a flag after it.
+fn image_args(command: &mut Command, attachments: &[Attachment]) {
+    for a in attachments {
+        command.arg("-i").arg(a.path());
+    }
+}
+
 impl PerTurnProtocol for CodexExec {
     fn harness(&self) -> HarnessId {
-        HarnessId::Codex
+        HarnessId::CODEX
     }
 
-    fn build_turn(&self, state: &TurnState, text: &str) -> Result<TurnSpec> {
+    fn build_turn(
+        &self,
+        state: &TurnState,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<TurnSpec> {
         let mut command = Command::new(&state.binary);
         command.current_dir(&state.cwd);
         command.arg("exec");
         match &state.session_id {
             Some(id) => {
                 command.arg("resume").arg(id);
+                image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
                 for o in policy_config_overrides(state.policy) {
                     command.arg("-c").arg(o);
@@ -58,6 +71,7 @@ impl PerTurnProtocol for CodexExec {
                 }
             }
             None => {
+                image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
                 command.arg("-C").arg(&state.cwd);
                 command.args(policy_args(state.policy));
@@ -108,7 +122,7 @@ mod tests {
         TurnState {
             binary: PathBuf::from("/bin/codex"),
             cwd: PathBuf::from("/work"),
-            model: Some(ModelRef::new(HarnessId::Codex, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
             effort: Some("high".into()),
             policy,
             session_id: session_id.map(str::to_string),
@@ -128,9 +142,26 @@ mod tests {
     }
 
     #[test]
+    fn images_are_passed_before_a_flag() {
+        let a = Attachment::image("/w/a.png").unwrap();
+        let spec = CodexExec
+            .build_turn(&state(PermissionPolicy::Auto, None), "p", &[a])
+            .unwrap();
+        let args: Vec<String> = spec
+            .command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let i = args.iter().position(|a| a == "-i").unwrap();
+        assert_eq!(args[i + 1], "/w/a.png");
+        assert!(args[i + 2].starts_with("--"));
+    }
+
+    #[test]
     fn first_turn_uses_sandbox_flags() {
         let spec = CodexExec
-            .build_turn(&state(PermissionPolicy::Auto, None), "p")
+            .build_turn(&state(PermissionPolicy::Auto, None), "p", &[])
             .unwrap();
         assert_eq!(
             argv(&spec),
@@ -142,7 +173,7 @@ mod tests {
     #[test]
     fn resume_uses_config_overrides() {
         let spec = CodexExec
-            .build_turn(&state(PermissionPolicy::Bypass, Some("t1")), "p")
+            .build_turn(&state(PermissionPolicy::Bypass, Some("t1")), "p", &[])
             .unwrap();
         let a = argv(&spec);
         assert!(a.starts_with("exec resume t1 --json --skip-git-repo-check -c sandbox_mode=\"danger-full-access\" -c approval_policy=\"never\" --dangerously-bypass-approvals-and-sandbox"));

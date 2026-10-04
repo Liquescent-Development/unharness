@@ -1,0 +1,10 @@
+Error "Herdr A2A unavailable: client session readiness timed out"
+SessionStarted id=01a103bf-f52f-73fa-b232-d0f881c2c7bb model=gpt-5.6-sol
+Context used=- window=272000
+CapabilitiesChanged image_input=true
+CapabilitiesChanged efforts=off,minimal,low,medium,high,xhigh,max
+TurnStarted
+TextDelta "pong"
+Usage in=5096 out=22 cache_read=0 cache_write=0 cost=0.0208 cumulative=false
+TurnCompleted Done
+Context used=5118 window=272000

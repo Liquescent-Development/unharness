@@ -23,6 +23,8 @@ def redact(line: str, cwd: str) -> str:
     if home:
         line = line.replace(home, "/HOME")
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
+    line = re.sub(r'"serverName":"[^"]*"', '"serverName":"user"', line)
+    line = re.sub(r'"installationId":"[^"]*"', '"installationId":"REDACTED"', line)
     return line
 
 
@@ -34,6 +36,12 @@ def main() -> int:
     ap.add_argument("--sandbox", default="read-only")
     ap.add_argument("--model")
     ap.add_argument("--idle-timeout", type=float, default=180.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--fork-thread", help="branch this existing thread (thread/fork) instead of starting one")
+    ap.add_argument("--rewind", action="store_true",
+                    help="after the second prompt, rewind to before it, then send the remaining prompts")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -86,6 +94,12 @@ def main() -> int:
     prompts = list(args.prompts)
     phase = "init"
     models_id = None
+    turn_id = None
+    steered = False
+    compact_id = None
+    turn_ids = []
+    revert_id = None
+    rewound = False
 
     last = time.time()
     while proc.poll() is None:
@@ -123,10 +137,13 @@ def main() -> int:
         if rid is not None and "method" not in obj:
             if rid == init_id:
                 notify("initialized")
-                params = {"cwd": cwd, "approvalPolicy": args.approval, "sandbox": args.sandbox}
-                if args.model:
-                    params["model"] = args.model
-                pending_start = request("thread/start", params)
+                if args.fork_thread:
+                    pending_start = request("thread/fork", {"threadId": args.fork_thread, "excludeTurns": True})
+                else:
+                    params = {"cwd": cwd, "approvalPolicy": args.approval, "sandbox": args.sandbox}
+                    if args.model:
+                        params["model"] = args.model
+                    pending_start = request("thread/start", params)
                 phase = "thread"
             elif rid == pending_start:
                 result = obj.get("result") or {}
@@ -135,17 +152,44 @@ def main() -> int:
                     sys.stderr.write(f"[thread/start failed] {json.dumps(obj)[:300]}\n")
                     proc.stdin.close()
                     break
-                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+                items = [{"type": "text", "text": prompts.pop(0)}]
+                if args.image:
+                    items.append({"type": "localImage", "path": os.path.abspath(args.image)})
+                request("turn/start", {"threadId": thread_id, "input": items})
                 phase = "turn"
             elif rid == models_id:
                 proc.stdin.close()
                 break
+            elif rid == revert_id:
+                revert_id = None
+                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
             continue
 
+        params = obj.get("params") or {}
+        if method == "turn/started" and params.get("threadId") == thread_id:
+            turn_id = (params.get("turn") or {}).get("id")
+            if compact_id is None:
+                turn_ids.append(turn_id)
+        if (args.steer and not steered and method == "item/started"
+                and (params.get("item") or {}).get("type") == "commandExecution"):
+            steered = True
+            request("turn/steer", {"threadId": thread_id, "expectedTurnId": turn_id,
+                                   "input": [{"type": "text", "text": args.steer}]})
+
         # Notifications.
+        # Sub-agent threads report on the same stream; only the main thread's
+        # turn ends ours.
+        if method == "turn/completed" and params.get("threadId") != thread_id:
+            continue
         if method == "turn/completed":
-            if prompts:
+            if args.rewind and len(turn_ids) == 2 and prompts and not rewound:
+                rewound = True
+                revert_id = request("thread/revert", {"threadId": thread_id, "beforeTurnId": turn_ids[1]})
+            elif prompts:
                 request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+            elif args.compact and compact_id is None:
+                # Compaction runs as a turn of its own and ends with turn/completed.
+                compact_id = request("thread/compact/start", {"threadId": thread_id})
             else:
                 models_id = request("model/list", {})
         elif method == "error":

@@ -44,6 +44,11 @@ def main() -> int:
     ap.add_argument("--no-initialize", action="store_true")
     ap.add_argument("--extra", default="", help="extra CLI args (space separated)")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
+    ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--rewind", action="store_true",
+                    help="after the second prompt, rewind to before it, then send the remaining prompts")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -85,8 +90,33 @@ def main() -> int:
               "request": {"subtype": "initialize"}})
 
     prompts = list(args.prompts)
-    send({"type": "user", "message": {"role": "user", "content": prompts.pop(0)}})
+    first = prompts.pop(0)
+    if args.image:
+        import base64
+        import mimetypes
+        with open(args.image, "rb") as f:
+            data = base64.b64encode(f.read()).decode()
+        first = [
+            {"type": "text", "text": first},
+            {"type": "image", "source": {
+                "type": "base64",
+                "media_type": mimetypes.guess_type(args.image)[0] or "image/png",
+                "data": data,
+            }},
+        ]
+    turn_ids = []
 
+    def send_turn(content):
+        # Each turn carries a uuid of ours; rewind_conversation targets it.
+        turn_ids.append(str(uuid.uuid4()))
+        send({"type": "user", "uuid": turn_ids[-1], "message": {"role": "user", "content": content}})
+
+    send_turn(first)
+
+    rewind_id = None
+    steered = False
+    compacted = False
+    rewound = False
     last_activity = time.time()
     while True:
         if proc.poll() is not None:
@@ -105,6 +135,10 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
+        if (args.steer and not steered and t == "assistant"
+                and any(b.get("type") == "tool_use" for b in obj.get("message", {}).get("content", []))):
+            steered = True
+            send({"type": "user", "message": {"role": "user", "content": args.steer}, "priority": "next"})
         if t == "control_request":
             req = obj.get("request", {})
             rid = obj.get("request_id")
@@ -126,9 +160,20 @@ def main() -> int:
                       "response": {"subtype": "success", "request_id": rid, "response": resp}})
             else:
                 sys.stderr.write(f"[control_request] {json.dumps(req)[:200]}\n")
+        elif t == "control_response" and rewind_id and obj.get("response", {}).get("request_id") == rewind_id:
+            rewind_id = None
+            send_turn(prompts.pop(0))
         elif t == "result":
-            if prompts:
-                send({"type": "user", "message": {"role": "user", "content": prompts.pop(0)}})
+            if args.rewind and len(turn_ids) == 2 and prompts and not rewound:
+                rewound = True
+                rewind_id = str(uuid.uuid4())
+                send({"type": "control_request", "request_id": rewind_id,
+                      "request": {"subtype": "rewind_conversation", "target_message_uuid": turn_ids[1]}})
+            elif prompts:
+                send_turn(prompts.pop(0))
+            elif args.compact and not compacted:
+                compacted = True
+                send({"type": "user", "message": {"role": "user", "content": "/compact"}})
             else:
                 proc.stdin.close()
                 # drain remaining output

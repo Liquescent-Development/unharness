@@ -18,8 +18,8 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 pub use transport::AgyTransport;
 
@@ -42,8 +42,9 @@ impl AgyHarness {
 }
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Agy,
+    id: HarnessId::AGY,
     display_name: "Antigravity (agy)",
+    short_name: "Antigravity",
     binary_names: &["agy"],
     providers: ProviderSource::Static(&[("google", "Google")]),
 };
@@ -103,6 +104,15 @@ impl Harness for AgyHarness {
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
+            image_input: false,
+            plan_updates: false,
+            subagents: false,
+            steer: false,
+            compaction: false,
+            context_usage: false,
+            rate_limits: false,
+            rewind: RewindSupport::default(),
+            fork: false,
         }
     }
 
@@ -132,7 +142,7 @@ impl Harness for AgyHarness {
                         .and_then(Value::as_str)?
                         .to_string();
                     Some(ModelInfo {
-                        model_ref: ModelRef::new(HarnessId::Agy, "google", id.clone()),
+                        model_ref: ModelRef::new(HarnessId::AGY, "google", id.clone()),
                         display_name: m
                             .get("display_name")
                             .or_else(|| m.get("displayName"))
@@ -151,7 +161,7 @@ impl Harness for AgyHarness {
         Ok(FALLBACK_MODELS
             .iter()
             .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::Agy, "google", *id),
+                model_ref: ModelRef::new(HarnessId::AGY, "google", *id),
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
@@ -303,7 +313,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("fix it".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Agy, "google", "gemini-x")),
+            model: Some(ModelRef::new(HarnessId::AGY, "google", "gemini-x")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Bypass),
             format: Some("stream-json".into()),

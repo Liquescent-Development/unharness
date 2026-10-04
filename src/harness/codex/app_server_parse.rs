@@ -3,12 +3,15 @@
 //! Responses to our own requests are handled by the transport driver (it
 //! owns the request ids); this parser ignores them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
-use crate::core::{AgentEvent, PermissionKind, PermissionRequest, Question, StopReason, Usage};
+use crate::core::{
+    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
+    RateLimitInfo, RateLimitWindow, StopReason, Usage,
+};
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
 pub const ELICITATION_PREFIX: &str = "MCP ";
@@ -18,6 +21,12 @@ pub struct CodexAppServerParser {
     turn_started: bool,
     /// agentMessage / reasoning item ids that streamed deltas.
     streamed_items: HashSet<String>,
+    /// Rate-limit updates are sparse; a null window keeps its last value.
+    rate_primary: Option<RateLimitWindow>,
+    rate_secondary: Option<RateLimitWindow>,
+    /// Sub-agent thread id → the item that spawned it. Sub-agent threads
+    /// report on the same stream as the main thread.
+    children: HashMap<String, String>,
 }
 
 impl CodexAppServerParser {
@@ -27,11 +36,25 @@ impl CodexAppServerParser {
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
-            Some(RpcMessage::Notification { method, params }) => {
-                self.on_notification(&method, &params)
-            }
+            Some(RpcMessage::Notification { method, params }) => match self.child_parent(&params) {
+                // A sub-agent's turn and token accounting are its own.
+                Some(_)
+                    if matches!(
+                        method.as_str(),
+                        "turn/started" | "turn/completed" | "thread/tokenUsage/updated"
+                    ) =>
+                {
+                    vec![]
+                }
+                Some(parent) => wrap_sub(&parent, self.on_notification(&method, &params)),
+                None => self.on_notification(&method, &params),
+            },
             Some(RpcMessage::Request { id, method, params }) => {
-                self.on_server_request(&id, &method, &params)
+                let events = self.on_server_request(&id, &method, &params);
+                match self.child_parent(&params) {
+                    Some(parent) => wrap_sub(&parent, events),
+                    None => events,
+                }
             }
             Some(RpcMessage::Response { error: Some(e), .. }) => vec![AgentEvent::Error(format!(
                 "codex: {}",
@@ -69,6 +92,13 @@ impl CodexAppServerParser {
             };
         }
         vec![AgentEvent::Notice(format!("codex: {t}"))]
+    }
+
+    /// The spawning item's id when `params` belong to a sub-agent thread.
+    fn child_parent(&self, params: &Value) -> Option<String> {
+        self.children
+            .get(params.get("threadId")?.as_str()?)
+            .cloned()
     }
 
     fn on_notification(&mut self, method: &str, p: &Value) -> Vec<AgentEvent> {
@@ -134,6 +164,61 @@ impl CodexAppServerParser {
                         cumulative: false,
                     }));
                 }
+                // The last request's total is what currently sits in the context.
+                let used = p
+                    .pointer("/tokenUsage/last/totalTokens")
+                    .and_then(Value::as_u64);
+                let window = p
+                    .pointer("/tokenUsage/modelContextWindow")
+                    .and_then(Value::as_u64);
+                if used.is_some() || window.is_some() {
+                    out.push(AgentEvent::Context(ContextUsage { used, window }));
+                }
+            }
+            "turn/plan/updated" => {
+                let entries = p
+                    .get("plan")
+                    .and_then(Value::as_array)
+                    .map(|steps| {
+                        steps
+                            .iter()
+                            .map(|st| PlanEntry {
+                                text: s(st.get("step").unwrap_or(&Value::Null)).to_string(),
+                                status: PlanStatus::parse(s(st
+                                    .get("status")
+                                    .unwrap_or(&Value::Null))),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(AgentEvent::PlanUpdated {
+                    entries,
+                    explanation: p
+                        .get("explanation")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+            "account/rateLimits/updated" => {
+                let limits = p.get("rateLimits").unwrap_or(&Value::Null);
+                if let Some(w) = rate_window(limits.get("primary")) {
+                    self.rate_primary = Some(w);
+                }
+                if let Some(w) = rate_window(limits.get("secondary")) {
+                    self.rate_secondary = Some(w);
+                }
+                out.push(AgentEvent::RateLimit(RateLimitInfo {
+                    status: limits
+                        .get("rateLimitReachedType")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    windows: self
+                        .rate_primary
+                        .iter()
+                        .chain(self.rate_secondary.iter())
+                        .cloned()
+                        .collect(),
+                }));
             }
             "turn/completed" => {
                 self.turn_started = false;
@@ -163,8 +248,10 @@ impl CodexAppServerParser {
             }
             "thread/compacted" => out.push(AgentEvent::Notice("context compacted".into())),
             "warning" | "deprecationNotice" | "configWarning" => {
+                // `deprecationNotice` carries `summary` instead of `message`.
                 let msg = p
                     .get("message")
+                    .or_else(|| p.get("summary"))
                     .and_then(Value::as_str)
                     .unwrap_or("codex warning");
                 out.push(AgentEvent::Notice(msg.to_string()));
@@ -172,7 +259,7 @@ impl CodexAppServerParser {
             "autoApprovalReview/strictReviewRequired" => out.push(AgentEvent::Notice(
                 "codex auto-review requires strict review".into(),
             )),
-            // thread/status/changed, mcpServer/startupStatus/updated, account/*,
+            // thread/status/changed, mcpServer/startupStatus/updated, account/updated,
             // remoteControl/*, serverRequest/resolved, item/updated…
             _ => {}
         }
@@ -208,6 +295,41 @@ impl CodexAppServerParser {
                 id,
                 name: s(item.get("tool").unwrap_or(&Value::Null)).to_string(),
                 input: item.get("arguments").cloned().unwrap_or(Value::Null),
+            }),
+            "contextCompaction" => out.push(AgentEvent::Notice("compacting context…".into())),
+            // One item announces the sub-agent, a later one (with its own id)
+            // reports how it ended; both name the sub-agent's thread.
+            "subAgentActivity" => {
+                let thread = s(item.get("agentThreadId").unwrap_or(&Value::Null)).to_string();
+                match s(item.get("kind").unwrap_or(&Value::Null)) {
+                    "started" => {
+                        self.children.insert(thread, id.clone());
+                        out.push(AgentEvent::ToolCallStarted {
+                            id,
+                            name: "agent".into(),
+                            input: json!({
+                                "path": item.get("agentPath").cloned().unwrap_or(Value::Null),
+                            }),
+                        });
+                    }
+                    kind => {
+                        if let Some(parent) = self.children.get(&thread) {
+                            out.push(AgentEvent::ToolCallResult {
+                                id: parent.clone(),
+                                output: String::new(),
+                                is_error: kind != "completed",
+                            });
+                        }
+                    }
+                }
+            }
+            "collabAgentToolCall" => out.push(AgentEvent::ToolCallStarted {
+                id,
+                name: format!("agent:{}", s(item.get("tool").unwrap_or(&Value::Null))),
+                input: json!({
+                    "prompt": item.get("prompt").cloned().unwrap_or(Value::Null),
+                    "agents": item.get("receiverThreadIds").cloned().unwrap_or(Value::Null),
+                }),
             }),
             "webSearch" => out.push(AgentEvent::ToolCallStarted {
                 id,
@@ -291,19 +413,18 @@ impl CodexAppServerParser {
                 output: String::new(),
                 is_error: false,
             }),
-            "plan" | "todoList" => {
-                if let Some(items) = item.get("items").and_then(Value::as_array) {
-                    let plan: Vec<String> = items
-                        .iter()
-                        .map(|i| {
-                            format!(
-                                "[{}] {}",
-                                s(i.get("status").unwrap_or(&Value::Null)),
-                                s(i.get("text").unwrap_or(&Value::Null))
-                            )
-                        })
-                        .collect();
-                    out.push(AgentEvent::Notice(format!("plan:\n{}", plan.join("\n"))));
+            "contextCompaction" => out.push(AgentEvent::Notice("context compacted".into())),
+            "collabAgentToolCall" => out.push(AgentEvent::ToolCallResult {
+                id,
+                output: String::new(),
+                is_error: s(item.get("status").unwrap_or(&Value::Null)) == "failed",
+            }),
+            // A proposed plan (plan mode) is prose; the step list arrives as
+            // `turn/plan/updated`.
+            "plan" => {
+                let text = s(item.get("text").unwrap_or(&Value::Null));
+                if !text.is_empty() {
+                    out.push(AgentEvent::Notice(format!("plan:\n{text}")));
                 }
             }
             _ => {}
@@ -415,6 +536,35 @@ fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+fn wrap_sub(parent: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+    events
+        .into_iter()
+        .map(|event| AgentEvent::Sub {
+            parent: parent.to_string(),
+            event: Box::new(event),
+        })
+        .collect()
+}
+
+/// A `primary` / `secondary` rate-limit window, labelled by its length (`5h`, `7d`).
+fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
+    let w = w.filter(|w| w.is_object())?;
+    let label = match w.get("windowDurationMins").and_then(Value::as_u64) {
+        Some(m) if m >= 1440 => format!("{}d", m / 1440),
+        Some(m) if m >= 60 => format!("{}h", m / 60),
+        Some(m) => format!("{m}m"),
+        None => "limit".to_string(),
+    };
+    Some(RateLimitWindow {
+        label,
+        used_percent: w
+            .get("usedPercent")
+            .and_then(Value::as_f64)
+            .map(|p| p as f32),
+        resets_at: w.get("resetsAt").and_then(Value::as_i64),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +585,62 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_two_turns",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_fork() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_fork",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_rewind() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_rewind",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_steer_and_compact() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_steer_and_compact",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_image_turn() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_image_turn",
+        );
+    }
+
+    #[test]
+    fn plan_update_replaces_the_plan() {
+        // Shape from the 0.157.0 app-server schema (TurnPlanUpdatedNotification).
+        let mut p = CodexAppServerParser::new();
+        let ev = p.feed(r#"{"method":"turn/plan/updated","params":{"threadId":"t","turnId":"u","explanation":"why","plan":[{"step":"say hello","status":"completed"},{"step":"say bye","status":"inProgress"}]}}"#);
+        assert_eq!(ev[0].summary(), "PlanUpdated [x] say hello; [~] say bye");
+        assert!(
+            matches!(&ev[0], AgentEvent::PlanUpdated { explanation: Some(e), .. } if e == "why")
         );
     }
 

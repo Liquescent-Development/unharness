@@ -1,0 +1,27 @@
+Error "Herdr A2A unavailable: client session readiness timed out"
+SessionStarted id=01a103dd-e972-72db-91c6-a0fcc7ece6b3 model=gpt-5.6-sol
+Context used=- window=272000
+CapabilitiesChanged image_input=true
+CapabilitiesChanged efforts=off,minimal,low,medium,high,xhigh,max
+TurnStarted
+TextDelta "ok"
+Usage in=5099 out=5 cache_read=0 cache_write=0 cost=0.0205 cumulative=false
+TurnCompleted Done
+Context used=5104 window=272000
+TurnAnchor id=e68fbdbd
+TurnStarted
+TextDelta "ok"
+Usage in=213 out=5 cache_read=3840 cache_write=0 cost=0.0025 cumulative=false
+TurnCompleted Done
+Context used=4058 window=272000
+TurnAnchor id=50e67628
+Error "Herdr A2A unavailable: client session readiness timed out"
+SessionStarted id=01a103de-07b8-72db-91c6-a0ffbf186166 model=gpt-5.6-sol
+Context used=- window=272000
+CapabilitiesChanged image_input=true
+TurnStarted
+TextDelta "alpha"
+Usage in=1543 out=5 cache_read=3584 cache_write=0 cost=0.0077 cumulative=false
+TurnCompleted Done
+Context used=5132 window=272000
+TurnAnchor id=d1584d7e

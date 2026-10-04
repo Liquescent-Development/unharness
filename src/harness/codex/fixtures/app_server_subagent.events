@@ -1,0 +1,38 @@
+SessionStarted id=01a103cb-d008-74a2-8c58-d23063bcd8ca model=gpt-6-astra
+TurnStarted
+TextDelta "I"
+TextDelta "’ll"
+TextDelta " have"
+TextDelta " one"
+TextDelta " sub"
+TextDelta "-agent"
+TextDelta " read"
+TextDelta " the"
+TextDelta " file"
+TextDelta " and"
+TextDelta " wait"
+TextDelta " for"
+TextDelta " its"
+TextDelta " report"
+TextDelta ".\\n"
+ToolCallStarted id=call_Pwtw6aRfVLbd4HznMb6U78UT name=agent input={"path":"/root/read_note"}
+Usage in=14469 out=68 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=14537 window=258400
+RateLimit status=- 7d=1%
+ToolCallStarted id=call_bTch83F7trPqlIaxLZTIWVHR name=agent:wait input={"agents":[],"prompt":null}
+Sub parent=call_Pwtw6aRfVLbd4HznMb6U78UT ToolCallStarted id=exec-ce076550-5f2f-4c26-978c-c29df74894ee name=shell input={"command":"/usr/bin/zsh -lc 'cat notes.txt'","cwd":"/WOR...
+Sub parent=call_Pwtw6aRfVLbd4HznMb6U78UT PermissionRequest id=0 ToolUse shell
+Sub parent=call_Pwtw6aRfVLbd4HznMb6U78UT ToolCallResult id=exec-ce076550-5f2f-4c26-978c-c29df74894ee error=false "alpha\\n"
+RateLimit status=- 7d=1%
+Sub parent=call_Pwtw6aRfVLbd4HznMb6U78UT TextDelta "alpha"
+RateLimit status=- 7d=1%
+ToolCallResult id=call_Pwtw6aRfVLbd4HznMb6U78UT error=false ""
+ToolCallResult id=call_bTch83F7trPqlIaxLZTIWVHR error=false ""
+Usage in=14558 out=21 cache_read=14336 cache_write=0 cost=- cumulative=false
+Context used=14579 window=258400
+RateLimit status=- 7d=1%
+TextDelta "alpha"
+Usage in=14639 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=14644 window=258400
+RateLimit status=- 7d=1%
+TurnCompleted Done

@@ -210,21 +210,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ConversationStore::open(Some(dir.path()), dir.path());
         assert_eq!(
-            resolve_resume(&store, None, HarnessId::Claude).unwrap(),
+            resolve_resume(&store, None, HarnessId::CLAUDE).unwrap(),
             (None, None)
         );
-        assert!(resolve_resume(&store, Some(""), HarnessId::Claude).is_err());
+        assert!(resolve_resume(&store, Some(""), HarnessId::CLAUDE).is_err());
         assert_eq!(
-            resolve_resume(&store, Some("raw-vendor"), HarnessId::Claude).unwrap(),
+            resolve_resume(&store, Some("raw-vendor"), HarnessId::CLAUDE).unwrap(),
             (Some("raw-vendor".into()), Some("raw-vendor".into()))
         );
-        let mut c = crate::core::conversations::Conversation::new(HarnessId::Claude);
-        c.sessions.insert(HarnessId::Claude, "claude-9".into());
+        let mut c = crate::core::conversations::Conversation::new(HarnessId::CLAUDE);
+        c.sessions.insert(HarnessId::CLAUDE, "claude-9".into());
         store.save(&c).unwrap();
-        let (conv, vendor) = resolve_resume(&store, Some(""), HarnessId::Claude).unwrap();
+        let (conv, vendor) = resolve_resume(&store, Some(""), HarnessId::CLAUDE).unwrap();
         assert_eq!(conv.as_deref(), Some(c.id.as_str()));
         assert_eq!(vendor.as_deref(), Some("claude-9"));
-        let (_, vendor) = resolve_resume(&store, Some(&c.id[..8]), HarnessId::Codex).unwrap();
+        let (_, vendor) = resolve_resume(&store, Some(&c.id[..8]), HarnessId::CODEX).unwrap();
         assert!(vendor.is_none());
     }
 
@@ -236,7 +236,7 @@ mod tests {
         };
         let base = CommonRunArgs::default();
         assert_eq!(
-            requested_policy(&base, &cfg, HarnessId::Claude).unwrap(),
+            requested_policy(&base, &cfg, HarnessId::CLAUDE).unwrap(),
             PermissionPolicy::Auto
         );
 
@@ -248,11 +248,11 @@ mod tests {
             },
         );
         assert_eq!(
-            requested_policy(&base, &cfg, HarnessId::Claude).unwrap(),
+            requested_policy(&base, &cfg, HarnessId::CLAUDE).unwrap(),
             PermissionPolicy::AcceptEdits
         );
         assert_eq!(
-            requested_policy(&base, &cfg, HarnessId::Agy).unwrap(),
+            requested_policy(&base, &cfg, HarnessId::AGY).unwrap(),
             PermissionPolicy::Auto
         );
 
@@ -261,7 +261,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            requested_policy(&y, &cfg, HarnessId::Claude).unwrap(),
+            requested_policy(&y, &cfg, HarnessId::CLAUDE).unwrap(),
             PermissionPolicy::Bypass
         );
 
@@ -271,7 +271,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            requested_policy(&flag, &cfg, HarnessId::Claude).unwrap(),
+            requested_policy(&flag, &cfg, HarnessId::CLAUDE).unwrap(),
             PermissionPolicy::Ask
         );
 
@@ -279,10 +279,10 @@ mod tests {
             policy: Some("nah".into()),
             ..Default::default()
         };
-        assert!(requested_policy(&bad, &cfg, HarnessId::Claude).is_err());
+        assert!(requested_policy(&bad, &cfg, HarnessId::CLAUDE).is_err());
 
         assert_eq!(
-            requested_policy(&base, &Config::default(), HarnessId::Claude).unwrap(),
+            requested_policy(&base, &Config::default(), HarnessId::CLAUDE).unwrap(),
             PermissionPolicy::Ask
         );
     }

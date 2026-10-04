@@ -21,8 +21,8 @@ use super::{
 };
 use crate::core::jsonrpc;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
+    SessionConfig, SessionHandle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,8 +58,9 @@ impl Default for CodexHarness {
 }
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
-    id: HarnessId::Codex,
+    id: HarnessId::CODEX,
     display_name: "Codex (codex)",
+    short_name: "Codex",
     binary_names: &["codex"],
     providers: ProviderSource::Static(&[("openai", "OpenAI")]),
 };
@@ -146,6 +147,18 @@ impl Harness for CodexHarness {
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
+            image_input: true,
+            plan_updates: true,
+            subagents: app_server,
+            steer: app_server,
+            compaction: app_server,
+            context_usage: app_server,
+            rate_limits: app_server,
+            rewind: RewindSupport {
+                conversation: app_server,
+                anchors_survive_fork: true,
+            },
+            fork: app_server,
         }
     }
 
@@ -190,7 +203,7 @@ impl Harness for CodexHarness {
                         })
                         .unwrap_or_default();
                     ModelInfo {
-                        model_ref: ModelRef::new(HarnessId::Codex, "openai", id),
+                        model_ref: ModelRef::new(HarnessId::CODEX, "openai", id),
                         display_name: m
                             .get("displayName")
                             .and_then(Value::as_str)
@@ -208,7 +221,7 @@ impl Harness for CodexHarness {
         Ok(FALLBACK_MODELS
             .iter()
             .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::Codex, "openai", *id),
+                model_ref: ModelRef::new(HarnessId::CODEX, "openai", *id),
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
@@ -371,7 +384,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("fix it".into()),
             print_mode: true,
-            model: Some(ModelRef::new(HarnessId::Codex, "openai", "gpt-5.5")),
+            model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::AcceptEdits),
             format: None,

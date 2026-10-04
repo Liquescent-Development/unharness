@@ -1,5 +1,6 @@
 //! Harness adapters: one module per vendor CLI implementing [`Harness`].
 
+pub mod acp;
 pub mod agy;
 pub mod claude;
 pub mod codex;
@@ -9,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+pub use crate::core::ModelInfo;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
 };
@@ -26,6 +28,8 @@ pub enum ProviderSource {
 pub struct HarnessDescriptor {
     pub id: HarnessId,
     pub display_name: &'static str,
+    /// Short label for the TUI (sender name, status lines).
+    pub short_name: &'static str,
     /// Executable names to look for on PATH, in order.
     pub binary_names: &'static [&'static str],
     pub providers: ProviderSource,
@@ -42,15 +46,6 @@ pub struct Probe {
     pub binary: Option<PathBuf>,
     pub version: Option<String>,
     pub auth: AuthInfo,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelInfo {
-    pub model_ref: ModelRef,
-    pub display_name: String,
-    pub description: Option<String>,
-    /// Per-model effort levels when the harness reports them.
-    pub effort_levels: Option<Vec<String>>,
 }
 
 /// Options for the non-TUI paths (`-p` print mode and `--no-tui` passthrough).

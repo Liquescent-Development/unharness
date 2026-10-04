@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::event::Usage;
+use super::event::{PlanEntry, Usage};
 use super::ids::HarnessId;
 
 /// Conversations kept in the index; older ones are deleted on save.
@@ -39,6 +39,9 @@ pub enum BlockRecord {
         input: Value,
         output: String,
         is_error: bool,
+        /// The tool call that spawned the subagent this call ran in.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
     },
     System {
         text: String,
@@ -78,6 +81,37 @@ pub struct Conversation {
     /// Harness → that harness's session usage totals.
     #[serde(default)]
     pub usage: HashMap<HarnessId, Usage>,
+    /// The agent's latest plan / todo list.
+    #[serde(default)]
+    pub plan: Vec<PlanEntry>,
+    /// Where each harness can rewind its own session to.
+    #[serde(default)]
+    pub anchors: Vec<TurnAnchorRecord>,
+    /// The working tree as it was before each prompt.
+    #[serde(default)]
+    pub checkpoints: Vec<CheckpointRecord>,
+    /// Harnesses whose session id here belongs to the conversation this one
+    /// was forked from: their next session must branch it, not reattach.
+    #[serde(default)]
+    pub fork_pending: Vec<HarnessId>,
+}
+
+/// A file checkpoint taken just before the user block at `block` was sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CheckpointRecord {
+    pub block: usize,
+    /// Commit id (see `core::checkpoints`).
+    pub commit: String,
+}
+
+/// A user turn as one harness's session knows it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnAnchorRecord {
+    /// Index of the user block in the transcript.
+    pub block: usize,
+    pub harness: HarnessId,
+    /// The harness's id for that turn (`AgentEvent::TurnAnchor`).
+    pub id: String,
 }
 
 impl Conversation {
@@ -93,6 +127,10 @@ impl Conversation {
             bookmarks: HashMap::new(),
             blocks: Vec::new(),
             usage: HashMap::new(),
+            plan: Vec::new(),
+            anchors: Vec::new(),
+            checkpoints: Vec::new(),
+            fork_pending: Vec::new(),
         }
     }
 
@@ -309,11 +347,11 @@ mod tests {
     use super::*;
 
     fn conv(title: &str) -> Conversation {
-        let mut c = Conversation::new(HarnessId::Claude);
+        let mut c = Conversation::new(HarnessId::CLAUDE);
         c.title = title.into();
-        c.sessions.insert(HarnessId::Claude, "claude-sess".into());
-        c.sessions.insert(HarnessId::Codex, "codex-thread".into());
-        c.bookmarks.insert(HarnessId::Claude, 2);
+        c.sessions.insert(HarnessId::CLAUDE, "claude-sess".into());
+        c.sessions.insert(HarnessId::CODEX, "codex-thread".into());
+        c.bookmarks.insert(HarnessId::CLAUDE, 2);
         c.blocks.push(BlockRecord::User { text: "hi".into() });
         c.blocks.push(BlockRecord::Assistant {
             text: "hello".into(),
@@ -321,7 +359,7 @@ mod tests {
             secs: Some(1.5),
         });
         c.usage.insert(
-            HarnessId::Claude,
+            HarnessId::CLAUDE,
             Usage {
                 input: 10,
                 ..Default::default()
@@ -349,7 +387,7 @@ mod tests {
         let loaded = store.load(&c.id).unwrap();
         assert_eq!(loaded, c);
         let row = store.last().unwrap();
-        assert_eq!(row.harnesses, vec![HarnessId::Claude, HarnessId::Codex]);
+        assert_eq!(row.harnesses, vec![HarnessId::CLAUDE, HarnessId::CODEX]);
         assert_eq!(row.title, "first prompt");
 
         // Prefix lookup

@@ -1,0 +1,8 @@
+SessionStarted id=258ac096-5455-4bab-b247-a30c49d7de49 model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=21868 window=-
+TextDelta "red"
+RateLimit status=allowed five_hour=38% seven_day=19%
+Usage in=10 out=109 cache_read=13803 cache_write=8055 cost=0.0180 cumulative=false
+Context used=- window=200000
+TurnCompleted Done

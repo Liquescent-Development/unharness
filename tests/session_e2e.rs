@@ -57,10 +57,11 @@ impl Fake {
         SessionConfig {
             binary: fake_harness(),
             cwd: self._tmp.path().to_path_buf(),
-            model: Some(ModelRef::new(HarnessId::Claude, "anthropic", "haiku")),
+            model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
             effort: None,
             policy,
             resume: None,
+            fork: false,
             extra_args: vec![],
             env,
         }
@@ -129,18 +130,23 @@ async fn claude_basic_turn_streams_tool_and_text() {
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run echo".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run echo")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
 
+    // The driver tags the turn with a uuid of its own (the rewind target)
+    // before anything comes back from the harness.
+    let Some(AgentEvent::TurnAnchor { id: anchor }) = events.first() else {
+        panic!("expected the turn anchor first, got {:?}", events.first());
+    };
     assert!(matches!(
-        events.first(),
+        events.get(1),
         Some(AgentEvent::SessionStarted { .. })
     ));
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["type"] == "user" && v["uuid"] == anchor.as_str())
+    );
     assert!(
         events
             .iter()
@@ -193,9 +199,7 @@ async fn claude_permission_round_trip_and_question() {
 
     // Turn 1: Write needs permission; allow it.
     handle
-        .send(SessionCommand::SendTurn {
-            text: "create spike3.txt".into(),
-        })
+        .send(SessionCommand::turn("create spike3.txt"))
         .await
         .unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
@@ -218,9 +222,7 @@ async fn claude_permission_round_trip_and_question() {
 
     // Turn 2: AskUserQuestion; answer "Red".
     handle
-        .send(SessionCommand::SendTurn {
-            text: "ask me a question".into(),
-        })
+        .send(SessionCommand::turn("ask me a question"))
         .await
         .unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
@@ -275,10 +277,7 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Bypass, false))
         .unwrap();
-    handle
-        .send(SessionCommand::SendTurn { text: "x".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -318,12 +317,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
 
     // The driver sends get_state first; the fixture then replays the catalog
     // responses before the first prompt.
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong?".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -336,12 +330,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
             .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
     );
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run bash".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run bash")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -385,12 +374,7 @@ async fn codex_app_server_handshake_turns_and_approval() {
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong?".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a10023-e1c2"))));
     assert!(
@@ -399,12 +383,7 @@ async fn codex_app_server_handshake_turns_and_approval() {
             .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
     );
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "run it".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("run it")).await.unwrap();
     let events = run_turn(&mut handle, |ev| match ev {
         AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Allow {
             updated_input: None,
@@ -442,6 +421,161 @@ async fn codex_app_server_handshake_turns_and_approval() {
 }
 
 #[tokio::test]
+async fn codex_app_server_steers_the_running_turn_and_compacts() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_steer_and_compact.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("run it")).await.unwrap();
+    // Steer once the command has started, as a user would mid-turn.
+    loop {
+        if matches!(
+            next_event(&mut handle).await,
+            AgentEvent::ToolCallStarted { .. }
+        ) {
+            break;
+        }
+    }
+    handle
+        .send(SessionCommand::Steer {
+            text: "also say STEERED".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    let text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(text.ends_with("done STEERED"), "{text}");
+
+    // Compaction runs as a turn of its own.
+    handle
+        .send(SessionCommand::Compact { instructions: None })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(n) if n == "context compacted"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    let sent = fake.sent_lines();
+    let turn_start = sent
+        .iter()
+        .position(|v| v["method"] == "turn/start")
+        .unwrap();
+    let steer = &sent[turn_start + 1];
+    assert_eq!(steer["method"], "turn/steer");
+    assert_eq!(steer["params"]["input"][0]["text"], "also say STEERED");
+    // The turn id comes from the fixture's turn/started notification.
+    assert!(
+        steer["params"]["expectedTurnId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("01a103c7"))
+    );
+    assert!(sent.iter().any(|v| v["method"] == "thread/compact/start"));
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_sub_agent_events_are_attributed_and_do_not_end_the_turn() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_subagent.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("delegate")).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        // The sub-agent asks to run a command; its request arrives wrapped.
+        if let AgentEvent::Sub { event, .. } = &ev
+            && let AgentEvent::PermissionRequest(req) = event.as_ref()
+        {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        events.push(ev);
+        if done {
+            break;
+        }
+    }
+
+    // The sub-agent's own turn/completed did not end ours: the main agent's
+    // answer comes after the sub-agent's work.
+    let spawn = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolCallStarted { id, name, .. } if name == "agent" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("sub-agent announced");
+    let sub_tool = events.iter().position(|e| {
+        matches!(e, AgentEvent::Sub { parent, event }
+            if *parent == spawn && matches!(event.as_ref(), AgentEvent::ToolCallStarted { name, .. } if name == "shell"))
+    });
+    let answer = events
+        .iter()
+        .rposition(|e| matches!(e, AgentEvent::TextDelta(t) if t == "alpha"));
+    assert!(sub_tool.is_some() && answer > sub_tool);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+            .count(),
+        1
+    );
+
+    let sent = fake.sent_lines();
+    assert!(
+        sent.iter()
+            .any(|v| v["id"] == 0 && v["result"]["decision"] == "accept")
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn codex_exec_per_turn_resumes_by_thread() {
     if !python_available() {
         return;
@@ -457,10 +591,7 @@ async fn codex_exec_per_turn_resumes_by_thread() {
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn { text: "one".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("one")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -474,10 +605,7 @@ async fn codex_exec_per_turn_resumes_by_thread() {
         })
     ));
 
-    handle
-        .send(SessionCommand::SendTurn { text: "two".into() })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("two")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(matches!(
         events.last(),
@@ -511,12 +639,7 @@ async fn agy_stream_session_against_synthetic_fixture() {
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, true))
         .unwrap();
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "echo hi".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "conv-synthetic-1")));
     assert!(
@@ -531,12 +654,7 @@ async fn agy_stream_session_against_synthetic_fixture() {
         })
     ));
 
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "delete".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("delete")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events
@@ -567,12 +685,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, false))
         .unwrap();
-    handle
-        .send(SessionCommand::SendTurn {
-            text: "pong".into(),
-        })
-        .await
-        .unwrap();
+    handle.send(SessionCommand::turn("pong")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::TurnCompleted { stop_reason: StopReason::Error(m) } if m.contains("authentication"))));
     // The stderr explanation and the exit arrive after the result line.
@@ -597,4 +710,267 @@ async fn agy_auth_failure_ends_turn_with_error() {
         ),
         "{tail:?}"
     );
+}
+
+fn acp_harness() -> unharness::harness::acp::AcpHarness {
+    unharness::harness::acp::AcpHarness::new(
+        "fake-acp",
+        None,
+        &[fake_harness().to_string_lossy().into_owned()],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn acp_handshake_turns_and_permission_round_trip() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    // Sent before the handshake finishes: the driver holds it until the
+    // session exists.
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("201664ad"))
+    ));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+
+    handle.send(SessionCommand::turn("write it")).await.unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallStarted { name, input, .. } if name == "Write" && input["content"] == "hello\n")
+    ));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult {
+            is_error: false,
+            ..
+        }
+    )));
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[0]["method"], "initialize");
+    assert_eq!(sent[0]["params"]["protocolVersion"], 1);
+    assert_eq!(sent[1]["method"], "session/new");
+    assert_eq!(sent[1]["params"]["mcpServers"], serde_json::json!([]));
+    assert_eq!(sent[2]["method"], "session/prompt");
+    assert_eq!(sent[2]["params"]["prompt"][0]["text"], "pong?");
+    assert!(
+        sent[2]["params"]["sessionId"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("201664ad"))
+    );
+    let answer = sent
+        .iter()
+        .find(|v| v.get("result").is_some())
+        .expect("permission answer");
+    assert_eq!(answer["id"], 0);
+    assert_eq!(answer["result"]["outcome"]["optionId"], "allow-once");
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
+#[tokio::test]
+async fn acp_bypass_answers_permission_requests_itself() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle.send(SessionCommand::turn("write it")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    // The tool call is shown, the question is not.
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "Write"))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+    );
+    let sent = fake.sent_lines();
+    assert!(
+        sent.iter()
+            .any(|v| v["result"]["outcome"]["optionId"] == "allow-once")
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn acp_resumes_a_session_and_applies_the_configured_model() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_resume.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.resume = Some("201664ad-6914-49da-8f50-0e36f73b8d3b".into());
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle
+        .send(SessionCommand::turn("what was it?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "hello"))
+    );
+    // The model switch drops the effort option: the capability update says so.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::CapabilitiesChanged(u) if u.effort_levels.as_deref() == Some(&[][..])
+    )));
+
+    let sent = fake.sent_lines();
+    assert_eq!(sent[1]["method"], "session/resume");
+    assert_eq!(
+        sent[1]["params"]["sessionId"],
+        "201664ad-6914-49da-8f50-0e36f73b8d3b"
+    );
+    assert_eq!(sent[2]["method"], "session/set_config_option");
+    assert_eq!(sent[2]["params"]["configId"], "model");
+    assert_eq!(sent[2]["params"]["value"], "haiku");
+    assert_eq!(sent[3]["method"], "session/prompt");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
+    let harness = unharness::harness::pi::PiHarness;
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    // Each turn is followed by its anchor: pi lists the user messages (and
+    // their entry ids) once the turn has settled.
+    let mut anchors = Vec::new();
+    for prompt in ["alpha", "beta"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        run_turn(&mut handle, |_| None).await;
+        loop {
+            if let AgentEvent::TurnAnchor { id } = next_event(&mut handle).await {
+                anchors.push(id);
+                break;
+            }
+        }
+    }
+    assert_eq!(anchors.len(), 2);
+
+    // Rewind to before the second turn, and send the next prompt at once:
+    // the driver must not pass it on before the fork has answered.
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchors[1].clone(),
+        })
+        .await
+        .unwrap();
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "alpha"))
+    );
+    // The fork is a new pi session.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a103de"))
+    ));
+
+    let sent = fake.sent_lines();
+    let pos = |pred: &dyn Fn(&Value) -> bool| sent.iter().position(pred).unwrap();
+    let fork = pos(&|v| v["type"] == "fork");
+    assert_eq!(sent[fork]["entryId"], anchors[1].as_str());
+    let prompt = pos(&|v| v["type"] == "prompt" && v["message"] == "which?");
+    let state_after_fork = sent
+        .iter()
+        .skip(fork)
+        .position(|v| v["type"] == "get_state")
+        .map(|i| i + fork)
+        .unwrap();
+    assert!(fork < state_after_fork && state_after_fork < prompt);
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_fork.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.resume = Some("01a103e9-859f-7680-ac4c-56b3e6512414".into());
+    cfg.fork = true;
+    let mut handle = harness.start_session(cfg).unwrap();
+
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    // The branch is a thread of its own, and turns go to it.
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id.starts_with("01a103fc"))
+    ));
+    let sent = fake.sent_lines();
+    assert_eq!(sent[2]["method"], "thread/fork");
+    assert_eq!(
+        sent[2]["params"]["threadId"],
+        "01a103e9-859f-7680-ac4c-56b3e6512414"
+    );
+    let turn = sent.iter().find(|v| v["method"] == "turn/start").unwrap();
+    assert!(
+        turn["params"]["threadId"]
+            .as_str()
+            .is_some_and(|t| t.starts_with("01a103fc"))
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
