@@ -183,6 +183,12 @@ pub enum Sandbox {
     },
 }
 
+impl Default for Sandbox {
+    fn default() -> Self {
+        Sandbox::off()
+    }
+}
+
 impl Sandbox {
     /// No confinement, by choice.
     pub fn off() -> Self {

@@ -235,6 +235,7 @@ mod tests {
             format: Some("stream-json".into()),
             resume: None,
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let a = args(&ClaudeHarness.build_print_command(&cfg).unwrap());
         assert_eq!(a.last().unwrap(), "run tests");

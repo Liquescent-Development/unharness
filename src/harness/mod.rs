@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::core::sandbox::Sandbox;
+
 pub use crate::core::ModelInfo;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
@@ -62,6 +64,8 @@ pub struct PrintConfig {
     pub format: Option<String>,
     pub resume: Option<String>,
     pub extra_args: Vec<String>,
+    /// Applied by the caller to the command `build_print_command` returns.
+    pub sandbox: Sandbox,
 }
 
 /// One vendor CLI. Implementations live in `src/harness/<name>/`.

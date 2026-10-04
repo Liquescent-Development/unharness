@@ -400,6 +400,7 @@ mod tests {
             format: None,
             resume: None,
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let h = CodexHarness::default();
         assert_eq!(

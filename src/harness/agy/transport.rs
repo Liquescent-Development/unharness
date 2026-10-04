@@ -110,7 +110,7 @@ pub fn start_stream(cfg: SessionConfig, transport: AgyTransport) -> Result<Sessi
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let proc = LineProcess::spawn(cmd)?;
+    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness: HarnessId::AGY,
         process_model: ProcessModel::LongLived,
@@ -125,7 +125,7 @@ fn spawn_stream(cfg: &SessionConfig) -> Result<LineProcess> {
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    LineProcess::spawn(cmd)
+    LineProcess::spawn(cmd, &cfg.sandbox)
 }
 
 async fn drive(
@@ -352,6 +352,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--add-dir".into(), "/x".into()],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
         }
     }
 
@@ -401,6 +402,7 @@ mod tests {
             session_id: None,
             extra_args: vec![],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
             turn_index: 0,
         };
         assert_eq!(

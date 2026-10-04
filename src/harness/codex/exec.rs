@@ -128,6 +128,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             extra_args: vec![],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
             turn_index: 0,
         }
     }

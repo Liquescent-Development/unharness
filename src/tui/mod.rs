@@ -525,6 +525,7 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         },
         extra_args: app.config.extra_args(desc.id.as_str()).to_vec(),
         env: Vec::new(),
+        sandbox: crate::core::Sandbox::off(),
     };
     harness.start_session(cfg)
 }

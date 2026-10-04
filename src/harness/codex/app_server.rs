@@ -101,7 +101,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let proc = LineProcess::spawn(cmd)?;
+    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness: HarnessId::CODEX,
         process_model: ProcessModel::LongLived,

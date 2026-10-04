@@ -129,8 +129,9 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             format: args.format.clone(),
             resume: print_resume,
             extra_args: config.extra_args(id.as_str()).to_vec(),
+            sandbox: crate::core::Sandbox::off(),
         };
-        let mut cmd = harness.build_print_command(&cfg)?;
+        let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
         if args.print {
             let status = cmd.status()?;
             if !status.success() {

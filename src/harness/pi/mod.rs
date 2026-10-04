@@ -254,6 +254,7 @@ mod tests {
             format: Some("json".into()),
             resume: Some("s1".into()),
             extra_args: vec![],
+            sandbox: crate::core::Sandbox::off(),
         };
         let cmd = PiHarness.build_print_command(&cfg).unwrap();
         let a: Vec<String> = cmd

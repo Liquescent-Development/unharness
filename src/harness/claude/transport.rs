@@ -203,7 +203,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         cmd.env_remove(var);
     }
 
-    let proc = LineProcess::spawn(cmd)?;
+    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness: HarnessId::CLAUDE,
         process_model: ProcessModel::LongLived,
@@ -390,6 +390,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--bare".into()],
             env: vec![],
+            sandbox: crate::core::Sandbox::off(),
         }
     }
 

@@ -16,6 +16,7 @@ use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, StopReason};
 use super::ids::{HarnessId, ModelRef};
 use super::process::{LineProcess, RawLine};
+use super::sandbox::Sandbox;
 use super::session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
 };
@@ -32,6 +33,7 @@ pub struct TurnState {
     pub session_id: Option<String>,
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub sandbox: Sandbox,
     pub turn_index: usize,
 }
 
@@ -71,6 +73,7 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         session_id: cfg.resume,
         extra_args: cfg.extra_args,
         env: cfg.env,
+        sandbox: cfg.sandbox,
         turn_index: 0,
     };
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
@@ -134,7 +137,7 @@ async fn drive(
                             }
                         }
                         match protocol.build_turn(&state, &text, &attachments) {
-                            Ok(spec) => match LineProcess::spawn(spec.command) {
+                            Ok(spec) => match LineProcess::spawn(spec.command, &state.sandbox) {
                                 Ok(mut proc) => {
                                     if let Some(input) = spec.stdin
                                         && let Err(e) = proc.write_line(&input).await
@@ -287,6 +290,7 @@ mod tests {
             fork: false,
             extra_args: vec![],
             env: vec![],
+            sandbox: Sandbox::off(),
         }
     }
 

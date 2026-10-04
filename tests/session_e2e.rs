@@ -64,6 +64,7 @@ impl Fake {
             fork: false,
             extra_args: vec![],
             env,
+            sandbox: unharness::core::Sandbox::off(),
         }
     }
 
