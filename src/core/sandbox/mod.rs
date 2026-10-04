@@ -79,9 +79,8 @@ pub struct SandboxPaths {
 
 /// Credential locations no harness process may read, relative to the home
 /// directory. A harness's own writable paths and `[sandbox].readable` are
-/// exempt.
+/// exempt. `~/.ssh` is not here: git over ssh and commit signing need it.
 pub const DEFAULT_DENY_READ: &[&str] = &[
-    ".ssh",
     ".gnupg",
     ".aws",
     ".azure",
@@ -103,9 +102,10 @@ pub const DEFAULT_DENY_READ: &[&str] = &[
 #[derive(Debug, Clone, Default)]
 pub struct SandboxEnv {
     pub home: Option<PathBuf>,
-    /// Temp and device directories every process may write to.
+    /// What every harness may write: temp and device directories, and the
+    /// runtime directory of herdr, which agents are commonly run under.
     pub scratch: Vec<PathBuf>,
-    /// unharness's own state (the checkpoint store): never writable.
+    /// unharness's own state and configuration: never writable.
     pub protected: Vec<PathBuf>,
 }
 
@@ -117,11 +117,17 @@ impl SandboxEnv {
             PathBuf::from("/dev"),
             std::env::temp_dir(),
         ];
-        scratch.dedup();
-        let protected = dirs::state_dir()
-            .or_else(dirs::data_local_dir)
-            .map(|d| vec![d.join("unharness")])
-            .unwrap_or_default();
+        if let Some(run) = dirs::runtime_dir() {
+            scratch.push(run.join("herdr-a2a"));
+        }
+        let protected = [
+            dirs::state_dir().or_else(dirs::data_local_dir),
+            dirs::config_dir(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|d| d.join("unharness"))
+        .collect();
         SandboxEnv {
             home: dirs::home_dir(),
             scratch,
@@ -439,6 +445,7 @@ mod tests {
             "code/project",
             ".vendor",
             ".ssh",
+            ".gnupg",
             ".config/gh",
             ".local/state/unharness",
             "scratch",
@@ -511,9 +518,10 @@ mod tests {
                 w.home.join("scratch")
             ]
         );
+        // ~/.ssh stays readable.
         assert_eq!(
             p.deny_read,
-            vec![w.home.join(".ssh"), w.home.join(".config/gh")]
+            vec![w.home.join(".gnupg"), w.home.join(".config/gh")]
         );
         assert_eq!(p.protected, vec![w.home.join(".local/state/unharness")]);
     }
@@ -536,7 +544,7 @@ mod tests {
     #[test]
     fn readable_and_writable_paths_lift_the_read_deny() {
         let w = world();
-        let readable = [PathBuf::from("~/.ssh")];
+        let readable = [PathBuf::from("~/.gnupg")];
         let writable = [w.home.join(".config/gh")];
         let mut req = request(&w, None);
         req.extra_readable = &readable;

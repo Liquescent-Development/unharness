@@ -1105,10 +1105,10 @@ impl Confined {
         }
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().canonicalize().unwrap();
-        for dir in ["ws", "state", "outside", "home/.ssh"] {
+        for dir in ["ws", "state", "outside", "home/.gnupg"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
-        std::fs::write(root.join("home/.ssh/id_key"), "secret").unwrap();
+        std::fs::write(root.join("home/.gnupg/id_key"), "secret").unwrap();
         std::fs::write(root.join("outside/notes"), "plain").unwrap();
         let sandbox = sandbox::resolve(
             &SandboxRequest {
@@ -1151,7 +1151,7 @@ impl Confined {
                     at("ws/new"),
                     at("outside/new"),
                     at("outside/notes"),
-                    at("home/.ssh/id_key")
+                    at("home/.gnupg/id_key")
                 ),
             ),
         ];
