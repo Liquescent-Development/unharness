@@ -34,6 +34,23 @@ pub struct Checkpoints {
     shadow: PathBuf,
 }
 
+/// A file name for what unharness keeps about the project at `root` (a
+/// canonical path) outside it: a readable name plus a hash of the full path
+/// (FNV-1a, so the name is the same in every build).
+pub fn project_key(root: &Path) -> String {
+    let hash = root
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "root".into());
+    format!("{name}-{hash:016x}")
+}
+
 impl Checkpoints {
     /// Where shadow repositories are kept: `<state dir>/unharness/checkpoints`.
     pub fn default_store() -> PathBuf {
@@ -55,20 +72,8 @@ impl Checkpoints {
             return None;
         }
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        // One shadow per project path: a readable name plus a hash of the
-        // full path (FNV-1a, so the name is the same in every build).
-        let hash = root
-            .to_string_lossy()
-            .bytes()
-            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
-            });
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "root".into());
         Some(Checkpoints {
-            shadow: store.join(format!("{name}-{hash:016x}.git")),
+            shadow: store.join(format!("{}.git", project_key(&root))),
             root,
         })
     }

@@ -586,6 +586,13 @@ impl App {
         if let Some(w) = app.sandbox_level().1 {
             app.transcript.push_notice(w);
         }
+        if let Some(w) = app
+            .workspace_root
+            .as_deref()
+            .and_then(Config::legacy_warning)
+        {
+            app.transcript.push_notice(w);
+        }
         if let Some(e) = resume_error {
             app.transcript.push_error(e);
         }

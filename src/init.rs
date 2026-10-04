@@ -24,6 +24,13 @@ Project guidelines and procedures for AI coding agents.
 "#;
 
 pub fn init_workspace(cwd: &Path) -> Result<()> {
+    let store = Config::workspace_store()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine user config directory"))?;
+    init_workspace_in(cwd, &store)
+}
+
+/// Like [`init_workspace`], with the workspace's settings kept under `store`.
+pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
     println!(
         "{}",
         "=== Initializing unharness in current repository ==="
@@ -61,21 +68,39 @@ pub fn init_workspace(cwd: &Path) -> Result<()> {
         );
     }
 
-    // 3. Create default unharness.toml if none exists
-    let config_path = cwd.join("unharness.toml");
+    // 3. Workspace settings, kept outside the workspace so an agent working
+    // in it cannot change them. An older in-tree unharness.toml is imported.
+    let config_path = Config::workspace_path_in(store, cwd);
     if !config_path.exists() {
-        let cfg = Config {
-            default_harness: Some("agy".to_string()),
-            default_policy: Some("ask".to_string()),
-            auto_sync: true,
-            ..Default::default()
-        };
-        cfg.save_to_dir(cwd)?;
-        println!(
-            "{} Created configuration: {}",
-            "[✓]".green().bold(),
-            "unharness.toml".bold()
-        );
+        match Config::legacy_workspace_file(cwd) {
+            Some(legacy) => {
+                Config::load_legacy(cwd)?.save_workspace_in(store, cwd)?;
+                println!(
+                    "{} Imported {} into {}",
+                    "[✓]".green().bold(),
+                    legacy.display(),
+                    config_path.display().to_string().bold()
+                );
+                println!(
+                    "    {} is no longer read and can be deleted",
+                    legacy.display()
+                );
+            }
+            None => {
+                let cfg = Config {
+                    default_harness: Some("agy".to_string()),
+                    default_policy: Some("ask".to_string()),
+                    auto_sync: true,
+                    ..Default::default()
+                };
+                cfg.save_workspace_in(store, cwd)?;
+                println!(
+                    "{} Created workspace configuration: {}",
+                    "[✓]".green().bold(),
+                    config_path.display().to_string().bold()
+                );
+            }
+        }
     }
 
     // 4. Ignore unharness session state
@@ -137,15 +162,41 @@ mod tests {
     #[test]
     fn test_init_workspace_creates_everything() {
         let dir = tempfile::tempdir().unwrap();
-        init_workspace(dir.path()).unwrap();
+        let store = tempfile::tempdir().unwrap();
+        init_workspace_in(dir.path(), store.path()).unwrap();
         assert!(dir.path().join(".agents/skills").is_dir());
         assert!(dir.path().join("AGENTS.md").is_file());
         assert!(dir.path().join("CLAUDE.md").is_symlink());
         assert!(dir.path().join("GEMINI.md").is_symlink());
-        assert!(dir.path().join("unharness.toml").is_file());
+        // Settings go to the store, not into the workspace.
+        assert!(!dir.path().join("unharness.toml").exists());
+        assert!(Config::workspace_path_in(store.path(), dir.path()).is_file());
         let gi = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gi.contains(".unharness/"));
         // Idempotent
-        init_workspace(dir.path()).unwrap();
+        init_workspace_in(dir.path(), store.path()).unwrap();
+    }
+
+    #[test]
+    fn init_imports_an_in_tree_config_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("unharness.toml"),
+            "default_harness = \"codex\"\n",
+        )
+        .unwrap();
+        init_workspace_in(dir.path(), store.path()).unwrap();
+        let load = || Config::load_workspace_in(store.path(), dir.path()).unwrap();
+        assert_eq!(load().default_harness.as_deref(), Some("codex"));
+
+        // Later edits to the in-tree file change nothing.
+        fs::write(
+            dir.path().join("unharness.toml"),
+            "default_harness = \"pi\"\n",
+        )
+        .unwrap();
+        init_workspace_in(dir.path(), store.path()).unwrap();
+        assert_eq!(load().default_harness.as_deref(), Some("codex"));
     }
 }

@@ -182,6 +182,17 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     match &ws_root {
         Some(root) => {
             println!("  Root: {}", root.display());
+            if let Some(store) = Config::workspace_store() {
+                let path = Config::workspace_path_in(&store, root);
+                println!(
+                    "  Settings: {} {}",
+                    path.display(),
+                    if path.exists() { "" } else { "(none yet)" }.dimmed()
+                );
+            }
+            if let Some(warning) = Config::legacy_warning(root) {
+                println!("  {} {}", "[!]".yellow().bold(), warning);
+            }
             report_rules(root);
             report_skills(
                 "Workspace Skills",
@@ -190,16 +201,12 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
             for (k, settings) in &config.harnesses {
                 if settings.protocol.as_deref() == Some("acp") && settings.command.is_empty() {
                     println!(
-                        "  {} harness '{}' has protocol = \"acp\" but no command in unharness.toml",
+                        "  {} harness '{}' has protocol = \"acp\" but no command in the config",
                         "[!]".yellow(),
                         k
                     );
                 } else if registry.parse(k).is_none() {
-                    println!(
-                        "  {} unknown harness '{}' in unharness.toml",
-                        "[!]".yellow(),
-                        k
-                    );
+                    println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k);
                 }
             }
         }

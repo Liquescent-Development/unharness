@@ -239,8 +239,8 @@ commands, MCP servers) can:
 
 - **write** only inside the workspace, the harness's own state directories
   (`~/.claude`, `~/.codex`, `~/.pi`, …; `unharness doctor` lists them) and
-  the temp directories;
-- **read** everything except credential locations: `~/.ssh`, `~/.gnupg`,
+  the temp directories (and herdr's runtime directory);
+- **read** everything except credential locations: `~/.gnupg`,
   `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`,
   `~/.config/gcloud`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`,
   `~/.git-credentials` and shell history;
@@ -268,7 +268,8 @@ Things to know:
   active Codex is told the sandbox is external (its approvals are
   unchanged). With `--sandbox off` Codex's sandbox follows the policy as in
   the table above.
-- Git over ssh from the agent needs `readable = ["~/.ssh"]`.
+- `~/.ssh` stays readable, since git over ssh and commit signing need it;
+  keep keys in an agent or protect them with a passphrase if that matters.
 - An MCP server or extension that keeps data elsewhere needs its directory
   in `writable`.
 - Claude Code updates `~/.claude.json` by creating files next to it in the
@@ -281,8 +282,9 @@ Things to know:
   add the main repository's `.git` to `writable` to commit from the agent.
 - Programs that need to raise privileges (`sudo`) do not work inside
   (Linux).
-- The workspace's own `unharness.toml` is inside the workspace, so an agent
-  can edit it; what it sets there applies from the next run.
+- unharness's own configuration, the workspace's included, is kept in
+  `~/.config/unharness`, which is never writable from inside: an agent
+  cannot change the settings its next run starts with.
 
 ### Switching harnesses
 
@@ -293,7 +295,13 @@ harness resumes its own session and bridges only what happened since.
 
 ## Configuration
 
-Workspace `unharness.toml` is merged over `~/.config/unharness/config.toml`.
+Settings come from `~/.config/unharness/config.toml`, with the workspace's
+overrides merged over it. The overrides are kept outside the workspace, in
+`~/.config/unharness/workspaces/<name>-<hash>.toml` (`unharness doctor`
+prints the path, `unharness init` creates it), because a file inside the
+workspace could be edited by the agent it is meant to configure. An
+`unharness.toml` left in a workspace from an earlier version is not read;
+`unharness init` imports it once.
 
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
@@ -306,7 +314,7 @@ file_checkpoints = true          # snapshot the working tree before each prompt 
 [sandbox]
 level    = "workspace-write"     # read-only | workspace-write | off
 writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
-readable = ["~/.ssh"]            # credential paths to allow reading
+readable = ["~/.config/gh"]      # credential paths to allow reading
 
 [harnesses.claude]
 # binary = "/path/to/claude"

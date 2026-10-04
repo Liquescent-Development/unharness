@@ -44,6 +44,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   project's `.git` (the tests compare refs, status, stash and object count
   before and after), and a restore snapshots the tree first so it can be
   undone. Tests pass their own store directory, never the real one.
+- **Nothing an agent can write decides how it is run.** Workspace settings
+  are read from `<config dir>/unharness/workspaces/`, never from the
+  workspace; an in-tree `unharness.toml` is only imported by `unharness
+  init`. The config and state directories are never writable in the sandbox.
 - **No silent edits to vendor settings.** unharness does not write to
   `~/.claude`, `~/.codex`, `~/.gemini` or similar.
 - **Processes are reaped.** Child processes go through `core::process::
@@ -165,7 +169,7 @@ recorded ones. For anything else:
 - Sandbox (`src/core/sandbox/`), checked on Linux 7.2 (Landlock ABI 10) with
   Claude Code 2.1.289, Codex 0.157.0 (app-server and exec) and pi 0.87.1: a
   workspace write succeeds, a write to the home directory and a read of
-  `~/.ssh` fail, sessions resume. Landlock only allows, so reads are granted
+  a denied credential directory fail, sessions resume. Landlock only allows, so reads are granted
   on everything around the denied paths (`linux::read_grants`); directory
   listing reaches into them, file contents do not. Codex's bubblewrap fails
   inside a Landlock domain ("setting up uid map: Permission denied"), hence

@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::core::checkpoints::project_key;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
     /// Preferred default harness (agy, claude, codex, pi).
@@ -47,7 +49,7 @@ pub struct SandboxSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable: Vec<PathBuf>,
     /// Credential paths a harness may read although they are denied by
-    /// default (e.g. `~/.ssh` for git over ssh).
+    /// default (e.g. `~/.config/gh`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readable: Vec<PathBuf>,
 }
@@ -89,14 +91,68 @@ pub struct HarnessSettings {
 }
 
 impl Config {
+    /// The global config with the workspace's overrides merged over it.
+    ///
+    /// Both live under the user's config directory. Nothing is read from the
+    /// workspace itself: an agent can write there, and a config it edited
+    /// would decide its own sandbox and permissions on the next run.
     pub fn load_effective(workspace_root: Option<&Path>) -> Self {
         let global_config = Self::load_global().unwrap_or_default();
-        let workspace_config = workspace_root.and_then(|root| Self::load_from_dir(root).ok());
+        let workspace_config = workspace_root
+            .zip(Self::workspace_store())
+            .and_then(|(root, store)| Self::load_workspace_in(&store, root));
 
         match workspace_config {
             Some(local) => Self::merge(global_config, local),
             None => global_config,
         }
+    }
+
+    /// Where workspace overrides are kept: `<config dir>/unharness/workspaces`.
+    pub fn workspace_store() -> Option<PathBuf> {
+        dirs::config_dir().map(|d| d.join("unharness").join("workspaces"))
+    }
+
+    /// The overrides file for the workspace at `root`, under `store`.
+    pub fn workspace_path_in(store: &Path, root: &Path) -> PathBuf {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        store.join(format!("{}.toml", project_key(&root)))
+    }
+
+    pub fn load_workspace_in(store: &Path, root: &Path) -> Option<Self> {
+        let content = std::fs::read_to_string(Self::workspace_path_in(store, root)).ok()?;
+        toml::from_str(&content).ok()
+    }
+
+    pub fn save_workspace_in(&self, store: &Path, root: &Path) -> Result<PathBuf> {
+        let path = Self::workspace_path_in(store, root);
+        std::fs::create_dir_all(store)?;
+        std::fs::write(&path, toml::to_string_pretty(self)?)?;
+        Ok(path)
+    }
+
+    /// An `unharness.toml` inside the workspace, from before overrides moved
+    /// out of it. It is not read; `unharness init` imports it.
+    pub fn legacy_workspace_file(root: &Path) -> Option<PathBuf> {
+        ["unharness.toml", ".unharness.toml"]
+            .iter()
+            .map(|name| root.join(name))
+            .find(|p| p.exists())
+    }
+
+    /// What to tell the user when the workspace has a config file that is
+    /// being ignored because it was never imported.
+    pub fn legacy_warning(root: &Path) -> Option<String> {
+        let legacy = Self::legacy_workspace_file(root)?;
+        let store = Self::workspace_store()?;
+        if Self::workspace_path_in(&store, root).exists() {
+            return None;
+        }
+        Some(format!(
+            "{} is not read any more (workspace settings are kept outside the workspace, \
+             where an agent cannot edit them); run `unharness init` to import it",
+            legacy.display()
+        ))
     }
 
     pub fn global_path() -> Option<PathBuf> {
@@ -113,21 +169,12 @@ impl Config {
         Ok(Config::default())
     }
 
-    pub fn load_from_dir(dir: &Path) -> Result<Self> {
-        for candidate in ["unharness.toml", ".unharness.toml"] {
-            let path = dir.join(candidate);
-            if path.exists() {
-                let content = std::fs::read_to_string(&path)?;
-                return Ok(toml::from_str(&content)?);
-            }
-        }
-        anyhow::bail!("No unharness configuration found in {}", dir.display())
-    }
-
-    pub fn save_to_dir(&self, dir: &Path) -> Result<PathBuf> {
-        let path = dir.join("unharness.toml");
-        std::fs::write(&path, toml::to_string_pretty(self)?)?;
-        Ok(path)
+    /// Parse the workspace's old in-tree config, for importing it.
+    pub fn load_legacy(root: &Path) -> Result<Self> {
+        let path = Self::legacy_workspace_file(root).ok_or_else(|| {
+            anyhow::anyhow!("No unharness configuration found in {}", root.display())
+        })?;
+        Ok(toml::from_str(&std::fs::read_to_string(&path)?)?)
     }
 
     pub fn save_global(&self) -> Result<PathBuf> {
@@ -269,6 +316,54 @@ transport = "rpc"
         assert_eq!(
             cfg.harness("pi").unwrap().default_provider.as_deref(),
             Some("anthropic")
+        );
+    }
+
+    #[test]
+    fn workspace_overrides_live_outside_the_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, root) = (tmp.path().join("store"), tmp.path().join("proj"));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Config::load_workspace_in(&store, &root).is_none());
+
+        let cfg = Config {
+            default_harness: Some("pi".into()),
+            ..Default::default()
+        };
+        let path = cfg.save_workspace_in(&store, &root).unwrap();
+        assert!(path.starts_with(&store));
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("proj-") && name.ends_with(".toml"),
+            "{name}"
+        );
+        assert_eq!(
+            Config::load_workspace_in(&store, &root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("pi")
+        );
+
+        // A file in the workspace is found for import, never loaded.
+        std::fs::write(root.join("unharness.toml"), "default_harness = \"codex\"\n").unwrap();
+        assert_eq!(
+            Config::legacy_workspace_file(&root),
+            Some(root.join("unharness.toml"))
+        );
+        assert_eq!(
+            Config::load_legacy(&root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("codex")
+        );
+        assert_eq!(
+            Config::load_workspace_in(&store, &root)
+                .unwrap()
+                .default_harness
+                .as_deref(),
+            Some("pi")
         );
     }
 
