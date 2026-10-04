@@ -19,7 +19,7 @@ use super::{
 };
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 pub use transport::AgyTransport;
 
@@ -106,7 +106,7 @@ impl Harness for AgyHarness {
             usage_reporting: true,
             image_input: false,
             plan_updates: false,
-            subagents: false,
+            subagents: SubagentSupport::default(),
             steer: false,
             compaction: false,
             context_usage: false,

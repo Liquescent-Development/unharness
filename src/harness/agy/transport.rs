@@ -160,6 +160,8 @@ async fn drive(
                     return;
                 };
                 match cmd {
+                    // No subagents are reported here, so none can be running.
+                    SessionCommand::StopSubagent { .. } => {}
                     SessionCommand::Steer { .. }
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. } => {

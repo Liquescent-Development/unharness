@@ -15,7 +15,7 @@ use super::history::PromptHistory;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
-use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript};
+use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
 use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
@@ -46,6 +46,22 @@ pub enum Action {
     Shutdown,
 }
 
+/// A subagent that is at work.
+#[derive(Debug, Clone)]
+pub struct RunningSubagent {
+    /// The tool call that spawned it.
+    pub id: String,
+    pub description: String,
+    pub kind: Option<String>,
+    /// What it is doing now.
+    pub activity: Option<String>,
+    /// The harness words its activity itself, so its tool calls need not.
+    described: bool,
+    /// Tool calls it has made.
+    pub tools: usize,
+    pub started: Instant,
+}
+
 /// A prompt waiting for the running turn to finish.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedPrompt {
@@ -61,6 +77,38 @@ impl Action {
             attachments: Vec::new(),
         }
     }
+}
+
+/// A subagent as listed under the prompt.
+#[derive(Debug, Clone)]
+pub struct SubagentRow {
+    /// The tool call that spawned it.
+    pub id: String,
+    pub description: String,
+    pub kind: Option<String>,
+    /// `None` while it runs.
+    pub status: Option<crate::core::SubagentStatus>,
+    /// How many subagents deep it was spawned.
+    pub depth: usize,
+    /// What it is doing now.
+    pub activity: Option<String>,
+    /// Tool calls it has made.
+    pub tools: usize,
+    /// How long it has run, or ran.
+    pub secs: f32,
+}
+
+/// A subagent offered in the picker, running or not.
+#[derive(Debug, Clone)]
+pub struct SubagentOption {
+    /// The tool call that spawned it.
+    pub id: String,
+    pub description: String,
+    pub kind: Option<String>,
+    /// `None` while it runs.
+    pub status: Option<crate::core::SubagentStatus>,
+    /// How many subagents deep it was spawned.
+    pub depth: usize,
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -86,6 +134,10 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/usage", "Show token usage and cost"),
     ("/plan", "Show or hide the agent's plan"),
+    (
+        "/subagents",
+        "Open a subagent's own transcript (and stop it from there)",
+    ),
     (
         "/steer",
         "Send a message into the running turn: /steer <text>",
@@ -184,6 +236,16 @@ pub struct App {
     pub rate_limit: Option<RateLimitInfo>,
     pub plan: Vec<PlanEntry>,
     pub show_plan: bool,
+    /// Subagents at work, oldest first. They can outlive the turn that
+    /// started them.
+    pub subagents: Vec<RunningSubagent>,
+    /// The subagent the keyboard is on in the list under the prompt; `None`
+    /// while it is in the prompt.
+    pub subagent_focus: Option<String>,
+    /// The subagent whose transcript is shown in place of the main one.
+    pub viewing: Option<String>,
+    /// Where the main transcript was scrolled to when a subagent's was opened.
+    main_scroll: (u16, bool),
     /// Images that go out with the next prompt.
     pub attachments: Vec<Attachment>,
     /// Where each harness can rewind its session to (see `TurnAnchor`).
@@ -482,6 +544,10 @@ impl App {
             rate_limit: None,
             plan,
             show_plan: true,
+            subagents: Vec::new(),
+            subagent_focus: None,
+            viewing: None,
+            main_scroll: (0, true),
             attachments: Vec::new(),
             anchors,
             fork_pending,
@@ -696,6 +762,28 @@ impl App {
             return "Streaming".to_string();
         }
         "Working".to_string()
+    }
+
+    /// A turn is running, or subagents are still at work after one.
+    pub fn is_busy(&self) -> bool {
+        self.is_generating || !self.subagents.is_empty()
+    }
+
+    /// "2 subagents running", when any are.
+    pub fn subagents_label(&self) -> Option<String> {
+        match self.subagents.len() {
+            0 => None,
+            1 => Some("1 subagent running".to_string()),
+            n => Some(format!("{n} subagents running")),
+        }
+    }
+
+    /// How long the longest-running subagent has been at work.
+    pub fn subagents_elapsed_secs(&self) -> f32 {
+        self.subagents
+            .iter()
+            .map(|a| a.started.elapsed().as_secs_f32())
+            .fold(0.0, f32::max)
     }
 
     pub fn tick_spinner(&mut self) {
@@ -1053,7 +1141,7 @@ impl App {
     /// one and gets the conversation so far as context.
     fn forget_session(&mut self, harness: HarnessId) {
         if harness == self.active && self.session_alive {
-            self.actions.push_back(Action::Shutdown);
+            self.shutdown_session();
         }
         self.session_ids.remove(&harness);
         self.last_active_index.remove(&harness);
@@ -1105,7 +1193,7 @@ impl App {
         self.persist();
         let original = self.conversation.id.clone();
         if self.session_alive {
-            self.actions.push_back(Action::Shutdown);
+            self.shutdown_session();
         }
         let mut fork = Conversation::new(self.active);
         fork.title = self.conversation.title.clone();
@@ -1217,6 +1305,219 @@ impl App {
         }
     }
 
+    /// The list under the prompt: the subagents at work, then those that
+    /// have ended, latest first. An ended one stays until the user takes
+    /// it off, so that what it did can still be read.
+    pub fn subagent_rows(&self) -> Vec<SubagentRow> {
+        let mut rows: Vec<SubagentRow> = self
+            .transcript
+            .listed_agents()
+            .into_iter()
+            .map(|(id, run, depth)| {
+                let live = self.subagents.iter().find(|a| a.id == id);
+                SubagentRow {
+                    id: id.to_string(),
+                    description: run.description.clone(),
+                    kind: run.kind.clone(),
+                    status: run.status,
+                    depth,
+                    activity: live.and_then(|a| a.activity.clone()),
+                    tools: live.map_or(0, |a| a.tools),
+                    secs: run
+                        .duration
+                        .unwrap_or_else(|| run.started.elapsed())
+                        .as_secs_f32(),
+                }
+            })
+            .collect();
+        let ended = rows.iter().filter(|r| r.status.is_some()).count();
+        // (Stable: the running keep their order; the ended are then reversed.)
+        rows.sort_by_key(|r| r.status.is_some());
+        let n = rows.len();
+        rows[n - ended..].reverse();
+        rows
+    }
+
+    /// Where the keyboard is in that list, if it is there (and the
+    /// subagent it was on is still listed).
+    pub fn subagent_focus_index(&self) -> Option<usize> {
+        let id = self.subagent_focus.as_ref()?;
+        self.subagent_rows().iter().position(|r| &r.id == id)
+    }
+
+    /// Down: from the prompt into the list, then along it. False when
+    /// there is no list to go into.
+    pub fn subagent_list_down(&mut self) -> bool {
+        let rows = self.subagent_rows();
+        let next = match self.subagent_focus_index() {
+            Some(i) => (i + 1).min(rows.len().saturating_sub(1)),
+            None => 0,
+        };
+        self.subagent_focus = rows.get(next).map(|r| r.id.clone());
+        self.subagent_focus.is_some()
+    }
+
+    /// Up: along the list, and from its first row back to the prompt.
+    pub fn subagent_list_up(&mut self) {
+        let rows = self.subagent_rows();
+        self.subagent_focus = match self.subagent_focus_index() {
+            Some(i) if i > 0 => rows.get(i - 1).map(|r| r.id.clone()),
+            _ => None,
+        };
+    }
+
+    /// Take the chosen subagent off the list, if it has ended. The
+    /// keyboard moves to the row that takes its place, or back to the
+    /// prompt when the list is empty.
+    pub fn dismiss_focused_subagent(&mut self) {
+        let rows = self.subagent_rows();
+        let Some(at) = self.subagent_focus_index() else {
+            return;
+        };
+        if rows[at].status.is_none() {
+            self.flash("Still running: open it and press s to stop it");
+            return;
+        }
+        if let Some(run) = self.transcript.agent_mut(&rows[at].id) {
+            run.dismissed = true;
+        }
+        self.persist();
+        let rows = self.subagent_rows();
+        self.subagent_focus = rows
+            .get(at.min(rows.len().saturating_sub(1)))
+            .map(|r| r.id.clone());
+    }
+
+    /// Enter on the list: that subagent's own transcript.
+    pub fn open_focused_subagent(&mut self) {
+        match self.subagent_focus_index() {
+            Some(_) => {
+                let id = self.subagent_focus.clone().unwrap_or_default();
+                self.open_subagent(&id);
+            }
+            None => self.subagent_focus = None,
+        }
+    }
+
+    /// Every subagent of the conversation, to choose one to look at.
+    pub fn open_subagent_picker(&mut self) {
+        let items: Vec<SubagentOption> = self
+            .transcript
+            .agents()
+            .into_iter()
+            .map(|(id, run, depth)| SubagentOption {
+                id: id.to_string(),
+                description: run.description.clone(),
+                kind: run.kind.clone(),
+                status: run.status,
+                depth,
+            })
+            .collect();
+        if items.is_empty() {
+            self.transcript
+                .push_notice("no subagents in this conversation");
+            return;
+        }
+        // Start on the one in view, else the first still at work, else the latest.
+        let at = items
+            .iter()
+            .position(|a| Some(&a.id) == self.viewing.as_ref())
+            .or_else(|| items.iter().position(|a| a.status.is_none()))
+            .unwrap_or(items.len() - 1);
+        self.modal = Some(Modal::Subagents(
+            ListPicker::new(items).with_selected(Some(at)),
+        ));
+    }
+
+    /// Show the transcript of the subagent that the tool call `id` spawned
+    /// in place of the main one.
+    pub fn open_subagent(&mut self, id: &str) {
+        if self.transcript.agent(id).is_none() {
+            return;
+        }
+        if self.viewing.is_none() {
+            self.main_scroll = (self.scroll, self.auto_scroll);
+        }
+        self.viewing = Some(id.to_string());
+        // Back from it, the keyboard is on its row of the list, if it has one.
+        self.subagent_focus = Some(id.to_string());
+        self.show_from_the_end();
+    }
+
+    /// Back to the main transcript, where it was.
+    pub fn close_subagent_view(&mut self) {
+        if self.viewing.take().is_some() {
+            self.show_from_the_end();
+            (self.scroll, self.auto_scroll) = self.main_scroll;
+        }
+    }
+
+    /// Another transcript is to be drawn: nothing kept from the last one applies.
+    fn show_from_the_end(&mut self) {
+        self.transcript_view = TranscriptView::default();
+        self.selection = None;
+        self.last_click = None;
+        self.scroll = 0;
+        self.auto_scroll = true;
+    }
+
+    /// The subagent in view, if it still exists (a rewind may have removed it).
+    pub fn viewed(&self) -> Option<&super::transcript::AgentRun> {
+        self.transcript.agent(self.viewing.as_deref()?)
+    }
+
+    /// The next (or previous) subagent's transcript, round and round.
+    pub fn view_next_subagent(&mut self, back: bool) {
+        let ids: Vec<String> = self
+            .transcript
+            .agents()
+            .into_iter()
+            .map(|(id, _, _)| id.to_string())
+            .collect();
+        let Some(at) = ids.iter().position(|i| Some(i) == self.viewing.as_ref()) else {
+            return;
+        };
+        let step = if back { ids.len() - 1 } else { 1 };
+        let next = ids[(at + step) % ids.len()].clone();
+        self.open_subagent(&next);
+    }
+
+    /// The blocks on screen: the main transcript's, or those of the subagent in view.
+    pub fn shown_blocks(&self) -> &[super::transcript::Block] {
+        match self.viewed() {
+            Some(run) => &run.log.blocks,
+            None => &self.transcript.blocks,
+        }
+    }
+
+    /// The transcript on screen, for expanding and collapsing its tool calls.
+    pub fn shown_transcript_mut(&mut self) -> &mut Transcript {
+        let id = self.viewing.clone().unwrap_or_default();
+        if self.transcript.agent(&id).is_some() {
+            return &mut self.transcript.agent_mut(&id).unwrap().log;
+        }
+        &mut self.transcript
+    }
+
+    /// Stop the subagent in view.
+    pub fn stop_viewed_subagent(&mut self) {
+        let Some(id) = self.viewing.clone() else {
+            return;
+        };
+        if !self.subagents.iter().any(|a| a.id == id) {
+            self.flash("This subagent is not running");
+        } else if !self.caps().subagents.stop || !self.session_alive {
+            self.flash(format!(
+                "{} cannot stop a subagent from here",
+                self.short_name()
+            ));
+        } else {
+            self.flash("Stopping…");
+            self.actions
+                .push_back(Action::Command(SessionCommand::StopSubagent { id }));
+        }
+    }
+
     // ------------------------------------------------------------- session events
 
     pub fn on_event(&mut self, ev: AgentEvent) {
@@ -1266,22 +1567,83 @@ impl App {
                 }
             }
             AgentEvent::PlanUpdated { entries, .. } => self.plan = entries,
+            // What a subagent does goes into its own transcript, not this
+            // one: several at work would otherwise drown the main agent.
             AgentEvent::Sub { parent, event } => match *event {
-                AgentEvent::ToolCallStarted { id, name, input } => {
-                    self.transcript
-                        .tool_started_in(Some(&parent), &id, &name, input)
-                }
-                // The subagent's prose streams into its spawning call while
-                // that is still running; the call's result replaces it.
-                AgentEvent::TextDelta(t) => self.transcript.tool_delta(&parent, &t),
+                // These find their own place (ids are unique), or are the user's to answer.
                 ev @ (AgentEvent::ToolCallDelta { .. }
                 | AgentEvent::ToolCallResult { .. }
                 | AgentEvent::PermissionRequest(_)
                 | AgentEvent::Sub { .. }
-                | AgentEvent::Notice(_)
-                | AgentEvent::Error(_)) => self.on_event(ev),
-                _ => {}
+                | AgentEvent::SubagentStarted { .. }
+                | AgentEvent::SubagentProgress { .. }
+                | AgentEvent::SubagentEnded { .. }) => self.on_event(ev),
+                ev => {
+                    if let AgentEvent::ToolCallStarted { name, input, .. } = &ev
+                        && let Some(a) = self.subagents.iter_mut().find(|a| a.id == parent)
+                    {
+                        a.tools += 1;
+                        if !a.described {
+                            a.activity = Some(
+                                format!("{name} {}", tool_summary(name, input))
+                                    .trim_end()
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    let sender = self
+                        .transcript
+                        .agent(&parent)
+                        .map_or("subagent", |run| run.sender())
+                        .to_string();
+                    // Nothing known of the call that spawned it: nowhere to put it.
+                    let Some(log) = self.transcript.agent_log(&parent) else {
+                        return;
+                    };
+                    match ev {
+                        AgentEvent::ToolCallStarted { id, name, input } => {
+                            log.tool_started(&id, &name, input)
+                        }
+                        AgentEvent::TextDelta(t) => log.append_assistant(&sender, &t),
+                        AgentEvent::ThinkingDelta(t) => log.append_thought(&t),
+                        AgentEvent::Notice(n) => log.push_notice(n),
+                        AgentEvent::Error(e) => log.push_error(e),
+                        _ => {}
+                    }
+                }
             },
+            AgentEvent::SubagentStarted {
+                id,
+                description,
+                kind,
+            } => {
+                self.transcript
+                    .agent_started(&id, &description, kind.as_deref());
+                self.subagents.retain(|a| a.id != id);
+                self.subagents.push(RunningSubagent {
+                    id,
+                    description,
+                    kind,
+                    activity: None,
+                    described: false,
+                    tools: 0,
+                    started: Instant::now(),
+                });
+            }
+            AgentEvent::SubagentProgress { id, activity } => {
+                if let Some(a) = self.subagents.iter_mut().find(|a| a.id == id) {
+                    a.activity = Some(activity);
+                    a.described = true;
+                }
+            }
+            AgentEvent::SubagentEnded { id, status, result } => {
+                self.transcript.agent_ended(&id, status, result.as_deref());
+                self.subagents.retain(|a| a.id != id);
+                // Between turns nothing else would save its report.
+                if !self.is_generating {
+                    self.persist();
+                }
+            }
             AgentEvent::Context(c) => self.context.merge(c),
             AgentEvent::RateLimit(r) => {
                 // Warn once each time a window crosses the threshold.
@@ -1359,6 +1721,7 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                self.drop_subagents();
                 if self.is_generating {
                     self.finish_generation();
                     self.transcript.push_error(format!(
@@ -1373,6 +1736,18 @@ impl App {
                 self.pending_prompts.clear();
             }
         }
+    }
+
+    /// The session is going away, and whatever its subagents were doing.
+    fn drop_subagents(&mut self) {
+        self.subagents.clear();
+        self.transcript.end_running_agents();
+    }
+
+    /// End the active harness's session.
+    fn shutdown_session(&mut self) {
+        self.drop_subagents();
+        self.actions.push_back(Action::Shutdown);
     }
 
     fn on_permission_request(&mut self, req: PermissionRequest) {
@@ -1411,7 +1786,7 @@ impl App {
             return;
         }
         if self.session_alive {
-            self.actions.push_back(Action::Shutdown);
+            self.shutdown_session();
         }
         self.last_active_index
             .insert(self.active, self.transcript.blocks.len());
@@ -1518,7 +1893,7 @@ impl App {
             }
         };
         if self.session_alive {
-            self.actions.push_back(Action::Shutdown);
+            self.shutdown_session();
         }
         self.persist();
         let active = if self.registry.get(conv.active_harness).is_some() {
@@ -1561,7 +1936,7 @@ impl App {
 
     pub fn quit(&mut self) {
         if self.session_alive {
-            self.actions.push_back(Action::Shutdown);
+            self.shutdown_session();
         }
         self.persist();
         self.should_quit = true;
@@ -1725,6 +2100,8 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|e| ModalChoice::Effort(e.clone())))),
             Modal::Policy(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
+            Modal::Subagents(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|a| ModalChoice::Subagent(a.id.clone())))),
             Modal::Resume(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|r| ModalChoice::Resume(r.id.clone())))),
             // Enter rewinds the conversation; `f` also restores the files.
@@ -1923,6 +2300,10 @@ impl App {
                         self.modal = None;
                         self.set_policy(p);
                     }
+                    ModalChoice::Subagent(id) => {
+                        self.modal = None;
+                        self.open_subagent(&id);
+                    }
                     ModalChoice::Resume(id) => {
                         self.modal = None;
                         self.resume_conversation(id);
@@ -2055,6 +2436,7 @@ impl App {
                 self.attachments.clear();
                 self.transcript.push_system("Attachments cleared.");
             }
+            "/subagents" => self.open_subagent_picker(),
             "/plan" => {
                 self.show_plan = !self.show_plan;
                 if self.plan.is_empty() {
@@ -2107,7 +2489,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand tool output · Esc/Ctrl+C interrupt or quit\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2297,10 +2679,15 @@ impl App {
     }
 
     /// Show the next newer sent prompt, or the draft after the newest.
-    pub fn history_newer(&mut self) {
-        if let Some(text) = self.history.newer() {
-            self.input = text;
-            self.show_recalled();
+    /// False when no earlier prompt was on show: there is nothing newer.
+    pub fn history_newer(&mut self) -> bool {
+        match self.history.newer() {
+            Some(text) => {
+                self.input = text;
+                self.show_recalled();
+                true
+            }
+            None => false,
         }
     }
 
@@ -2532,13 +2919,50 @@ impl App {
             Some(text) if !text.trim().is_empty() => self.copy_request = Some(text),
             _ => {
                 // A plain click, or only blank cells: nothing is selected.
-                if self
+                if let Some(s) = self
                     .selection
-                    .is_some_and(|s| s.granularity == Granularity::Char)
+                    .filter(|s| s.granularity == Granularity::Char)
                 {
                     self.selection = None;
+                    if s.anchor == s.focus {
+                        self.toggle_tool_at(s.anchor.line);
+                    }
                 }
             }
+        }
+    }
+
+    /// Expand or collapse the tool call whose first row is rendered line
+    /// `line` (a click on it).
+    fn toggle_tool_at(&mut self, line: usize) -> bool {
+        let mut start = 0;
+        let mut at = None;
+        for (i, (_, end)) in self.transcript_view.blocks.iter().enumerate() {
+            if line == start {
+                at = Some(i);
+            }
+            if line < *end {
+                break;
+            }
+            start = *end;
+        }
+        let Some(i) = at else {
+            return false;
+        };
+        match self.shown_transcript_mut().blocks.get_mut(i) {
+            // A call that spawned a subagent opens that subagent's transcript.
+            Some(super::transcript::Block::Tool {
+                id, agent: Some(_), ..
+            }) => {
+                let id = id.clone();
+                self.open_subagent(&id);
+                true
+            }
+            Some(super::transcript::Block::Tool { collapsed, .. }) => {
+                *collapsed = !*collapsed;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2638,6 +3062,7 @@ enum ModalChoice {
     Model(String),
     Effort(String),
     Policy(PermissionPolicy),
+    Subagent(String),
     Resume(String),
     /// (user block, also restore files)
     Rewind(usize, bool),
@@ -2872,7 +3297,8 @@ pub(crate) mod tests {
         });
         assert_eq!(app.plan.len(), 1);
 
-        // Subagent tool calls land in the transcript; subagent prose does not.
+        // Nothing a subagent does lands in the main transcript, least of
+        // all when the call that spawned it is unknown.
         let before = app.transcript.blocks.len();
         app.on_event(AgentEvent::Sub {
             parent: "p".into(),
@@ -2887,7 +3313,7 @@ pub(crate) mod tests {
                 input: serde_json::json!({"command": "ls"}),
             }),
         });
-        assert_eq!(app.transcript.blocks.len(), before + 1);
+        assert_eq!(app.transcript.blocks.len(), before);
     }
 
     #[test]
@@ -3200,58 +3626,465 @@ pub(crate) mod tests {
         assert!(root.join("new.txt").exists());
     }
 
-    #[test]
-    fn subagent_calls_hang_off_their_spawner() {
+    fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::super::transcript::AgentRun {
+        app.transcript
+            .agent(want)
+            .unwrap_or_else(|| panic!("no subagent on {want}"))
+    }
+
+    /// What a transcript holds, one word per block.
+    fn kinds(blocks: &[super::super::transcript::Block]) -> Vec<String> {
         use super::super::transcript::Block;
+        blocks
+            .iter()
+            .map(|b| match b {
+                Block::User { .. } => "user".to_string(),
+                Block::Assistant { text, .. } => format!("text:{text}"),
+                Block::Thought { .. } => "thought".to_string(),
+                Block::Tool { id, .. } => format!("tool:{id}"),
+                Block::System(_) => "system".to_string(),
+                Block::Notice(_) => "notice".to_string(),
+                Block::Error(_) => "error".to_string(),
+            })
+            .collect()
+    }
+
+    fn sub(parent: &str, event: AgentEvent) -> AgentEvent {
+        AgentEvent::Sub {
+            parent: parent.into(),
+            event: Box::new(event),
+        }
+    }
+
+    fn spawn(app: &mut App, id: &str, description: &str, kind: Option<&str>) {
+        app.on_event(AgentEvent::ToolCallStarted {
+            id: id.into(),
+            name: "Agent".into(),
+            input: serde_json::json!({ "description": description }),
+        });
+        app.on_event(AgentEvent::SubagentStarted {
+            id: id.into(),
+            description: description.into(),
+            kind: kind.map(str::to_string),
+        });
+    }
+
+    fn read_call(id: &str, file: &str) -> AgentEvent {
+        AgentEvent::ToolCallStarted {
+            id: id.into(),
+            name: "Read".into(),
+            input: serde_json::json!({ "file_path": file }),
+        }
+    }
+
+    #[test]
+    fn an_unannounced_subagent_still_gets_a_transcript_of_its_own() {
+        use crate::core::SubagentStatus;
         let mut app = test_app(HarnessId::CLAUDE);
         app.submit_prompt("delegate".into());
+        // A harness that attributes a subagent's work without announcing it.
         app.on_event(AgentEvent::ToolCallStarted {
             id: "spawn".into(),
             name: "Agent".into(),
             input: serde_json::json!({"description": "look around"}),
         });
-        let sub = |event| AgentEvent::Sub {
-            parent: "spawn".into(),
-            event: Box::new(event),
-        };
-        app.on_event(sub(AgentEvent::ToolCallStarted {
-            id: "inner".into(),
-            name: "Read".into(),
-            input: serde_json::json!({"file_path": "a.txt"}),
-        }));
-        app.on_event(sub(AgentEvent::ToolCallResult {
-            id: "inner".into(),
-            output: "contents".into(),
-            is_error: false,
-        }));
-        // The subagent's prose shows as the spawning call's live output.
-        app.on_event(sub(AgentEvent::TextDelta("found it".into())));
-        let find = |app: &App, want: &str| {
-            app.transcript
-                .blocks
-                .iter()
-                .find_map(|b| match b {
-                    Block::Tool {
-                        id, parent, output, ..
-                    } if id == want => Some((parent.clone(), output.clone())),
-                    _ => None,
-                })
-                .unwrap()
-        };
-        assert_eq!(
-            find(&app, "inner"),
-            (Some("spawn".into()), "contents".into())
-        );
-        assert_eq!(find(&app, "spawn"), (None, "found it".into()));
-
-        // Saved and restored with the link; left out of the bridge.
-        let records = app.transcript.to_records();
-        let back = Transcript::from_records(&records);
-        assert!(back.blocks.iter().any(
-            |b| matches!(b, Block::Tool { id, parent: Some(p), .. } if id == "inner" && p == "spawn")
+        let main_len = app.transcript.blocks.len();
+        app.on_event(sub("spawn", read_call("inner", "a.txt")));
+        app.on_event(sub(
+            "spawn",
+            AgentEvent::ToolCallResult {
+                id: "inner".into(),
+                output: "contents".into(),
+                is_error: false,
+            },
         ));
+        app.on_event(sub("spawn", AgentEvent::TextDelta("found it".into())));
+        assert_eq!(app.transcript.blocks.len(), main_len);
+        let run = spawn_block(&app, "spawn");
+        assert_eq!(run.description, "look around");
+        assert_eq!(run.status, None);
+        assert_eq!(kinds(&run.log.blocks), ["tool:inner", "text:found it"]);
+        // It ends when its call does.
+        app.on_event(AgentEvent::ToolCallResult {
+            id: "spawn".into(),
+            output: "found it".into(),
+            is_error: false,
+        });
+        assert_eq!(
+            spawn_block(&app, "spawn").status,
+            Some(SubagentStatus::Completed)
+        );
+
+        // Another harness is told what it reported, not what it called.
         let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
-        assert!(bridge.contains("[tool Agent") && !bridge.contains("[tool Read"));
+        assert!(bridge.contains("[tool Agent look around → completed] found it"));
+        assert!(!bridge.contains("[tool Read"));
+
+        // A conversation saved when subagent calls sat in the main list,
+        // pointing at their spawner, comes back with them under it.
+        let old: Vec<crate::core::conversations::BlockRecord> =
+            serde_json::from_value(serde_json::json!([
+                {"kind": "user", "text": "delegate"},
+                {"kind": "tool", "id": "spawn", "name": "Agent",
+                 "input": {"description": "look around"}, "output": "found it", "is_error": false},
+                {"kind": "tool", "id": "inner", "name": "Read", "input": {"file_path": "a.txt"},
+                 "output": "contents", "is_error": false, "parent": "spawn"},
+                {"kind": "assistant", "text": "done", "sender": "Claude", "secs": 1.0},
+            ]))
+            .unwrap();
+        let back = Transcript::from_records(&old);
+        assert_eq!(kinds(&back.blocks), ["user", "tool:spawn", "text:done"]);
+        let run = back.agent("spawn").unwrap();
+        assert_eq!(kinds(&run.log.blocks), ["tool:inner"]);
+        assert_eq!(run.status, Some(SubagentStatus::Completed));
+    }
+
+    #[test]
+    fn a_background_subagent_outlives_its_call_and_its_turn() {
+        use crate::core::SubagentStatus;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("delegate".into());
+        spawn(&mut app, "spawn", "look around", Some("Explore"));
+        // The call returns at once and the turn ends; the subagent works on.
+        app.on_event(AgentEvent::ToolCallResult {
+            id: "spawn".into(),
+            output: "Async agent launched successfully.".into(),
+            is_error: false,
+        });
+        app.on_event(AgentEvent::TextDelta("It is on its way.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(!app.is_generating);
+        assert_eq!(app.subagents.len(), 1);
+        assert_eq!(spawn_block(&app, "spawn").status, None);
+        let main = kinds(&app.transcript.blocks);
+
+        app.on_event(sub("spawn", AgentEvent::ThinkingDelta("hm".into())));
+        app.on_event(sub("spawn", AgentEvent::TextDelta("Looking.".into())));
+        app.on_event(sub("spawn", read_call("inner", "a.txt")));
+        // Until the harness words it, the call is the activity.
+        assert_eq!(app.subagents[0].activity.as_deref(), Some("Read a.txt"));
+        app.on_event(AgentEvent::SubagentProgress {
+            id: "spawn".into(),
+            activity: "Reading a.txt".into(),
+        });
+        app.on_event(sub("spawn", read_call("inner2", "b.txt")));
+        assert_eq!(app.subagents[0].activity.as_deref(), Some("Reading a.txt"));
+        assert_eq!(app.subagents[0].tools, 2);
+        app.on_event(sub("spawn", AgentEvent::Notice("retrying".into())));
+        app.on_event(sub(
+            "spawn",
+            AgentEvent::TextDelta("The word is alpha.".into()),
+        ));
+        app.on_event(AgentEvent::SubagentEnded {
+            id: "spawn".into(),
+            status: SubagentStatus::Completed,
+            result: Some("The word is alpha.".into()),
+        });
+        assert!(app.subagents.is_empty());
+
+        // All of it is in the subagent's transcript, the report (once) last,
+        // and none of it in the main one.
+        assert_eq!(kinds(&app.transcript.blocks), main);
+        let run = spawn_block(&app, "spawn");
+        assert_eq!(run.status, Some(SubagentStatus::Completed));
+        let log = kinds(&run.log.blocks);
+        assert_eq!(
+            log,
+            [
+                "thought",
+                "text:Looking.",
+                "tool:inner",
+                "tool:inner2",
+                "notice",
+                "text:The word is alpha."
+            ]
+        );
+        assert_eq!(run.report(), "The word is alpha.");
+
+        // Its end was saved though no turn was running, and comes back.
+        let saved = app.store.load(&app.conversation.id).unwrap();
+        let back = Transcript::from_records(&saved.blocks);
+        assert_eq!(kinds(&back.blocks), main);
+        let restored = back.agent("spawn").unwrap();
+        assert_eq!(restored.status, Some(SubagentStatus::Completed));
+        assert_eq!(kinds(&restored.log.blocks), log);
+        assert_eq!(restored.kind.as_deref(), Some("Explore"));
+
+        // Another harness is told what the subagent reported, not the receipt.
+        let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
+        assert!(bridge.contains("completed] The word is alpha."));
+        assert!(!bridge.contains("launched"));
+
+        // A report the subagent never wrote out itself is added to its transcript.
+        spawn(&mut app, "quiet", "say nothing", None);
+        app.on_event(AgentEvent::SubagentEnded {
+            id: "quiet".into(),
+            status: SubagentStatus::Completed,
+            result: Some("done quietly".into()),
+        });
+        assert_eq!(spawn_block(&app, "quiet").report(), "done quietly");
+    }
+
+    #[test]
+    fn a_subagents_transcript_is_opened_read_and_left() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        // Nothing to open.
+        app.open_subagent_picker();
+        assert!(app.modal.is_none());
+
+        app.submit_prompt("delegate".into());
+        app.session_alive = true;
+        spawn(&mut app, "first", "look around", None);
+        spawn(&mut app, "second", "look elsewhere", Some("Explore"));
+        app.on_event(sub("first", read_call("f1", "a.txt")));
+        app.on_event(sub("second", read_call("s1", "b.txt")));
+        // A subagent's own subagent lives in its transcript.
+        app.on_event(sub(
+            "second",
+            AgentEvent::ToolCallStarted {
+                id: "deep".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({"description": "deeper"}),
+            },
+        ));
+        app.on_event(sub(
+            "second",
+            AgentEvent::SubagentStarted {
+                id: "deep".into(),
+                description: "deeper".into(),
+                kind: None,
+            },
+        ));
+        app.on_event(sub("deep", read_call("d1", "c.txt")));
+        app.on_event(AgentEvent::SubagentEnded {
+            id: "first".into(),
+            status: crate::core::SubagentStatus::Completed,
+            result: None,
+        });
+        assert_eq!(
+            kinds(&spawn_block(&app, "second").log.blocks),
+            ["tool:s1", "tool:deep"]
+        );
+        assert_eq!(kinds(&spawn_block(&app, "deep").log.blocks), ["tool:d1"]);
+        let main = kinds(&app.transcript.blocks);
+        assert_eq!(kinds(app.shown_blocks()), main);
+
+        // The picker lists them all, finished or not, and starts on the
+        // first still at work.
+        app.open_subagent_picker();
+        match &app.modal {
+            Some(Modal::Subagents(p)) => {
+                let rows: Vec<(&str, usize, bool)> = p
+                    .items
+                    .iter()
+                    .map(|a| (a.id.as_str(), a.depth, a.status.is_none()))
+                    .collect();
+                assert_eq!(
+                    rows,
+                    [("first", 0, false), ("second", 0, true), ("deep", 1, true)]
+                );
+                assert_eq!(p.selected, 1);
+            }
+            _ => panic!("no picker"),
+        }
+        // Esc opens nothing; Enter opens the chosen one.
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none() && app.viewing.is_none());
+        app.scroll = 7;
+        app.auto_scroll = false;
+        app.open_subagent_picker();
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.viewing.as_deref(), Some("second"));
+        assert_eq!(kinds(app.shown_blocks()), ["tool:s1", "tool:deep"]);
+        assert!(app.auto_scroll);
+
+        // Round the others and back.
+        app.view_next_subagent(false);
+        assert_eq!(kinds(app.shown_blocks()), ["tool:d1"]);
+        app.view_next_subagent(false);
+        assert_eq!(app.viewing.as_deref(), Some("first"));
+        app.view_next_subagent(true);
+        assert_eq!(app.viewing.as_deref(), Some("deep"));
+
+        // Expanding is done to the transcript in view.
+        app.shown_transcript_mut().toggle_last_tool();
+        assert!(matches!(
+            spawn_block(&app, "deep").log.blocks[0],
+            super::super::transcript::Block::Tool {
+                collapsed: false,
+                ..
+            }
+        ));
+
+        // Stopping is done from its own view, and only to it.
+        app.take_actions();
+        app.stop_viewed_subagent();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::StopSubagent {
+                id: "deep".into()
+            })]
+        );
+        // One that has ended is not asked to stop.
+        app.open_subagent("first");
+        app.stop_viewed_subagent();
+        assert!(app.take_actions().is_empty());
+
+        // Leaving puts the main transcript back where it was.
+        app.close_subagent_view();
+        assert!(app.viewing.is_none());
+        assert_eq!((app.scroll, app.auto_scroll), (7, false));
+        assert_eq!(kinds(app.shown_blocks()), main);
+
+        // A prompt sent while they work goes out at once.
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.queue_prompt("meanwhile".into());
+        assert!(app.queued.is_empty());
+        assert!(matches!(
+            app.take_actions().as_slice(),
+            [Action::SendTurn { text, .. }] if text == "meanwhile"
+        ));
+
+        // The session dies: nothing is left running, however deep.
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        assert!(app.subagents.is_empty());
+        for id in ["second", "deep"] {
+            assert_eq!(
+                spawn_block(&app, id).status,
+                Some(crate::core::SubagentStatus::Cancelled)
+            );
+        }
+
+        // A harness that cannot stop one says so.
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        spawn(&mut app, "spawn", "look around", None);
+        app.open_subagent("spawn");
+        app.stop_viewed_subagent();
+        assert!(app.take_actions().is_empty());
+        assert!(app.flash_text().is_some_and(|t| t.contains("cannot stop")));
+    }
+
+    /// Feed a recorded session through its parser into the app.
+    fn replay_fixture(app: &mut App, path: &str, mut feed: impl FnMut(&str) -> Vec<AgentEvent>) {
+        let text =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap();
+        for line in text.lines() {
+            if line.is_empty() || line.starts_with(['#', '>', '!']) {
+                continue;
+            }
+            for ev in feed(line) {
+                app.on_event(ev);
+            }
+        }
+    }
+
+    #[test]
+    fn recorded_subagent_sessions_end_with_every_report_in_place() {
+        use crate::core::SubagentStatus;
+        use crate::harness::claude::parse::ClaudeParser;
+        use crate::harness::codex::app_server_parse::CodexAppServerParser;
+        let reports = |app: &App| -> Vec<(Option<SubagentStatus>, String)> {
+            app.transcript
+                .agents()
+                .into_iter()
+                .map(|(_, a, _)| (a.status, a.report().to_string()))
+                .collect()
+        };
+        let done = Some(SubagentStatus::Completed);
+
+        // Claude: three launched in the background, reports interleaved.
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent_parallel.jsonl",
+            |l| p.feed(l),
+        );
+        assert!(app.subagents.is_empty() && !app.is_generating);
+        let got = reports(&app);
+        assert_eq!(got.len(), 3);
+        assert!(got.iter().all(|(s, _)| *s == done));
+        assert!(got[0].1.contains("alpha") && got[1].1.contains("bravo"));
+        assert!(got[2].1.contains("charlie"));
+        // The main transcript holds the three spawning calls and no other;
+        // each subagent's one call is in its own.
+        let tools = |blocks: &[super::super::transcript::Block]| {
+            kinds(blocks)
+                .iter()
+                .filter(|k| k.starts_with("tool:"))
+                .count()
+        };
+        assert_eq!(tools(&app.transcript.blocks), 3);
+        assert!(
+            app.transcript
+                .agents()
+                .iter()
+                .all(|(_, a, _)| tools(&a.log.blocks) == 1)
+        );
+
+        // Claude: a blocking call's subagent, and one stopped by the agent.
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent_blocking.jsonl",
+            |l| p.feed(l),
+        );
+        assert_eq!(reports(&app), vec![(done, "alpha".to_string())]);
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent_stopped.jsonl",
+            |l| p.feed(l),
+        );
+        assert_eq!(
+            reports(&app),
+            vec![(Some(SubagentStatus::Cancelled), String::new())]
+        );
+
+        // Claude: sent back to work twice, it is one subagent throughout.
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent_resumed.jsonl",
+            |l| p.feed(l),
+        );
+        let got = reports(&app);
+        assert_eq!(got.len(), 1);
+        assert!(app.subagents.is_empty());
+        assert!(got[0].0 == done && got[0].1.ends_with("**alpha**"));
+
+        // Codex: the sub-agent outlives two turns, and nothing follows its
+        // end on the main thread, so its report is only here.
+        let mut app = test_app(HarnessId::CODEX);
+        let mut p = CodexAppServerParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/codex/fixtures/app_server_subagent_background.jsonl",
+            |l| p.feed(l),
+        );
+        assert!(app.subagents.is_empty() && !app.is_generating);
+        assert_eq!(reports(&app), vec![(done, "alpha".to_string())]);
+
+        let mut app = test_app(HarnessId::CODEX);
+        let mut p = CodexAppServerParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/codex/fixtures/app_server_subagent_interrupted.jsonl",
+            |l| p.feed(l),
+        );
+        assert_eq!(
+            reports(&app),
+            vec![(Some(SubagentStatus::Cancelled), String::new())]
+        );
     }
 
     #[test]

@@ -38,10 +38,33 @@ pub enum AgentEvent {
         entries: Vec<PlanEntry>,
         explanation: Option<String>,
     },
-    /// An event produced inside a subagent; `parent` is the tool call that spawned it.
+    /// An event produced inside a subagent; `parent` is the tool call that
+    /// spawned it, which is also the subagent's id in the `Subagent*` events.
     Sub {
         parent: String,
         event: Box<AgentEvent>,
+    },
+    /// A subagent began work. Its life is its own: the tool call that
+    /// spawned it may return long before it ends, and the turn may end too.
+    /// Sent again for the same `id` when an ended subagent is put back to work.
+    SubagentStarted {
+        /// The tool call that spawned it (the `parent` of its `Sub` events).
+        id: String,
+        /// The task as the harness words it; a bare name where that is all there is.
+        description: String,
+        /// The kind of agent (`Explore`, `general-purpose`...), where the harness has kinds.
+        kind: Option<String>,
+    },
+    /// What a running subagent is doing now, in the harness's words.
+    SubagentProgress {
+        id: String,
+        activity: String,
+    },
+    SubagentEnded {
+        id: String,
+        status: SubagentStatus,
+        /// Its final report, when the harness hands one over.
+        result: Option<String>,
     },
     Context(ContextUsage),
     RateLimit(RateLimitInfo),
@@ -65,6 +88,26 @@ pub enum AgentEvent {
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+/// How a subagent ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Completed,
+    Failed,
+    /// Stopped before it finished, by the user or by the agent that spawned it.
+    Cancelled,
+}
+
+impl SubagentStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SubagentStatus::Completed => "completed",
+            SubagentStatus::Failed => "failed",
+            SubagentStatus::Cancelled => "stopped",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -353,6 +396,28 @@ impl AgentEvent {
             AgentEvent::Sub { parent, event } => {
                 format!("Sub parent={} {}", parent, event.summary())
             }
+            AgentEvent::SubagentStarted {
+                id,
+                description,
+                kind,
+            } => format!(
+                "SubagentStarted id={} kind={} {:?}",
+                id,
+                kind.as_deref().unwrap_or("-"),
+                short(description)
+            ),
+            AgentEvent::SubagentProgress { id, activity } => {
+                format!("SubagentProgress id={} {:?}", id, short(activity))
+            }
+            AgentEvent::SubagentEnded { id, status, result } => format!(
+                "SubagentEnded id={} {} {}",
+                id,
+                status.label(),
+                result
+                    .as_deref()
+                    .map(|r| format!("{:?}", short(r)))
+                    .unwrap_or_else(|| "-".into())
+            ),
             AgentEvent::Context(c) => format!(
                 "Context used={} window={}",
                 c.used.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
@@ -453,6 +518,24 @@ mod tests {
             event: Box::new(AgentEvent::TextDelta("hi".into())),
         };
         assert_eq!(sub.summary(), "Sub parent=t1 TextDelta \"hi\"");
+        assert_eq!(
+            AgentEvent::SubagentStarted {
+                id: "t1".into(),
+                description: "read a file".into(),
+                kind: Some("Explore".into()),
+            }
+            .summary(),
+            "SubagentStarted id=t1 kind=Explore \"read a file\""
+        );
+        assert_eq!(
+            AgentEvent::SubagentEnded {
+                id: "t1".into(),
+                status: SubagentStatus::Cancelled,
+                result: None,
+            }
+            .summary(),
+            "SubagentEnded id=t1 stopped -"
+        );
         let plan = AgentEvent::PlanUpdated {
             entries: vec![PlanEntry {
                 text: "a".into(),

@@ -15,7 +15,7 @@ use super::{
 };
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 
 pub struct ClaudeHarness;
@@ -96,7 +96,13 @@ impl Harness for ClaudeHarness {
             usage_reporting: true,
             image_input: true,
             plan_updates: true,
-            subagents: true,
+            // Tasks are described and their progress worded; an interrupt
+            // between turns stops them.
+            subagents: SubagentSupport {
+                reported: true,
+                described: true,
+                stop: true,
+            },
             steer: true,
             compaction: true,
             context_usage: true,

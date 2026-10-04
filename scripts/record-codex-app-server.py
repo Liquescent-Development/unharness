@@ -3,13 +3,16 @@
 
 Performs initialize → initialized → thread/start → turn/start for each
 prompt, auto-accepts approval requests, asks for model/list at the end, and
-writes both directions to OUT.jsonl (`>>` = sent, `!!` = stderr).
+writes both directions to OUT.jsonl (`>>` = sent, `!!` = stderr). Sub-agent
+threads report on the same stream and can outlive the turn that spawned
+them; the recording goes on until they have all finished.
 
 Usage: scripts/record-codex-app-server.py OUT.jsonl [--approval untrusted] [--sandbox read-only] PROMPT [PROMPT...]
 """
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -42,6 +45,10 @@ def main() -> int:
     ap.add_argument("--fork-thread", help="branch this existing thread (thread/fork) instead of starting one")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
+    ap.add_argument("--interrupt-children", action="store_true",
+                    help="when the last turn ends with sub-agents still running, interrupt them")
+    ap.add_argument("--linger", type=float, default=6.0,
+                    help="seconds of silence to wait for after the last sub-agent ends")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -88,6 +95,16 @@ def main() -> int:
 
     threading.Thread(target=pump_stderr, daemon=True).start()
 
+    # Read on a thread so the loop can notice silence.
+    lines = queue.Queue()
+
+    def pump_stdout():
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump_stdout, daemon=True).start()
+
     init_id = request("initialize", {"clientInfo": {"name": "unharness", "version": "0.2.0"}})
     thread_id = None
     pending_start = None
@@ -100,16 +117,28 @@ def main() -> int:
     turn_ids = []
     revert_id = None
     rewound = False
+    # Sub-agent thread id -> its running turn.
+    children = {}
+    saw_children = False
+    main_active = False
+    # Every prompt has been answered; waiting for sub-agents to finish.
+    finishing = False
 
     last = time.time()
-    while proc.poll() is None:
-        line = proc.stdout.readline()
-        if not line:
-            if time.time() - last > args.idle_timeout:
+    while True:
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
+            quiet = time.time() - last
+            if (finishing and models_id is None and not children and not main_active
+                    and quiet >= (args.linger if saw_children else 0)):
+                models_id = request("model/list", {})
+            elif quiet > args.idle_timeout:
                 sys.stderr.write("idle timeout\n")
                 break
-            time.sleep(0.05)
             continue
+        if line is None:
+            break
         last = time.time()
         record("", line)
         try:
@@ -166,7 +195,11 @@ def main() -> int:
             continue
 
         params = obj.get("params") or {}
+        if method == "turn/started" and params.get("threadId") != thread_id:
+            children[params.get("threadId")] = (params.get("turn") or {}).get("id")
+            saw_children = True
         if method == "turn/started" and params.get("threadId") == thread_id:
+            main_active = True
             turn_id = (params.get("turn") or {}).get("id")
             if compact_id is None:
                 turn_ids.append(turn_id)
@@ -180,8 +213,13 @@ def main() -> int:
         # Sub-agent threads report on the same stream; only the main thread's
         # turn ends ours.
         if method == "turn/completed" and params.get("threadId") != thread_id:
+            children.pop(params.get("threadId"), None)
             continue
         if method == "turn/completed":
+            main_active = False
+            if finishing:
+                # A turn the agent started by itself (a sub-agent reported).
+                continue
             if args.rewind and len(turn_ids) == 2 and prompts and not rewound:
                 rewound = True
                 revert_id = request("thread/revert", {"threadId": thread_id, "beforeTurnId": turn_ids[1]})
@@ -191,7 +229,10 @@ def main() -> int:
                 # Compaction runs as a turn of its own and ends with turn/completed.
                 compact_id = request("thread/compact/start", {"threadId": thread_id})
             else:
-                models_id = request("model/list", {})
+                finishing = True
+                if args.interrupt_children:
+                    for child, child_turn in children.items():
+                        request("turn/interrupt", {"threadId": child, "turnId": child_turn})
         elif method == "error":
             sys.stderr.write(f"[error] {json.dumps(obj.get('params'))[:300]}\n")
 

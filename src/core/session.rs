@@ -103,6 +103,11 @@ pub enum SessionCommand {
         instructions: Option<String>,
     },
     Interrupt,
+    /// Stop one running subagent, named by the tool call that spawned it
+    /// (`Capabilities::subagents.stop`).
+    StopSubagent {
+        id: String,
+    },
     RespondPermission {
         id: String,
         decision: PermissionDecision,

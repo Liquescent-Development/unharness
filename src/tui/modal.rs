@@ -245,6 +245,8 @@ pub enum Modal {
     Model(ListPicker<ModelInfo>),
     Effort(ListPicker<String>),
     Policy(ListPicker<PermissionPolicy>),
+    /// The conversation's subagents; the chosen one's transcript is opened.
+    Subagents(ListPicker<super::app::SubagentOption>),
     Resume(ListPicker<ConversationSummary>),
     Rewind(ListPicker<RewindOption>),
     Permission(PermissionModal),

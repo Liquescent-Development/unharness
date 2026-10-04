@@ -21,9 +21,13 @@ use super::markdown::render_markdown_to_lines;
 use super::modal::{ListPicker, Modal};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
-use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus};
+use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    // The subagent in view may be gone (a rewind, /clear, another conversation).
+    if app.viewing.is_some() && app.viewed().is_none() {
+        app.close_subagent_view();
+    }
     let warning = app.policy_warning();
     let area = frame.area();
     // The prompt grows with its content up to a cap (less on a short
@@ -39,7 +43,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .prompt_scroll
         .clamp((cursor_row + 1).saturating_sub(prompt_height), cursor_row)
         .min(rows.len() - prompt_height);
-    let bottom_height = 1 + prompt_height + 1 + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, info x2, warning?, footer
+    let subagents = subagent_list_lines(app);
+    let bottom_height =
+        1 + prompt_height + 1 + subagents.len() + 2 + usize::from(warning.is_some()) + 1; // rule, prompt, rule, subagents, info x2, warning?, footer
     let pinned = pinned_lines(app);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -54,7 +60,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if !pinned.is_empty() {
         frame.render_widget(Paragraph::new(pinned), chunks[1]);
     }
-    let prompt_row = render_bottom(frame, app, chunks[2], warning.as_deref());
+    let prompt_row = render_bottom(frame, app, chunks[2], warning.as_deref(), subagents);
 
     if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, prompt_row);
@@ -72,6 +78,89 @@ const QUEUE_ROWS: usize = 3;
 
 /// Most plan rows shown above the prompt; the rest are summarised.
 const PLAN_ROWS: usize = 6;
+
+/// Most subagents shown under the prompt at once.
+const SUBAGENT_ROWS: usize = 4;
+
+/// The subagents listed under the prompt: those at work and those that
+/// ended since the last prompt. Down from the prompt moves into it and
+/// Enter opens the chosen one's transcript.
+fn subagent_list_lines(app: &App) -> Vec<Line<'static>> {
+    let rows = app.subagent_rows();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let focus = app.subagent_focus_index();
+    let running = rows.iter().filter(|r| r.status.is_none()).count();
+    let count = match running {
+        0 => format!("{} done", rows.len()),
+        n => format!("{n} running"),
+    };
+    let hint = if app.viewing.is_some() {
+        ""
+    } else if focus.is_some() {
+        " · ↑/↓ select · Enter open · Del remove a finished one · Esc back to the prompt"
+    } else {
+        " · ↓ to select one"
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  Subagents · {count}{hint}"),
+        Style::default().fg(Color::DarkGray),
+    ))];
+    // Keep the chosen row in the window.
+    let start = focus
+        .map_or(0, |f| (f + 1).saturating_sub(SUBAGENT_ROWS))
+        .min(rows.len().saturating_sub(SUBAGENT_ROWS));
+    for (i, a) in rows.iter().enumerate().skip(start).take(SUBAGENT_ROWS) {
+        let chosen = focus == Some(i);
+        let viewed = app.viewing.as_ref() == Some(&a.id);
+        let (glyph, color) = match a.status {
+            None => (app.spinner(), Color::Yellow),
+            Some(SubagentStatus::Completed) => ("✓", Color::Green),
+            Some(SubagentStatus::Failed) => ("✗", Color::Red),
+            Some(SubagentStatus::Cancelled) => ("◼", Color::DarkGray),
+        };
+        let mut name = Style::default().add_modifier(Modifier::BOLD);
+        if chosen || viewed {
+            name = name.fg(Color::Cyan);
+        }
+        let mut rest = String::new();
+        if let Some(kind) = &a.kind {
+            rest.push_str(&format!(" ({kind})"));
+        }
+        rest.push_str(&format!(" · {:.0}s", a.secs));
+        if a.tools > 0 {
+            let calls = if a.tools == 1 { "call" } else { "calls" };
+            rest.push_str(&format!(" · {} tool {calls}", a.tools));
+        }
+        match (&a.activity, a.status) {
+            (Some(activity), None) => {
+                rest.push_str(&format!(" · {}", truncate_chars(activity, 60)))
+            }
+            (_, Some(status)) => rest.push_str(&format!(" · {}", status.label())),
+            _ => {}
+        }
+        lines.push(Line::from(vec![
+            Span::styled(
+                if chosen { "❯ " } else { "  " },
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  ".repeat(a.depth)),
+            Span::styled(format!("{glyph} "), Style::default().fg(color)),
+            Span::styled(sanitize(&truncate_chars(&a.description, 48)), name),
+            Span::styled(sanitize(&rest), Style::default().fg(Color::Gray)),
+        ]));
+    }
+    if rows.len() > SUBAGENT_ROWS {
+        lines.push(Line::from(Span::styled(
+            format!("  … {} more", rows.len() - SUBAGENT_ROWS),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines
+}
 
 /// Lines pinned between the transcript and the prompt.
 fn pinned_lines(app: &App) -> Vec<Line<'static>> {
@@ -240,37 +329,45 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             done,
             collapsed,
             duration,
-            parent,
+            agent,
             ..
         } => {
-            let status = if !*done {
-                Span::styled(" ⠿ running", Style::default().fg(Color::Yellow))
-            } else if *is_error {
-                Span::styled(" ✗", Style::default().fg(Color::Red))
-            } else {
-                Span::styled(
-                    format!(
-                        " ✓{}",
-                        duration
-                            .map(|d| format!(" {:.1}s", d.as_secs_f32()))
-                            .unwrap_or_default()
-                    ),
-                    Style::default().fg(Color::Green),
-                )
+            let done_in = |d: &Option<std::time::Duration>| {
+                d.map(|d| format!(" {:.1}s", d.as_secs_f32()))
+                    .unwrap_or_default()
             };
-            let summary = tool_summary_full(name, input);
-            let head_width = width.saturating_sub(name.len() + 18).max(10);
+            let running = Span::styled(" ⠿ running", Style::default().fg(Color::Yellow));
+            // A call that spawned a subagent shows how the subagent is
+            // doing: the call itself may have returned at once.
+            let status = match agent.as_ref().map(|a| (a.status, &a.duration)) {
+                Some((None, _)) => running,
+                Some((Some(SubagentStatus::Completed), d)) => Span::styled(
+                    format!(" ✓{}", done_in(d)),
+                    Style::default().fg(Color::Green),
+                ),
+                Some((Some(SubagentStatus::Failed), _)) => {
+                    Span::styled(" ✗ failed", Style::default().fg(Color::Red))
+                }
+                Some((Some(SubagentStatus::Cancelled), _)) => {
+                    Span::styled(" ◼ stopped", Style::default().fg(Color::DarkGray))
+                }
+                None if !*done => running,
+                None if *is_error => Span::styled(" ✗", Style::default().fg(Color::Red)),
+                None => Span::styled(
+                    format!(" ✓{}", done_in(duration)),
+                    Style::default().fg(Color::Green),
+                ),
+            };
+            let mut summary = tool_summary_full(name, input);
+            if let Some(kind) = agent.as_ref().and_then(|a| a.kind.as_deref()) {
+                summary.push_str(&format!(" ({kind})"));
+            }
+            let marker = "  ⚡ ";
+            let indent = UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(name.as_str()) + 2;
+            let head_width = width.saturating_sub(indent + 11).max(10);
             let mut summary_lines = wrap_words(&summary, head_width).into_iter();
             let mut first = vec![
-                Span::styled(
-                    // Calls made inside a subagent hang off their spawner.
-                    if parent.is_some() {
-                        "    ↳ "
-                    } else {
-                        "  ⚡ "
-                    },
-                    Style::default().fg(Color::Yellow),
-                ),
+                Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::styled(
                     name.clone(),
                     Style::default()
@@ -284,33 +381,53 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                 ),
             ];
             let rest: Vec<String> = summary_lines.collect();
+            let status = vec![status];
             if rest.is_empty() {
-                first.push(status);
+                first.extend(status);
                 lines.push(Line::from(first));
             } else {
                 lines.push(Line::from(first));
                 let n = rest.len();
                 for (i, seg) in rest.into_iter().enumerate() {
                     let mut l = vec![
-                        Span::raw(" ".repeat(name.len() + 7)),
+                        Span::raw(" ".repeat(indent)),
                         Span::styled(seg, Style::default().fg(Color::Gray)),
                     ];
                     if i + 1 == n {
-                        l.push(status.clone());
+                        l.extend(status.clone());
                     }
                     lines.push(Line::from(l));
                 }
             }
 
-            let body = tool_body_lines(name, input, output, *is_error, width.saturating_sub(2));
-            let limit = if *collapsed { 4 } else { usize::MAX };
-            let total = body.len();
-            lines.extend(body.into_iter().take(limit));
-            if *collapsed && total > limit {
-                lines.push(Line::from(Span::styled(
-                    format!("  │ … {} more lines (Ctrl+O to expand)", total - limit),
-                    Style::default().fg(Color::DarkGray),
-                )));
+            let body_width = width.saturating_sub(2);
+            match agent {
+                // One line for a subagent: what it does and writes is in a
+                // transcript of its own. Only a failed spawn says more here.
+                Some(_) => {
+                    if *is_error && !output.is_empty() {
+                        lines.extend(plain_lines(
+                            output,
+                            body_width,
+                            Style::default().fg(Color::Red),
+                        ));
+                    }
+                }
+                None => {
+                    let limit = if *collapsed { 4 } else { usize::MAX };
+                    let body = tool_body_lines(name, input, output, *is_error, body_width);
+                    let total = body.len();
+                    lines.extend(body.into_iter().take(limit));
+                    if *collapsed && total > limit {
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                "  │ … {} more lines (click the call, or Ctrl+T, to expand)",
+                                total - limit
+                            ),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
             }
         }
         TBlock::System(t) => {
@@ -386,10 +503,15 @@ fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
             done,
             collapsed,
             duration,
-            parent,
+            agent,
             ..
         } => {
-            (name, output, is_error, done, collapsed, duration, parent).hash(&mut h);
+            (name, output, is_error, done, collapsed, duration).hash(&mut h);
+            // Not its transcript: that is drawn only when it is opened.
+            agent.is_some().hash(&mut h);
+            if let Some(run) = agent {
+                (&run.kind, run.status, run.duration).hash(&mut h);
+            }
             value(input, &mut h);
         }
         TBlock::System(t) | TBlock::Notice(t) | TBlock::Error(t) => t.hash(&mut h),
@@ -402,15 +524,31 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(
-            " unharness ",
+            match app.viewed() {
+                Some(run) => format!(
+                    " unharness › subagent · {}{} · {} ",
+                    truncate_chars(&run.description, 60),
+                    run.kind
+                        .as_ref()
+                        .map(|k| format!(" ({k})"))
+                        .unwrap_or_default(),
+                    run.status.map_or("running", |s| s.label()),
+                ),
+                None => " unharness ".to_string(),
+            },
             Style::default()
-                .fg(Color::Cyan)
+                .fg(if app.viewing.is_some() {
+                    Color::Yellow
+                } else {
+                    Color::Cyan
+                })
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     let width = (inner.width.saturating_sub(4)).max(10) as usize;
 
-    let thinking_live = app.is_thinking();
+    // The running clock on a thought is the main agent's.
+    let thinking_live = app.viewing.is_none() && app.is_thinking();
     let elapsed = app.elapsed_secs();
 
     // Rendering a block (markdown, syntax highlighting, diffs) is far too
@@ -422,7 +560,8 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         view.blocks.clear();
     }
     let mut fresh = 0;
-    for (i, b) in app.transcript.blocks.iter().enumerate() {
+    let shown = app.shown_blocks();
+    for (i, b) in shown.iter().enumerate() {
         let key = block_key(b, thinking_live, elapsed);
         if i == fresh && view.blocks.get(i).is_some_and(|(k, _)| *k == key) {
             fresh += 1;
@@ -446,7 +585,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         view.rendered.extend(lines);
         view.blocks.push((key, view.rendered.len()));
     }
-    if fresh == app.transcript.blocks.len() && view.blocks.len() > fresh {
+    if fresh == shown.len() && view.blocks.len() > fresh {
         // Blocks were removed from the end (rewind, /clear).
         let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].1);
         view.blocks.truncate(fresh);
@@ -615,13 +754,20 @@ pub fn wrap_prefixed_text(
 
 /// Status rule, prompt, rule, context lines, optional warning, key hints.
 /// Returns the prompt row's rect (for the suggestions popup).
-fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>) -> Rect {
-    // Everything but the prompt is one row each.
-    let fixed = 5 + u16::from(warning.is_some());
+fn render_bottom(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    warning: Option<&str>,
+    subagents: Vec<Line<'static>>,
+) -> Rect {
+    // Everything but the prompt and the subagent list is one row each.
+    let fixed = 5 + u16::from(warning.is_some()) + subagents.len() as u16;
     let mut constraints = vec![
         Constraint::Length(1),                                 // status rule
         Constraint::Length(area.height.saturating_sub(fixed)), // prompt
         Constraint::Length(1),                                 // rule
+        Constraint::Length(subagents.len() as u16),            // subagents
         Constraint::Length(1),                                 // where / what
         Constraint::Length(1),                                 // usage / session
     ];
@@ -646,6 +792,23 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
                 app.spinner(),
                 app.status_label(),
                 app.elapsed_secs()
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(label) = app.subagents_label().filter(|_| {
+        !app.modal
+            .as_ref()
+            .is_some_and(super::modal::Modal::is_prompt)
+    }) {
+        // The turn is over but its subagents are not: still busy.
+        Span::styled(
+            format!(
+                " {} {} · {:.0}s ",
+                app.spinner(),
+                label,
+                app.subagents_elapsed_secs()
             ),
             Style::default()
                 .fg(Color::Yellow)
@@ -676,7 +839,7 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
     );
 
     // Prompt line
-    let prompt_style = if app.is_generating {
+    let prompt_style = if app.is_generating || app.subagent_focus_index().is_some() {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -690,33 +853,51 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
         .enumerate()
         .skip(app.prompt_scroll)
         .take(rows[1].height as usize);
-    let lines: Vec<Line> = visible
-        .map(|(i, r)| {
-            let marker = if i == 0 {
-                Span::styled("❯ ", prompt_style)
-            } else {
-                Span::raw("  ")
-            };
-            let text: String = chars[r.start..r.end].iter().collect();
-            Line::from(vec![marker, Span::raw(sanitize(&text))])
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines), rows[1]);
-    if app.modal.is_none() {
-        let row = prompt::cursor_row(&input_rows, app.cursor);
-        let col = prompt::width_between(&app.input, input_rows[row].start, app.cursor);
-        let x = rows[1].x + (PROMPT_INDENT + col) as u16;
-        let y = rows[1].y + row.saturating_sub(app.prompt_scroll) as u16;
-        frame.set_cursor_position((
-            x.min(rows[1].x + rows[1].width.saturating_sub(1)),
-            y.min(rows[1].y + rows[1].height.saturating_sub(1)),
-        ));
+    if app.viewing.is_some() {
+        // The prompt is the main agent's; here there are only these keys.
+        let stop = if app.caps().subagents.stop {
+            " · s stop this subagent"
+        } else {
+            ""
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                format!("  Esc back to the conversation{stop} · Tab next subagent"),
+                Style::default().fg(Color::Yellow),
+            )),
+            rows[1],
+        );
+    } else {
+        let lines: Vec<Line> = visible
+            .map(|(i, r)| {
+                let marker = if i == 0 {
+                    Span::styled("❯ ", prompt_style)
+                } else {
+                    Span::raw("  ")
+                };
+                let text: String = chars[r.start..r.end].iter().collect();
+                Line::from(vec![marker, Span::raw(sanitize(&text))])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), rows[1]);
+        // No cursor in the prompt while the keyboard is in the list under it.
+        if app.modal.is_none() && app.subagent_focus_index().is_none() {
+            let row = prompt::cursor_row(&input_rows, app.cursor);
+            let col = prompt::width_between(&app.input, input_rows[row].start, app.cursor);
+            let x = rows[1].x + (PROMPT_INDENT + col) as u16;
+            let y = rows[1].y + row.saturating_sub(app.prompt_scroll) as u16;
+            frame.set_cursor_position((
+                x.min(rows[1].x + rows[1].width.saturating_sub(1)),
+                y.min(rows[1].y + rows[1].height.saturating_sub(1)),
+            ));
+        }
     }
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled("─".repeat(width), rule_style))),
         rows[2],
     );
+    frame.render_widget(Paragraph::new(subagents), rows[3]);
 
     // Line 1: where (left) · harness/model/effort/policy (right)
     let mut cwd = app.cwd.to_string_lossy().to_string();
@@ -758,7 +939,7 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
             Style::default().fg(policy_color(effective)),
         ),
     ]);
-    render_split(frame, rows[3], left1, right1);
+    render_split(frame, rows[4], left1, right1);
 
     // Line 2: usage (left) · session id (right)
     let t = &app.turn_usage;
@@ -794,9 +975,9 @@ fn render_bottom(frame: &mut Frame, app: &App, area: Rect, warning: Option<&str>
             }),
         Style::default().fg(Color::DarkGray),
     ));
-    render_split(frame, rows[4], left2, right2);
+    render_split(frame, rows[5], left2, right2);
 
-    let mut next = 5;
+    let mut next = 6;
     if let Some(w) = warning {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1033,6 +1214,21 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     e.clone(),
                     String::new(),
                     app.current_effort() == Some(e.as_str()),
+                )
+            }),
+        ),
+        Modal::Subagents(p) => (
+            centered_rect(80, 50, area),
+            modal_block(format!(" Open a subagent ({NAV}) "), Color::Yellow),
+            picker_lines(p, Color::Yellow, |a| {
+                let mut detail = a.status.map_or("running", |s| s.label()).to_string();
+                if let Some(kind) = &a.kind {
+                    detail = format!("{kind} · {detail}");
+                }
+                (
+                    format!("{}{}", "  ".repeat(a.depth), sanitize(&a.description)),
+                    sanitize(&detail),
+                    Some(&a.id) == app.viewing.as_ref(),
                 )
             }),
         ),
@@ -1502,6 +1698,48 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_a_tool_call_expands_that_call() {
+        use super::super::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        for id in ["t1", "t2"] {
+            app.on_event(crate::core::AgentEvent::ToolCallStarted {
+                id: id.into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": format!("run {id}")}),
+            });
+            app.on_event(crate::core::AgentEvent::ToolCallResult {
+                id: id.into(),
+                output: format!("{id}-1\n{id}-2\n{id}-3\n{id}-4\n{id}-5\n{id}-6"),
+                is_error: false,
+            });
+        }
+        let (rows, _) = screen(&mut app, 80, 30);
+        assert!(!rows.join("\n").contains("t1-6"));
+        // Not the last call: Ctrl+O would not reach it.
+        let row = rows.iter().position(|r| r.contains("run t1")).unwrap() as u16;
+        let click = |app: &mut App, row: u16| {
+            app.last_click_forget();
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 10, row));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
+        };
+        click(&mut app, row);
+        let (rows, _) = screen(&mut app, 80, 30);
+        let text = rows.join("\n");
+        assert!(text.contains("t1-6") && !text.contains("t2-6"), "{text}");
+        assert!(app.take_copy_request().is_none());
+        // Again to collapse; a click on its output does nothing.
+        click(&mut app, row + 1);
+        let (rows, _) = screen(&mut app, 80, 30);
+        assert!(rows.join("\n").contains("t1-6"));
+        click(&mut app, row);
+        let (rows, _) = screen(&mut app, 80, 30);
+        assert!(!rows.join("\n").contains("t1-6"));
+    }
+
+    #[test]
     fn scrollbar_and_jump_label_follow_and_move_the_view() {
         use crate::tui::app::tests::mouse;
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -1652,6 +1890,75 @@ mod tests {
         }
         check(&mut app, 70, "tool block expanded");
 
+        // A subagent changes the call that spawned it after later blocks
+        // were drawn: its state, its prose, its report.
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "spawn".into(),
+            name: "Agent".into(),
+            input: serde_json::json!({"description": "look around"}),
+        });
+        check(&mut app, 70, "spawn call");
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "spawn".into(),
+            description: "look around".into(),
+            kind: Some("Explore".into()),
+        });
+        check(&mut app, 70, "subagent started");
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "spawn".into(),
+            output: "launched".into(),
+            is_error: false,
+        });
+        app.on_event(crate::core::AgentEvent::TextDelta("Meanwhile.".into()));
+        check(&mut app, 70, "spawn call returned");
+        let sub = |event| crate::core::AgentEvent::Sub {
+            parent: "spawn".into(),
+            event: Box::new(event),
+        };
+        app.on_event(sub(crate::core::AgentEvent::TextDelta("one\ntwo".into())));
+        check(&mut app, 70, "subagent prose");
+        app.on_event(sub(crate::core::AgentEvent::ToolCallStarted {
+            id: "inner".into(),
+            name: "Read".into(),
+            input: serde_json::json!({"file_path": "a.txt"}),
+        }));
+        app.on_event(sub(crate::core::AgentEvent::TextDelta(
+            "three\nfour\nfive".into(),
+        )));
+        check(&mut app, 70, "subagent call and more prose");
+        app.on_event(crate::core::AgentEvent::SubagentEnded {
+            id: "spawn".into(),
+            status: crate::core::SubagentStatus::Completed,
+            result: Some("the report".into()),
+        });
+        check(&mut app, 70, "subagent ended");
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "spawn".into(),
+            description: "look around".into(),
+            kind: Some("Explore".into()),
+        });
+        check(&mut app, 70, "subagent back at work");
+        app.on_event(crate::core::AgentEvent::SubagentEnded {
+            id: "spawn".into(),
+            status: crate::core::SubagentStatus::Cancelled,
+            result: None,
+        });
+        check(&mut app, 70, "subagent stopped");
+
+        // Its own transcript is drawn in place of the main one, and the
+        // main one again after it.
+        app.open_subagent("spawn");
+        check(&mut app, 70, "subagent in view");
+        assert_eq!(app.transcript_view.blocks.len(), app.shown_blocks().len());
+        app.on_event(sub(crate::core::AgentEvent::TextDelta(" six".into())));
+        check(&mut app, 70, "subagent writes while in view");
+        app.close_subagent_view();
+        check(&mut app, 70, "back from the subagent");
+        assert_eq!(
+            app.transcript_view.blocks.len(),
+            app.transcript.blocks.len()
+        );
+
         // A new width lays everything out again.
         check(&mut app, 50, "narrower");
         check(&mut app, 90, "wider");
@@ -1665,6 +1972,286 @@ mod tests {
         assert!(app.transcript_view.lines.is_empty());
         app.transcript.push_user("again");
         check(&mut app, 90, "after clear");
+    }
+
+    #[test]
+    fn a_subagent_is_one_line_in_the_main_transcript_and_a_transcript_of_its_own() {
+        use super::super::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        for (id, description) in [("a", "read the first file"), ("b", "read the second")] {
+            app.on_event(crate::core::AgentEvent::ToolCallStarted {
+                id: id.into(),
+                name: "Agent".into(),
+                input: serde_json::json!({ "description": description }),
+            });
+            app.on_event(crate::core::AgentEvent::SubagentStarted {
+                id: id.into(),
+                description: description.into(),
+                kind: Some("Explore".into()),
+            });
+            app.on_event(crate::core::AgentEvent::ToolCallResult {
+                id: id.into(),
+                output: "Async agent launched successfully.".into(),
+                is_error: false,
+            });
+        }
+        let sub = |parent: &str, event| crate::core::AgentEvent::Sub {
+            parent: parent.into(),
+            event: Box::new(event),
+        };
+        app.on_event(sub(
+            "b",
+            crate::core::AgentEvent::ToolCallStarted {
+                id: "b1".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"file_path": "second.txt"}),
+            },
+        ));
+        app.on_event(sub(
+            "a",
+            crate::core::AgentEvent::TextDelta("the word is alpha".into()),
+        ));
+        app.on_event(crate::core::AgentEvent::TextDelta("Both are on it.".into()));
+
+        // The main transcript: a line for each, running though the calls
+        // returned, and nothing of what they do or of the launch receipt.
+        let (rows, _) = screen(&mut app, 100, 40);
+        let text = rows.join("\n");
+        for d in ["read the first file", "read the second"] {
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains(&format!("Agent  {d} (Explore) ⠿ running"))),
+                "{text}"
+            );
+        }
+        assert!(text.contains("Both are on it."), "{text}");
+        // (Below the transcript, the pinned list does say what each is doing.)
+        let end = rows.iter().position(|r| r.starts_with('└')).unwrap();
+        let transcript = rows[..end].join("\n");
+        for absent in ["launched", "second.txt", "the word is alpha", "↳"] {
+            assert!(!transcript.contains(absent), "{absent}: {text}");
+        }
+        assert!(rows[end..].join("\n").contains("Read second.txt"), "{text}");
+
+        // A click on its line opens its own transcript.
+        let row = rows
+            .iter()
+            .position(|r| r.contains("read the second"))
+            .unwrap() as u16;
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 10, row));
+        app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
+        assert_eq!(app.viewing.as_deref(), Some("b"));
+        let (rows, _) = screen(&mut app, 100, 40);
+        let text = rows.join("\n");
+        assert!(
+            rows[0].contains("unharness › subagent · read the second (Explore) · running"),
+            "{text}"
+        );
+        assert!(text.contains("Read  second.txt"), "{text}");
+        assert!(!text.contains("Both are on it.") && !text.contains("delegate"));
+        assert!(
+            text.contains("Esc back to the conversation · s stop this subagent"),
+            "{text}"
+        );
+
+        // The other one's, with its prose; then its end shows in both places.
+        app.view_next_subagent(false);
+        let (rows, _) = screen(&mut app, 100, 40);
+        let end = rows.iter().position(|r| r.starts_with('└')).unwrap();
+        let text = rows[..end].join("\n");
+        assert!(text.contains("the word is alpha") && !text.contains("second.txt"));
+        app.on_event(crate::core::AgentEvent::SubagentEnded {
+            id: "a".into(),
+            status: crate::core::SubagentStatus::Completed,
+            result: Some("the word is alpha".into()),
+        });
+        app.on_event(crate::core::AgentEvent::SubagentEnded {
+            id: "b".into(),
+            status: crate::core::SubagentStatus::Cancelled,
+            result: None,
+        });
+        let (rows, _) = screen(&mut app, 100, 40);
+        assert!(rows[0].contains("read the first file (Explore) · completed"));
+        app.close_subagent_view();
+        let (rows, _) = screen(&mut app, 100, 40);
+        let text = rows.join("\n");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("read the first file (Explore) ✓")),
+            "{text}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("read the second (Explore) ◼ stopped")),
+            "{text}"
+        );
+        assert!(text.contains("Both are on it."), "{text}");
+
+        // The subagent in view goes away with its conversation.
+        app.open_subagent("a");
+        app.transcript.clear();
+        let (rows, _) = screen(&mut app, 100, 40);
+        assert!(app.viewing.is_none() && rows[0].contains("┌ unharness ─"));
+    }
+
+    #[test]
+    fn subagents_are_listed_under_the_prompt_and_keep_the_status_rule_busy() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        for i in 0..6 {
+            let id = format!("s{i}");
+            app.on_event(crate::core::AgentEvent::ToolCallStarted {
+                id: id.clone(),
+                name: "Agent".into(),
+                input: serde_json::json!({"description": format!("task {i}")}),
+            });
+            app.on_event(crate::core::AgentEvent::SubagentStarted {
+                id: id.clone(),
+                description: format!("task {i}"),
+                kind: Some("Explore".into()),
+            });
+            app.on_event(crate::core::AgentEvent::ToolCallResult {
+                id,
+                output: "launched".into(),
+                is_error: false,
+            });
+        }
+        app.on_event(crate::core::AgentEvent::SubagentProgress {
+            id: "s0".into(),
+            activity: "Reading a.txt".into(),
+        });
+        // The rows under the prompt, down to the first of the two info lines.
+        let list = |app: &mut App| -> Vec<String> {
+            let (rows, _) = screen(app, 100, 40);
+            let border = rows.iter().rposition(|r| r.starts_with('└')).unwrap();
+            let end = rows.iter().rposition(|r| r.contains("[Claude]")).unwrap();
+            // (status rule, the one-row prompt, rule, then the list)
+            assert!(rows[border + 2].starts_with('❯'));
+            rows[border + 4..end].to_vec()
+        };
+
+        // During the turn the rule tells of the turn; the list is there
+        // already: a header, four rows, and a count of the rest.
+        let rows = list(&mut app);
+        assert_eq!(rows.len(), 6, "{rows:#?}");
+        assert!(rows[0].contains("Subagents · 6 running · ↓ to select one"));
+        assert!(
+            rows[1].contains("task 0 (Explore) · 0s · Reading a.txt"),
+            "{rows:#?}"
+        );
+        assert!(rows[4].contains("task 3") && rows[5].contains("… 2 more"));
+
+        // The turn ends; the subagents do not.
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        let (rows, cursor) = screen(&mut app, 100, 40);
+        let text = rows.join("\n");
+        assert!(text.contains("── ") && text.contains("6 subagents running ·"));
+        assert!(!text.contains("Ready"), "{text}");
+        assert!(app.is_busy() && !app.is_generating);
+        // The cursor is in the prompt.
+        assert!(rows[cursor.1 as usize].starts_with('❯'));
+
+        // Down from the prompt goes into the list; the window follows.
+        assert!(app.subagent_list_down());
+        let rows = list(&mut app);
+        assert!(rows[0].contains("↑/↓ select · Enter open · Del remove a finished one"));
+        assert!(rows[1].starts_with("❯ ") && rows[1].contains("task 0"));
+        for _ in 0..5 {
+            app.subagent_list_down();
+        }
+        app.subagent_list_down(); // already on the last: stays
+        let rows = list(&mut app);
+        assert!(rows[1].contains("task 2"), "{rows:#?}");
+        assert!(rows[4].starts_with("❯ ") && rows[4].contains("task 5"));
+
+        // Ended ones stay listed, the latest first, after those still at work.
+        for i in 0..6 {
+            app.on_event(crate::core::AgentEvent::SubagentEnded {
+                id: format!("s{i}"),
+                status: if i == 5 {
+                    crate::core::SubagentStatus::Cancelled
+                } else {
+                    crate::core::SubagentStatus::Completed
+                },
+                result: None,
+            });
+            if i == 4 {
+                let (rows, _) = screen(&mut app, 100, 40);
+                assert!(rows.join("\n").contains("1 subagent running ·"));
+                let rows = list(&mut app);
+                assert!(rows[1].contains("task 5") && rows[2].contains("✓ task 4"));
+            }
+        }
+        let (all, _) = screen(&mut app, 100, 40);
+        assert!(all.join("\n").contains("Ready · last turn"));
+        let rows = list(&mut app);
+        assert!(rows[0].contains("Subagents · 6 done"), "{rows:#?}");
+        assert!(rows[1].starts_with("❯ ◼ task 5") && rows[1].contains("stopped"));
+        assert!(rows[2].contains("✓ task 4 (Explore)") && rows[2].contains("completed"));
+
+        // Enter opens the chosen one; back from it the keyboard is still on its row.
+        app.open_focused_subagent();
+        assert_eq!(app.viewing.as_deref(), Some("s5"));
+        app.close_subagent_view();
+        assert_eq!(app.subagent_focus_index(), Some(0));
+        // Up from the first row is the prompt again.
+        app.subagent_list_up();
+        assert_eq!(app.subagent_focus_index(), None);
+
+        // Another prompt does not clear the list: what they did may still
+        // be wanted.
+        app.submit_prompt("next".into());
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        assert!(list(&mut app)[0].contains("Subagents · 6 done"));
+
+        // Delete takes a finished one off the list (not out of the
+        // conversation); the keyboard moves to the row that takes its place.
+        app.subagent_list_down();
+        app.dismiss_focused_subagent();
+        let rows = list(&mut app);
+        assert!(rows[0].contains("Subagents · 5 done"), "{rows:#?}");
+        assert!(rows[1].starts_with("❯ ") && rows[1].contains("task 4"));
+        assert!(app.transcript.agent("s5").is_some());
+        // That it was taken off is saved with the conversation.
+        let saved = app.store.load(&app.conversation.id).unwrap();
+        let back = super::super::transcript::Transcript::from_records(&saved.blocks);
+        assert_eq!(back.agents().len(), 6);
+        assert_eq!(back.listed_agents().len(), 5);
+
+        // One back at work is listed again, first, and cannot be removed
+        // while it runs.
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "s5".into(),
+            description: "task 5".into(),
+            kind: Some("Explore".into()),
+        });
+        let rows = list(&mut app);
+        assert!(rows[0].contains("Subagents · 1 running"), "{rows:#?}");
+        assert!(rows[1].contains("task 5") && rows[2].starts_with("❯ "));
+        app.subagent_list_up();
+        app.dismiss_focused_subagent();
+        let rows = list(&mut app);
+        assert!(rows[1].starts_with("❯ ") && rows[1].contains("task 5"));
+        app.on_event(crate::core::AgentEvent::SubagentEnded {
+            id: "s5".into(),
+            status: crate::core::SubagentStatus::Completed,
+            result: None,
+        });
+        // Removing the last of them puts the keyboard back in the prompt.
+        for _ in 0..6 {
+            app.dismiss_focused_subagent();
+        }
+        assert!(list(&mut app).is_empty());
+        assert_eq!(app.subagent_focus_index(), None);
+        assert!(!app.subagent_list_down());
     }
 
     #[test]
@@ -1802,6 +2389,17 @@ mod tests {
         term.draw(|f| render(f, &mut app)).unwrap();
         app.open_policy_picker();
         term.draw(|f| render(f, &mut app)).unwrap();
+        app.session_alive = true;
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "spawn".into(),
+            description: "look around".into(),
+            kind: Some("Explore".into()),
+        });
+        app.open_subagent_picker();
+        assert!(matches!(app.modal, Some(Modal::Subagents(_))));
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let shown = term.backend().to_string();
+        assert!(shown.contains("Open a subagent") && shown.contains("look around"));
         app.open_model_picker();
         term.draw(|f| render(f, &mut app)).unwrap();
         app.modal = None;

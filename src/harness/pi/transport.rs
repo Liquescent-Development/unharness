@@ -188,6 +188,8 @@ async fn drive(
                         Some(cmd.to_string())
                     }
                     SessionCommand::Interrupt => Some(json!({"id": next_id(), "type":"abort"}).to_string()),
+                    // No subagents are reported here, so none can be running.
+                    SessionCommand::StopSubagent { .. } => None,
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
                         Some(kind) => Some(encode_ui_response(&id, kind, &decision)),
                         None => {

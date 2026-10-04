@@ -6,7 +6,57 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::code::sanitize;
-use crate::core::conversations::BlockRecord;
+use crate::core::SubagentStatus;
+use crate::core::conversations::{AgentRecord, BlockRecord};
+
+/// A subagent's work, kept on the tool call that spawned it. The call
+/// itself may be long done (a background launch returns at once). What the
+/// subagent did and wrote is a transcript of its own, shown on request, so
+/// that several at work do not flood the main one.
+#[derive(Debug, Clone)]
+pub struct AgentRun {
+    pub description: String,
+    pub kind: Option<String>,
+    /// `None` while it runs.
+    pub status: Option<SubagentStatus>,
+    /// Its tool calls, its prose and, last, its report.
+    pub log: Transcript,
+    /// Taken off the list under the prompt by the user, once it had ended.
+    pub dismissed: bool,
+    /// Never announced by the harness, only seen at work: it ends when
+    /// the call that spawned it returns.
+    implicit: bool,
+    pub started: Instant,
+    pub duration: Option<Duration>,
+}
+
+impl AgentRun {
+    /// Who its prose is from.
+    pub fn sender(&self) -> &str {
+        self.kind.as_deref().unwrap_or("subagent")
+    }
+
+    /// The last thing it wrote: its report, once it has ended.
+    pub fn report(&self) -> &str {
+        self.log
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|b| match b {
+                Block::Assistant { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap_or("")
+    }
+
+    fn end(&mut self, status: SubagentStatus) {
+        let elapsed = self.started.elapsed();
+        self.status = Some(status);
+        self.duration = Some(elapsed);
+        self.log.finish_turn(elapsed);
+        self.log.end_running_agents();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Block {
@@ -32,15 +82,15 @@ pub enum Block {
         collapsed: bool,
         started: Instant,
         duration: Option<Duration>,
-        /// The tool call that spawned the subagent this call ran in.
-        parent: Option<String>,
+        /// The subagent this call spawned.
+        agent: Option<Box<AgentRun>>,
     },
     System(String),
     Notice(String),
     Error(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Transcript {
     pub blocks: Vec<Block>,
     thought_start: Option<Instant>,
@@ -48,6 +98,76 @@ pub struct Transcript {
 
 /// Default cap on bridged transcript text.
 pub const DEFAULT_BRIDGE_MAX_CHARS: usize = 24_000;
+
+/// The tool call `id`, in `blocks` or in the transcript of any subagent
+/// spawned there (ids are unique across them).
+fn find_in<'a>(blocks: &'a mut [Block], id: &str) -> Option<&'a mut Block> {
+    let here = blocks
+        .iter()
+        .rposition(|b| matches!(b, Block::Tool { id: tid, .. } if tid == id));
+    if let Some(i) = here {
+        return blocks.get_mut(i);
+    }
+    for b in blocks.iter_mut().rev() {
+        if let Block::Tool {
+            agent: Some(run), ..
+        } = b
+            && let Some(found) = find_in(&mut run.log.blocks, id)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
+    blocks
+        .iter()
+        .map(|b| match b {
+            Block::User { text } => BlockRecord::User { text: text.clone() },
+            Block::Assistant {
+                text,
+                sender,
+                duration,
+            } => BlockRecord::Assistant {
+                text: text.clone(),
+                sender: sender.clone(),
+                secs: duration.map(|d| d.as_secs_f32()),
+            },
+            Block::Thought { text, duration } => BlockRecord::Thought {
+                text: text.clone(),
+                secs: duration.map(|d| d.as_secs_f32()),
+            },
+            Block::Tool {
+                id,
+                name,
+                input,
+                output,
+                is_error,
+                agent,
+                ..
+            } => BlockRecord::Tool {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+                output: output.clone(),
+                is_error: *is_error,
+                parent: None,
+                agent: agent.as_ref().map(|a| AgentRecord {
+                    description: a.description.clone(),
+                    kind: a.kind.clone(),
+                    status: a.status,
+                    blocks: records_of(&a.log.blocks),
+                    dismissed: a.dismissed,
+                    secs: a.duration.map(|d| d.as_secs_f32()),
+                }),
+            },
+            Block::System(t) => BlockRecord::System { text: t.clone() },
+            Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
+            Block::Error(t) => BlockRecord::Error { text: t.clone() },
+        })
+        .collect()
+}
 
 impl Transcript {
     pub fn push_user(&mut self, text: impl Into<String>) {
@@ -75,52 +195,16 @@ impl Transcript {
 
     /// Serializable form for conversation persistence.
     pub fn to_records(&self) -> Vec<BlockRecord> {
-        self.blocks
-            .iter()
-            .map(|b| match b {
-                Block::User { text } => BlockRecord::User { text: text.clone() },
-                Block::Assistant {
-                    text,
-                    sender,
-                    duration,
-                } => BlockRecord::Assistant {
-                    text: text.clone(),
-                    sender: sender.clone(),
-                    secs: duration.map(|d| d.as_secs_f32()),
-                },
-                Block::Thought { text, duration } => BlockRecord::Thought {
-                    text: text.clone(),
-                    secs: duration.map(|d| d.as_secs_f32()),
-                },
-                Block::Tool {
-                    id,
-                    name,
-                    input,
-                    output,
-                    is_error,
-                    parent,
-                    ..
-                } => BlockRecord::Tool {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    output: output.clone(),
-                    is_error: *is_error,
-                    parent: parent.clone(),
-                },
-                Block::System(t) => BlockRecord::System { text: t.clone() },
-                Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
-                Block::Error(t) => BlockRecord::Error { text: t.clone() },
-            })
-            .collect()
+        records_of(&self.blocks)
     }
 
     /// Rebuild from persisted records; everything comes back finished and
     /// collapsed.
     pub fn from_records(records: &[BlockRecord]) -> Self {
-        let blocks = records
-            .iter()
-            .map(|r| match r {
+        let mut t = Transcript::default();
+        for r in records {
+            let mut parent = None;
+            let block = match r {
                 BlockRecord::User { text } => Block::User { text: text.clone() },
                 BlockRecord::Assistant { text, sender, secs } => Block::Assistant {
                     text: text.clone(),
@@ -137,28 +221,48 @@ impl Transcript {
                     input,
                     output,
                     is_error,
-                    parent,
-                } => Block::Tool {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                    output: output.clone(),
-                    is_error: *is_error,
-                    done: true,
-                    collapsed: true,
-                    started: Instant::now(),
-                    duration: Some(Duration::ZERO),
-                    parent: parent.clone(),
-                },
+                    parent: p,
+                    agent,
+                } => {
+                    parent = p.as_deref();
+                    Block::Tool {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                        output: output.clone(),
+                        is_error: *is_error,
+                        done: true,
+                        collapsed: true,
+                        started: Instant::now(),
+                        duration: Some(Duration::ZERO),
+                        agent: agent.as_ref().map(|a| {
+                            Box::new(AgentRun {
+                                description: a.description.clone(),
+                                kind: a.kind.clone(),
+                                // Whatever was still running went with its session.
+                                status: Some(a.status.unwrap_or(SubagentStatus::Cancelled)),
+                                log: Transcript::from_records(&a.blocks),
+                                dismissed: a.dismissed,
+                                implicit: false,
+                                started: Instant::now(),
+                                duration: Some(Duration::from_secs_f32(a.secs.unwrap_or(0.0))),
+                            })
+                        }),
+                    }
+                }
                 BlockRecord::System { text } => Block::System(text.clone()),
                 BlockRecord::Notice { text } => Block::Notice(text.clone()),
                 BlockRecord::Error { text } => Block::Error(text.clone()),
-            })
-            .collect();
-        Transcript {
-            blocks,
-            thought_start: None,
+            };
+            // Older files kept a subagent's calls in the main list, each
+            // pointing at the call that spawned it.
+            match parent.and_then(|p| t.agent_log(p)) {
+                Some(log) => log.blocks.push(block),
+                None => t.blocks.push(block),
+            }
         }
+        t.end_running_agents();
+        t
     }
 
     pub fn append_assistant(&mut self, sender: &str, delta: &str) {
@@ -215,11 +319,6 @@ impl Transcript {
     }
 
     pub fn tool_started(&mut self, id: &str, name: &str, input: Value) {
-        self.tool_started_in(None, id, name, input);
-    }
-
-    /// A tool call, possibly made by the subagent that `parent` spawned.
-    pub fn tool_started_in(&mut self, parent: Option<&str>, id: &str, name: &str, input: Value) {
         self.close_thought();
         self.blocks.push(Block::Tool {
             id: id.to_string(),
@@ -231,15 +330,156 @@ impl Transcript {
             collapsed: true,
             started: Instant::now(),
             duration: None,
-            parent: parent.map(str::to_string),
+            agent: None,
         });
     }
 
+    /// The tool call `id` spawned a subagent, or its subagent is back at work.
+    pub fn agent_started(&mut self, id: &str, description: &str, kind: Option<&str>) {
+        if self.find_tool(id).is_none() {
+            // A subagent we never saw spawned still needs a home.
+            self.tool_started(id, "agent", serde_json::json!({"description": description}));
+            self.tool_result(id, "", false);
+        }
+        let Some(Block::Tool { agent, .. }) = self.find_tool(id) else {
+            return;
+        };
+        match agent {
+            Some(run) => {
+                run.status = None;
+                // Back at work, it is back on the list.
+                run.dismissed = false;
+                run.implicit = false;
+                run.started = Instant::now();
+                run.duration = None;
+            }
+            None => {
+                *agent = Some(Box::new(AgentRun {
+                    description: sanitize(description),
+                    kind: kind.map(sanitize),
+                    status: None,
+                    log: Transcript::default(),
+                    dismissed: false,
+                    implicit: false,
+                    started: Instant::now(),
+                    duration: None,
+                }))
+            }
+        }
+    }
+
+    /// The subagent that the tool call `id` spawned, wherever it is.
+    pub fn agent(&self, id: &str) -> Option<&AgentRun> {
+        self.agents()
+            .into_iter()
+            .find_map(|(i, run, _)| (i == id).then_some(run))
+    }
+
+    pub fn agent_mut(&mut self, id: &str) -> Option<&mut AgentRun> {
+        match self.find_tool(id) {
+            Some(Block::Tool { agent, .. }) => agent.as_deref_mut(),
+            _ => None,
+        }
+    }
+
+    /// Every subagent in spawning order, those spawned by subagents
+    /// included: (spawning call, run, how many subagents deep).
+    pub fn agents(&self) -> Vec<(&str, &AgentRun, usize)> {
+        fn walk<'a>(
+            blocks: &'a [Block],
+            depth: usize,
+            out: &mut Vec<(&'a str, &'a AgentRun, usize)>,
+        ) {
+            for b in blocks {
+                if let Block::Tool {
+                    id,
+                    agent: Some(run),
+                    ..
+                } = b
+                {
+                    out.push((id, run, depth));
+                    walk(&run.log.blocks, depth + 1, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.blocks, 0, &mut out);
+        out
+    }
+
+    /// The subagents listed by the prompt: every one the user has not
+    /// taken off the list, and any that is running.
+    pub fn listed_agents(&self) -> Vec<(&str, &AgentRun, usize)> {
+        self.agents()
+            .into_iter()
+            .filter(|(_, run, _)| run.status.is_none() || !run.dismissed)
+            .collect()
+    }
+
+    /// The transcript of the subagent that the tool call `id` spawned. A
+    /// harness that reports a subagent's work without announcing it gets
+    /// one made here, which lasts as long as the call does.
+    pub fn agent_log(&mut self, id: &str) -> Option<&mut Transcript> {
+        let Some(Block::Tool {
+            name,
+            input,
+            done,
+            agent,
+            ..
+        }) = self.find_tool(id)
+        else {
+            return None;
+        };
+        let run = agent.get_or_insert_with(|| {
+            Box::new(AgentRun {
+                description: tool_summary(name, input),
+                kind: None,
+                status: done.then_some(SubagentStatus::Completed),
+                log: Transcript::default(),
+                dismissed: false,
+                implicit: true,
+                started: Instant::now(),
+                duration: done.then_some(Duration::ZERO),
+            })
+        });
+        Some(&mut run.log)
+    }
+
+    pub fn agent_ended(&mut self, id: &str, status: SubagentStatus, result: Option<&str>) {
+        let Some(run) = self.agent_mut(id) else {
+            return;
+        };
+        // The report is usually the last thing it wrote.
+        if let Some(result) = result.map(sanitize)
+            && !result.trim().is_empty()
+            && !run.report().trim_end().ends_with(result.trim())
+        {
+            let sender = run.sender().to_string();
+            // A block of its own, not the tail of an unfinished one.
+            run.log.finish_turn(run.started.elapsed());
+            run.log.append_assistant(&sender, &result);
+        }
+        run.end(status);
+    }
+
+    /// The session is gone and its subagents with it.
+    pub fn end_running_agents(&mut self) {
+        for b in &mut self.blocks {
+            if let Block::Tool {
+                agent: Some(run), ..
+            } = b
+            {
+                if run.status.is_none() {
+                    run.end(SubagentStatus::Cancelled);
+                } else {
+                    run.log.end_running_agents();
+                }
+            }
+        }
+    }
+
     fn find_tool(&mut self, id: &str) -> Option<&mut Block> {
-        self.blocks
-            .iter_mut()
-            .rev()
-            .find(|b| matches!(b, Block::Tool { id: tid, .. } if tid == id))
+        find_in(&mut self.blocks, id)
     }
 
     /// Live output (or streaming args before the call is announced; those are
@@ -262,6 +502,7 @@ impl Transcript {
                 done,
                 started,
                 duration,
+                agent,
                 ..
             }) => {
                 if !result.is_empty() {
@@ -270,6 +511,17 @@ impl Transcript {
                 *err = is_error;
                 *done = true;
                 *duration = Some(started.elapsed());
+                // A subagent nobody announced has no end of its own.
+                if let Some(run) = agent
+                    && run.implicit
+                    && run.status.is_none()
+                {
+                    run.end(if is_error {
+                        SubagentStatus::Failed
+                    } else {
+                        SubagentStatus::Completed
+                    });
+                }
             }
             _ => {
                 // Result for a call we never saw announced (e.g. codex exec).
@@ -283,7 +535,7 @@ impl Transcript {
                     collapsed: true,
                     started: Instant::now(),
                     duration: Some(Duration::ZERO),
-                    parent: None,
+                    agent: None,
                 });
             }
         }
@@ -340,17 +592,25 @@ impl Transcript {
                 Block::User { text } => chunks.push(format!("User: {text}")),
                 Block::Assistant { text, sender, .. } => chunks.push(format!("{sender}: {text}")),
                 Block::Tool {
-                    parent: Some(_), ..
-                } => {} // the spawning call's result covers its subagent
-                Block::Tool {
                     name,
                     input,
                     output,
                     is_error,
+                    agent,
                     ..
                 } => {
-                    let status = if *is_error { "error" } else { "ok" };
-                    let out = first_lines(output, 3);
+                    let status = match agent.as_ref().map(|a| a.status) {
+                        Some(None) => "running",
+                        Some(Some(s)) => s.label(),
+                        None if *is_error => "error",
+                        None => "ok",
+                    };
+                    // A spawn call's own output is the launch receipt; what
+                    // the subagent reported is what matters.
+                    let out = match agent {
+                        Some(run) => last_lines(run.report(), 3),
+                        None => first_lines(output, 3),
+                    };
                     chunks.push(format!(
                         "[tool {} {} → {}] {}",
                         name,
@@ -442,6 +702,15 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     } else {
         s.to_string()
     }
+}
+
+fn last_lines(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let mut out = lines[lines.len().saturating_sub(n)..].join(" / ");
+    if lines.len() > n {
+        out.insert_str(0, "… ");
+    }
+    truncate_chars(&out, 200)
 }
 
 fn first_lines(s: &str, n: usize) -> String {

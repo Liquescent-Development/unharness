@@ -274,6 +274,14 @@ async fn drive(
                         format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
                     )),
                     SessionCommand::Interrupt => Some(control_request("interrupt", json!({})).1),
+                    // Claude then tells of the stop in a turn of its own.
+                    SessionCommand::StopSubagent { id } => match parser.task_of(&id) {
+                        Some(task) => Some(control_request("stop_task", json!({"task_id": task})).1),
+                        None => {
+                            let _ = events.send(AgentEvent::Notice("that subagent is no longer running".into())).await;
+                            None
+                        }
+                    },
                     SessionCommand::RespondPermission { id, decision } => {
                         match pending.remove(&id) {
                             Some(p) => Some(control_response(&id, encode_decision(&p, &decision))),

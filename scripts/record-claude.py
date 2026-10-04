@@ -49,6 +49,10 @@ def main() -> int:
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
+    ap.add_argument("--stop-tasks", action="store_true",
+                    help="when a turn ends with subagents still running, stop each one (stop_task)")
+    ap.add_argument("--interrupt-tasks", action="store_true",
+                    help="when a turn ends with subagents still running, interrupt (which stops them)")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -114,6 +118,9 @@ def main() -> int:
     send_turn(first)
 
     rewind_id = None
+    # Subagent tasks that have started and not yet reported an end.
+    running_tasks = []
+    tasks_stopped = False
     steered = False
     compacted = False
     rewound = False
@@ -163,8 +170,33 @@ def main() -> int:
         elif t == "control_response" and rewind_id and obj.get("response", {}).get("request_id") == rewind_id:
             rewind_id = None
             send_turn(prompts.pop(0))
+        elif t == "system" and obj.get("subtype") == "task_started" and obj.get("task_type") == "local_agent":
+            running_tasks.append(obj.get("task_id"))
+        elif t == "system" and obj.get("subtype") == "task_notification":
+            if obj.get("task_id") in running_tasks:
+                running_tasks.remove(obj.get("task_id"))
+            if args.interrupt_tasks and tasks_stopped and not running_tasks:
+                # An interrupt between turns ends the subagents without a turn
+                # to report it, so no `result` will come.
+                time.sleep(2)
+                proc.stdin.close()
+                for rest in proc.stdout:
+                    record("", rest)
+                break
         elif t == "result":
-            if args.rewind and len(turn_ids) == 2 and prompts and not rewound:
+            if args.stop_tasks and running_tasks and not tasks_stopped:
+                # Claude reports a stopped task in a turn of its own, whose
+                # `result` then ends the recording.
+                tasks_stopped = True
+                for task_id in running_tasks:
+                    send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                          "request": {"subtype": "stop_task", "task_id": task_id}})
+            elif args.interrupt_tasks and running_tasks and not tasks_stopped:
+                # Leave stdin open: whatever the interrupt causes should be recorded.
+                tasks_stopped = True
+                send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                      "request": {"subtype": "interrupt"}})
+            elif args.rewind and len(turn_ids) == 2 and prompts and not rewound:
                 rewound = True
                 rewind_id = str(uuid.uuid4())
                 send({"type": "control_request", "request_id": rewind_id,

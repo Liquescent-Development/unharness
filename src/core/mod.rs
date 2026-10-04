@@ -14,11 +14,13 @@ pub mod session;
 pub mod testing;
 
 pub use caps::{
-    Capabilities, PermissionPolicy, PolicyResolution, PolicySupport, RewindSupport, resolve_policy,
+    Capabilities, PermissionPolicy, PolicyResolution, PolicySupport, RewindSupport,
+    SubagentSupport, resolve_policy,
 };
 pub use event::{
     AgentEvent, CapsUpdate, ContextUsage, PermissionDecision, PermissionKind, PermissionRequest,
-    PlanEntry, PlanStatus, Question, RateLimitInfo, RateLimitWindow, StopReason, Usage,
+    PlanEntry, PlanStatus, Question, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus,
+    Usage,
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
 pub use session::{

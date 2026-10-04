@@ -31,7 +31,9 @@ What each harness supports beyond a plain turn:
 |---|---|---|---|---|---|
 | Image attachments | yes | yes | per model | per agent | exec only |
 | Plan / todo list | yes | yes | no | yes | exec only |
-| Subagent activity | yes | yes | no | no | no |
+| Subagents: start, end, tool calls, report | yes | yes | no | no | no |
+| Subagents: task description and progress in words | yes | no (a name and its tool calls) | no | no | no |
+| Subagents: stop one | yes | yes | no | no | no |
 | Steer a running turn | yes | yes | yes | no (queued) | no (queued) |
 | Compact on request | yes | yes | yes | no | no |
 | Context-window gauge | yes | yes | yes | yes | no |
@@ -103,11 +105,16 @@ capability caveat, and the key hints.
 | `Ctrl+P` | Permission policy picker |
 | `Ctrl+R` | Resume a saved conversation |
 | `Ctrl+O` | Expand or collapse the last tool call's output |
+| Click on a tool call | Expand or collapse that call; on a call that spawned a subagent, open the subagent's transcript |
+| `Ctrl+T` | Expand or collapse every tool call |
+| `Down` past the prompt's last row | Into the list of subagents under the prompt: `Up`/`Down` choose one, `Enter` opens its own transcript, `Delete` takes a finished one off the list, `Esc` (or typing) returns to the prompt |
+| `Ctrl+S`, `/subagents` | Choose among all the conversation's subagents and open one's transcript |
+| In a subagent's transcript | `Esc` back to the conversation · `s` stop that subagent · `Tab` / `Shift+Tab` next / previous subagent · arrows, `PageUp`/`PageDown`, `End` scroll · `Ctrl+O`, `Ctrl+T` expand its tool calls |
 | `Esc` | Interrupt the running turn, else clear the prompt (never quits) |
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
-`/resume`, `/sessions`, `/usage`, `/plan`, `/attach <image>`, `/detach`,
+`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <image>`, `/detach`,
 `/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
@@ -172,7 +179,31 @@ off; `unharness sessions --clear` deletes the project's shadow repository.
 is. Harnesses that can branch a session do, so the copy knows exactly what
 the original knew; the others start fresh with the transcript as context.
 
-Tool calls made inside a subagent are shown under the call that spawned it.
+Subagents are shown as long as they run, which can be longer than the turn
+that started them (Claude Code launches them in the background by default,
+and a Codex sub-agent keeps going when the agent does not wait for it).
+They are listed under the prompt, each with its task, how long it has run
+and what it is doing: those at work first, then those that have ended,
+latest first. An ended one stays listed, so that what it did can still be
+read, until it is taken off with `Delete` (its transcript is kept, and
+`Ctrl+S` still offers it). While any is at work the status rule stays busy ("2 subagents
+running") instead of "Ready".
+
+The main transcript stays the main agent's: a subagent is one line there,
+the call that spawned it, showing whether it is running, done, failed or
+stopped. What it does and writes (its tool calls, its prose, its final
+report) is a transcript of its own. `Down` from the prompt moves into the
+list under it and `Enter` opens the chosen subagent's transcript; `Ctrl+S`
+or `/subagents` offers every subagent of the conversation, and a click on
+its line in the transcript works too. A subagent's own subagents are in its transcript in the same way.
+A subagent is stopped only from its own transcript, with `s`; `Esc` there
+just goes back. A prompt sent while subagents run goes straight to the main
+agent. All of it is saved with the conversation.
+
+Claude Code starts a turn of its own to report when a background subagent
+ends or is stopped; Codex does not, so there its report is only in its own
+transcript. Codex names a sub-agent but does not describe its task, and
+says what it is doing only through its tool calls.
 
 Policy, model and effort changes apply to the next turn on every harness
 (Claude via its control channel, Codex per `turn/start`, pi per RPC command,

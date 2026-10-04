@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, Usage,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
 };
 
 #[derive(Debug, Default)]
@@ -39,6 +39,12 @@ pub struct ClaudeParser {
     last_total_cost: f64,
     /// Tasks created with `TaskCreate`, in creation order: (id, entry).
     tasks: Vec<(String, PlanEntry)>,
+    /// Subagent task id → the tool call that first spawned it. A subagent
+    /// sent back to work (`SendMessage`) starts again under the same task
+    /// id, and its messages keep naming the original call.
+    agent_tasks: HashMap<String, String>,
+    /// Subagent tasks that started and have not reported an end.
+    running_agents: HashSet<String>,
 }
 
 impl ClaudeParser {
@@ -48,6 +54,14 @@ impl ClaudeParser {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// The task id of the running subagent that the tool call `id` spawned.
+    pub fn task_of(&self, id: &str) -> Option<&str> {
+        self.agent_tasks
+            .iter()
+            .find(|(task, spawn)| *spawn == id && self.running_agents.contains(*task))
+            .map(|(task, _)| task.as_str())
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -176,6 +190,53 @@ impl ClaudeParser {
                 )));
             }
             "compact_boundary" => out.push(AgentEvent::Notice("context compacted".into())),
+            // Shell commands are tasks too (`local_bash`); only agents are subagents.
+            "task_started" if str_at(val, "task_type") == "local_agent" => {
+                let task = str_at(val, "task_id").to_string();
+                let id = self
+                    .agent_tasks
+                    .entry(task.clone())
+                    .or_insert_with(|| str_at(val, "tool_use_id").to_string())
+                    .clone();
+                self.running_agents.insert(task);
+                out.push(AgentEvent::SubagentStarted {
+                    id,
+                    description: str_at(val, "description").to_string(),
+                    kind: opt_str(val, "subagent_type"),
+                });
+            }
+            "task_progress" => {
+                let activity = str_at(val, "description");
+                if let Some(id) = self.agent_tasks.get(str_at(val, "task_id"))
+                    && !activity.is_empty()
+                {
+                    out.push(AgentEvent::SubagentProgress {
+                        id: id.clone(),
+                        activity: activity.to_string(),
+                    });
+                }
+            }
+            // The end of a task. `task_updated` says so first, without the
+            // report; `background_tasks_changed` lists what is left.
+            "task_notification" => {
+                let task = str_at(val, "task_id");
+                if self.running_agents.remove(task)
+                    && let Some(id) = self.agent_tasks.get(task)
+                {
+                    let status = match str_at(val, "status") {
+                        "completed" => SubagentStatus::Completed,
+                        "stopped" | "killed" => SubagentStatus::Cancelled,
+                        _ => SubagentStatus::Failed,
+                    };
+                    out.push(AgentEvent::SubagentEnded {
+                        id: id.clone(),
+                        status,
+                        // A stopped task's summary is only its description.
+                        result: opt_str(val, "summary")
+                            .filter(|s| status != SubagentStatus::Cancelled && !s.is_empty()),
+                    });
+                }
+            }
             // status, thinking_tokens, hook_*, plugin_install: not shown.
             _ => {}
         }
@@ -388,14 +449,20 @@ impl ClaudeParser {
             turn
         });
         if let Some(usage) = val.get("usage") {
-            out.push(AgentEvent::Usage(Usage {
+            let usage = Usage {
                 input: u64_at(usage, "input_tokens"),
                 output: u64_at(usage, "output_tokens"),
                 cache_read: u64_at(usage, "cache_read_input_tokens"),
                 cache_write: u64_at(usage, "cache_creation_input_tokens"),
                 cost_usd,
                 cumulative: false,
-            }));
+            };
+            // A subagent's report that arrives during a turn is taken into
+            // that turn; the turn it would have started still gets a result,
+            // an empty one that used nothing.
+            if usage.total_tokens() > 0 || cost_usd.is_some_and(|c| c > 0.0) {
+                out.push(AgentEvent::Usage(usage));
+            }
         }
         let window = val
             .get("modelUsage")
@@ -626,6 +693,41 @@ mod tests {
     #[test]
     fn fixture_subagent() {
         fixture("subagent");
+    }
+
+    #[test]
+    fn fixture_subagent_parallel() {
+        fixture("subagent_parallel");
+    }
+
+    #[test]
+    fn fixture_subagent_blocking() {
+        fixture("subagent_blocking");
+    }
+
+    #[test]
+    fn fixture_subagent_stopped() {
+        fixture("subagent_stopped");
+    }
+
+    #[test]
+    fn fixture_subagent_resumed() {
+        fixture("subagent_resumed");
+    }
+
+    #[test]
+    fn fixture_subagent_next_prompt() {
+        fixture("subagent_next_prompt");
+    }
+
+    #[test]
+    fn fixture_subagent_stop_task() {
+        fixture("subagent_stop_task");
+    }
+
+    #[test]
+    fn fixture_subagent_interrupted() {
+        fixture("subagent_interrupted");
     }
 
     #[test]

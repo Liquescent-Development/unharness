@@ -575,6 +575,115 @@ async fn codex_sub_agent_events_are_attributed_and_do_not_end_the_turn() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// Read events until the subagent ends; returns how.
+async fn subagent_end(handle: &mut SessionHandle) -> unharness::core::SubagentStatus {
+    loop {
+        if let AgentEvent::SubagentEnded { status, .. } = next_event(handle).await {
+            return status;
+        }
+    }
+}
+
+/// The tool call that spawned the subagent announced in `events`.
+fn spawned(events: &[AgentEvent]) -> String {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::SubagentStarted { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .expect("subagent announced")
+}
+
+#[tokio::test]
+async fn claude_stops_the_chosen_subagent_by_its_task() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/subagent_stop_task.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness;
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("delegate")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    // The turn is over and the subagent it launched is not.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SubagentEnded { .. }))
+    );
+    let id = spawned(&events);
+
+    handle
+        .send(SessionCommand::StopSubagent { id })
+        .await
+        .unwrap();
+    assert_eq!(
+        subagent_end(&mut handle).await,
+        unharness::core::SubagentStatus::Cancelled
+    );
+    // The request names the task, which is not the tool call's id.
+    let sent = fake.sent_lines();
+    let stop = &sent.last().unwrap()["request"];
+    assert_eq!(stop["subtype"], "stop_task");
+    assert!(stop["task_id"].is_string());
+    // Claude then reports the stop in a turn of its own.
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_stops_the_chosen_sub_agent_on_its_own_thread() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_subagent_interrupted.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("delegate")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let id = spawned(&events);
+
+    handle
+        .send(SessionCommand::StopSubagent { id })
+        .await
+        .unwrap();
+    assert_eq!(
+        subagent_end(&mut handle).await,
+        unharness::core::SubagentStatus::Cancelled
+    );
+    // The interrupt names the sub-agent's thread and turn, not the main one's.
+    let sent = fake.sent_lines();
+    let main_thread = sent
+        .iter()
+        .find(|v| v["method"] == "turn/start")
+        .map(|v| v["params"]["threadId"].clone())
+        .unwrap();
+    let interrupt = sent
+        .iter()
+        .find(|v| v["method"] == "turn/interrupt")
+        .expect("turn/interrupt sent");
+    assert!(interrupt["params"]["threadId"].is_string());
+    assert_ne!(interrupt["params"]["threadId"], main_thread);
+    assert!(interrupt["params"]["turnId"].is_string());
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn codex_exec_per_turn_resumes_by_thread() {
     if !python_available() {

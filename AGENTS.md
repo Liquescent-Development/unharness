@@ -111,8 +111,35 @@ recorded ones. For anything else:
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
-  `threadId`; the parser and driver ignore their `turn/started` /
-  `turn/completed` so they cannot end or re-target the main turn.
+  `threadId`; their `turn/started` / `turn/completed` never end or re-target
+  the main turn. They are the subagent's life instead (`SubagentStarted` /
+  `SubagentEnded`, the turn's last `agentMessage` being the report): the
+  `subAgentActivity` items on the main thread carry no report, and an
+  interrupt from outside sends none. Checked on 0.157.0: a sub-agent outlives
+  the turn that spawned it, the main thread takes a turn meanwhile, nothing
+  follows on the main thread when it ends, `turn/interrupt` on its thread
+  and turn stops it (what `StopSubagent` sends). `SubAgentActivityKind` has no `failed`; a sub-agent
+  whose command fails completes and says so. Unverified: a failed child turn
+  (mapped to `Failed`), `interacted`, nested sub-agents, `multi_agent_v2`
+  (stable but off by default).
+- Subagents in Claude Code (2.1.289) run in the background unless the model
+  passes `run_in_background: false`: the `Agent` call returns a launch
+  receipt and the turn can end. Their life is the `system` events of
+  `local_agent` tasks (`local_bash` tasks use the same events and are
+  ignored): `task_started`, `task_progress`, `task_notification` (which
+  ends it; `task_updated` and `background_tasks_changed` repeat it). A task
+  resumed with `SendMessage` starts again under the same `task_id` with the
+  new call's `tool_use_id`, while its messages keep the original call as
+  `parent_tool_use_id`; the parser keys on the original. A notification
+  that arrives during a turn is folded into it and still yields a `result`
+  with `num_turns: 0`, and results of self-started turns can arrive in a
+  batch after the last one. `stop_task` with the task id stops one (what
+  `StopSubagent` sends) and Claude then reports it in a turn of its own;
+  `interrupt` between turns stops all background tasks and starts no turn. Never seen: a `failed` task (an agent
+  cut off by `maxTurns` reports `completed`), nested subagents, subagent
+  `stream_event`s. Without `--forward-subagent-text` a blocking subagent's
+  text was not sent (its tool calls were); a background one's final message
+  arrived either way.
 - Rewind and fork, all checked live: Claude `rewind_conversation` (targets
   the uuid we put on each user message; refuses the session's first message
   and uuids from the session a fork came from with "stale target", reported

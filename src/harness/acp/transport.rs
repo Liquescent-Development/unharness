@@ -236,6 +236,8 @@ async fn drive(
                             }
                         }
                     }
+                    // No subagents are reported here, so none can be running.
+                    SessionCommand::StopSubagent { .. } => Ok(()),
                     SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
                             "this agent cannot be steered or rewound".into(),

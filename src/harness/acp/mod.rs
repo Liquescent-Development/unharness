@@ -20,7 +20,7 @@ use super::{
 };
 use crate::core::{
     Capabilities, HarnessId, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 
 /// Agents with a native ACP mode: (id, display name, command). Each is
@@ -119,7 +119,7 @@ impl Harness for AcpHarness {
             usage_reporting: true,
             image_input: false,
             plan_updates: true,
-            subagents: false,
+            subagents: SubagentSupport::default(),
             steer: false,
             compaction: false,
             context_usage: true,

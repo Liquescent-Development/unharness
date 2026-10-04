@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, Usage,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -27,6 +27,10 @@ pub struct CodexAppServerParser {
     /// Sub-agent thread id → the item that spawned it. Sub-agent threads
     /// report on the same stream as the main thread.
     children: HashMap<String, String>,
+    /// Sub-agent thread id → its name (the last part of its agent path).
+    child_names: HashMap<String, String>,
+    /// Sub-agent threads with a turn in progress.
+    running_children: HashSet<String>,
 }
 
 impl CodexAppServerParser {
@@ -37,15 +41,15 @@ impl CodexAppServerParser {
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
             Some(RpcMessage::Notification { method, params }) => match self.child_parent(&params) {
-                // A sub-agent's turn and token accounting are its own.
-                Some(_)
-                    if matches!(
-                        method.as_str(),
-                        "turn/started" | "turn/completed" | "thread/tokenUsage/updated"
-                    ) =>
-                {
-                    vec![]
+                // A sub-agent's turns are its life, not the main agent's.
+                Some(parent) if method == "turn/started" => {
+                    self.on_child_turn_started(parent, &params)
                 }
+                Some(parent) if method == "turn/completed" => {
+                    self.on_child_turn_completed(parent, &params)
+                }
+                // Its token accounting is its own.
+                Some(_) if method == "thread/tokenUsage/updated" => vec![],
                 Some(parent) => wrap_sub(&parent, self.on_notification(&method, &params)),
                 None => self.on_notification(&method, &params),
             },
@@ -65,6 +69,14 @@ impl CodexAppServerParser {
             Some(RpcMessage::Response { .. }) => vec![],
             None => vec![AgentEvent::Notice(line.to_string())],
         }
+    }
+
+    /// The thread of the sub-agent that the item `id` spawned.
+    pub fn child_thread(&self, id: &str) -> Option<&str> {
+        self.children
+            .iter()
+            .find(|(_, spawn)| *spawn == id)
+            .map(|(thread, _)| thread.as_str())
     }
 
     /// Codex logs tracing lines (`2026-… ERROR module: msg`) to stderr. Only
@@ -99,6 +111,54 @@ impl CodexAppServerParser {
         self.children
             .get(params.get("threadId")?.as_str()?)
             .cloned()
+    }
+
+    /// A sub-agent's first turn starts right after it is announced; a later
+    /// one means it was sent back to work.
+    fn on_child_turn_started(&mut self, id: String, p: &Value) -> Vec<AgentEvent> {
+        let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+        if !self.running_children.insert(thread.to_string()) {
+            return vec![];
+        }
+        vec![AgentEvent::SubagentStarted {
+            id,
+            description: self.child_names.get(thread).cloned().unwrap_or_default(),
+            kind: None,
+        }]
+    }
+
+    /// The end of a sub-agent's turn is the end of its work. The main thread
+    /// also gets a `subAgentActivity` item, but not when the turn was
+    /// interrupted from outside, and never with the report.
+    fn on_child_turn_completed(&mut self, id: String, p: &Value) -> Vec<AgentEvent> {
+        let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+        if !self.running_children.remove(thread) {
+            return vec![];
+        }
+        let status = match s(p.pointer("/turn/status").unwrap_or(&Value::Null)) {
+            "completed" => SubagentStatus::Completed,
+            "interrupted" | "cancelled" => SubagentStatus::Cancelled,
+            _ => SubagentStatus::Failed,
+        };
+        let result = match status {
+            // The turn's summary ends with the sub-agent's answer.
+            SubagentStatus::Completed => p
+                .pointer("/turn/items")
+                .and_then(Value::as_array)
+                .and_then(|items| {
+                    items.iter().rev().find_map(|i| {
+                        (s(i.get("type").unwrap_or(&Value::Null)) == "agentMessage")
+                            .then(|| s(i.get("text").unwrap_or(&Value::Null)).to_string())
+                    })
+                })
+                .filter(|t| !t.is_empty()),
+            SubagentStatus::Failed => p
+                .pointer("/turn/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            SubagentStatus::Cancelled => None,
+        };
+        vec![AgentEvent::SubagentEnded { id, status, result }]
     }
 
     fn on_notification(&mut self, method: &str, p: &Value) -> Vec<AgentEvent> {
@@ -297,40 +357,52 @@ impl CodexAppServerParser {
                 input: item.get("arguments").cloned().unwrap_or(Value::Null),
             }),
             "contextCompaction" => out.push(AgentEvent::Notice("compacting context…".into())),
-            // One item announces the sub-agent, a later one (with its own id)
-            // reports how it ended; both name the sub-agent's thread.
+            // One item announces the sub-agent and names its thread. Later
+            // ones (`interacted`, `interrupted`, `completed`, each with an id
+            // of its own) only repeat what the sub-agent's turns say.
             "subAgentActivity" => {
-                let thread = s(item.get("agentThreadId").unwrap_or(&Value::Null)).to_string();
-                match s(item.get("kind").unwrap_or(&Value::Null)) {
-                    "started" => {
-                        self.children.insert(thread, id.clone());
-                        out.push(AgentEvent::ToolCallStarted {
-                            id,
-                            name: "agent".into(),
-                            input: json!({
-                                "path": item.get("agentPath").cloned().unwrap_or(Value::Null),
-                            }),
-                        });
-                    }
-                    kind => {
-                        if let Some(parent) = self.children.get(&thread) {
-                            out.push(AgentEvent::ToolCallResult {
-                                id: parent.clone(),
-                                output: String::new(),
-                                is_error: kind != "completed",
-                            });
-                        }
-                    }
+                if s(item.get("kind").unwrap_or(&Value::Null)) == "started" {
+                    let thread = s(item.get("agentThreadId").unwrap_or(&Value::Null)).to_string();
+                    let path = s(item.get("agentPath").unwrap_or(&Value::Null));
+                    // All there is to describe it: `/root/read_notes`.
+                    let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                    self.children.insert(thread.clone(), id.clone());
+                    self.child_names.insert(thread.clone(), name.clone());
+                    self.running_children.insert(thread);
+                    out.push(AgentEvent::ToolCallStarted {
+                        id: id.clone(),
+                        name: "agent".into(),
+                        input: json!({"path": path}),
+                    });
+                    out.push(AgentEvent::SubagentStarted {
+                        id,
+                        description: name,
+                        kind: None,
+                    });
                 }
             }
-            "collabAgentToolCall" => out.push(AgentEvent::ToolCallStarted {
-                id,
-                name: format!("agent:{}", s(item.get("tool").unwrap_or(&Value::Null))),
-                input: json!({
-                    "prompt": item.get("prompt").cloned().unwrap_or(Value::Null),
-                    "agents": item.get("receiverThreadIds").cloned().unwrap_or(Value::Null),
-                }),
-            }),
+            "collabAgentToolCall" => {
+                // `wait` has neither a prompt nor receivers; say nothing then.
+                let mut input = serde_json::Map::new();
+                if let Some(prompt) = item.get("prompt").filter(|p| !p.is_null()) {
+                    input.insert("prompt".into(), prompt.clone());
+                }
+                if let Some(agents) = item
+                    .get("receiverThreadIds")
+                    .filter(|a| a.as_array().is_some_and(|a| !a.is_empty()))
+                {
+                    input.insert("agents".into(), agents.clone());
+                }
+                out.push(AgentEvent::ToolCallStarted {
+                    id,
+                    name: format!("agent:{}", s(item.get("tool").unwrap_or(&Value::Null))),
+                    input: if input.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::Object(input)
+                    },
+                });
+            }
             "webSearch" => out.push(AgentEvent::ToolCallStarted {
                 id,
                 name: "web_search".into(),
@@ -414,6 +486,13 @@ impl CodexAppServerParser {
                 is_error: false,
             }),
             "contextCompaction" => out.push(AgentEvent::Notice("context compacted".into())),
+            // Spawning returns at once; the sub-agent works on.
+            "subAgentActivity" if s(item.get("kind").unwrap_or(&Value::Null)) == "started" => out
+                .push(AgentEvent::ToolCallResult {
+                    id,
+                    output: String::new(),
+                    is_error: false,
+                }),
             "collabAgentToolCall" => out.push(AgentEvent::ToolCallResult {
                 id,
                 output: String::new(),
@@ -612,6 +691,42 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_subagent",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent_parallel() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent_parallel",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent_stopped() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent_stopped",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent_background() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent_background",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_subagent_interrupted() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_subagent_interrupted",
         );
     }
 

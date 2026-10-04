@@ -130,6 +130,8 @@ struct Driver {
     pending: HashMap<String, (Value, PermissionKind)>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    /// Sub-agent thread id → its running turn.
+    child_turns: HashMap<String, String>,
     model: Option<ModelRef>,
     effort: Option<String>,
     policy: PermissionPolicy,
@@ -186,6 +188,7 @@ async fn drive(
         pending: HashMap::new(),
         thread_id: None,
         turn_id: None,
+        child_turns: HashMap::new(),
         model: cfg.model.clone(),
         effort: cfg.effort.clone(),
         policy: cfg.policy,
@@ -254,6 +257,21 @@ async fn drive(
                                 d.request("turn/interrupt", params, Outstanding::Interrupt).await.map(|_| ())
                             }
                             _ => Ok(()),
+                        }
+                    }
+                    SessionCommand::StopSubagent { id } => {
+                        let running = d.parser.child_thread(&id).and_then(|thread| {
+                            d.child_turns.get(thread).map(|turn| (thread.to_string(), turn.clone()))
+                        });
+                        match running {
+                            Some((thread, turn)) => {
+                                let params = json!({"threadId": thread, "turnId": turn});
+                                d.request("turn/interrupt", params, Outstanding::Interrupt).await.map(|_| ())
+                            }
+                            None => {
+                                let _ = events.send(AgentEvent::Notice("that sub-agent is no longer running".into())).await;
+                                Ok(())
+                            }
                         }
                     }
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
@@ -383,6 +401,22 @@ async fn drive(
                                     }
                                     "turn/completed" => d.turn_id = None,
                                     _ => {}
+                                }
+                            }
+                            // A sub-agent's turn is what stopping it interrupts.
+                            Some(RpcMessage::Notification { method, params }) => {
+                                if let Some(thread) = params.get("threadId").and_then(Value::as_str) {
+                                    match method.as_str() {
+                                        "turn/started" => {
+                                            if let Some(turn) = params.pointer("/turn/id").and_then(Value::as_str) {
+                                                d.child_turns.insert(thread.to_string(), turn.to_string());
+                                            }
+                                        }
+                                        "turn/completed" => {
+                                            d.child_turns.remove(thread);
+                                        }
+                                        _ => {}
+                                    }
                                 }
                             }
                             Some(RpcMessage::Request { id, method, .. }) => {

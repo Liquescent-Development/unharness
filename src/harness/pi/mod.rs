@@ -17,7 +17,7 @@ use super::{
 };
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 
 pub struct PiHarness;
@@ -66,7 +66,7 @@ impl Harness for PiHarness {
             usage_reporting: true,
             image_input: false,
             plan_updates: false,
-            subagents: false,
+            subagents: SubagentSupport::default(),
             steer: true,
             compaction: true,
             context_usage: true,

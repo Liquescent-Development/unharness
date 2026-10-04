@@ -186,7 +186,7 @@ async fn event_loop(
 
         tokio::select! {
             _ = ticker.tick() => {
-                if app.is_generating {
+                if app.is_busy() {
                     app.tick_spinner();
                     needs_redraw = true;
                 }
@@ -267,7 +267,9 @@ fn handle_event(app: &mut App, event: Event) {
                 handle_key(app, key.modifiers, key.code);
             }
         }
-        Event::Paste(text) => app.paste(&text),
+        // The prompt is out of view while a subagent is being read.
+        Event::Paste(text) if app.viewing.is_none() => app.paste(&text),
+        Event::Paste(_) => {}
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         _ => {}
     }
@@ -297,10 +299,57 @@ fn edit_prompt(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App)
     Ok(())
 }
 
+/// Keys while a subagent's transcript is in view: reading it, stopping it,
+/// leaving it. The prompt belongs to the main conversation.
+fn handle_view_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+    match (ctrl, code) {
+        (false, KeyCode::Esc | KeyCode::Char('q')) | (true, KeyCode::Char('c')) => {
+            app.close_subagent_view()
+        }
+        (true, KeyCode::Char('d')) => app.quit(),
+        (false, KeyCode::Char('s')) => app.stop_viewed_subagent(),
+        (true, KeyCode::Char('s')) => app.open_subagent_picker(),
+        (_, KeyCode::Tab) => app.view_next_subagent(false),
+        (_, KeyCode::BackTab) => app.view_next_subagent(true),
+        (true, KeyCode::Char('o')) => {
+            app.shown_transcript_mut().toggle_last_tool();
+        }
+        (true, KeyCode::Char('t')) => app.shown_transcript_mut().toggle_all_tools(),
+        (_, KeyCode::Up) => app.scroll_up(2),
+        (_, KeyCode::Down) => app.scroll_down(2),
+        (_, KeyCode::PageUp) => app.scroll_up(10),
+        (_, KeyCode::PageDown) => app.scroll_down(10),
+        (_, KeyCode::End) => app.scroll_to_bottom(),
+        _ => {}
+    }
+}
+
 fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
+    if app.viewing.is_some() {
+        return handle_view_key(app, modifiers, code);
+    }
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
     let alt = modifiers.contains(KeyModifiers::ALT);
     let shift = modifiers.contains(KeyModifiers::SHIFT);
+    // The keyboard is in the list of subagents under the prompt.
+    if app.subagent_focus_index().is_some() {
+        match code {
+            KeyCode::Up if modifiers.is_empty() => return app.subagent_list_up(),
+            KeyCode::Down if modifiers.is_empty() => {
+                app.subagent_list_down();
+                return;
+            }
+            KeyCode::Enter if modifiers.is_empty() => return app.open_focused_subagent(),
+            KeyCode::Delete | KeyCode::Backspace => return app.dismiss_focused_subagent(),
+            KeyCode::Esc => {
+                app.subagent_focus = None;
+                return;
+            }
+            // Anything else is meant for the prompt.
+            _ => app.subagent_focus = None,
+        }
+    }
     match (ctrl, code) {
         (false, KeyCode::Up) if alt => app.unqueue_last(),
         (false, KeyCode::Up) if shift => app.scroll_up(2),
@@ -326,6 +375,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('o')) => {
             app.transcript.toggle_last_tool();
         }
+        (true, KeyCode::Char('t')) => app.transcript.toggle_all_tools(),
+        (true, KeyCode::Char('s')) => app.open_subagent_picker(),
         (true, KeyCode::Char('a')) => app.move_cursor_home(),
         (true, KeyCode::Char('u')) => {
             app.take_input();
@@ -346,8 +397,9 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (_, KeyCode::Down) => {
             if !app.suggestions.is_empty() {
                 app.suggestion_down();
-            } else if !app.move_cursor_down() {
-                app.history_newer();
+            } else if !app.move_cursor_down() && !app.history_newer() {
+                // Past the prompt's last row: the subagents listed under it.
+                app.subagent_list_down();
             }
         }
         (_, KeyCode::PageUp) => app.scroll_up(10),
@@ -670,6 +722,144 @@ mod tests {
         handle_key(&mut app, NONE, KeyCode::PageDown);
         assert_eq!(app.scroll, 20);
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn esc_never_stops_a_subagent_and_ctrl_s_offers_the_choice() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "spawn".into(),
+            description: "look around".into(),
+            kind: None,
+        });
+        // Esc clears a draft and then does nothing more, however often.
+        type_text(&mut app, "draft");
+        for _ in 0..3 {
+            handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
+        }
+        assert!(app.input.is_empty() && app.take_actions().is_empty());
+        assert_eq!(app.subagents.len(), 1);
+        assert!(app.modal.is_none() && !app.should_quit);
+
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('s'));
+        assert!(matches!(app.modal, Some(modal::Modal::Subagents(_))));
+        app.close_modal();
+
+        // Idle, Ctrl+C quits as it always did.
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('c'));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn down_from_the_prompt_reaches_the_subagents_and_enter_opens_one() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.prompt_width = 40;
+        // Nothing listed: Down at the prompt does nothing new.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        assert!(app.subagent_focus.is_none());
+
+        app.session_alive = true;
+        for id in ["one", "two"] {
+            app.on_event(crate::core::AgentEvent::SubagentStarted {
+                id: id.into(),
+                description: format!("task {id}"),
+                kind: None,
+            });
+        }
+        // In a prompt of two rows, Down first moves within the prompt.
+        type_text(&mut app, "a");
+        app.insert_newline();
+        type_text(&mut app, "b");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Up);
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        assert!(app.subagent_focus.is_none());
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        assert_eq!(app.subagent_focus.as_deref(), Some("one"));
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        assert_eq!(app.subagent_focus.as_deref(), Some("two"));
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Up);
+        assert_eq!(app.subagent_focus.as_deref(), Some("one"));
+
+        // Enter opens it instead of sending the draft; Esc comes back to its row.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Enter);
+        assert_eq!(app.viewing.as_deref(), Some("one"));
+        assert!(app.take_actions().is_empty() && app.input == "a\nb");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
+        assert!(app.viewing.is_none());
+        assert_eq!(app.subagent_focus.as_deref(), Some("one"));
+
+        // Up from the first row is the prompt again; so is Esc, which stops nothing.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Up);
+        assert!(app.subagent_focus.is_none());
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
+        assert!(app.subagent_focus.is_none() && app.input == "a\nb");
+        assert_eq!(app.subagents.len(), 2);
+
+        // Delete in the list leaves a running one, and the draft, alone.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Delete);
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Backspace);
+        assert_eq!(app.subagent_rows().len(), 2);
+        assert_eq!(app.input, "a\nb");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
+
+        // Typing while in the list goes to the prompt.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        type_text(&mut app, "c");
+        assert!(app.subagent_focus.is_none() && app.input == "a\nbc");
+
+        // Stepping back through earlier prompts still ends at the draft
+        // before Down leaves the prompt.
+        app.history.push("earlier");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Up);
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Up);
+        assert_eq!(app.input, "earlier");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
+        assert!(app.input == "a\nbc" && app.subagent_focus.is_none());
+    }
+
+    #[test]
+    fn in_a_subagents_view_the_keys_are_for_reading_stopping_and_leaving() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        for id in ["one", "two"] {
+            app.on_event(crate::core::AgentEvent::SubagentStarted {
+                id: id.into(),
+                description: format!("task {id}"),
+                kind: None,
+            });
+        }
+        type_text(&mut app, "draft");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('s'));
+        app.handle_modal_key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        assert_eq!(app.viewing.as_deref(), Some("one"));
+
+        // Typing does not reach the prompt, and Enter sends nothing.
+        type_text(&mut app, "x");
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Enter);
+        handle_event(&mut app, Event::Paste("pasted".into()));
+        assert_eq!(app.input, "draft");
+        assert!(app.take_actions().is_empty());
+
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Tab);
+        assert_eq!(app.viewing.as_deref(), Some("two"));
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Char('s'));
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::StopSubagent {
+                id: "two".into()
+            })]
+        );
+        // Esc leaves the view and stops nothing; the draft is still there.
+        handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
+        assert!(app.viewing.is_none() && app.take_actions().is_empty());
+        assert_eq!(app.subagents.len(), 2);
+        assert_eq!(app.input, "draft");
     }
 
     #[test]

@@ -127,8 +127,7 @@ pub struct Capabilities {
     pub image_input: bool,
     /// The agent's plan / todo list arrives as `PlanUpdated`.
     pub plan_updates: bool,
-    /// Subagent activity is attributed to its parent tool call (`Sub`).
-    pub subagents: bool,
+    pub subagents: SubagentSupport,
     /// A message can be injected into the running turn.
     pub steer: bool,
     /// Context can be compacted on request.
@@ -140,6 +139,20 @@ pub struct Capabilities {
     pub rewind: RewindSupport,
     /// A session can be branched into a new one (`SessionConfig::fork`).
     pub fork: bool,
+}
+
+/// What a harness tells about the subagents its agent dispatches, and what
+/// can be done about them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SubagentSupport {
+    /// Their start, their end and what they do are reported (`Subagent*`,
+    /// `Sub`). Without this a subagent is invisible.
+    pub reported: bool,
+    /// The harness words each one's task and what it is doing now;
+    /// otherwise there is a bare name, and its tool calls stand in.
+    pub described: bool,
+    /// A running subagent can be stopped (`SessionCommand::StopSubagent`).
+    pub stop: bool,
 }
 
 /// How a harness can go back to an earlier turn of its own session. (Files

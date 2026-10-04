@@ -22,7 +22,7 @@ use super::{
 use crate::core::jsonrpc;
 use crate::core::{
     Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -149,7 +149,13 @@ impl Harness for CodexHarness {
             usage_reporting: true,
             image_input: true,
             plan_updates: true,
-            subagents: app_server,
+            // A sub-agent thread has a name but no task description, and
+            // says what it is doing only through its tool calls.
+            subagents: SubagentSupport {
+                reported: app_server,
+                described: false,
+                stop: app_server,
+            },
             steer: app_server,
             compaction: app_server,
             context_usage: app_server,

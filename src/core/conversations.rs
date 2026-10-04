@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::event::{PlanEntry, Usage};
+use super::event::{PlanEntry, SubagentStatus, Usage};
 use super::ids::HarnessId;
 
 /// Conversations kept in the index; older ones are deleted on save.
@@ -39,9 +39,14 @@ pub enum BlockRecord {
         input: Value,
         output: String,
         is_error: bool,
-        /// The tool call that spawned the subagent this call ran in.
+        /// Only in older files, which kept a subagent's calls in the main
+        /// list: the call that spawned that subagent. Such a call is moved
+        /// into the subagent's own transcript when the file is loaded.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent: Option<String>,
+        /// The subagent this call spawned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentRecord>,
     },
     System {
         text: String,
@@ -52,6 +57,25 @@ pub enum BlockRecord {
     Error {
         text: String,
     },
+}
+
+/// A subagent's work, as kept on the tool call that spawned it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentRecord {
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `None`: it was still running when this was saved.
+    #[serde(default)]
+    pub status: Option<SubagentStatus>,
+    /// Its own transcript: its tool calls, its prose and, last, its report.
+    #[serde(default)]
+    pub blocks: Vec<BlockRecord>,
+    #[serde(default)]
+    pub secs: Option<f32>,
+    /// The user took it off the list under the prompt.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dismissed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
