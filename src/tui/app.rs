@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use super::clipboard::{self, Pasted};
 use super::drop;
+use super::files;
 use super::history::PromptHistory;
 use super::modal::{AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
@@ -298,6 +299,15 @@ pub struct App {
     rules: Rules,
     pub suggestions: Vec<(String, String)>,
     pub selected_suggestion: usize,
+    /// The list is of files, for the `@` at this char index of the input,
+    /// instead of slash commands.
+    pub completing_file: Option<usize>,
+    /// The files `@` completes, relative to `cwd`, as last listed.
+    file_index: Vec<String>,
+    /// The files are to be listed again; walking the tree takes a while,
+    /// so the event loop has it done off the UI.
+    file_index_requested: bool,
+    file_walk_pending: bool,
 
     pub should_quit: bool,
     actions: VecDeque<Action>,
@@ -595,6 +605,10 @@ impl App {
             rules: init.rules,
             suggestions: Vec::new(),
             selected_suggestion: 0,
+            completing_file: None,
+            file_index: Vec::new(),
+            file_index_requested: false,
+            file_walk_pending: false,
             should_quit: false,
             actions: VecDeque::new(),
         };
@@ -2827,8 +2841,10 @@ impl App {
 
     pub fn update_suggestions(&mut self) {
         self.suggestions.clear();
+        let was_completing_file = self.completing_file.take().is_some();
         if !self.input.starts_with('/') || self.input.contains('\n') {
             self.selected_suggestion = 0;
+            self.suggest_files(was_completing_file);
             return;
         }
         let query = self.input.to_lowercase();
@@ -2900,6 +2916,66 @@ impl App {
         }
     }
 
+    /// The files matching the `@` word the cursor ends, if it ends one.
+    fn suggest_files(&mut self, already_open: bool) {
+        let Some((start, query)) = files::token_at(&self.input, self.cursor) else {
+            return;
+        };
+        self.completing_file = Some(start);
+        // Each `@` lists the files anew: agents create and delete them.
+        if !already_open && !self.file_walk_pending {
+            self.file_index_requested = true;
+        }
+        self.suggestions = files::rank(&query, &self.file_index, files::SHOWN)
+            .into_iter()
+            .map(|path| (path, String::new()))
+            .collect();
+    }
+
+    /// The directory whose files are to be listed, when a list was asked for.
+    pub fn take_file_index_request(&mut self) -> Option<PathBuf> {
+        if !std::mem::take(&mut self.file_index_requested) {
+            return None;
+        }
+        self.file_walk_pending = true;
+        Some(self.cwd.clone())
+    }
+
+    /// The files under `cwd`, from `files::walk`.
+    pub fn set_file_index(&mut self, paths: Vec<String>) {
+        self.file_index = paths;
+        self.file_walk_pending = false;
+        if self.completing_file.is_none() {
+            return;
+        }
+        // An open list takes the new files in, without moving the selection
+        // off the file it is on.
+        let selected = self.suggestions.get(self.selected_suggestion).cloned();
+        self.update_suggestions();
+        self.selected_suggestion = selected
+            .and_then(|s| self.suggestions.iter().position(|o| *o == s))
+            .unwrap_or(0);
+    }
+
+    pub fn close_suggestions(&mut self) {
+        self.suggestions.clear();
+        self.completing_file = None;
+    }
+
+    /// A list of files belongs to the word the cursor ends: it goes when
+    /// the cursor leaves, or when text arrives that was not typed.
+    fn close_file_suggestions(&mut self) {
+        if self.completing_file.is_some() {
+            self.close_suggestions();
+        }
+    }
+
+    /// The selected file as the active harness wants it written.
+    fn selected_file_reference(&self) -> Option<String> {
+        let (path, _) = self.suggestions.get(self.selected_suggestion)?;
+        Some(self.harness().file_reference(path))
+    }
+
     pub fn suggestion_up(&mut self) {
         if !self.suggestions.is_empty() {
             self.selected_suggestion = if self.selected_suggestion == 0 {
@@ -2918,7 +2994,21 @@ impl App {
 
     /// Enter should complete the highlighted suggestion when the typed text
     /// is only a prefix of a command (e.g. `/pro` → `/provider`).
+    ///
+    /// With a list of files it should unless the word typed already is the
+    /// selected file's reference: completing would change nothing.
     pub fn should_accept_suggestion(&self) -> bool {
+        if let Some(start) = self.completing_file {
+            let typed: String = self
+                .input
+                .chars()
+                .skip(start)
+                .take(self.cursor - start)
+                .collect();
+            return self
+                .selected_file_reference()
+                .is_some_and(|reference| reference != typed);
+        }
         if !self.input.starts_with('/') || self.suggestions.is_empty() {
             return false;
         }
@@ -2930,6 +3020,19 @@ impl App {
     }
 
     pub fn accept_suggestion(&mut self) {
+        if let Some(start) = self.completing_file {
+            let Some(mut text) = self.selected_file_reference() else {
+                return;
+            };
+            let (from, to) = (self.byte_index(start), self.byte_index(self.cursor));
+            if !self.input[to..].starts_with(char::is_whitespace) {
+                text.push(' ');
+            }
+            self.input.replace_range(from..to, &text);
+            self.cursor = start + text.chars().count();
+            self.close_suggestions();
+            return;
+        }
         if let Some((cmd, _)) = self.suggestions.get(self.selected_suggestion) {
             self.input = cmd.clone();
             self.cursor = self.input.chars().count();
@@ -2973,10 +3076,12 @@ impl App {
 
     pub fn move_cursor_left(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
+        self.close_file_suggestions();
     }
 
     pub fn move_cursor_right(&mut self) {
         self.cursor = (self.cursor + 1).min(self.input.chars().count());
+        self.close_file_suggestions();
     }
 
     /// The input's visual rows at the current prompt width.
@@ -2991,6 +3096,7 @@ impl App {
         self.input.insert_str(idx, &text);
         self.cursor += text.chars().count();
         self.update_suggestions();
+        self.close_file_suggestions();
     }
 
     /// Show the next older sent prompt, keeping what was typed as a draft.
@@ -3018,7 +3124,7 @@ impl App {
         self.cursor = self.input.chars().count();
         // No suggestion list for a recalled command: it would take over
         // the arrows that are stepping through history.
-        self.suggestions.clear();
+        self.close_suggestions();
     }
 
     /// A paste goes in whole, into whichever text field has the keyboard;
@@ -3098,6 +3204,7 @@ impl App {
         self.input = prompt::clean(text);
         self.cursor = self.input.chars().count();
         self.update_suggestions();
+        self.close_file_suggestions();
     }
 
     pub fn insert_newline(&mut self) {
@@ -3132,6 +3239,7 @@ impl App {
     pub fn move_cursor_home(&mut self) {
         let before: Vec<char> = self.input.chars().take(self.cursor).collect();
         self.cursor = before.iter().rposition(|c| *c == '\n').map_or(0, |i| i + 1);
+        self.close_file_suggestions();
     }
 
     /// End of the line the cursor is on.
@@ -3142,6 +3250,7 @@ impl App {
             .skip(self.cursor)
             .take_while(|c| *c != '\n')
             .count();
+        self.close_file_suggestions();
     }
 
     pub fn take_input(&mut self) -> String {
@@ -3149,7 +3258,7 @@ impl App {
         self.cursor = 0;
         self.prompt_scroll = 0;
         self.history.reset();
-        self.suggestions.clear();
+        self.close_suggestions();
         text
     }
 
@@ -5110,6 +5219,105 @@ pub(crate) mod tests {
         app.open_harness_picker();
         app.handle_modal_key(key(KeyCode::Char('q')));
         assert!(app.modal.is_none());
+    }
+
+    fn index(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn at_completes_a_file_where_the_cursor_is() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.insert_str("see  for details");
+        app.cursor = 4;
+        app.insert_char('@');
+        // The first `@` asks for the files; there are none to show yet.
+        assert_eq!(app.completing_file, Some(4));
+        assert!(app.suggestions.is_empty());
+        assert_eq!(app.take_file_index_request(), Some(app.cwd.clone()));
+        app.insert_char('m');
+        assert_eq!(app.take_file_index_request(), None);
+
+        app.set_file_index(index(&["README.md", "src/main.rs", "src/tui/mod.rs"]));
+        let listed: Vec<&str> = app.suggestions.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(listed.len(), 3);
+        app.insert_char('a');
+        assert_eq!(app.suggestions[0].0, "src/main.rs");
+        assert!(app.should_accept_suggestion());
+
+        app.accept_suggestion();
+        // Whitespace followed already: none is added.
+        assert_eq!(app.input, "see src/main.rs for details");
+        assert_eq!(app.cursor, 15);
+        assert!(app.suggestions.is_empty() && app.completing_file.is_none());
+
+        // At the end of the input a space follows the path.
+        app.take_input();
+        app.insert_str("read ");
+        app.insert_char('@');
+        assert!(app.take_file_index_request().is_some());
+        for c in "read".chars() {
+            app.insert_char(c);
+        }
+        app.accept_suggestion();
+        assert_eq!(app.input, "read README.md ");
+        assert_eq!(app.cursor, 15);
+    }
+
+    #[test]
+    fn file_list_keeps_to_typed_at_words() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.set_file_index(index(&["a.rs", "b.rs", "c.rs"]));
+
+        // An address is not a file, and a slash command keeps its own list.
+        for c in "git@a".chars() {
+            app.insert_char(c);
+        }
+        assert!(app.suggestions.is_empty());
+        app.set_input("/");
+        app.insert_char('@');
+        assert!(app.completing_file.is_none());
+
+        // Pasted text and text from the editor open no list.
+        app.take_input();
+        app.insert_str("@a");
+        assert!(app.suggestions.is_empty());
+        app.set_input("look at @a");
+        assert!(app.suggestions.is_empty());
+
+        // Typing on does, and the cursor leaving the word closes it.
+        app.insert_char('.');
+        assert_eq!(app.suggestions.len(), 1);
+        app.move_cursor_left();
+        assert!(app.suggestions.is_empty() && app.completing_file.is_none());
+        app.move_cursor_end();
+        app.delete_backwards();
+        assert_eq!(app.suggestions.len(), 1);
+        app.take_input();
+        assert!(app.suggestions.is_empty() && app.completing_file.is_none());
+    }
+
+    #[test]
+    fn new_file_list_leaves_the_selection_on_its_file() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.set_file_index(index(&["a.rs", "b.rs"]));
+        app.insert_char('@');
+        app.suggestion_down();
+        assert_eq!(app.suggestions[app.selected_suggestion].0, "b.rs");
+
+        app.set_file_index(index(&["0.rs", "a.rs", "b.rs"]));
+        assert_eq!(app.suggestions.len(), 3);
+        assert_eq!(app.suggestions[app.selected_suggestion].0, "b.rs");
+        app.set_file_index(index(&["a.rs"]));
+        assert_eq!(app.selected_suggestion, 0);
+
+        // A path typed out in full is still put into the harness's form.
+        for c in "a.rs".chars() {
+            app.insert_char(c);
+        }
+        assert!(app.should_accept_suggestion());
+        app.accept_suggestion();
+        assert_eq!(app.input, "a.rs ");
     }
 
     #[test]

@@ -7,6 +7,13 @@ use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+/// How many files are listed at most; a tree with more is cut off, deepest
+/// files first.
+pub const LISTED: usize = 50_000;
+
+/// How many matches the prompt offers.
+pub const SHOWN: usize = 50;
+
 /// Directories never listed: git's own, and unharness's in the workspace.
 const SKIPPED: &[&str] = &[".git", ".unharness"];
 

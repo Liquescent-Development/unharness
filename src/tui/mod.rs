@@ -182,6 +182,8 @@ async fn event_loop(
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
     let mut session: Option<SessionHandle> = None;
     let mut needs_redraw = true;
+    // File lists for `@` completion, walked off this task.
+    let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -233,6 +235,17 @@ async fn event_loop(
                     handle_event(app, event);
                 }
             }
+            Some(paths) = files_rx.recv() => {
+                app.set_file_index(paths);
+                needs_redraw = true;
+            }
+        }
+
+        if let Some(root) = app.take_file_index_request() {
+            let tx = files_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = tx.send(files::walk(&root, files::LISTED));
+            });
         }
 
         if let Some(text) = app.take_copy_request() {
@@ -432,10 +445,11 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         }
         (_, KeyCode::Esc) => {
             // Esc cancels; it never quits (use /quit, Ctrl+D, or Ctrl+C when idle).
-            if app.is_generating {
+            // An open list is what Esc closes, also while a turn runs.
+            if !app.suggestions.is_empty() {
+                app.close_suggestions();
+            } else if app.is_generating {
                 app.interrupt();
-            } else if !app.suggestions.is_empty() {
-                app.suggestions.clear();
             } else if !app.input.is_empty() {
                 app.take_input();
             }
@@ -641,6 +655,64 @@ mod tests {
         handle_key(&mut app, NONE, KeyCode::Tab);
         assert_eq!(app.input, "/policy");
         handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('j'));
+        assert!(app.suggestions.is_empty());
+    }
+
+    fn files(app: &mut App, paths: &[&str]) {
+        app.set_file_index(paths.iter().map(|p| p.to_string()).collect());
+    }
+
+    #[test]
+    fn at_lists_files_and_tab_or_enter_takes_one() {
+        let mut app = test_app(HarnessId::CODEX);
+        files(&mut app, &["Cargo.toml", "src/lib.rs", "src/main.rs"]);
+        type_text(&mut app, "fix @src");
+        assert_eq!(app.suggestions.len(), 2);
+        // The arrows are the list's, not the history's.
+        handle_key(&mut app, NONE, KeyCode::Down);
+        assert_eq!(app.selected_suggestion, 1);
+        handle_key(&mut app, NONE, KeyCode::Tab);
+        assert_eq!(app.input, "fix src/main.rs ");
+
+        // Enter takes the file; the next Enter sends.
+        type_text(&mut app, "and @carg");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.input, "fix src/main.rs and Cargo.toml ");
+        assert!(app.take_actions().is_empty());
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.input.is_empty());
+        assert!(!app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn esc_closes_a_file_list_before_anything_else() {
+        let mut app = test_app(HarnessId::CODEX);
+        files(&mut app, &["Cargo.toml"]);
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.take_actions();
+        assert!(app.is_generating);
+
+        // While a turn runs, Esc closes the list and leaves the turn alone.
+        type_text(&mut app, "hi @c");
+        assert_eq!(app.suggestions.len(), 1);
+        handle_key(&mut app, NONE, KeyCode::Esc);
+        assert!(app.suggestions.is_empty());
+        assert!(app.take_actions().is_empty());
+        // Closed, Enter sends the text as typed.
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.queued.len(), 1);
+        assert_eq!(app.queued[0].text, "hi @c");
+
+        // A word no file matches does not hold Enter back either.
+        type_text(&mut app, "thanks @zzz");
+        assert!(app.suggestions.is_empty());
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.queued.len(), 2);
+
+        // Left moves the cursor out of the word: no list to act on.
+        type_text(&mut app, "@c");
+        handle_key(&mut app, NONE, KeyCode::Left);
         assert!(app.suggestions.is_empty());
     }
 

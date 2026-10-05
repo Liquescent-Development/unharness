@@ -10,7 +10,7 @@ use ratatui::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, Scrollbar};
 use super::code::{
@@ -1184,23 +1184,50 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
         } else {
             Style::default()
         };
+        let marker = if selected { "❯ " } else { "  " };
+        if app.completing_file.is_some() {
+            // A path too long for the list keeps its end: the file's name.
+            let room = area.width.saturating_sub(5) as usize;
+            let path = keep_end(cmd, room);
+            lines.push(Line::styled(format!("{marker}{path} "), style));
+            continue;
+        }
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{}{:<26} ", if selected { "❯ " } else { "  " }, cmd),
-                style,
-            ),
+            Span::styled(format!("{marker}{cmd:<26} "), style),
             Span::styled(format!("─ {desc}"), Style::default().fg(Color::Gray)),
         ]));
     }
+    let title = if app.completing_file.is_some() {
+        " Files [Tab to complete] "
+    } else {
+        " Suggestions [Tab to complete] "
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Yellow))
-                .title(" Suggestions [Tab to complete] "),
+                .title(title),
         ),
         area,
     );
+}
+
+/// `text` cut at the front to `width` columns, an ellipsis for what went.
+fn keep_end(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut kept = Vec::new();
+    let mut used = 1;
+    for c in text.chars().rev() {
+        used += c.width().unwrap_or(0);
+        if used > width {
+            break;
+        }
+        kept.push(c);
+    }
+    std::iter::once('…').chain(kept.into_iter().rev()).collect()
 }
 
 // ------------------------------------------------------------------ modals
@@ -2427,6 +2454,24 @@ mod tests {
             rows.iter().any(|r| r.contains(&format!("❯ {last} "))),
             "selected item not on screen"
         );
+    }
+
+    #[test]
+    fn file_list_shows_paths_and_keeps_the_end_of_long_ones() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        let long = format!("{}/deep/file.rs", "directory".repeat(12));
+        app.set_file_index(vec!["src/main.rs".to_string(), long]);
+        app.insert_char('@');
+        let (rows, _) = screen(&mut app, 100, 30);
+        assert!(rows.iter().any(|r| r.contains("Files [Tab to complete]")));
+        let first = rows.iter().find(|r| r.contains("❯ src/main.rs")).unwrap();
+        assert!(!first.contains('─'), "no description: {first}");
+        let second = rows.iter().find(|r| r.contains("/deep/file.rs")).unwrap();
+        assert!(second.contains("│  …"), "cut at the front: {second}");
+        assert!(second.contains("/deep/file.rs │"), "{second}");
+
+        assert_eq!(keep_end("src/main.rs", 11), "src/main.rs");
+        assert_eq!(keep_end("src/main.rs", 8), "…main.rs");
     }
 
     #[test]
