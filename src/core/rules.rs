@@ -403,6 +403,22 @@ pub fn shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
     Some(segments)
 }
 
+/// A command line without the shell a harness runs it through
+/// (`/bin/zsh -lc '<command>'`): rules are about the command.
+pub fn unwrap_shell(command: &str) -> String {
+    if let Some([words]) = shell_segments(command).as_deref()
+        && let [shell, flag, inner] = words.as_slice()
+        && matches!(
+            shell.rsplit('/').next(),
+            Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")
+        )
+        && matches!(flag.as_str(), "-c" | "-lc" | "-ic" | "-lic")
+    {
+        return inner.clone();
+    }
+    command.to_string()
+}
+
 /// A word as it has to be written for `shell_segments` to read it back.
 fn shell_quote(word: &str) -> String {
     let plain = |c: char| c.is_alphanumeric() || "_-./=:,@%+~".contains(c);
@@ -674,6 +690,25 @@ mod tests {
         assert_eq!(words("a | b; c &\nd"), [["a"], ["b"], ["c"], ["d"]]);
         assert_eq!(words("echo ''"), [["echo", ""]]);
         assert_eq!(words("  "), Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn the_shell_a_command_is_run_through_is_taken_off() {
+        assert_eq!(unwrap_shell("/usr/bin/zsh -lc 'echo ok'"), "echo ok");
+        assert_eq!(
+            unwrap_shell(r#"bash -c 'echo '\''a b'\'' && ls'"#),
+            "echo 'a b' && ls"
+        );
+        assert_eq!(unwrap_shell("cargo test"), "cargo test");
+        // Not just a wrapper: left as it is, and no rule will cover it.
+        for command in [
+            "zsh -lc 'echo ok' && rm -rf x",
+            "zsh -lc 'echo ok' extra",
+            "zsh -lc \"echo $(date)\"",
+            "env -c x",
+        ] {
+            assert_eq!(unwrap_shell(command), command);
+        }
     }
 
     #[test]

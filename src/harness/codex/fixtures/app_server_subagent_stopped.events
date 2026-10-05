@@ -91,7 +91,7 @@ Context used=17192 window=258400
 RateLimit status=- 7d=2%
 ToolCallStarted id=call_5yi4kaWzQMMM5UOq3mdL9ZJA name=agent:wait input=null
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj ToolCallStarted id=exec-6f345307-9b4f-4cbb-9c8c-f03b7bcbcaf1 name=shell input={"command":"/usr/bin/zsh -lc 'cat /nonexistent/file'","cw...
-Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj PermissionRequest id=0 ToolUse shell
+Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj PermissionRequest id=0 ToolUse shell [shell "cat /nonexistent/file"]
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj ToolCallResult id=exec-6f345307-9b4f-4cbb-9c8c-f03b7bcbcaf1 error=true "\u{1b}[31m[bat error]\u{1b}[0m: '/nonexistent/file': No such file o..."
 RateLimit status=- 7d=2%
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta "Failed"

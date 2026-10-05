@@ -541,6 +541,7 @@ mod tests {
         let tool = PermissionKind::ToolUse {
             tool: "shell".into(),
             input: Value::Null,
+            action: crate::core::ToolAction::Opaque,
             suggestions: None,
             description: None,
         };

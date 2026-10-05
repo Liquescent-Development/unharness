@@ -1325,6 +1325,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 input,
                 suggestions,
                 description,
+                ..
             } = &m.request.kind
             {
                 lines.push(Line::from(vec![
@@ -2431,6 +2432,7 @@ mod tests {
                 kind: PermissionKind::ToolUse {
                     tool: "Write".into(),
                     input: serde_json::json!({"file_path":"/x","content":"line1\nline2"}),
+                    action: crate::core::ToolAction::Opaque,
                     suggestions: Some(serde_json::json!([])),
                     description: None,
                 },

@@ -28,6 +28,7 @@ pub use event::{
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
 pub use mcp::{McpServer, McpTransport};
+pub use rules::{Rule, Rules, ToolAction};
 pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,

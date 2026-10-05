@@ -4573,6 +4573,7 @@ pub(crate) mod tests {
             kind: PermissionKind::ToolUse {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"ls"}),
+                action: crate::core::ToolAction::Opaque,
                 suggestions: None,
                 description: None,
             },
@@ -4802,6 +4803,7 @@ pub(crate) mod tests {
             kind: PermissionKind::ToolUse {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"ls"}),
+                action: crate::core::ToolAction::Opaque,
                 suggestions: None,
                 description: None,
             },

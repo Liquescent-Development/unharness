@@ -8,9 +8,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
+use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -34,8 +35,39 @@ pub struct CodexAppServerParser {
     /// The MCP tool call in progress on each thread: thread id → (item id,
     /// name). The request to approve it follows and names only the thread.
     mcp_calls: HashMap<String, (String, String)>,
+    /// The changes of each `fileChange` item in progress. The request to
+    /// approve one names only the item.
+    file_changes: HashMap<String, Value>,
     /// MCP servers already reported as failed; Codex retries and says so again.
     failed_mcp_servers: HashSet<String>,
+}
+
+/// A `fileChange` item's (id, changes).
+fn file_change(item: &Value) -> Option<(String, Value)> {
+    (s(item.get("type")?) == "fileChange").then(|| {
+        (
+            s(item.get("id").unwrap_or(&Value::Null)).to_string(),
+            item.get("changes").cloned().unwrap_or(Value::Null),
+        )
+    })
+}
+
+/// The files a `fileChange` item's changes write: each one's path, and
+/// where it moves to.
+fn changed_paths(changes: &Value) -> ToolAction {
+    let paths: Vec<_> = changes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| [c.get("path"), c.pointer("/kind/move_path")])
+        .filter_map(|p| p.and_then(Value::as_str))
+        .map(Into::into)
+        .collect();
+    if paths.is_empty() {
+        ToolAction::Opaque
+    } else {
+        ToolAction::Edit { paths }
+    }
 }
 
 /// An `mcpToolCall` item's (id, `server/tool`).
@@ -202,6 +234,9 @@ impl CodexAppServerParser {
                         let thread = s(p.get("threadId").unwrap_or(&Value::Null));
                         self.mcp_calls.insert(thread.to_string(), call);
                     }
+                    if let Some((id, changes)) = file_change(item) {
+                        self.file_changes.insert(id, changes);
+                    }
                     self.on_item_started(item, &mut out);
                 }
             }
@@ -210,6 +245,9 @@ impl CodexAppServerParser {
                     if mcp_call(item).is_some() {
                         self.mcp_calls
                             .remove(s(p.get("threadId").unwrap_or(&Value::Null)));
+                    }
+                    if let Some((id, _)) = file_change(item) {
+                        self.file_changes.remove(&id);
                     }
                     self.on_item_completed(item, &mut out);
                 }
@@ -555,6 +593,12 @@ impl CodexAppServerParser {
         let kind = match method {
             "item/commandExecution/requestApproval" => PermissionKind::ToolUse {
                 tool: "shell".into(),
+                action: match p.get("command").and_then(Value::as_str) {
+                    Some(command) => ToolAction::Shell {
+                        command: unwrap_shell(command),
+                    },
+                    None => ToolAction::Opaque,
+                },
                 input: json!({
                     "command": p.get("command").cloned().unwrap_or(Value::Null),
                     "cwd": p.get("cwd").cloned().unwrap_or(Value::Null),
@@ -563,18 +607,28 @@ impl CodexAppServerParser {
                 suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
             },
-            "item/fileChange/requestApproval" => PermissionKind::ToolUse {
-                tool: "apply_patch".into(),
-                input: json!({
-                    "reason": p.get("reason").cloned().unwrap_or(Value::Null),
-                    "grantRoot": p.get("grantRoot").cloned().unwrap_or(Value::Null),
-                    "changes": p.get("changes").cloned().unwrap_or(Value::Null),
-                }),
-                suggestions: p.get("availableDecisions").cloned(),
-                description: p.get("reason").and_then(Value::as_str).map(str::to_string),
-            },
+            "item/fileChange/requestApproval" => {
+                // The request has no changes of its own; the item it names does.
+                let changes = item_id
+                    .as_ref()
+                    .and_then(|id| self.file_changes.get(id))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                PermissionKind::ToolUse {
+                    tool: "apply_patch".into(),
+                    action: changed_paths(&changes),
+                    input: json!({
+                        "reason": p.get("reason").cloned().unwrap_or(Value::Null),
+                        "grantRoot": p.get("grantRoot").cloned().unwrap_or(Value::Null),
+                        "changes": changes,
+                    }),
+                    suggestions: p.get("availableDecisions").cloned(),
+                    description: p.get("reason").and_then(Value::as_str).map(str::to_string),
+                }
+            }
             "item/permissions/requestApproval" => PermissionKind::ToolUse {
                 tool: "permissions".into(),
+                action: ToolAction::Opaque,
                 input: p.clone(),
                 suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
@@ -632,6 +686,14 @@ impl CodexAppServerParser {
                 };
                 item_id = call;
                 PermissionKind::ToolUse {
+                    // Without the call there is only the server's name.
+                    action: match tool.split_once('/') {
+                        Some((server, tool)) => ToolAction::Mcp {
+                            server: server.to_string(),
+                            tool: tool.to_string(),
+                        },
+                        None => ToolAction::Opaque,
+                    },
                     tool,
                     input: p
                         .pointer("/_meta/tool_params")
@@ -729,6 +791,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_mcp_server",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_file_change() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_file_change",
         );
     }
 

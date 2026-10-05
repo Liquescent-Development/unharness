@@ -36,7 +36,7 @@ Usage in=16218 out=182 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=16400 window=258400
 RateLimit status=- 7d=3%
 Sub parent=call_2SpSJBeNUCETkMwc0VsB1p30 ToolCallStarted id=exec-78f5ef6b-afc2-44d8-809b-c58d37745ce8 name=shell input={"command":"/usr/bin/zsh -lc 'cat /WORKSPACE/a.txt'","cwd...
-Sub parent=call_2SpSJBeNUCETkMwc0VsB1p30 PermissionRequest id=0 ToolUse shell
+Sub parent=call_2SpSJBeNUCETkMwc0VsB1p30 PermissionRequest id=0 ToolUse shell [shell "cat /WORKSPACE/a.txt"]
 Sub parent=call_2SpSJBeNUCETkMwc0VsB1p30 ToolCallResult id=exec-78f5ef6b-afc2-44d8-809b-c58d37745ce8 error=false "alpha\\n"
 RateLimit status=- 7d=3%
 Sub parent=call_2SpSJBeNUCETkMwc0VsB1p30 TextDelta "alpha"
@@ -49,7 +49,7 @@ Usage in=16421 out=84 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=16505 window=258400
 RateLimit status=- 7d=3%
 Sub parent=call_lwm88FmhvbjOghcd2N81pCZI ToolCallStarted id=exec-4b016a90-cd2b-4c1e-9acb-2d8f7e21f1de name=shell input={"command":"/usr/bin/zsh -lc 'cat /WORKSPACE/b.txt'","cwd...
-Sub parent=call_lwm88FmhvbjOghcd2N81pCZI PermissionRequest id=1 ToolUse shell
+Sub parent=call_lwm88FmhvbjOghcd2N81pCZI PermissionRequest id=1 ToolUse shell [shell "cat /WORKSPACE/b.txt"]
 Sub parent=call_lwm88FmhvbjOghcd2N81pCZI ToolCallResult id=exec-4b016a90-cd2b-4c1e-9acb-2d8f7e21f1de error=false "bravo\\n"
 RateLimit status=- 7d=3%
 Sub parent=call_lwm88FmhvbjOghcd2N81pCZI TextDelta "br"
@@ -64,7 +64,7 @@ Context used=16646 window=258400
 RateLimit status=- 7d=3%
 ToolCallStarted id=call_s4UsdAv1ytOeS1xDM2OEAiJI name=agent:wait input=null
 Sub parent=call_5LRPxeOcSdsi25M9s3hw7bAe ToolCallStarted id=exec-fd0e9b33-fa06-45b4-9dee-361a44808c9c name=shell input={"command":"/usr/bin/zsh -lc 'cat /WORKSPACE/c.txt'","cwd...
-Sub parent=call_5LRPxeOcSdsi25M9s3hw7bAe PermissionRequest id=2 ToolUse shell
+Sub parent=call_5LRPxeOcSdsi25M9s3hw7bAe PermissionRequest id=2 ToolUse shell [shell "cat /WORKSPACE/c.txt"]
 Sub parent=call_5LRPxeOcSdsi25M9s3hw7bAe ToolCallResult id=exec-fd0e9b33-fa06-45b4-9dee-361a44808c9c error=false "charlie\\n"
 RateLimit status=- 7d=3%
 Sub parent=call_5LRPxeOcSdsi25M9s3hw7bAe TextDelta "char"

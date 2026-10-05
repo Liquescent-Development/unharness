@@ -8,7 +8,7 @@ ToolCallStarted id=toolu_01EtFXMAAhLezqbMDcYryyWW name=ToolSearch input={"max_re
 ToolCallResult id=toolu_01EtFXMAAhLezqbMDcYryyWW error=false "Tool: mcp__probe__magic_word"
 Context used=25618 window=1000000
 ToolCallStarted id=toolu_01E5e8VgaWBNBNxZALx8nNZ3 name=mcp__probe__magic_word input={"description":"mcp__probe__magic_word"}
-PermissionRequest id=0 ToolUse mcp__probe__magic_word
+PermissionRequest id=0 ToolUse mcp__probe__magic_word [mcp probe/magic_word]
 Context used=25628 window=1000000
 ToolCallResult id=toolu_01E5e8VgaWBNBNxZALx8nNZ3 error=false "zanzibar argA"
 Context used=25649 window=1000000

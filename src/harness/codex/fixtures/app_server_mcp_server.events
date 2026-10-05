@@ -2,7 +2,7 @@ SessionStarted id=01a109ef-c3c1-7f82-a4ca-3fd92bf4983a model=gpt-6-astra
 Notice "MCP client for `broken` failed to start: MCP startup fail..."
 TurnStarted
 ToolCallStarted id=exec-5bf5a82b-0aa3-4a3f-bad4-6bdbaa65fd97 name=probe/magic_word input={}
-PermissionRequest id=0 ToolUse probe/magic_word
+PermissionRequest id=0 ToolUse probe/magic_word [mcp probe/magic_word]
 ToolCallResult id=exec-5bf5a82b-0aa3-4a3f-bad4-6bdbaa65fd97 error=false "{\"_meta\":null,\"content\":[{\"text\":\"zanzibar argA\",\"type\":\"..."
 Usage in=14383 out=90 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=14473 window=258400

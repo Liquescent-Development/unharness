@@ -13,10 +13,12 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
+use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessId, ModelInfo, ModelRef, PermissionKind,
-    PermissionRequest, PlanEntry, PlanStatus, StopReason, Usage,
+    PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
 };
+use crate::harness::claude::parse::tool_action as claude_tool_action;
 
 /// Provider id shown for ACP agents (they pick their own backend).
 pub const PROVIDER: &str = "agent";
@@ -100,6 +102,12 @@ impl SessionOptions {
 #[derive(Debug, Default)]
 struct ToolState {
     name: String,
+    /// The agent gave the tool a name (else `name` is the protocol's kind).
+    named: bool,
+    /// The call is one of Claude Code's tools, passed on with its input.
+    claude: bool,
+    /// The protocol's category: `execute`, `edit`, `read`, …
+    kind: String,
     title: String,
     input: Value,
     content: Value,
@@ -363,6 +371,7 @@ impl AcpParser {
             kind: PermissionKind::ToolUse {
                 tool: tool.name.clone(),
                 input: tool_input(tool),
+                action: tool_action(tool),
                 // The agent's own choices; the driver maps a decision onto them.
                 suggestions: params.get("options").cloned(),
                 description: (!tool.title.is_empty()).then(|| tool.title.clone()),
@@ -421,8 +430,15 @@ fn merge_tool(tool: &mut ToolState, update: &Value) {
                 .and_then(Value::as_str)
         })
         .filter(|n| !n.is_empty());
+    if update.pointer("/_meta/claudeCode/toolName").is_some() {
+        tool.claude = true;
+    }
+    if let Some(kind) = update.get("kind").and_then(Value::as_str) {
+        tool.kind = kind.to_string();
+    }
     if let Some(name) = name {
         tool.name = name.to_string();
+        tool.named = true;
     } else if tool.name.is_empty() {
         tool.name = match s(update, "kind") {
             "" => "tool".to_string(),
@@ -451,6 +467,57 @@ fn started_event(id: &str, tool: &ToolState) -> AgentEvent {
         id: id.to_string(),
         name: tool.name.clone(),
         input: tool_input(tool),
+    }
+}
+
+/// What a tool call does, for allow rules. Claude's tools are known by name.
+/// For any other agent there is the protocol's `kind`: a command (codex-acp
+/// sends it as `rawInput.command`, an MCP call as `server` and `tool`), or
+/// the files in `locations` and in `diff` content.
+fn tool_action(tool: &ToolState) -> ToolAction {
+    if tool.claude {
+        return claude_tool_action(&tool.name, &tool.input);
+    }
+    let raw = |key: &str| tool.input.get(key).and_then(Value::as_str);
+    let paths = || -> Vec<std::path::PathBuf> {
+        let listed = |list: &Value| -> Vec<std::path::PathBuf> {
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get("path").and_then(Value::as_str))
+                .map(Into::into)
+                .collect()
+        };
+        let mut paths = listed(&tool.locations);
+        for path in listed(&tool.content) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
+    };
+    match tool.kind.as_str() {
+        "execute" => match (raw("command"), raw("server"), raw("tool")) {
+            (Some(command), _, _) => ToolAction::Shell {
+                command: unwrap_shell(command),
+            },
+            (None, Some(server), Some(name)) => ToolAction::Mcp {
+                server: server.to_string(),
+                tool: name.to_string(),
+            },
+            _ => ToolAction::Opaque,
+        },
+        "edit" | "delete" | "move" => match paths() {
+            paths if paths.is_empty() => ToolAction::Opaque,
+            paths => ToolAction::Edit { paths },
+        },
+        "read" => match paths().as_slice() {
+            [path] => ToolAction::Read { path: path.clone() },
+            _ => ToolAction::Opaque,
+        },
+        // A name of the agent's own can be held on to; a kind is too wide.
+        _ if tool.named => ToolAction::Other,
+        _ => ToolAction::Opaque,
     }
 }
 
@@ -542,6 +609,84 @@ mod tests {
             AcpParser::feed(self, line)
         }
         // Agents log freely to stderr; it is not part of the protocol.
+    }
+
+    /// The action of a permission request for this tool call.
+    fn requested(tool_call: Value) -> ToolAction {
+        let line = json!({"jsonrpc": "2.0", "id": 0, "method": "session/request_permission",
+            "params": {"toolCall": tool_call, "options": []}});
+        let events = parser().feed(&line.to_string());
+        match events.last() {
+            Some(AgentEvent::PermissionRequest(PermissionRequest {
+                kind: PermissionKind::ToolUse { action, .. },
+                ..
+            })) => action.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The shapes are codex-acp 2.1.1's tool calls (`fixtures/codex_acp.jsonl`
+    /// and a recording of an edit); it asked for no permission while recorded.
+    #[test]
+    fn a_tool_without_claudes_names_is_known_by_its_kind() {
+        assert_eq!(
+            requested(
+                json!({"toolCallId": "t", "name": "exec_command", "kind": "execute",
+                "rawInput": {"command": "/usr/bin/zsh -lc 'cargo test'", "cwd": "/w"}})
+            ),
+            ToolAction::Shell {
+                command: "cargo test".into()
+            }
+        );
+        assert_eq!(
+            requested(
+                json!({"toolCallId": "t", "kind": "execute", "title": "mcp.docs.search",
+                "rawInput": {"server": "docs", "tool": "search", "arguments": {}}})
+            ),
+            ToolAction::Mcp {
+                server: "docs".into(),
+                tool: "search".into()
+            }
+        );
+        assert_eq!(
+            requested(
+                json!({"toolCallId": "t", "kind": "edit", "title": "Editing files",
+                "locations": [{"path": "/w/a"}],
+                "content": [{"type": "diff", "path": "/w/a", "newText": "x"},
+                            {"type": "diff", "path": "/w/b", "newText": "y"}]})
+            ),
+            ToolAction::Edit {
+                paths: vec!["/w/a".into(), "/w/b".into()]
+            }
+        );
+        assert_eq!(
+            requested(json!({"toolCallId": "t", "kind": "read", "locations": [{"path": "/w/a"}]})),
+            ToolAction::Read {
+                path: "/w/a".into()
+            }
+        );
+        // A name can be held on to, a bare kind cannot.
+        assert_eq!(
+            requested(json!({"toolCallId": "t", "name": "web_search", "kind": "fetch"})),
+            ToolAction::Other
+        );
+        for call in [
+            json!({"toolCallId": "t", "kind": "fetch"}),
+            json!({"toolCallId": "t", "kind": "execute", "title": "something"}),
+            json!({"toolCallId": "t", "kind": "edit"}),
+            json!({"toolCallId": "t"}),
+        ] {
+            assert_eq!(requested(call), ToolAction::Opaque);
+        }
+        // Claude's tools, passed on, are known by name whatever the kind.
+        assert_eq!(
+            requested(json!({"toolCallId": "t", "name": "Bash", "kind": "execute",
+                "rawInput": {"command": "ls"},
+                "_meta": {"claudeCode": {"toolName": "Bash"}}})),
+            ToolAction::Shell {
+                command: "ls".into()
+            }
+        );
     }
 
     fn parser() -> AcpParser {
