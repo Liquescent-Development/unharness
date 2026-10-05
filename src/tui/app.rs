@@ -3698,6 +3698,24 @@ pub(crate) mod tests {
         resume: Option<String>,
         harness_explicit: bool,
     ) -> App {
+        let mut app = test_app_asking(cwd, harness, resume, harness_explicit);
+        // A harness without `ask` waits for a choice; most tests are not
+        // about that.
+        if app.effective_policy().is_none() {
+            app.policy_choice
+                .insert(harness, PermissionPolicy::AcceptEdits);
+            app.modal = None;
+        }
+        app
+    }
+
+    /// An app as it starts, with `ask` requested whatever the harness.
+    fn test_app_asking(
+        cwd: PathBuf,
+        harness: HarnessId,
+        resume: Option<String>,
+        harness_explicit: bool,
+    ) -> App {
         App::new(AppInit {
             // Tests never write to the real state directory.
             checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
@@ -4872,6 +4890,9 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         app.session_alive = false;
+        // agy has no `ask`.
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        app.modal = None;
 
         app.submit_prompt("second question".into());
         let actions = app.take_actions();
@@ -4896,12 +4917,58 @@ pub(crate) mod tests {
 
     #[test]
     fn policy_resolution_per_harness() {
-        let mut app = test_app(HarnessId::AGY);
+        let mut app = test_app(HarnessId::CLAUDE);
         app.set_policy(PermissionPolicy::Auto);
-        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
-        app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
         assert!(app.policy_warning().is_none());
+        app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(app.policy_warning().unwrap().contains("less permissive"));
+    }
+
+    #[test]
+    fn a_policy_that_is_not_available_waits_for_a_choice() {
+        let tmp = tempfile::tempdir().unwrap();
+        // agy has no `ask`, and nothing below it.
+        let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+        assert_eq!(app.effective_policy(), None);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        assert!(
+            app.status_warning()
+                .unwrap()
+                .contains("accept-edits, bypass")
+        );
+
+        // A prompt is kept, not sent.
+        app.modal = None;
+        app.submit_prompt("do it".into());
+        assert!(app.take_actions().is_empty());
+        assert!(!app.is_generating);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+
+        // `ask` is the first row and cannot be taken: the picker stays.
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        assert_eq!(app.effective_policy(), None);
+
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        let actions = app.take_actions();
+        assert!(matches!(actions[0], Action::StartSession { .. }));
+        assert!(matches!(actions[1], Action::SendTurn { .. }));
+
+        // The choice is for this harness; the others keep what was asked for.
+        assert_eq!(app.policy_requested, PermissionPolicy::Ask);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(app.modal.is_none());
     }
 
     /// One command as each harness asks to run it, through its own parser.
