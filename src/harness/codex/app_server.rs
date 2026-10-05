@@ -60,7 +60,7 @@ pub fn policy_params(policy: PermissionPolicy, confined: bool) -> (&'static str,
 /// elicitation with nothing to fill in.
 pub fn encode_mcp_approval(decision: &PermissionDecision) -> Value {
     match decision {
-        PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
+        PermissionDecision::Allow { .. } => {
             json!({"action": "accept", "content": {}})
         }
         PermissionDecision::Deny { .. } => json!({"action": "decline"}),
@@ -80,7 +80,7 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
             PermissionDecision::Answer(Value::Bool(b)) => {
                 json!({"action": "accept", "content": {"value": b}})
             }
-            PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
+            PermissionDecision::Allow { .. } => {
                 json!({"action": "accept", "content": {}})
             }
             PermissionDecision::Deny { .. } => json!({"action": "decline"}),
@@ -108,7 +108,6 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
         _ => {
             let decision = match decision {
                 PermissionDecision::Allow { .. } => "accept",
-                PermissionDecision::AllowAlways => "acceptForSession",
                 PermissionDecision::Deny { .. } => "decline",
                 PermissionDecision::Answer(Value::Bool(true)) => "accept",
                 PermissionDecision::Answer(_) => "cancel",
@@ -542,7 +541,6 @@ mod tests {
             tool: "shell".into(),
             input: Value::Null,
             action: crate::core::ToolAction::Opaque,
-            suggestions: None,
             description: None,
         };
         assert_eq!(
@@ -553,10 +551,6 @@ mod tests {
                 }
             ),
             json!({"decision":"accept"})
-        );
-        assert_eq!(
-            encode_decision(&tool, &PermissionDecision::AllowAlways),
-            json!({"decision":"acceptForSession"})
         );
         assert_eq!(
             encode_decision(&tool, &PermissionDecision::Deny { reason: "x".into() }),

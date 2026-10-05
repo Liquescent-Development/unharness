@@ -253,8 +253,6 @@ pub enum PermissionKind {
         input: Value,
         /// What the call does, in terms rules can match on every harness.
         action: ToolAction,
-        /// Harness-provided "allow always" rule suggestions, passed back verbatim.
-        suggestions: Option<Value>,
         description: Option<String>,
     },
     Question {
@@ -292,7 +290,6 @@ pub enum PermissionDecision {
     Allow {
         updated_input: Option<Value>,
     },
-    AllowAlways,
     Deny {
         reason: String,
     },

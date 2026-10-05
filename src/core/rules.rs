@@ -572,6 +572,11 @@ impl Rules {
         find_allowing(&rules, tool, action, self.dirs(cwd))
     }
 
+    /// The rules "allow always" would write for a request.
+    pub fn propose(&self, tool: &str, action: &ToolAction, cwd: &Path) -> Vec<Rule> {
+        propose(tool, action, self.root.as_deref(), cwd)
+    }
+
     /// Whether these rules, once added, would cover the request.
     pub fn would_allow(&self, new: &[Rule], tool: &str, action: &ToolAction, cwd: &Path) -> bool {
         let mut with = self.clone();

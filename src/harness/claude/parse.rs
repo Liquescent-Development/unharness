@@ -586,7 +586,6 @@ impl ClaudeParser {
                         action: tool_action(&tool, &input),
                         tool,
                         input,
-                        suggestions: req.get("permission_suggestions").cloned(),
                         description: opt_str(req, "description").or_else(|| {
                             opt_str(req, "blocked_path").map(|p| format!("blocked path: {p}"))
                         }),
@@ -961,7 +960,7 @@ mod tests {
                 assert_eq!(req.id, "r1");
                 assert_eq!(req.tool_call_id.as_deref(), Some("t9"));
                 assert!(
-                    matches!(&req.kind, PermissionKind::ToolUse { tool, suggestions: Some(_), .. } if tool == "Write")
+                    matches!(&req.kind, PermissionKind::ToolUse { tool, .. } if tool == "Write")
                 );
             }
             other => panic!("{other:?}"),

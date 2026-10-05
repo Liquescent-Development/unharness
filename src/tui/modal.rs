@@ -3,6 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::core::conversations::ConversationSummary;
+use crate::core::rules::{Rule, Scope};
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
@@ -79,9 +80,60 @@ pub struct ProviderOption {
     pub name: String,
 }
 
+/// "Allow always" before it is confirmed: the rules it would write.
+#[derive(Debug, Clone)]
+pub struct AlwaysDraft {
+    /// As proposed; empty when no rule can cover the request.
+    proposed: Vec<Rule>,
+    pub scope: Scope,
+    /// There is a workspace, so the scope is a choice.
+    pub has_workspace: bool,
+    /// A lone rule's pattern, open for editing.
+    pub pattern: Option<String>,
+    /// Why Enter was refused.
+    pub problem: Option<String>,
+}
+
+impl AlwaysDraft {
+    pub fn new(proposed: Vec<Rule>, has_workspace: bool) -> Self {
+        let pattern = match proposed.as_slice() {
+            [rule] => rule.pattern().map(str::to_string),
+            _ => None,
+        };
+        AlwaysDraft {
+            proposed,
+            scope: if has_workspace {
+                Scope::Workspace
+            } else {
+                Scope::Global
+            },
+            has_workspace,
+            pattern,
+            problem: None,
+        }
+    }
+
+    /// The rules as they would be written now.
+    pub fn rules(&self) -> Vec<Rule> {
+        match (&self.pattern, self.proposed.as_slice()) {
+            (Some(pattern), [rule]) => vec![rule.with_pattern(pattern.trim())],
+            _ => self.proposed.clone(),
+        }
+    }
+
+    pub fn other_scope(&self) -> Scope {
+        match self.scope {
+            Scope::Workspace => Scope::Global,
+            Scope::Global => Scope::Workspace,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PermissionModal {
     pub request: PermissionRequest,
+    /// Allow-always flow: the user is looking at what would be allowed.
+    pub always: Option<AlwaysDraft>,
     /// Deny flow: the user is typing a reason.
     pub denying: bool,
     pub reason: String,
@@ -262,6 +314,7 @@ impl Modal {
         match &req.kind {
             PermissionKind::ToolUse { .. } => Modal::Permission(PermissionModal {
                 request: req,
+                always: None,
                 denying: false,
                 reason: String::new(),
                 show_input: false,
@@ -298,6 +351,18 @@ impl Modal {
     /// holds newlines.
     pub fn text_field(&mut self) -> Option<(&mut String, bool)> {
         match self {
+            Modal::Permission(PermissionModal {
+                always:
+                    Some(AlwaysDraft {
+                        pattern: Some(pattern),
+                        problem,
+                        ..
+                    }),
+                ..
+            }) => {
+                *problem = None;
+                Some((pattern, false))
+            }
             Modal::Permission(m) if m.denying => Some((&mut m.reason, false)),
             Modal::Question(m) if m.editing_other => Some((&mut m.other[m.idx], false)),
             Modal::Input(m) => Some((&mut m.text, m.multiline)),

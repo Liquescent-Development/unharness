@@ -102,7 +102,6 @@ fn file_uri(path: &Path) -> String {
 pub fn permission_outcome(options: &Value, decision: &PermissionDecision) -> Value {
     let wanted: &[&str] = match decision {
         PermissionDecision::Allow { .. } => &["allow_once", "allow_always"],
-        PermissionDecision::AllowAlways => &["allow_always", "allow_once"],
         PermissionDecision::Deny { .. } => &["reject_once", "reject_always"],
         PermissionDecision::Answer(_) => &[],
     };
@@ -610,10 +609,6 @@ mod tests {
             json!({"outcome":{"outcome":"selected","optionId":"allow-once"}})
         );
         assert_eq!(
-            pick(PermissionDecision::AllowAlways)["outcome"]["optionId"],
-            "allow-all"
-        );
-        assert_eq!(
             pick(PermissionDecision::Deny {
                 reason: "no".into()
             })["outcome"]["optionId"],
@@ -626,7 +621,12 @@ mod tests {
         // An agent that offers no way to allow gets a cancel, never a guess.
         let only_reject = json!([{"optionId":"r","kind":"reject_once"}]);
         assert_eq!(
-            permission_outcome(&only_reject, &PermissionDecision::AllowAlways),
+            permission_outcome(
+                &only_reject,
+                &PermissionDecision::Allow {
+                    updated_input: None
+                }
+            ),
             json!({"outcome":{"outcome":"cancelled"}})
         );
     }

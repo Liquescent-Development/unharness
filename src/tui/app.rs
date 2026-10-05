@@ -14,7 +14,7 @@ use serde_json::Value;
 use super::clipboard::{self, Pasted};
 use super::drop;
 use super::history::PromptHistory;
-use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
+use super::modal::{AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
@@ -1953,7 +1953,39 @@ impl App {
                     decision,
                 }));
         }
-        self.modal = self.pending_prompts.pop_front().map(Modal::for_request);
+        self.modal = None;
+        // The next one waiting that still needs an answer: a rule added in
+        // the meantime may cover some of them.
+        while self.modal.is_none()
+            && let Some(req) = self.pending_prompts.pop_front()
+        {
+            self.on_permission_request(req);
+        }
+    }
+
+    /// "Allow always": the request is allowed, and so is what the rules
+    /// cover from now on, on any harness. The harness itself is only told
+    /// "allow": what it would remember, it would remember in its own
+    /// settings, or forget with the session.
+    fn allow_always(&mut self, scope: Scope, rules: &[Rule]) {
+        let what: Vec<String> = rules.iter().map(Rule::describe).collect();
+        let place = match scope {
+            Scope::Workspace => "in this workspace",
+            Scope::Global => "in every workspace",
+        };
+        match self.rules.append(scope, rules) {
+            Ok(path) => self.transcript.push_notice(format!(
+                "from now on allowing {} {place} (see /allow; kept in {})",
+                what.join(", "),
+                path.display()
+            )),
+            Err(e) => self.transcript.push_error(format!(
+                "allowed this once, but the rule could not be saved: {e:#}"
+            )),
+        }
+        self.answer_prompt(PermissionDecision::Allow {
+            updated_input: None,
+        });
     }
 
     // ------------------------------------------------------------------ settings
@@ -2286,6 +2318,7 @@ impl App {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
+        let mut choice = None;
         let outcome = match &mut modal {
             Modal::Harness(p) => picker_nav(p, key.code).map(|c| {
                 c.and_then(|_| p.current().map(|o| (o.id, o.installed)))
@@ -2318,7 +2351,46 @@ impl App {
                 }),
             },
             Modal::Permission(m) => {
-                if m.denying {
+                if let Some(draft) = m.always.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => m.always = None,
+                        KeyCode::Tab if draft.has_workspace => {
+                            draft.scope = draft.other_scope();
+                        }
+                        KeyCode::Backspace => {
+                            draft.problem = None;
+                            if let Some(pattern) = &mut draft.pattern {
+                                pattern.pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            draft.problem = None;
+                            if let Some(pattern) = &mut draft.pattern {
+                                pattern.push(c);
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let rules = draft.rules();
+                            let covers = match &m.request.kind {
+                                PermissionKind::ToolUse { tool, action, .. } => {
+                                    self.rules.would_allow(&rules, tool, action, &self.cwd)
+                                }
+                                _ => false,
+                            };
+                            // A rule that would not have allowed this very
+                            // request is not what was asked for.
+                            if let Some(e) = rules.iter().find_map(|r| r.validate().err()) {
+                                draft.problem = Some(e.to_string());
+                            } else if !rules.is_empty() && !covers {
+                                draft.problem = Some("that would not cover this request".into());
+                            } else if !rules.is_empty() {
+                                choice = Some(ModalChoice::Always(draft.scope, rules));
+                            }
+                        }
+                        _ => {}
+                    }
+                    choice.map(Some)
+                } else if m.denying {
                     match key.code {
                         KeyCode::Enter => {
                             let reason = if m.reason.trim().is_empty() {
@@ -2352,7 +2424,13 @@ impl App {
                             })))
                         }
                         KeyCode::Char('a') => {
-                            Some(Some(ModalChoice::Decision(PermissionDecision::AllowAlways)))
+                            if let PermissionKind::ToolUse { tool, action, .. } = &m.request.kind {
+                                m.always = Some(AlwaysDraft::new(
+                                    self.rules.propose(tool, action, &self.cwd),
+                                    self.rules.has_workspace(),
+                                ));
+                            }
+                            None
                         }
                         KeyCode::Char('n') | KeyCode::Char('d') => {
                             m.denying = true;
@@ -2516,6 +2594,7 @@ impl App {
                         self.rewind_to(block, restore_files);
                     }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
+                    ModalChoice::Always(scope, rules) => self.allow_always(scope, &rules),
                     ModalChoice::Dismiss => self.close_modal(),
                 }
             }
@@ -3348,6 +3427,8 @@ enum ModalChoice {
     /// (user block, also restore files)
     Rewind(usize, bool),
     Decision(PermissionDecision),
+    /// Allow the request and keep these rules for the next ones like it.
+    Always(Scope, Vec<Rule>),
     Dismiss,
 }
 
@@ -4707,6 +4788,153 @@ pub(crate) mod tests {
         assert_eq!(app.take_actions(), vec![allowed("claude")]);
     }
 
+    fn type_keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_modal_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn draft(app: &App) -> &AlwaysDraft {
+        match &app.modal {
+            Some(Modal::Permission(m)) => m.always.as_ref().expect("the always step"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn allow_always_writes_a_rule_that_the_next_harness_knows() {
+        let mut requests = cargo_test_requests("cargo test --all");
+        let (acp, codex, claude) = (
+            requests.pop().unwrap(),
+            requests.pop().unwrap(),
+            requests.pop().unwrap(),
+        );
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(claude);
+        // A second request for the same thing is already waiting.
+        app.on_event(acp);
+
+        // `a` shows what would be allowed and sends nothing yet.
+        app.handle_modal_key(key(KeyCode::Char('a')));
+        assert_eq!(app.take_actions(), vec![]);
+        assert_eq!(draft(&app).rules(), [Rule::shell("cargo test")]);
+        assert_eq!(draft(&app).scope, Scope::Workspace);
+        // Esc goes back to the request, not out of it.
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert_eq!(app.take_actions(), vec![]);
+        assert!(matches!(&app.modal, Some(Modal::Permission(m)) if m.always.is_none()));
+
+        app.handle_modal_key(key(KeyCode::Char('a')));
+        app.handle_modal_key(key(KeyCode::Enter));
+        // Claude is told "allow" and nothing more, and the request that was
+        // waiting is answered by the new rule.
+        assert_eq!(app.take_actions(), vec![allowed("claude"), allowed("acp")]);
+        assert!(app.modal.is_none());
+        let path = app.rules.path(Scope::Workspace).unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("command = \"cargo test\""), "{written}");
+        assert!(!app.rules.path(Scope::Global).unwrap().exists());
+
+        // After a switch, Codex asks for the same thing and is not asked about.
+        app.on_event(codex);
+        assert_eq!(app.take_actions(), vec![allowed("codex")]);
+        assert!(app.modal.is_none());
+
+        // The rule is there for the next run.
+        let reloaded = Rules::load_in(path.parent().unwrap().parent().unwrap(), Some(&app.cwd));
+        assert_eq!(
+            reloaded.unwrap().iter().collect::<Vec<_>>(),
+            [(Scope::Workspace, &Rule::shell("cargo test"))]
+        );
+    }
+
+    #[test]
+    fn the_rule_can_be_changed_and_moved_before_it_is_kept() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(cargo_test_requests("cargo test --all").remove(0));
+        app.handle_modal_key(key(KeyCode::Char('a')));
+
+        // Widened to every cargo command, for every workspace.
+        for _ in 0.." test".len() {
+            app.handle_modal_key(key(KeyCode::Backspace));
+        }
+        app.handle_modal_key(key(KeyCode::Tab));
+        assert_eq!(draft(&app).rules(), [Rule::shell("cargo")]);
+        assert_eq!(draft(&app).scope, Scope::Global);
+
+        // A pattern that would not have allowed this request is refused.
+        type_keys(&mut app, " build");
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![]);
+        assert!(
+            draft(&app)
+                .problem
+                .as_deref()
+                .unwrap()
+                .contains("not cover")
+        );
+        // So is one that is no rule at all.
+        type_keys(&mut app, " && ls");
+        assert!(draft(&app).problem.is_none());
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![]);
+        assert!(draft(&app).problem.is_some());
+
+        for _ in 0.." build && ls".len() {
+            app.handle_modal_key(key(KeyCode::Backspace));
+        }
+        // A paste goes into the pattern too.
+        app.paste(" test");
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![allowed("claude")]);
+        assert_eq!(
+            app.rules.iter().collect::<Vec<_>>(),
+            [(Scope::Global, &Rule::shell("cargo test"))]
+        );
+        assert!(!app.rules.path(Scope::Workspace).unwrap().exists());
+    }
+
+    #[test]
+    fn a_request_no_rule_can_cover_says_so_and_stays_a_question() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(cargo_test_requests("cargo test > log").remove(0));
+        app.handle_modal_key(key(KeyCode::Char('a')));
+        assert_eq!(draft(&app).rules(), []);
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![]);
+        app.handle_modal_key(key(KeyCode::Esc));
+        app.handle_modal_key(key(KeyCode::Char('y')));
+        assert_eq!(app.take_actions(), vec![allowed("claude")]);
+        assert_eq!(app.rules.iter().count(), 0);
+    }
+
+    #[test]
+    fn a_rule_that_cannot_be_saved_still_allows_this_once() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        // Something that is not a rules file is in the way.
+        let path = app.rules.path(Scope::Workspace).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not toml [").unwrap();
+        app.on_event(cargo_test_requests("cargo test").remove(0));
+        app.handle_modal_key(key(KeyCode::Char('a')));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(app.take_actions(), vec![allowed("claude")]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not toml [");
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Error(e) if e.contains("could not be saved")))
+        );
+        app.on_event(cargo_test_requests("cargo test").remove(0));
+        assert!(app.modal.is_some());
+    }
+
     #[test]
     fn allow_lists_the_rules_and_where_they_are_kept() {
         use crate::tui::transcript::Block;
@@ -4749,7 +4977,6 @@ pub(crate) mod tests {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"ls"}),
                 action: crate::core::ToolAction::Opaque,
-                suggestions: None,
                 description: None,
             },
             tool_call_id: None,
@@ -4979,7 +5206,6 @@ pub(crate) mod tests {
                 tool: "Bash".into(),
                 input: serde_json::json!({"command":"ls"}),
                 action: crate::core::ToolAction::Opaque,
-                suggestions: None,
                 description: None,
             },
             tool_call_id: None,

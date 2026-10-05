@@ -372,8 +372,6 @@ impl AcpParser {
                 tool: tool.name.clone(),
                 input: tool_input(tool),
                 action: tool_action(tool),
-                // The agent's own choices; the driver maps a decision onto them.
-                suggestions: params.get("options").cloned(),
                 description: (!tool.title.is_empty()).then(|| tool.title.clone()),
             },
             tool_call_id: (!id.is_empty()).then_some(id),

@@ -218,7 +218,6 @@ pub fn control_request(subtype: &str, extra: Value) -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct PendingPermission {
     input: Value,
-    suggestions: Option<Value>,
     is_question: bool,
 }
 
@@ -228,13 +227,6 @@ pub fn encode_decision(pending: &PendingPermission, decision: &PermissionDecisio
             "behavior": "allow",
             "updatedInput": updated_input.clone().unwrap_or_else(|| pending.input.clone()),
         }),
-        PermissionDecision::AllowAlways => {
-            let mut v = json!({"behavior":"allow","updatedInput": pending.input.clone()});
-            if let Some(s) = &pending.suggestions {
-                v["updatedPermissions"] = s.clone();
-            }
-            v
-        }
         PermissionDecision::Deny { reason } => json!({"behavior":"deny","message": reason}),
         PermissionDecision::Answer(answer) => {
             if pending.is_question {
@@ -411,10 +403,10 @@ async fn drive(
                         }
                         for ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
-                                let (input, suggestions, is_question) = match &req.kind {
-                                    PermissionKind::ToolUse { input, suggestions, .. } => (input.clone(), suggestions.clone(), false),
-                                    PermissionKind::Question { .. } => (Value::Null, None, true),
-                                    _ => (Value::Null, None, false),
+                                let (input, is_question) = match &req.kind {
+                                    PermissionKind::ToolUse { input, .. } => (input.clone(), false),
+                                    PermissionKind::Question { .. } => (Value::Null, true),
+                                    _ => (Value::Null, false),
                                 };
                                 // For questions we need the original input to echo back.
                                 let input = if is_question {
@@ -423,7 +415,7 @@ async fn drive(
                                         .and_then(|v| v.pointer("/request/input").cloned())
                                         .unwrap_or(Value::Null)
                                 } else { input };
-                                pending.insert(req.id.clone(), PendingPermission { input, suggestions, is_question });
+                                pending.insert(req.id.clone(), PendingPermission { input, is_question });
                             }
                             if events.send(ev).await.is_err() {
                                 proc.kill().await;
@@ -500,7 +492,6 @@ mod tests {
     fn decision_encoding() {
         let p = PendingPermission {
             input: json!({"file_path":"/x"}),
-            suggestions: Some(json!([{"type":"setMode","mode":"acceptEdits"}])),
             is_question: false,
         };
         let allow = encode_decision(
@@ -513,8 +504,9 @@ mod tests {
             allow,
             json!({"behavior":"allow","updatedInput":{"file_path":"/x"}})
         );
-        let always = encode_decision(&p, &PermissionDecision::AllowAlways);
-        assert_eq!(always["updatedPermissions"][0]["mode"], "acceptEdits");
+        // Claude's own "always" (`updatedPermissions`) is never sent: it can
+        // write to Claude's settings. Allow rules are unharness's.
+        assert!(allow.get("updatedPermissions").is_none());
         let deny = encode_decision(
             &p,
             &PermissionDecision::Deny {
@@ -525,7 +517,6 @@ mod tests {
 
         let q = PendingPermission {
             input: json!({"questions":[{"question":"Color?"}]}),
-            suggestions: None,
             is_question: true,
         };
         let ans = encode_decision(&q, &PermissionDecision::Answer(json!({"Color?":"Red"})));

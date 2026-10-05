@@ -604,7 +604,6 @@ impl CodexAppServerParser {
                     "cwd": p.get("cwd").cloned().unwrap_or(Value::Null),
                     "reason": p.get("reason").cloned().unwrap_or(Value::Null),
                 }),
-                suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
             },
             "item/fileChange/requestApproval" => {
@@ -622,7 +621,6 @@ impl CodexAppServerParser {
                         "grantRoot": p.get("grantRoot").cloned().unwrap_or(Value::Null),
                         "changes": changes,
                     }),
-                    suggestions: p.get("availableDecisions").cloned(),
                     description: p.get("reason").and_then(Value::as_str).map(str::to_string),
                 }
             }
@@ -630,7 +628,6 @@ impl CodexAppServerParser {
                 tool: "permissions".into(),
                 action: ToolAction::Opaque,
                 input: p.clone(),
-                suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
             },
             "item/tool/requestUserInput" => PermissionKind::Question {
@@ -699,10 +696,6 @@ impl CodexAppServerParser {
                         .pointer("/_meta/tool_params")
                         .cloned()
                         .unwrap_or(json!({})),
-                    // The request offers to remember the answer (`persist`);
-                    // how to ask for that is not in the schema, so "always"
-                    // is not offered.
-                    suggestions: None,
                     description: p.get("message").and_then(Value::as_str).map(str::to_string),
                 }
             }

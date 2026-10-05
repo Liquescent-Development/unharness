@@ -18,10 +18,11 @@ use super::code::{
     wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{ListPicker, Modal};
+use super::modal::{AlwaysDraft, ListPicker, Modal};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::SandboxLevel;
+use crate::core::rules::Scope;
 use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -742,6 +743,76 @@ fn tool_body_lines(
     lines
 }
 
+/// The "allow always" step of a permission request: what would be allowed
+/// from now on, and where, before anything is written.
+fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::Gray);
+    let rules = draft.rules();
+    if rules.is_empty() {
+        let mut lines = wrap_prefixed_text(
+            "  ",
+            "No rule can cover this request: a command that uses substitution or \
+             redirection, or a tool call with nothing to tell it by. It is asked \
+             about each time.",
+            width,
+            Style::default().fg(Color::Yellow),
+        );
+        lines.push(Line::from(Span::styled("  Esc back", gray)));
+        return lines;
+    }
+    let place = |scope: Scope| match scope {
+        Scope::Workspace => "this workspace",
+        Scope::Global => "every workspace",
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        format!("  Always allow, in {}, on any harness:", place(draft.scope)),
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for rule in &rules {
+        lines.extend(wrap_prefixed_text(
+            "    ",
+            &rule.describe(),
+            width,
+            Style::default(),
+        ));
+        if rule.pattern().is_none() && rule.tool != "mcp" {
+            lines.extend(wrap_prefixed_text(
+                "      ",
+                "(by this harness's name for the tool; another may call it something else)",
+                width,
+                gray,
+            ));
+        }
+    }
+    if let Some(pattern) = &draft.pattern {
+        lines.push(Line::from(vec![
+            Span::styled("  Pattern: ", Style::default().fg(Color::Green)),
+            Span::raw(pattern.clone()),
+            Span::styled("▏", Style::default().fg(Color::Green)),
+        ]));
+    }
+    if let Some(problem) = &draft.problem {
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            problem,
+            width,
+            Style::default().fg(Color::Red),
+        ));
+    }
+    let mut hint = "  Enter save and allow".to_string();
+    if draft.has_workspace {
+        hint.push_str(&format!(" · Tab {}", place(draft.other_scope())));
+    }
+    if draft.pattern.is_some() {
+        hint.push_str(" · type to change the pattern");
+    }
+    hint.push_str(" · Esc back");
+    lines.push(Line::from(Span::styled(hint, gray)));
+    lines
+}
+
 pub fn wrap_prefixed_text(
     prefix: &'static str,
     text: &str,
@@ -1323,7 +1394,6 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             if let PermissionKind::ToolUse {
                 tool,
                 input,
-                suggestions,
                 description,
                 ..
             } = &m.request.kind
@@ -1368,7 +1438,9 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::DarkGray),
                 ));
                 lines.push(Line::default());
-                if m.denying {
+                if let Some(draft) = &m.always {
+                    lines.extend(always_lines(draft, width));
+                } else if m.denying {
                     lines.push(Line::from(vec![
                         Span::styled("  Reason: ", Style::default().fg(Color::Red)),
                         Span::raw(m.reason.clone()),
@@ -1379,14 +1451,9 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(Color::Gray),
                     )));
                 } else {
-                    let always = if suggestions.is_some() {
-                        "a allow always · "
-                    } else {
-                        ""
-                    };
                     lines.push(Line::from(Span::styled(
                         format!(
-                            "  y/Enter allow once · {always}n deny · i {} input · Esc cancel",
+                            "  y/Enter allow once · a allow always · n deny · i {} input · Esc cancel",
                             if m.show_input { "hide" } else { "full" }
                         ),
                         Style::default().fg(Color::Gray),
@@ -2433,7 +2500,6 @@ mod tests {
                     tool: "Write".into(),
                     input: serde_json::json!({"file_path":"/x","content":"line1\nline2"}),
                     action: crate::core::ToolAction::Opaque,
-                    suggestions: Some(serde_json::json!([])),
                     description: None,
                 },
                 tool_call_id: None,
@@ -2444,5 +2510,64 @@ mod tests {
         let text: String = buf.content().iter().map(|c| c.symbol()).collect();
         assert!(text.contains("Permission request"));
         assert!(text.contains("Write"));
+    }
+
+    #[test]
+    fn the_permission_modal_says_what_allow_always_would_cover() {
+        use crate::core::{AgentEvent, PermissionRequest, ToolAction};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut app = test_app(HarnessId::CLAUDE);
+        let request = |id: &str, tool: &str, action: ToolAction| {
+            AgentEvent::PermissionRequest(PermissionRequest {
+                id: id.into(),
+                kind: PermissionKind::ToolUse {
+                    tool: tool.into(),
+                    input: serde_json::json!({"command": "cargo test --all"}),
+                    action,
+                    description: None,
+                },
+                tool_call_id: None,
+            })
+        };
+        let press = |app: &mut App, code: KeyCode| {
+            app.handle_modal_key(KeyEvent::new(code, KeyModifiers::NONE));
+            screen(app, 100, 40).0.join("\n")
+        };
+        let shell = ToolAction::Shell {
+            command: "cargo test --all".into(),
+        };
+        app.on_event(request("1", "Bash", shell));
+        let text = screen(&mut app, 100, 40).0.join("\n");
+        assert!(text.contains("a allow always"), "{text}");
+
+        let text = press(&mut app, KeyCode::Char('a'));
+        assert!(
+            text.contains("Always allow, in this workspace, on any harness:"),
+            "{text}"
+        );
+        assert!(text.contains("shell commands starting with `cargo test`"));
+        assert!(text.contains("Pattern: cargo test"));
+        assert!(text.contains("Enter save and allow · Tab every workspace"));
+        // What it says follows what is typed, and where it goes.
+        press(&mut app, KeyCode::Backspace);
+        let text = press(&mut app, KeyCode::Tab);
+        assert!(text.contains("Always allow, in every workspace"), "{text}");
+        assert!(text.contains("shell commands starting with `cargo tes`"));
+        let text = press(&mut app, KeyCode::Enter);
+        assert!(text.contains("that would not cover this request"), "{text}");
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+
+        app.on_event(request("2", "WebFetch", ToolAction::Other));
+        let text = press(&mut app, KeyCode::Char('a'));
+        assert!(text.contains("every use of `WebFetch`"), "{text}");
+        assert!(text.contains("by this harness's name for the tool"));
+        assert!(!text.contains("Pattern:"));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+
+        app.on_event(request("3", "permissions", ToolAction::Opaque));
+        let text = press(&mut app, KeyCode::Char('a'));
+        assert!(text.contains("No rule can cover this request"), "{text}");
     }
 }
