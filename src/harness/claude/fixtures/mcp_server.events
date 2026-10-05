@@ -13,7 +13,7 @@ ToolCallResult id=toolu_016SChCrgcugneGNhV1eoigh error=false "[tool_reference]"
 RateLimit status=allowed five_hour=18% seven_day=39%
 Context used=26294 window=-
 ToolCallStarted id=toolu_01NmbVvr95iibs7emosMArLA name=mcp__probe__magic_word input={}
-PermissionRequest id=a427695e-c0f0-4955-a681-16a55a6e407e ToolUse mcp__probe__magic_word
+PermissionRequest id=a427695e-c0f0-4955-a681-16a55a6e407e ToolUse mcp__probe__magic_word [mcp probe/magic_word]
 ToolCallResult id=toolu_01NmbVvr95iibs7emosMArLA error=false "zanzibar argA"
 Context used=26411 window=-
 TextDelta "zan"

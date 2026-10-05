@@ -85,8 +85,7 @@ pub fn encode_message(
 pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDecision) -> String {
     let mut v = json!({"type":"extension_ui_response","id":id});
     match (kind, decision) {
-        (PendingKind::Confirm, PermissionDecision::Allow { .. })
-        | (PendingKind::Confirm, PermissionDecision::AllowAlways) => v["confirmed"] = json!(true),
+        (PendingKind::Confirm, PermissionDecision::Allow { .. }) => v["confirmed"] = json!(true),
         (PendingKind::Confirm, PermissionDecision::Answer(Value::Bool(b))) => {
             v["confirmed"] = json!(b)
         }

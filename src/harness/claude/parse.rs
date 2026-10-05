@@ -9,8 +9,55 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
+
+/// What one of Claude Code's tools does, for allow rules. Also used for
+/// agents that pass Claude's tool calls on under their own names (ACP).
+pub fn tool_action(tool: &str, input: &Value) -> ToolAction {
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let edit = |key: &str| match text(key) {
+        Some(path) => ToolAction::Edit {
+            paths: vec![path.into()],
+        },
+        None => ToolAction::Opaque,
+    };
+    match tool {
+        // A command that asks to leave Claude's own sandbox is not the
+        // command a rule was written for.
+        "Bash" if input.get("dangerouslyDisableSandbox") == Some(&Value::Bool(true)) => {
+            ToolAction::Opaque
+        }
+        "Bash" => match text("command") {
+            Some(command) => ToolAction::Shell {
+                command: command.to_string(),
+                cwd: None,
+            },
+            None => ToolAction::Opaque,
+        },
+        "Write" | "Edit" | "MultiEdit" => edit("file_path"),
+        "NotebookEdit" => edit("notebook_path"),
+        "Read" => match text("file_path") {
+            Some(path) => ToolAction::Read { path: path.into() },
+            None => ToolAction::Opaque,
+        },
+        _ => match tool.strip_prefix("mcp__").map(|t| (t, t.split_once("__"))) {
+            // `mcp__a__b__c`: server `a` or server `a__b`, there is no telling.
+            Some((_, Some((_, tool)))) if tool.contains("__") => ToolAction::Opaque,
+            Some((_, None)) => ToolAction::Opaque,
+            Some((_, Some((server, tool)))) => ToolAction::Mcp {
+                server: server.to_string(),
+                tool: tool.to_string(),
+            },
+            None => ToolAction::Other,
+        },
+    }
+}
 
 #[derive(Debug, Default)]
 enum BlockAcc {
@@ -540,9 +587,9 @@ impl ClaudeParser {
                     }
                 } else {
                     PermissionKind::ToolUse {
+                        action: tool_action(&tool, &input),
                         tool,
                         input,
-                        suggestions: req.get("permission_suggestions").cloned(),
                         description: opt_str(req, "description").or_else(|| {
                             opt_str(req, "blocked_path").map(|p| format!("blocked path: {p}"))
                         }),
@@ -855,6 +902,65 @@ mod tests {
     }
 
     #[test]
+    fn tools_are_named_for_what_they_do() {
+        use serde_json::json;
+        let shell = |command: &str| ToolAction::Shell {
+            command: command.into(),
+            cwd: None,
+        };
+        let edit = |path: &str| ToolAction::Edit {
+            paths: vec![path.into()],
+        };
+        assert_eq!(
+            tool_action(
+                "Bash",
+                &json!({"command": "cargo test", "description": "x"})
+            ),
+            shell("cargo test")
+        );
+        assert_eq!(
+            tool_action(
+                "Bash",
+                &json!({"command": "cargo test", "dangerouslyDisableSandbox": true})
+            ),
+            ToolAction::Opaque
+        );
+        assert_eq!(tool_action("Bash", &json!({})), ToolAction::Opaque);
+        for tool in ["Write", "Edit", "MultiEdit"] {
+            assert_eq!(
+                tool_action(tool, &json!({"file_path": "/w/a"})),
+                edit("/w/a")
+            );
+        }
+        assert_eq!(
+            tool_action("NotebookEdit", &json!({"notebook_path": "/w/a.ipynb"})),
+            edit("/w/a.ipynb")
+        );
+        assert_eq!(tool_action("Write", &json!({})), ToolAction::Opaque);
+        assert_eq!(
+            tool_action("Read", &json!({"file_path": "/etc/hosts"})),
+            ToolAction::Read {
+                path: "/etc/hosts".into()
+            }
+        );
+        assert_eq!(
+            tool_action("mcp__probe__magic_word", &json!({})),
+            ToolAction::Mcp {
+                server: "probe".into(),
+                tool: "magic_word".into()
+            }
+        );
+        // Which part is the server's name cannot be told.
+        for tool in ["mcp__a__b__c", "mcp__probe", "mcp__"] {
+            assert_eq!(tool_action(tool, &json!({})), ToolAction::Opaque, "{tool}");
+        }
+        assert_eq!(
+            tool_action("WebFetch", &json!({"url": "https://example.com"})),
+            ToolAction::Other
+        );
+    }
+
+    #[test]
     fn control_request_maps_to_permission_and_question() {
         let mut p = ClaudeParser::new();
         let ev = p.feed(r#"{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"file_path":"/x"},"permission_suggestions":[{"type":"addRules"}],"tool_use_id":"t9"}}"#);
@@ -863,7 +969,7 @@ mod tests {
                 assert_eq!(req.id, "r1");
                 assert_eq!(req.tool_call_id.as_deref(), Some("t9"));
                 assert!(
-                    matches!(&req.kind, PermissionKind::ToolUse { tool, suggestions: Some(_), .. } if tool == "Write")
+                    matches!(&req.kind, PermissionKind::ToolUse { tool, .. } if tool == "Write")
                 );
             }
             other => panic!("{other:?}"),

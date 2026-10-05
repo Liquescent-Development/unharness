@@ -9,6 +9,7 @@ use colored::*;
 
 use crate::cli::CommonRunArgs;
 use crate::config::Config;
+use crate::core::Rules;
 use crate::core::conversations::ConversationStore;
 use crate::core::guard::{self, Watch};
 use crate::core::mcp;
@@ -123,6 +124,11 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let settings = config.harness(id.as_str());
 
     let policy = requested_policy(&args, config, id)?;
+    // The sandbox keeps unharness's config directory from being written,
+    // but only knows of it once it exists; allow rules will be kept there.
+    if let Some(dir) = Rules::default_dir() {
+        let _ = std::fs::create_dir_all(dir);
+    }
     let sandbox_setup = SandboxSetup::detect(requested_sandbox(&args, config)?);
     if let (Some(level), Err(why)) = (sandbox_setup.explicit, &sandbox_setup.backend)
         && level != SandboxLevel::Off
@@ -240,7 +246,11 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         }
     }
 
+    // Read before the terminal is taken over: a file that does not parse
+    // ends the run with an error that can be read.
+    let rules = Rules::load(ws_root.as_deref())?;
     tui::run_tui(TuiLaunch {
+        rules,
         cwd: cwd.to_path_buf(),
         workspace_root: ws_root,
         registry,

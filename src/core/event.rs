@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use super::ids::ModelInfo;
+use super::rules::ToolAction;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -250,8 +251,8 @@ pub enum PermissionKind {
     ToolUse {
         tool: String,
         input: Value,
-        /// Harness-provided "allow always" rule suggestions, passed back verbatim.
-        suggestions: Option<Value>,
+        /// What the call does, in terms rules can match on every harness.
+        action: ToolAction,
         description: Option<String>,
     },
     Question {
@@ -289,7 +290,6 @@ pub enum PermissionDecision {
     Allow {
         updated_input: Option<Value>,
     },
-    AllowAlways,
     Deny {
         reason: String,
     },
@@ -369,7 +369,9 @@ impl AgentEvent {
             ),
             AgentEvent::PermissionRequest(req) => {
                 let kind = match &req.kind {
-                    PermissionKind::ToolUse { tool, .. } => format!("ToolUse {}", tool),
+                    PermissionKind::ToolUse { tool, action, .. } => {
+                        format!("ToolUse {} [{}]", tool, short(&action.summary()))
+                    }
                     PermissionKind::Question { questions } => {
                         format!("Question n={}", questions.len())
                     }

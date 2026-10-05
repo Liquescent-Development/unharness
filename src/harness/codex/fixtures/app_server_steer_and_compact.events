@@ -7,7 +7,7 @@ TextDelta " the"
 TextDelta " command"
 TextDelta ".\\n"
 ToolCallStarted id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f name=shell input={"command":"/usr/bin/zsh -lc 'sleep 4 && echo first-ok'",...
-PermissionRequest id=0 ToolUse shell
+PermissionRequest id=0 ToolUse shell [shell "sleep 4 && echo first-ok"]
 ToolCallDelta id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f name=shell "first-ok\\n"
 ToolCallResult id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f error=false "first-ok\\n"
 Usage in=14456 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false

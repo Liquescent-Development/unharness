@@ -15,7 +15,7 @@ TextDelta " command"
 TextDelta " now"
 TextDelta "."
 ToolCallStarted id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 name=shell input={"command":"/usr/bin/zsh -lc 'echo codex-app-ok'","cwd":"...
-PermissionRequest id=0 ToolUse shell
+PermissionRequest id=0 ToolUse shell [shell "echo codex-app-ok"]
 ToolCallResult id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 error=false "codex-app-ok\\n"
 Usage in=16977 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=17023 window=258400

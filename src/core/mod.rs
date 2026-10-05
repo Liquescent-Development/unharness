@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod per_turn;
 pub mod process;
 pub mod registry;
+pub mod rules;
 pub mod sandbox;
 pub mod session;
 pub mod testing;
@@ -27,6 +28,7 @@ pub use event::{
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
 pub use mcp::{McpServer, McpTransport};
+pub use rules::{Rule, Rules, ToolAction};
 pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,

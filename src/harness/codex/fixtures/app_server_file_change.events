@@ -1,0 +1,22 @@
+SessionStarted id=01a10d0b-f839-74f2-82a0-c96a5fbe341f model=gpt-6-astra
+TurnStarted
+TextDelta "I"
+TextDelta "’ll"
+TextDelta " apply"
+TextDelta " the"
+TextDelta " patch"
+TextDelta " to"
+TextDelta " both"
+TextDelta " files"
+TextDelta "."
+ToolCallStarted id=exec-dfc761bb-847a-4467-8e97-0be730e702a1 name=apply_patch input={"changes":[{"diff":"@@ -1 +1,2 @@\n one\n+two\n","kind":...
+PermissionRequest id=0 ToolUse apply_patch [edit /WORKSPACE/notes.txt /WORKSPACE/src/hello.txt]
+ToolCallResult id=exec-dfc761bb-847a-4467-8e97-0be730e702a1 error=false " /WORKSPACE/notes.txt\\n /WORKSPACE/src/hello.txt"
+Usage in=14429 out=157 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=14586 window=258400
+RateLimit status=- 7d=10%
+TextDelta "done"
+Usage in=14610 out=5 cache_read=14208 cache_write=0 cost=- cumulative=false
+Context used=14615 window=258400
+RateLimit status=- 7d=10%
+TurnCompleted Done

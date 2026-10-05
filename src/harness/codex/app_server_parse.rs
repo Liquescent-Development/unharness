@@ -8,9 +8,10 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::core::jsonrpc::RpcMessage;
+use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -34,8 +35,72 @@ pub struct CodexAppServerParser {
     /// The MCP tool call in progress on each thread: thread id → (item id,
     /// name). The request to approve it follows and names only the thread.
     mcp_calls: HashMap<String, (String, String)>,
+    /// How many MCP tool calls are in progress on each thread. With more
+    /// than one, which of them a request is about cannot be told.
+    mcp_running: HashMap<String, usize>,
+    /// The changes of each `fileChange` item in progress. The request to
+    /// approve one names only the item.
+    file_changes: HashMap<String, Value>,
     /// MCP servers already reported as failed; Codex retries and says so again.
     failed_mcp_servers: HashSet<String>,
+}
+
+/// What a request to approve a command says, as recorded. One that says
+/// more (a grant beyond the command, a retry outside the sandbox) is asking
+/// for more than a rule about the command allows.
+const COMMAND_APPROVAL: &[&str] = &[
+    "kind",
+    "threadId",
+    "turnId",
+    "itemId",
+    "startedAtMs",
+    "environmentId",
+    "command",
+    "cwd",
+    "commandActions",
+    "proposedExecpolicyAmendment",
+    "availableDecisions",
+];
+
+/// The same for a file change. `reason` and `grantRoot` were always null
+/// when recorded; `grantRoot` asks for a whole directory.
+const FILE_APPROVAL: &[&str] = &["threadId", "turnId", "itemId", "startedAtMs"];
+
+/// Whether a request has nothing set beyond the fields it is known by.
+fn only_known(params: &Value, known: &[&str]) -> bool {
+    params.as_object().is_some_and(|fields| {
+        fields
+            .iter()
+            .all(|(key, value)| value.is_null() || known.contains(&key.as_str()))
+    })
+}
+
+/// A `fileChange` item's (id, changes).
+fn file_change(item: &Value) -> Option<(String, Value)> {
+    (s(item.get("type")?) == "fileChange").then(|| {
+        (
+            s(item.get("id").unwrap_or(&Value::Null)).to_string(),
+            item.get("changes").cloned().unwrap_or(Value::Null),
+        )
+    })
+}
+
+/// The files a `fileChange` item's changes write: each one's path, and
+/// where it moves to.
+fn changed_paths(changes: &Value) -> ToolAction {
+    let paths: Vec<_> = changes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| [c.get("path"), c.pointer("/kind/move_path")])
+        .filter_map(|p| p.and_then(Value::as_str))
+        .map(Into::into)
+        .collect();
+    if paths.is_empty() {
+        ToolAction::Opaque
+    } else {
+        ToolAction::Edit { paths }
+    }
 }
 
 /// An `mcpToolCall` item's (id, `server/tool`).
@@ -201,6 +266,10 @@ impl CodexAppServerParser {
                     if let Some(call) = mcp_call(item) {
                         let thread = s(p.get("threadId").unwrap_or(&Value::Null));
                         self.mcp_calls.insert(thread.to_string(), call);
+                        *self.mcp_running.entry(thread.to_string()).or_default() += 1;
+                    }
+                    if let Some((id, changes)) = file_change(item) {
+                        self.file_changes.insert(id, changes);
                     }
                     self.on_item_started(item, &mut out);
                 }
@@ -208,8 +277,14 @@ impl CodexAppServerParser {
             "item/completed" => {
                 if let Some(item) = p.get("item") {
                     if mcp_call(item).is_some() {
-                        self.mcp_calls
-                            .remove(s(p.get("threadId").unwrap_or(&Value::Null)));
+                        let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+                        self.mcp_calls.remove(thread);
+                        if let Some(running) = self.mcp_running.get_mut(thread) {
+                            *running = running.saturating_sub(1);
+                        }
+                    }
+                    if let Some((id, _)) = file_change(item) {
+                        self.file_changes.remove(&id);
                     }
                     self.on_item_completed(item, &mut out);
                 }
@@ -555,28 +630,46 @@ impl CodexAppServerParser {
         let kind = match method {
             "item/commandExecution/requestApproval" => PermissionKind::ToolUse {
                 tool: "shell".into(),
+                action: match p.get("command").and_then(Value::as_str) {
+                    Some(command) if only_known(p, COMMAND_APPROVAL) => ToolAction::Shell {
+                        command: unwrap_shell(command),
+                        cwd: p.get("cwd").and_then(Value::as_str).map(Into::into),
+                    },
+                    _ => ToolAction::Opaque,
+                },
                 input: json!({
                     "command": p.get("command").cloned().unwrap_or(Value::Null),
                     "cwd": p.get("cwd").cloned().unwrap_or(Value::Null),
                     "reason": p.get("reason").cloned().unwrap_or(Value::Null),
                 }),
-                suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
             },
-            "item/fileChange/requestApproval" => PermissionKind::ToolUse {
-                tool: "apply_patch".into(),
-                input: json!({
-                    "reason": p.get("reason").cloned().unwrap_or(Value::Null),
-                    "grantRoot": p.get("grantRoot").cloned().unwrap_or(Value::Null),
-                    "changes": p.get("changes").cloned().unwrap_or(Value::Null),
-                }),
-                suggestions: p.get("availableDecisions").cloned(),
-                description: p.get("reason").and_then(Value::as_str).map(str::to_string),
-            },
+            "item/fileChange/requestApproval" => {
+                // The request has no changes of its own; the item it names does.
+                let changes = item_id
+                    .as_ref()
+                    .and_then(|id| self.file_changes.get(id))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                PermissionKind::ToolUse {
+                    tool: "apply_patch".into(),
+                    action: if only_known(p, FILE_APPROVAL) {
+                        changed_paths(&changes)
+                    } else {
+                        ToolAction::Opaque
+                    },
+                    input: json!({
+                        "reason": p.get("reason").cloned().unwrap_or(Value::Null),
+                        "grantRoot": p.get("grantRoot").cloned().unwrap_or(Value::Null),
+                        "changes": changes,
+                    }),
+                    description: p.get("reason").and_then(Value::as_str).map(str::to_string),
+                }
+            }
             "item/permissions/requestApproval" => PermissionKind::ToolUse {
                 tool: "permissions".into(),
+                action: ToolAction::Opaque,
                 input: p.clone(),
-                suggestions: p.get("availableDecisions").cloned(),
                 description: p.get("reason").and_then(Value::as_str).map(str::to_string),
             },
             "item/tool/requestUserInput" => PermissionKind::Question {
@@ -623,6 +716,8 @@ impl CodexAppServerParser {
                     == Some("mcp_tool_call") =>
             {
                 let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+                let alone = self.mcp_running.get(thread) == Some(&1);
+                let message = s(p.get("message").unwrap_or(&Value::Null));
                 let (call, tool) = match self.mcp_calls.get(thread) {
                     Some((id, name)) => (Some(id.clone()), name.clone()),
                     None => (
@@ -632,15 +727,28 @@ impl CodexAppServerParser {
                 };
                 item_id = call;
                 PermissionKind::ToolUse {
+                    // The request names no call: it is taken to be about the
+                    // one in progress on its thread. For a rule to answer it
+                    // that has to be the only one, and the question has to
+                    // name the same server and tool.
+                    action: match tool.split_once('/') {
+                        Some((server, tool))
+                            if alone
+                                && message.contains(&format!("the {server} MCP server"))
+                                && message.contains(&format!("tool \"{tool}\"")) =>
+                        {
+                            ToolAction::Mcp {
+                                server: server.to_string(),
+                                tool: tool.to_string(),
+                            }
+                        }
+                        _ => ToolAction::Opaque,
+                    },
                     tool,
                     input: p
                         .pointer("/_meta/tool_params")
                         .cloned()
                         .unwrap_or(json!({})),
-                    // The request offers to remember the answer (`persist`);
-                    // how to ask for that is not in the schema, so "always"
-                    // is not offered.
-                    suggestions: None,
                     description: p.get("message").and_then(Value::as_str).map(str::to_string),
                 }
             }
@@ -729,6 +837,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_mcp_server",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_file_change() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_file_change",
         );
     }
 
@@ -852,6 +969,120 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// The action of the permission request a line turns into.
+    fn requested(parser: &mut CodexAppServerParser, line: Value) -> ToolAction {
+        match parser.feed(&line.to_string()).last() {
+            Some(AgentEvent::PermissionRequest(PermissionRequest {
+                kind: PermissionKind::ToolUse { action, .. },
+                ..
+            })) => action.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_request_that_asks_for_more_than_its_command_or_files_is_not_matched() {
+        let mut p = CodexAppServerParser::new();
+        let command = |extra: Value| {
+            let mut params = json!({"kind": "command", "threadId": "t", "turnId": "u",
+                "itemId": "i", "startedAtMs": 1, "environmentId": "local",
+                "command": "/usr/bin/zsh -lc 'cargo test'", "cwd": "/w",
+                "commandActions": [], "proposedExecpolicyAmendment": ["cargo", "test"],
+                "availableDecisions": ["accept", "cancel"], "reason": null});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"method": "item/commandExecution/requestApproval", "id": 1, "params": params})
+        };
+        assert_eq!(
+            requested(&mut p, command(json!({}))),
+            ToolAction::Shell {
+                command: "cargo test".into(),
+                cwd: Some("/w".into())
+            }
+        );
+        for extra in [
+            json!({"reason": "retry without the sandbox?"}),
+            json!({"additionalPermissions": {"network": true}}),
+            json!({"networkApprovalContext": {"host": "example.com"}}),
+        ] {
+            assert_eq!(
+                requested(&mut p, command(extra.clone())),
+                ToolAction::Opaque,
+                "{extra}"
+            );
+        }
+
+        p.feed(
+            &json!({"method": "item/started", "params": {"threadId": "t", "item": {
+            "type": "fileChange", "id": "f", "changes": [
+                {"path": "/w/a", "kind": {"type": "update", "move_path": "/w/b"}},
+                {"path": "/w/c", "kind": {"type": "add"}}]}}})
+            .to_string(),
+        );
+        let change = |extra: Value| {
+            let mut params = json!({"threadId": "t", "turnId": "u", "itemId": "f",
+                "startedAtMs": 1, "reason": null, "grantRoot": null});
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"method": "item/fileChange/requestApproval", "id": 2, "params": params})
+        };
+        assert_eq!(
+            requested(&mut p, change(json!({}))),
+            ToolAction::Edit {
+                paths: vec!["/w/a".into(), "/w/b".into(), "/w/c".into()]
+            }
+        );
+        // Write access to a whole directory, asked for with one file's change.
+        assert_eq!(
+            requested(&mut p, change(json!({"grantRoot": "/w"}))),
+            ToolAction::Opaque
+        );
+        assert_eq!(
+            requested(&mut p, change(json!({"itemId": "unknown"}))),
+            ToolAction::Opaque
+        );
+    }
+
+    #[test]
+    fn an_mcp_approval_is_matched_only_when_it_is_clear_which_call_it_is_for() {
+        let started = |id: &str, tool: &str| {
+            json!({"method": "item/started", "params": {"threadId": "t", "item": {
+                "type": "mcpToolCall", "id": id, "server": "docs", "tool": tool,
+                "arguments": {}}}})
+            .to_string()
+        };
+        let ask = |tool: &str| {
+            json!({"method": "mcpServer/elicitation/request", "id": 1, "params": {
+                "threadId": "t", "serverName": "docs", "mode": "form",
+                "_meta": {"codex_approval_kind": "mcp_tool_call", "tool_params": {}},
+                "message": format!("Allow the docs MCP server to run tool \"{tool}\"?")}})
+        };
+        let search = ToolAction::Mcp {
+            server: "docs".into(),
+            tool: "search".into(),
+        };
+        let mut p = CodexAppServerParser::new();
+        p.feed(&started("a", "search"));
+        assert_eq!(requested(&mut p, ask("search")), search);
+        // The question names another tool than the call it is tied to.
+        assert_eq!(requested(&mut p, ask("delete")), ToolAction::Opaque);
+        // Two calls in progress: either could be meant.
+        p.feed(&started("b", "search"));
+        assert_eq!(requested(&mut p, ask("search")), ToolAction::Opaque);
+        p.feed(
+            &json!({"method": "item/completed", "params": {"threadId": "t", "item": {
+            "type": "mcpToolCall", "id": "a", "server": "docs", "tool": "search"}}})
+            .to_string(),
+        );
+        // No call at all.
+        let mut p = CodexAppServerParser::new();
+        assert_eq!(requested(&mut p, ask("search")), ToolAction::Opaque);
     }
 
     #[test]

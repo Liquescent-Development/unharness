@@ -50,6 +50,20 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   init`, and never its MCP servers (commands to run). The config and state
   directories are never writable in the sandbox. A config file that does
   not parse is an error, never a silent fall back to defaults.
+- **"Allow always" is an unharness rule.** A harness is only ever told
+  "allow" or "deny": what it offers to remember (Claude's
+  `updatedPermissions`, Codex's `acceptForSession`, an ACP `allow_always`
+  option) is not sent, because it lands in vendor settings or dies with the
+  session. Rules live in `core/rules.rs` and under the config directory
+  (`allow.toml`, `workspaces/<key>.allow.toml`), and match on the
+  `ToolAction` each parser derives in `src/harness/<name>/`, which is part
+  of the `.events` summary. When a command or path cannot be read off a
+  request with certainty the action is `Opaque` and the user is asked; a
+  field that only describes a call (ACP `locations`) is not certainty, and
+  neither is a request carrying fields no recording had. The shell splitter
+  (`shell_segments`) refuses what it does not model instead of guessing;
+  a new construct it accepts needs a test showing a shell reads it the
+  same way. No rule reaches unharness's own config and state directories.
 - **A change to a harness's own configuration is never silent.** The files
   that decide a CLI's next run are declared in `src/harness/<name>/`
   (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
@@ -231,6 +245,28 @@ recorded ones. For anything else:
   reports it when its `modes` list one with id `plan` (claude-agent-acp
   0.85.1 does, codex-acp 2.1.1 does not). pi plans only through an
   extension.
+- Allow rules, checked live on Claude Code 2.1.289 and Codex 0.157.0
+  (app-server): a shell rule written from a Claude `Bash` request answered
+  Codex's request for the same command in the same workspace, a command
+  joined to another with `&&` was still asked about, and an edit rule
+  answered Claude's next `Write`. Recorded: Codex's
+  `item/fileChange/requestApproval` has no changes of its own, only the
+  `itemId` of the `fileChange` item that does
+  (`fixtures/app_server_file_change.jsonl`). Unverified: codex-acp 2.1.1
+  asked for no permission in its default mode in three recordings (a shell
+  command, an edit, a network command), so the action of a non-Claude ACP
+  request is built from its tool calls' shapes (`rawInput.command` and
+  `cwd`, `diff` content paths) and the spec's `kind`, and a read, move or
+  delete is `Opaque`; Codex's `move_path` on a rename, and a command or
+  file approval with `reason`, `grantRoot` or any field the recordings
+  lack (`Opaque`); the wording of Codex's MCP approval question, which the
+  parser checks for the server and tool (one recording); Claude's
+  `NotebookEdit` and `MultiEdit` inputs (field names from the tool schemas,
+  no request recorded). An ACP agent that offers `allow_always` and no
+  `allow_once` gets a cancel and the user a notice. Not done: a lock
+  around appending to a rules file (two unharness saving at once can lose
+  one rule), re-reading rules while running, closing the modal when Claude
+  cancels a request.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

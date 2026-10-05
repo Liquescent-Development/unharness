@@ -9,7 +9,7 @@ Usage in=2 out=4 cache_read=10738 cache_write=9490 cost=0.1937 cumulative=false
 TurnCompleted Done
 Context used=22256 window=1000000
 ToolCallStarted id=toolu_0116mbDASbU6mBhF6dcB1vmQ name=Write input={"content":"hello\n","file_path":"/WORKSPACE/acp-test.txt"}
-PermissionRequest id=0 ToolUse Write
+PermissionRequest id=0 ToolUse Write [edit /WORKSPACE/acp-test.txt]
 Context used=22380 window=1000000
 ToolCallResult id=toolu_0116mbDASbU6mBhF6dcB1vmQ error=false "File created successfully at: /WORKSPACE/acp-test.txt (fi..."
 Context used=22482 window=1000000

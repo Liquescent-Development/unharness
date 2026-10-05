@@ -23,7 +23,7 @@ Context used=16251 window=258400
 RateLimit status=- 7d=2%
 ToolCallStarted id=call_TaH7ivh31FQjsjvq5pUXTuzA name=agent:wait input=null
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii ToolCallStarted id=exec-7e9f57ca-924c-47e7-8d4d-5fabcea47ed1 name=shell input={"command":"/usr/bin/zsh -lc 'cat a.txt'","cwd":"/WORKSPA...
-Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii PermissionRequest id=0 ToolUse shell
+Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii PermissionRequest id=0 ToolUse shell [shell "cat a.txt"]
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii ToolCallResult id=exec-7e9f57ca-924c-47e7-8d4d-5fabcea47ed1 error=false "alpha\\n"
 RateLimit status=- 7d=2%
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii TextDelta "alpha"
