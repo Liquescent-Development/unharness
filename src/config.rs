@@ -49,9 +49,15 @@ pub struct SandboxSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable: Vec<PathBuf>,
     /// Credential paths a harness may read although they are denied by
-    /// default (e.g. `~/.config/gh`).
+    /// default (e.g. `~/.config/gh`), and paths that stay readable inside a
+    /// `deny_read` one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readable: Vec<PathBuf>,
+    /// More paths no harness may read, besides the built-in credential
+    /// locations. The workspace and the harness's own state stay readable
+    /// inside them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_read: Vec<PathBuf>,
 }
 
 impl SandboxSettings {
@@ -234,6 +240,7 @@ impl Config {
                 level: local.sandbox.level.or(global.sandbox.level),
                 writable: [global.sandbox.writable, local.sandbox.writable].concat(),
                 readable: [global.sandbox.readable, local.sandbox.readable].concat(),
+                deny_read: [global.sandbox.deny_read, local.sandbox.deny_read].concat(),
             },
             harnesses,
         }
@@ -382,6 +389,7 @@ transport = "rpc"
                 level: Some("off".to_string()),
                 writable: vec![PathBuf::from("~/.cache/a")],
                 readable: vec![],
+                deny_read: vec![],
             },
             ..Default::default()
         };
@@ -407,6 +415,7 @@ transport = "rpc"
                 level: Some("read-only".to_string()),
                 writable: vec![PathBuf::from("target-shared")],
                 readable: vec![],
+                deny_read: vec![],
             },
             ..Default::default()
         };

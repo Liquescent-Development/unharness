@@ -1120,6 +1120,7 @@ impl Confined {
                 },
                 extra_writable: &[],
                 extra_readable: &[],
+                extra_deny_read: &[],
             },
             &backend,
             &SandboxEnv {

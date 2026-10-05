@@ -91,6 +91,7 @@ pub fn session_sandbox(
             harness: &harness.sandbox_paths(),
             extra_writable: &extra_writable,
             extra_readable: &config.sandbox.readable,
+            extra_deny_read: &config.sandbox.deny_read,
         },
         &setup.backend,
         &SandboxEnv::current(),

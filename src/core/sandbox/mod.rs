@@ -146,6 +146,9 @@ pub struct SandboxProfile {
     /// `WorkspaceWrite`.
     pub writable: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
+    /// Readable although inside a denied path: the workspace, the writable
+    /// paths and `[sandbox].readable`.
+    pub allow_read: Vec<PathBuf>,
     /// Kept unwritable even inside a writable path, where the backend can.
     pub protected: Vec<PathBuf>,
 }
@@ -279,8 +282,11 @@ pub struct SandboxRequest<'a> {
     pub harness: &'a SandboxPaths,
     /// `[sandbox].writable`.
     pub extra_writable: &'a [PathBuf],
-    /// `[sandbox].readable`: exemptions from `DEFAULT_DENY_READ`.
+    /// `[sandbox].readable`: exemptions from `DEFAULT_DENY_READ`, and paths
+    /// that stay readable inside a `deny_read` one.
     pub extra_readable: &'a [PathBuf],
+    /// `[sandbox].deny_read`: more paths no harness process may read.
+    pub extra_deny_read: &'a [PathBuf],
 }
 
 /// Decide what confines a session.
@@ -385,11 +391,42 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         }
     }
 
+    let mut allow_read = vec![workspace.clone()];
+    for p in writable.iter().chain(&readable) {
+        if !allow_read.contains(p) {
+            allow_read.push(p.clone());
+        }
+    }
+    for extra in req.extra_deny_read {
+        let Some(path) = canonical(&expand(extra)) else {
+            continue;
+        };
+        // Reading is granted per subtree, so a path inside a readable one
+        // cannot be taken out of it again.
+        if let Some(around) = allow_read.iter().find(|a| path.starts_with(a)) {
+            bail!(
+                "[sandbox].deny_read path {} cannot be enforced: it is inside {}, which the \
+                 harness may read{}",
+                path.display(),
+                around.display(),
+                if writable.contains(around) {
+                    " and write"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !deny_read.contains(&path) {
+            deny_read.push(path);
+        }
+    }
+
     Ok(SandboxProfile {
         level,
         workspace,
         writable,
         deny_read,
+        allow_read,
         protected,
     })
 }
@@ -477,6 +514,7 @@ mod tests {
             harness: &w.harness,
             extra_writable: &[],
             extra_readable: &[],
+            extra_deny_read: &[],
         }
     }
 
@@ -552,6 +590,39 @@ mod tests {
         let p = active(resolve(&req, &available(), &w.env).unwrap());
         assert!(p.deny_read.is_empty(), "{:?}", p.deny_read);
         assert!(p.writable.contains(&w.home.join(".config/gh")));
+    }
+
+    #[test]
+    fn extra_denied_paths_keep_the_workspace_and_readable_paths_open() {
+        let w = world();
+        std::fs::create_dir_all(w.home.join("code/other")).unwrap();
+        let deny = [PathBuf::from("~/code"), PathBuf::from("~/missing")];
+        let readable = [PathBuf::from("~/code/other")];
+        let mut req = request(&w, Some(SandboxLevel::ReadOnly));
+        req.extra_deny_read = &deny;
+        req.extra_readable = &readable;
+        let p = active(resolve(&req, &available(), &w.env).unwrap());
+        assert!(p.deny_read.contains(&w.home.join("code")));
+        assert!(!p.deny_read.contains(&w.home.join("missing")));
+        // Read-only: the workspace is not writable but stays readable.
+        assert!(!p.writable.contains(&w.workspace));
+        assert_eq!(p.allow_read[0], w.workspace);
+        assert!(p.allow_read.contains(&w.home.join("code/other")));
+        assert!(p.allow_read.contains(&w.home.join(".vendor")));
+    }
+
+    #[test]
+    fn a_deny_inside_a_readable_path_is_refused() {
+        let w = world();
+        std::fs::write(w.workspace.join(".env"), "S=1").unwrap();
+        let deny = [PathBuf::from(".env")];
+        let mut req = request(&w, None);
+        req.extra_deny_read = &deny;
+        let err = resolve(&req, &available(), &w.env).unwrap_err().to_string();
+        assert!(
+            err.contains(".env") && err.contains("cannot be enforced"),
+            "{err}"
+        );
     }
 
     #[test]
