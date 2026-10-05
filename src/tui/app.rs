@@ -5321,6 +5321,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_is_written_the_way_the_active_harness_reads_it() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.set_file_index(index(&["src/main.rs", "my notes/a.txt"]));
+        for c in "@main".chars() {
+            app.insert_char(c);
+        }
+        app.accept_suggestion();
+        assert_eq!(app.input, "@src/main.rs ");
+
+        // Typed out in the harness's form already: Enter is free to send.
+        app.take_input();
+        for c in "@src/main.rs".chars() {
+            app.insert_char(c);
+        }
+        assert!(!app.should_accept_suggestion());
+
+        app.take_input();
+        for c in "@notes".chars() {
+            app.insert_char(c);
+        }
+        app.accept_suggestion();
+        assert_eq!(app.input, "@\"my notes/a.txt\" ");
+
+        app.take_input();
+        app.switch_harness(HarnessId::PI);
+        for c in "@main".chars() {
+            app.insert_char(c);
+        }
+        app.accept_suggestion();
+        assert_eq!(app.input, "src/main.rs ");
+    }
+
+    #[test]
     fn slash_commands_and_suggestions() {
         let mut app = test_app(HarnessId::CLAUDE);
         for c in "/pol".chars() {

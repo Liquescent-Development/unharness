@@ -311,6 +311,19 @@ impl Harness for ClaudeHarness {
             .collect())
     }
 
+    /// Claude Code puts the content of an `@path` in a user message into
+    /// the turn itself, wherever in the text it stands; a path with spaces
+    /// goes in double quotes. A path with a quote in it has no such form.
+    fn file_reference(&self, path: &str) -> String {
+        if path.contains('"') {
+            path.to_string()
+        } else if path.contains(char::is_whitespace) {
+            format!("@\"{path}\"")
+        } else {
+            format!("@{path}")
+        }
+    }
+
     fn start_session(&self, mut cfg: SessionConfig) -> Result<SessionHandle> {
         cfg.env.extend(self.config_env()?);
         let mcp = transport::mcp_config_file(&cfg.mcp_servers, &self.mcp_dir())?;
@@ -439,6 +452,17 @@ mod tests {
         };
         let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
         assert!(a.is_empty());
+    }
+
+    #[test]
+    fn files_are_referenced_with_an_at() {
+        let claude = ClaudeHarness::default();
+        assert_eq!(claude.file_reference("src/main.rs"), "@src/main.rs");
+        assert_eq!(
+            claude.file_reference("my notes/a.txt"),
+            "@\"my notes/a.txt\""
+        );
+        assert_eq!(claude.file_reference("odd\".txt"), "odd\".txt");
     }
 
     #[test]
