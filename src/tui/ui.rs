@@ -1171,7 +1171,10 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
     };
     frame.render_widget(Clear, area);
     let mut lines = Vec::new();
-    for (i, (cmd, desc)) in app.suggestions.iter().take(count as usize).enumerate() {
+    // The window moves down with the selection once it passes the last row.
+    let first = (app.selected_suggestion + 1).saturating_sub(count as usize);
+    let shown = app.suggestions.iter().enumerate().skip(first);
+    for (i, (cmd, desc)) in shown.take(count as usize) {
         let selected = i == app.selected_suggestion;
         let style = if selected {
             Style::default()
@@ -2404,6 +2407,25 @@ mod tests {
         assert!(
             rows[..n - 6].iter().any(|r| r.contains("/model")),
             "suggestions missing"
+        );
+    }
+
+    #[test]
+    fn suggestion_list_follows_the_selection() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_char('/');
+        assert!(app.suggestions.len() > 8);
+        let last = app.suggestions.last().unwrap().0.clone();
+        let (rows, _) = screen(&mut app, 100, 30);
+        assert!(rows.iter().any(|r| r.contains("❯ /")));
+        assert!(!rows.iter().any(|r| r.contains(&format!("{last} "))));
+
+        // Up from the first item wraps to the last one, below the window.
+        app.suggestion_up();
+        let (rows, _) = screen(&mut app, 100, 30);
+        assert!(
+            rows.iter().any(|r| r.contains(&format!("❯ {last} "))),
+            "selected item not on screen"
         );
     }
 
