@@ -85,6 +85,7 @@ impl Harness for PiHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: false,
+            file_input: false,
             plan_updates: false,
             subagents: SubagentSupport::default(),
             steer: true,

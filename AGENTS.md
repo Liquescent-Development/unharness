@@ -171,6 +171,16 @@ recorded ones. For anything else:
   only in place once it answers) and `--fork <id>` (entry ids survive).
   Claude's `rewind_files` answers "File rewinding is not enabled" in this
   mode, which is why file restore is unharness's own.
+- File attachments (PDF and text): Claude Code 2.1.289 takes `document`
+  content blocks on stream-json input (base64 `application/pdf`, and a
+  `text` source for `text/plain`), both answered from. ACP files go as a
+  `resource_link`, the one block besides text every agent must accept:
+  claude-agent-acp 0.85.1 and codex-acp 2.1.1 both read the linked file
+  with their own tools (so it must be readable inside the sandbox).
+  claude-agent-acp drops embedded `resource` blobs silently, which is why
+  files are not embedded. Codex's `UserInput` (0.157.0 schema: text, image,
+  localImage, audio, localAudio, skill, mention), `codex exec` and pi's
+  `prompt` (`images` only) have no document input.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

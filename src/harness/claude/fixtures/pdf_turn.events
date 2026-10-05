@@ -1,0 +1,8 @@
+SessionStarted id=ff10d588-8e26-4f5c-9f1a-73dfd52c2847 model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=23204 window=-
+TextDelta "PELICAN-42"
+RateLimit status=allowed five_hour=5% seven_day=38%
+Usage in=10 out=84 cache_read=13803 cache_write=9391 cost=0.0206 cumulative=false
+Context used=- window=200000
+TurnCompleted Done

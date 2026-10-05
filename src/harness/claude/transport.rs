@@ -95,17 +95,30 @@ pub fn user_message(text: &str) -> String {
     json!({"type":"user","message":{"role":"user","content":text}}).to_string()
 }
 
-/// A user turn; images ride along as base64 content blocks.
+/// A user turn; images and PDFs ride along as base64 content blocks, text
+/// files as text documents.
 pub fn user_turn(text: &str, attachments: &[Attachment]) -> Result<String> {
     if attachments.is_empty() {
         return Ok(user_message(text));
     }
     let mut content = vec![json!({"type":"text","text":text})];
     for a in attachments {
-        content.push(json!({
-            "type": "image",
-            "source": {"type":"base64","media_type": a.mime(),"data": a.read_base64()?},
-        }));
+        content.push(match a {
+            Attachment::Image { mime, .. } => json!({
+                "type": "image",
+                "source": {"type":"base64","media_type": mime,"data": a.read_base64()?},
+            }),
+            Attachment::File { mime, .. } if mime == "text/plain" => json!({
+                "type": "document",
+                "source": {"type":"text","media_type": mime,"data": a.read_text()?},
+                "title": a.label(),
+            }),
+            Attachment::File { mime, .. } => json!({
+                "type": "document",
+                "source": {"type":"base64","media_type": mime,"data": a.read_base64()?},
+                "title": a.label(),
+            }),
+        });
     }
     Ok(json!({"type":"user","message":{"role":"user","content":content}}).to_string())
 }
@@ -481,6 +494,29 @@ mod tests {
         assert_eq!(user_turn("hi", &[]).unwrap(), user_message("hi"));
         let gone = Attachment::image(dir.path().join("gone.png")).unwrap();
         assert!(user_turn("hi", &[gone]).is_err());
+    }
+
+    #[test]
+    fn user_turn_inlines_documents() {
+        // Shapes confirmed by fixtures/pdf_turn.jsonl and fixtures/text_file_turn.jsonl.
+        let dir = tempfile::tempdir().unwrap();
+        let pdf = dir.path().join("memo.pdf");
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&pdf, b"abc").unwrap();
+        std::fs::write(&notes, "héron\n").unwrap();
+        let files = [
+            Attachment::file(&pdf).unwrap(),
+            Attachment::file(&notes).unwrap(),
+        ];
+        let v: Value = serde_json::from_str(&user_turn("hi", &files).unwrap()).unwrap();
+        assert_eq!(
+            v["message"]["content"],
+            json!([
+                {"type":"text","text":"hi"},
+                {"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YWJj"},"title":"memo.pdf"},
+                {"type":"document","source":{"type":"text","media_type":"text/plain","data":"héron\n"},"title":"notes.txt"}
+            ])
+        );
     }
 
     #[test]

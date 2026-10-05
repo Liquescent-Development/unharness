@@ -150,6 +150,7 @@ impl Harness for CodexHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: true,
+            file_input: false,
             plan_updates: true,
             // A sub-agent thread has a name but no task description, and
             // says what it is doing only through its tool calls.

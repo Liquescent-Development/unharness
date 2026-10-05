@@ -71,9 +71,10 @@ pub fn encode_message(
     attachments: &[Attachment],
 ) -> Result<String> {
     let mut cmd = json!({"id": id, "type": kind, "message": text});
-    if !attachments.is_empty() {
+    if attachments.iter().any(Attachment::is_image) {
         let images = attachments
             .iter()
+            .filter(|a| a.is_image())
             .map(|a| Ok(json!({"type":"image","data": a.read_base64()?,"mimeType": a.mime()})))
             .collect::<Result<Vec<Value>>>()?;
         cmd["images"] = Value::Array(images);

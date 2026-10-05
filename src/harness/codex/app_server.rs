@@ -20,7 +20,7 @@ use crate::core::{
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
 pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
     let mut items = vec![json!({"type":"text","text": text})];
-    for a in attachments {
+    for a in attachments.iter().filter(|a| a.is_image()) {
         items.push(json!({"type":"localImage","path": a.path()}));
     }
     Value::Array(items)

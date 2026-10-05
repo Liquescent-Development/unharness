@@ -159,7 +159,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/attach",
-        "Attach an image to the next prompt: /attach <path>",
+        "Attach an image, PDF or text file to the next prompt: /attach <path>",
     ),
     ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
@@ -918,11 +918,8 @@ impl App {
         };
         self.last_active_index.remove(&self.active);
 
-        let attachments = std::mem::take(&mut self.attachments);
         let mut shown = text.clone();
-        for a in &attachments {
-            shown.push_str(&format!("\n[image: {}]", a.label()));
-        }
+        let attachments = self.take_attachments(&mut shown);
         self.transcript.push_user(shown);
         let block = self.transcript.blocks.len() - 1;
         if self.caps().rewind.conversation {
@@ -1030,11 +1027,8 @@ impl App {
             self.queue_prompt(text);
             return;
         }
-        let attachments = std::mem::take(&mut self.attachments);
         let mut shown = text.clone();
-        for a in &attachments {
-            shown.push_str(&format!("\n[image: {}]", a.label()));
-        }
+        let attachments = self.take_attachments(&mut shown);
         self.transcript.push_user(shown);
         self.actions
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
@@ -1336,15 +1330,41 @@ impl App {
             .push_back(Action::Command(SessionCommand::Compact { instructions }));
     }
 
-    /// Queue an image for the next prompt.
-    pub fn attach(&mut self, path: &str) {
-        if !self.caps().image_input {
-            self.transcript.push_error(format!(
+    /// Why the active harness cannot take this attachment.
+    fn refusal(&self, a: &Attachment) -> String {
+        match a {
+            Attachment::Image { .. } => format!(
                 "{} does not accept images with the current model",
                 self.short_name()
-            ));
-            return;
+            ),
+            Attachment::File { .. } => format!(
+                "{} does not accept file attachments, only images",
+                self.short_name()
+            ),
         }
+    }
+
+    /// The pending attachments the active harness accepts, with their
+    /// transcript markers appended to `shown`. The others are dropped, and
+    /// said to be: one queued for another harness can end up here.
+    fn take_attachments(&mut self, shown: &mut String) -> Vec<Attachment> {
+        let caps = self.caps();
+        let (sent, dropped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.attachments)
+            .into_iter()
+            .partition(|a| caps.accepts(a));
+        for a in &dropped {
+            let why = self.refusal(a);
+            self.transcript
+                .push_error(format!("{} not sent: {why}", a.label()));
+        }
+        for a in &sent {
+            shown.push_str(&format!("\n{}", a.marker()));
+        }
+        sent
+    }
+
+    /// Queue an image or a document for the next prompt.
+    pub fn attach(&mut self, path: &str) {
         let path = path.trim().trim_matches(['"', '\'']);
         let path = match path.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
@@ -1355,15 +1375,19 @@ impl App {
                 .push_error(format!("no such file: {}", path.display()));
             return;
         }
-        match Attachment::image(&path) {
+        match Attachment::from_path(&path) {
+            Some(a) if !self.caps().accepts(&a) => {
+                let why = self.refusal(&a);
+                self.transcript.push_error(why);
+            }
             Some(a) => {
                 self.transcript
                     .push_system(format!("Attached {} to the next prompt.", a.label()));
                 self.attachments.push(a);
             }
-            None => self
-                .transcript
-                .push_error("only png, jpg, gif and webp images can be attached"),
+            None => self.transcript.push_error(
+                "only images (png, jpg, gif, webp), PDFs and text files can be attached",
+            ),
         }
     }
 
@@ -2511,7 +2535,7 @@ impl App {
             "/attach" => match rest {
                 path if !path.is_empty() => self.attach(path),
                 _ if self.attachments.is_empty() => {
-                    self.transcript.push_notice("usage: /attach <image path>")
+                    self.transcript.push_notice("usage: /attach <path>")
                 }
                 _ => {
                     let names: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
@@ -4267,7 +4291,8 @@ pub(crate) mod tests {
         std::fs::write(tmp.path().join("my shot.png"), b"png").unwrap();
         std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
         let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
-        app.handle_slash_command("/attach notes.txt");
+        std::fs::write(tmp.path().join("a.out"), [0xff, 0xfe]).unwrap();
+        app.handle_slash_command("/attach a.out");
         app.handle_slash_command("/attach missing.png");
         assert!(app.attachments.is_empty());
         app.handle_slash_command("/attach my shot.png");
@@ -4289,6 +4314,41 @@ pub(crate) mod tests {
         let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
         app.handle_slash_command("/attach my shot.png");
         assert!(app.attachments.is_empty());
+    }
+
+    #[test]
+    fn files_are_attached_where_the_harness_takes_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
+        std::fs::write(tmp.path().join("shot.png"), b"png").unwrap();
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        app.handle_slash_command("/attach notes.txt");
+        app.submit_prompt("summarize".into());
+        let sent = app.take_actions().into_iter().find_map(|a| match a {
+            Action::SendTurn { attachments, .. } => Some(attachments),
+            _ => None,
+        });
+        assert_eq!(sent.unwrap()[0].mime(), "text/plain");
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(super::super::transcript::Block::User { text }) if text.ends_with("[file: notes.txt]")
+        ));
+
+        // Codex takes images only.
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CODEX, None, false);
+        app.handle_slash_command("/attach notes.txt");
+        assert!(app.attachments.is_empty());
+        // A file that got there anyway (queued under another harness) is
+        // dropped at send time, not passed off as an image.
+        app.handle_slash_command("/attach shot.png");
+        app.attachments
+            .push(Attachment::file(tmp.path().join("notes.txt")).unwrap());
+        app.submit_prompt("look".into());
+        let sent = app.take_actions().into_iter().find_map(|a| match a {
+            Action::SendTurn { attachments, .. } => Some(attachments),
+            _ => None,
+        });
+        assert_eq!(sent.unwrap().len(), 1);
     }
 
     #[test]

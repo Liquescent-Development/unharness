@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--extra", default="", help="extra CLI args (space separated)")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--file", help="attach this PDF or text file to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     ap.add_argument("--rewind", action="store_true",
@@ -108,6 +109,19 @@ def main() -> int:
                 "data": data,
             }},
         ]
+    if args.file:
+        import base64
+        if isinstance(first, str):
+            first = [{"type": "text", "text": first}]
+        name = os.path.basename(args.file)
+        if args.file.lower().endswith(".pdf"):
+            with open(args.file, "rb") as f:
+                source = {"type": "base64", "media_type": "application/pdf",
+                          "data": base64.b64encode(f.read()).decode()}
+        else:
+            with open(args.file) as f:
+                source = {"type": "text", "media_type": "text/plain", "data": f.read()}
+        first.append({"type": "document", "source": source, "title": name})
     turn_ids = []
 
     def send_turn(content):

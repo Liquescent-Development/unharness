@@ -113,6 +113,7 @@ impl Harness for AgyHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: false,
+            file_input: false,
             plan_updates: false,
             subagents: SubagentSupport::default(),
             steer: false,

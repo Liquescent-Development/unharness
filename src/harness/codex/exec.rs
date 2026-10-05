@@ -52,7 +52,7 @@ pub fn policy_config_overrides(policy: PermissionPolicy, confined: bool) -> Vec<
 
 /// `-i <FILE>...` accepts several values, so callers must put a flag after it.
 fn image_args(command: &mut Command, attachments: &[Attachment]) {
-    for a in attachments {
+    for a in attachments.iter().filter(|a| a.is_image()) {
         command.arg("-i").arg(a.path());
     }
 }

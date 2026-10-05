@@ -548,6 +548,16 @@ mod tests {
     }
 
     #[test]
+    fn fixture_file_links() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "claude_agent_acp_file",
+        );
+        assert_fixture(&mut parser(), &fixtures_dir(file!()), "codex_acp_file");
+    }
+
+    #[test]
     fn plan_and_thought_updates() {
         let mut p = parser();
         let ev = p.feed(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"plan","entries":[{"content":"check syntax","priority":"high","status":"completed"},{"content":"fix types","priority":"medium","status":"in_progress"}]}}}"#);

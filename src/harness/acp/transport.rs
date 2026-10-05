@@ -6,6 +6,7 @@
 //! request served is `session/request_permission`; the rest are refused.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -20,13 +21,39 @@ use crate::core::{
     SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 
-/// `session/prompt` content: the text, then each image inline.
+/// `session/prompt` content: the text, then each image inline and each
+/// file as a `resource_link` (the block every agent must accept; the agent
+/// reads the file itself).
 pub fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Result<Value> {
     let mut blocks = vec![json!({"type":"text","text": text})];
     for a in attachments {
-        blocks.push(json!({"type":"image","data": a.read_base64()?,"mimeType": a.mime()}));
+        blocks.push(match a {
+            Attachment::Image { mime, .. } => {
+                json!({"type":"image","data": a.read_base64()?,"mimeType": mime})
+            }
+            Attachment::File { path, mime } => json!({
+                "type": "resource_link",
+                "uri": file_uri(path),
+                "name": a.label(),
+                "mimeType": mime,
+            }),
+        });
     }
     Ok(Value::Array(blocks))
+}
+
+/// `file://` URI of an absolute path.
+fn file_uri(path: &Path) -> String {
+    let mut uri = String::from("file://");
+    for b in path.as_os_str().as_encoded_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'.' | b'_' | b'~' => {
+                uri.push(*b as char)
+            }
+            _ => uri.push_str(&format!("%{b:02X}")),
+        }
+    }
+    uri
 }
 
 /// Map a decision onto the options the agent offered. ACP has no free-form
@@ -569,6 +596,24 @@ mod tests {
         assert_eq!(
             prompt_blocks("hi", &[a]).unwrap(),
             json!([{"type":"text","text":"hi"},{"type":"image","data":"YWJj","mimeType":"image/png"}])
+        );
+    }
+
+    #[test]
+    fn prompt_blocks_link_files() {
+        // Shape confirmed by fixtures/claude_agent_acp_file.jsonl and
+        // fixtures/codex_acp_file.jsonl: both agents read the linked file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("my notes.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        let a = Attachment::file(&path).unwrap();
+        let uri = format!("file://{}/my%20notes.txt", dir.path().display());
+        assert_eq!(
+            prompt_blocks("hi", &[a]).unwrap(),
+            json!([
+                {"type":"text","text":"hi"},
+                {"type":"resource_link","uri":uri,"name":"my notes.txt","mimeType":"text/plain"}
+            ])
         );
     }
 }
