@@ -890,27 +890,27 @@ async fn codex_exec_per_turn_resumes_by_thread() {
 }
 
 #[tokio::test]
-async fn agy_stream_session_against_synthetic_fixture() {
+async fn agy_stream_session_runs_two_turns() {
     if !python_available() {
         return;
     }
-    // The fixture is synthetic (no agy account yet); this exercises the
-    // transport plumbing, not the vendor protocol.
     let fake = Fake::new();
-    let fixture = repo().join("src/harness/agy/fixtures/synthetic_turn.jsonl");
-    let harness = unharness::harness::agy::AgyHarness::default();
+    let fixture = repo().join("src/harness/agy/fixtures/turn.jsonl");
+    let harness = unharness::harness::agy::AgyHarness;
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, true))
         .unwrap();
 
+    // The first turn ends where agy refused a command it could not ask about.
     handle.send(SessionCommand::turn("echo hi")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
-    assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "conv-synthetic-1")));
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "hi\n"))
-    );
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "7d61bda4-46b7-4d1c-9764-809ad9b86fda")));
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "2 lines, 17 bytes")
+    ));
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::Notice(n) if n.contains("refused") && n.contains("RunCommand"))
+    ));
     assert!(matches!(
         events.last(),
         Some(AgentEvent::TurnCompleted {
@@ -918,16 +918,18 @@ async fn agy_stream_session_against_synthetic_fixture() {
         })
     ));
 
-    handle.send(SessionCommand::turn("delete")).await.unwrap();
+    // The second result lists that refusal again; it is not reported twice.
+    handle.send(SessionCommand::turn("write")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Notice(_))));
     assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("denied")))
+        events.iter().any(
+            |e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "write_to_file")
+        )
     );
 
     let sent = fake.sent_lines();
-    assert_eq!(sent[0]["type"], "user");
+    assert_eq!(sent[0]["event"], "user");
     assert_eq!(sent[0]["message"]["content"], "echo hi");
 
     handle.send(SessionCommand::Shutdown).await.unwrap();
@@ -945,7 +947,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     // Real recording: agy exits after a `result` with status ERROR.
     let fake = Fake::new();
     let fixture = repo().join("src/harness/agy/fixtures/auth_required.jsonl");
-    let harness = unharness::harness::agy::AgyHarness::default();
+    let harness = unharness::harness::agy::AgyHarness;
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
         .unwrap();

@@ -1,0 +1,20 @@
+# Recorded 2026-10-05 with agy 1.2.17 (scripts/record-agy.py), signed in; `--model no-such-model`: agy exits before a conversation exists.
+>> {"event": "user", "message": {"content": "Say hi."}}
+!! error: invalid model selection (--model "no-such-model" --effort ""): model no-such-model is not recognized as a known model or custom model in settings
+!! Available models:
+!!   Gemini 3.8 Flash (High)
+!!   Gemini 3.8 Flash (Medium)
+!!   Gemini 3.8 Flash (Low)
+!!   Gemini 3.7 Flash (High)
+!!   Gemini 3.7 Flash (Medium)
+!!   Gemini 3.7 Flash (Low)
+!!   Gemini 3.6 Flash (High)
+{"event":"result","result":{"conversation_id":"","status":"ERROR","response":"","error":"invalid model selection (--model \"no-such-model\" --effort \"\"): model no-such-model is not recognized as a known model or custom model in settings\nAvailable models:\n  Gemini 3.8 Flash (High)\n  Gemini 3.8 Flash (Medium)\n  Gemini 3.8 Flash (Low)\n  Gemini 3.7 Flash (High)\n  Gemini 3.7 Flash (Medium)\n  Gemini 3.7 Flash (Low)\n  Gemini 3.6 Flash (High)\n  Gemini 3.6 Flash (Medium)\n  Gemini 3.6 Flash (Low)\n  Gemini 3.1 Pro (High)\n  Gemini 3.1 Pro (Low)\n  Claude Sonnet 4.6 (Thinking)\n  Claude Opus 4.6 (Thinking)\n  GPT-OSS 120B (Medium)","duration_seconds":0,"num_turns":0,"usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0}}}
+!!   Gemini 3.6 Flash (Medium)
+!!   Gemini 3.6 Flash (Low)
+!!   Gemini 3.1 Pro (High)
+!!   Gemini 3.1 Pro (Low)
+!!   Claude Sonnet 4.6 (Thinking)
+!!   Claude Opus 4.6 (Thinking)
+!!   GPT-OSS 120B (Medium)
+# exit=1

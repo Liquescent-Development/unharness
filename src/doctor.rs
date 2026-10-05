@@ -234,9 +234,6 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     if path.exists() { "" } else { "(none yet)" }.dimmed()
                 );
             }
-            if let Some(warning) = Config::legacy_warning(root) {
-                println!("  {} {}", "[!]".yellow().bold(), warning);
-            }
             report_rules(root);
             report_skills(
                 "Workspace Skills",
@@ -254,9 +251,9 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                 }
             }
         }
-        None => println!(
-            "  Not inside a recognized workspace (no .git, .agents, AGENTS.md, or unharness.toml found)"
-        ),
+        None => {
+            println!("  Not inside a recognized workspace (no .git, .agents or AGENTS.md found)")
+        }
     }
     println!();
 

@@ -1,13 +1,11 @@
-//! Antigravity (`agy`) harness. Best effort: flag parsing and the `result`
-//! event were verified against agy 1.2.15 without an account; the live
-//! `init`/`step_update` stream has not been recorded yet.
+//! Antigravity (`agy`) harness, checked against agy 1.2.17 with an account
+//! (see the status notes in `AGENTS.md`).
 
 pub mod parse;
 pub mod transport;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -17,30 +15,15 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary,
 };
+use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
-pub use transport::AgyTransport;
 
-pub struct AgyHarness {
-    pub transport: AgyTransport,
-}
-
-impl Default for AgyHarness {
-    fn default() -> Self {
-        AgyHarness {
-            transport: AgyTransport::Stream,
-        }
-    }
-}
-
-impl AgyHarness {
-    pub fn new(transport: AgyTransport) -> Self {
-        AgyHarness { transport }
-    }
-}
+#[derive(Default)]
+pub struct AgyHarness;
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::AGY,
@@ -50,30 +33,23 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     providers: ProviderSource::Static(&[("google", "Google")]),
 };
 
-pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high"];
-
-/// Static fallback, from the v1 adapter (unverified against a live account).
-const FALLBACK_MODELS: &[(&str, &str, &str)] = &[
-    (
-        "gemini-3.8-flash-high",
-        "Gemini 3.8 Flash (High)",
-        "Fast, high reasoning effort",
-    ),
-    (
-        "gemini-3.8-flash-medium",
-        "Gemini 3.8 Flash (Medium)",
-        "Fast, balanced reasoning",
-    ),
-    (
-        "gemini-3.7-flash-high",
-        "Gemini 3.7 Flash (High)",
-        "Gemini 3.7 high reasoning tier",
-    ),
-    (
-        "gemini-3.1-pro-high",
-        "Gemini 3.1 Pro (High)",
-        "Pro model with high reasoning",
-    ),
+/// What `agy models` listed on 2026-10-05 (1.2.17), for when it cannot be
+/// asked.
+const FALLBACK_MODELS: &[(&str, &str)] = &[
+    ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+    ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+    ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+    ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+    ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
+    ("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
+    ("gemini-3.6-flash-high", "Gemini 3.6 Flash (High)"),
+    ("gemini-3.6-flash-medium", "Gemini 3.6 Flash (Medium)"),
+    ("gemini-3.6-flash-low", "Gemini 3.6 Flash (Low)"),
+    ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+    ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)"),
+    ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
+    ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
 ];
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -83,15 +59,29 @@ impl Harness for AgyHarness {
         &DESCRIPTOR
     }
 
-    /// Seen on agy 1.2.15 without an account: `~/.gemini/antigravity-cli`.
+    /// Headless runs left all three as they were; agy's own interface
+    /// adds the workspace to `trustedWorkspaces` in `settings.json` when the
+    /// user trusts it there.
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        let state = PathBuf::from("~/.gemini");
+        vec![
+            Guarded::File(state.join("antigravity-cli/settings.json")),
+            Guarded::File(state.join("config/config.json")),
+            Guarded::File(state.join("config/mcp_config.json")),
+        ]
+    }
+
+    /// Conversations, plans (`brain/`), logs and the updater's files are all
+    /// under this directory; `~/.gemini/config` is only read.
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
-            writable: vec![PathBuf::from("~/.gemini")],
+            writable: vec![PathBuf::from("~/.gemini/antigravity-cli")],
         }
     }
 
-    /// agy's own interface asks for itself; `--print` is headless like a
-    /// session.
+    /// agy's own interface asks before a write and before a command (seen
+    /// on 1.2.17: nothing happened until answered); `--print` is headless
+    /// like a session.
     fn print_policies(&self, print_mode: bool) -> Vec<PolicySupport> {
         let mut policies = self.capabilities().permission_policies;
         if !print_mode {
@@ -102,9 +92,10 @@ impl Harness for AgyHarness {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            streaming_input: self.transport != AgyTransport::PerTurn,
+            streaming_input: true,
             text_deltas: true,
-            thinking: true,
+            // Counted in the usage, never sent.
+            thinking: false,
             tool_events: true,
             interactive_permissions: false,
             // No `ask`: headless agy cannot prompt, and refuses by itself
@@ -113,7 +104,9 @@ impl Harness for AgyHarness {
                 PolicySupport::full(PermissionPolicy::AcceptEdits),
                 PolicySupport::full(PermissionPolicy::Bypass),
             ],
-            effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
+            // The effort is the end of the model id, and agy refuses
+            // `--effort` beside `--model`.
+            effort_levels: Vec::new(),
             resume_by_id: true,
             live_model_list: true,
             multi_provider: false,
@@ -133,8 +126,9 @@ impl Harness for AgyHarness {
             // Servers are only read from agy's own config (`agy mcp add`
             // writes it); there is no flag for one session.
             mcp: McpSupport::NONE,
-            // `--mode plan`, from `--help` on 1.2.16.
-            plan_mode: true,
+            // `--mode plan` makes agy write a plan file under its state
+            // directory and then act in the same turn: nothing waits.
+            plan_mode: false,
         }
     }
 
@@ -156,52 +150,26 @@ impl Harness for AgyHarness {
         if provider.as_str() != "google" {
             return Ok(Vec::new());
         }
-        let live = query_models(binary).unwrap_or_default();
-        if !live.is_empty() {
-            return Ok(live
+        let mut models = query_models(binary).unwrap_or_default();
+        if models.is_empty() {
+            models = FALLBACK_MODELS
                 .iter()
-                .filter_map(|m| {
-                    let id = m
-                        .get("id")
-                        .or_else(|| m.get("name"))
-                        .or_else(|| m.get("model"))
-                        .and_then(Value::as_str)?
-                        .to_string();
-                    Some(ModelInfo {
-                        model_ref: ModelRef::new(HarnessId::AGY, "google", id.clone()),
-                        display_name: m
-                            .get("display_name")
-                            .or_else(|| m.get("displayName"))
-                            .and_then(Value::as_str)
-                            .unwrap_or(&id)
-                            .to_string(),
-                        description: m
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        effort_levels: None,
-                    })
-                })
-                .collect());
+                .map(|(id, label)| (id.to_string(), label.to_string()))
+                .collect();
         }
-        Ok(FALLBACK_MODELS
-            .iter()
-            .map(|(id, name, desc)| ModelInfo {
-                model_ref: ModelRef::new(HarnessId::AGY, "google", *id),
-                display_name: name.to_string(),
-                description: Some(desc.to_string()),
+        Ok(models
+            .into_iter()
+            .map(|(id, label)| ModelInfo {
+                model_ref: ModelRef::new(HarnessId::AGY, "google", id),
+                display_name: label,
+                description: None,
                 effort_levels: None,
             })
             .collect())
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        match self.transport {
-            AgyTransport::PerTurn => {
-                crate::core::per_turn::start(cfg, Arc::new(transport::AgyPerTurn))
-            }
-            t => transport::start_stream(cfg, t),
-        }
+        transport::start_stream(cfg)
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
@@ -210,12 +178,9 @@ impl Harness for AgyHarness {
         if let Some(p) = cfg.policy {
             cmd.args(transport::policy_args(p));
         }
-        if let Some(m) = &cfg.model {
-            cmd.arg("--model").arg(&m.model);
-        }
-        if let Some(e) = &cfg.effort {
-            cmd.arg("--effort").arg(e);
-        }
+        cmd.args(transport::model_args(
+            cfg.model.as_ref().map(|m| m.model.as_str()),
+        ));
         if let Some(id) = &cfg.resume {
             cmd.arg("--conversation").arg(id);
         }
@@ -239,44 +204,27 @@ impl Harness for AgyHarness {
     }
 }
 
-/// Best-effort without spawning: agy keeps its login state next to its
-/// settings. A `GEMINI_API_KEY` also works for headless runs.
+/// Without spawning: signing in leaves a token file beside the settings.
+/// Only its presence is looked at.
 fn auth_status() -> AuthInfo {
-    if std::env::var("GEMINI_API_KEY").is_ok_and(|k| !k.is_empty()) {
-        return AuthInfo {
+    let token = dirs::home_dir()
+        .map(|home| home.join(".gemini/antigravity-cli/antigravity-oauth-token"))
+        .filter(|path| path.metadata().is_ok_and(|m| m.len() > 0));
+    match token {
+        Some(_) => AuthInfo {
             authenticated: true,
-            details: Some("GEMINI_API_KEY set".into()),
-        };
-    }
-    let Some(home) = dirs::home_dir() else {
-        return AuthInfo::default();
-    };
-    let dir = home.join(".gemini").join("antigravity-cli");
-    let settings = std::fs::read_to_string(dir.join("settings.json"))
-        .ok()
-        .and_then(|c| serde_json::from_str::<Value>(&c).ok());
-    if let Some(s) = &settings {
-        if let Some(project) = s.pointer("/gcp/project").and_then(Value::as_str) {
-            return AuthInfo {
-                authenticated: true,
-                details: Some(format!("GCP project: {project}")),
-            };
-        }
-        if s.get("account").is_some() || s.get("auth").is_some() || s.get("user").is_some() {
-            return AuthInfo {
-                authenticated: true,
-                details: Some("account configured".into()),
-            };
-        }
-    }
-    AuthInfo {
-        authenticated: false,
-        details: Some("not logged in (run `agy` to log in)".into()),
+            details: Some("signed in".into()),
+        },
+        None => AuthInfo {
+            authenticated: false,
+            details: Some("not logged in (run `agy` to log in)".into()),
+        },
     }
 }
 
-/// `agy --output-format json models`, bounded so an OAuth prompt cannot hang us.
-pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
+/// `agy --output-format json models` as `(id, label)`, bounded so an OAuth
+/// prompt cannot hang us.
+pub fn query_models(binary: &Path) -> Result<Vec<(String, String)>> {
     let mut child = Command::new(binary)
         .args(["--output-format", "json", "models"])
         .stdin(Stdio::null())
@@ -301,14 +249,7 @@ pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
                 if !status.success() {
                     anyhow::bail!("agy models exited with {status}");
                 }
-                let v: Value = serde_json::from_str(text.trim())
-                    .with_context(|| "agy models did not return JSON")?;
-                let list = v
-                    .as_array()
-                    .cloned()
-                    .or_else(|| v.get("models").and_then(Value::as_array).cloned())
-                    .unwrap_or_default();
-                return Ok(list);
+                return parse_models(&text);
             }
             None if Instant::now() > deadline => {
                 let _ = child.kill();
@@ -320,10 +261,48 @@ pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
     }
 }
 
+/// One object on stdout (a progress line goes to stderr), with the list at
+/// `command.data.models`.
+fn parse_models(stdout: &str) -> Result<Vec<(String, String)>> {
+    let v: Value = serde_json::from_str(stdout.trim()).context("agy models did not return JSON")?;
+    let models = v
+        .pointer("/command/data/models")
+        .and_then(Value::as_array)
+        .context("agy models: no command.data.models")?;
+    Ok(models
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str)?;
+            let label = m.get("label").and_then(Value::as_str).unwrap_or(id);
+            Some((id.to_string(), label.to_string()))
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn models_output() {
+        // Cut down from agy 1.2.17.
+        let out = "{\"conversation_id\":\"\",\"status\":\"SUCCESS\",\"response\":\"gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\n\",\"duration_seconds\":0,\"num_turns\":0,\"command\":{\"name\":\"models\",\"data\":{\"models\":[{\"id\":\"gemini-3.8-flash-high\",\"label\":\"Gemini 3.8 Flash (High)\"},{\"id\":\"claude-sonnet-4-6\",\"label\":\"Claude Sonnet 4.6 (Thinking)\"}]}}}\n";
+        assert_eq!(
+            parse_models(out).unwrap(),
+            vec![
+                (
+                    "gemini-3.8-flash-high".to_string(),
+                    "Gemini 3.8 Flash (High)".to_string()
+                ),
+                (
+                    "claude-sonnet-4-6".to_string(),
+                    "Claude Sonnet 4.6 (Thinking)".to_string()
+                ),
+            ]
+        );
+        assert!(parse_models("").is_err());
+    }
 
     fn args(cmd: &Command) -> String {
         cmd.get_args()
@@ -348,10 +327,10 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
-        let h = AgyHarness::default();
+        let h = AgyHarness;
         assert_eq!(
             args(&h.build_print_command(&base).unwrap()),
-            "--dangerously-skip-permissions --model gemini-x --effort low --conversation c1 --output-format stream-json --print=fix it"
+            "--dangerously-skip-permissions --model gemini-x --conversation c1 --output-format stream-json --print=fix it"
         );
         let tui = PrintConfig {
             print_mode: false,
@@ -366,21 +345,16 @@ mod tests {
 
     #[test]
     fn capabilities() {
-        let c = AgyHarness::default().capabilities();
+        let c = AgyHarness.capabilities();
         assert!(!c.interactive_permissions && c.streaming_input && c.resume_by_id);
         assert!(c.supports_policy(PermissionPolicy::Auto).is_none());
         assert!(c.supports_policy(PermissionPolicy::Ask).is_none());
-        let h = AgyHarness::default();
+        let h = AgyHarness;
         let asks = |print_mode| {
             h.print_policies(print_mode)
                 .iter()
                 .any(|p| p.policy == PermissionPolicy::Ask)
         };
         assert!(asks(false) && !asks(true));
-        assert!(
-            !AgyHarness::new(AgyTransport::PerTurn)
-                .capabilities()
-                .streaming_input
-        );
     }
 }

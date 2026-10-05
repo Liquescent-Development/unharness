@@ -636,13 +636,6 @@ impl App {
         if let Some(w) = app.sandbox_level().1 {
             app.transcript.push_notice(w);
         }
-        if let Some(w) = app
-            .workspace_root
-            .as_deref()
-            .and_then(Config::legacy_warning)
-        {
-            app.transcript.push_notice(w);
-        }
         for problem in app.config.mcp_servers().1 {
             app.transcript.push_notice(problem);
         }
@@ -3706,7 +3699,7 @@ pub(crate) mod tests {
     fn test_registry() -> Arc<Registry> {
         Arc::new(
             Registry::empty()
-                .with(Box::new(AgyHarness::default()))
+                .with(Box::new(AgyHarness))
                 .with(Box::new(ClaudeHarness::default()))
                 .with(Box::new(crate::harness::codex::CodexHarness::new(
                     crate::harness::codex::CodexTransport::AppServer,

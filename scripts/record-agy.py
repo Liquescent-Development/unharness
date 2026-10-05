@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Record an Antigravity stream-json session as a parser fixture.
 
-Drives `agy -p --input-format stream-json --output-format stream-json`, sends
-each prompt as one NDJSON line, and waits for the `result` event between
-prompts. The stdin message shape is selectable because it is undocumented:
+Drives `agy --print= --input-format stream-json --output-format stream-json`,
+sends each prompt as one NDJSON line, and waits for the `result` event between
+prompts. A line on stdin is `{"event":"user","message":{"content":"..."}}`
+(agy 1.2.17 names the missing `event` field when sent anything else).
 
-  --shape claude   {"type":"user","message":{"role":"user","content":"..."}}
-  --shape prompt   {"prompt":"..."}
-  --shape message  {"message":"..."}
-
-Usage: scripts/record-agy.py OUT.jsonl [--shape claude] [--extra "..."] PROMPT [PROMPT...]
+Usage: scripts/record-agy.py OUT.jsonl [--extra=...] PROMPT [PROMPT...]
 """
 import argparse
 import json
@@ -30,19 +27,14 @@ def redact(line: str, cwd: str) -> str:
     return line
 
 
-def encode(shape: str, text: str) -> dict:
-    if shape == "claude":
-        return {"type": "user", "message": {"role": "user", "content": text}}
-    if shape == "prompt":
-        return {"prompt": text}
-    return {"message": text}
+def encode(text: str) -> dict:
+    return {"event": "user", "message": {"content": text}}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("prompts", nargs="+")
-    ap.add_argument("--shape", default="claude", choices=["claude", "prompt", "message"])
     ap.add_argument("--extra", default="")
     ap.add_argument("--idle-timeout", type=float, default=90.0)
     args = ap.parse_args()
@@ -78,7 +70,7 @@ def main() -> int:
     threading.Thread(target=pump_stderr, daemon=True).start()
 
     prompts = list(args.prompts)
-    send(encode(args.shape, prompts.pop(0)))
+    send(encode(prompts.pop(0)))
 
     last = time.time()
     while proc.poll() is None:
@@ -97,7 +89,7 @@ def main() -> int:
             continue
         if obj.get("event") == "result" or obj.get("type") == "result":
             if prompts:
-                send(encode(args.shape, prompts.pop(0)))
+                send(encode(prompts.pop(0)))
             else:
                 proc.stdin.close()
                 for rest in proc.stdout:

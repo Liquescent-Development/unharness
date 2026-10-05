@@ -166,30 +166,6 @@ impl Config {
         Ok(path)
     }
 
-    /// An `unharness.toml` inside the workspace, from before overrides moved
-    /// out of it. It is not read; `unharness init` imports it.
-    pub fn legacy_workspace_file(root: &Path) -> Option<PathBuf> {
-        ["unharness.toml", ".unharness.toml"]
-            .iter()
-            .map(|name| root.join(name))
-            .find(|p| p.exists())
-    }
-
-    /// What to tell the user when the workspace has a config file that is
-    /// being ignored because it was never imported.
-    pub fn legacy_warning(root: &Path) -> Option<String> {
-        let legacy = Self::legacy_workspace_file(root)?;
-        let store = Self::workspace_store()?;
-        if Self::workspace_path_in(&store, root).exists() {
-            return None;
-        }
-        Some(format!(
-            "{} is not read any more (workspace settings are kept outside the workspace, \
-             where an agent cannot edit them); run `unharness init` to import it",
-            legacy.display()
-        ))
-    }
-
     pub fn global_path() -> Option<PathBuf> {
         dirs::config_dir().map(|d| d.join("unharness").join("config.toml"))
     }
@@ -199,14 +175,6 @@ impl Config {
             Some(path) => Ok(Self::load_file(&path)?.unwrap_or_default()),
             None => Ok(Config::default()),
         }
-    }
-
-    /// Parse the workspace's old in-tree config, for importing it.
-    pub fn load_legacy(root: &Path) -> Result<Self> {
-        let path = Self::legacy_workspace_file(root).ok_or_else(|| {
-            anyhow::anyhow!("No unharness configuration found in {}", root.display())
-        })?;
-        Ok(toml::from_str(&std::fs::read_to_string(&path)?)?)
     }
 
     pub fn save_global(&self) -> Result<PathBuf> {
@@ -319,25 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_toml_still_parses() {
-        let toml_str = r#"
-default_harness = "agy"
-auto_sync = true
-
-[harnesses.agy]
-extra_args = []
-
-[harnesses.claude]
-default_model = "opus"
-"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.default_harness.as_deref(), Some("agy"));
-        assert!(cfg.auto_sync);
-        assert_eq!(cfg.default_model("claude"), Some("opus"));
-        assert!(cfg.harness("codex").is_none());
-    }
-
-    #[test]
     fn test_toml_roundtrip() {
         let toml_str = r#"
 default_harness = "pi"
@@ -400,19 +349,8 @@ url = "https://example.com/mcp"
             Some("pi")
         );
 
-        // A file in the workspace is found for import, never loaded.
+        // A file in the workspace is never loaded.
         std::fs::write(root.join("unharness.toml"), "default_harness = \"codex\"\n").unwrap();
-        assert_eq!(
-            Config::legacy_workspace_file(&root),
-            Some(root.join("unharness.toml"))
-        );
-        assert_eq!(
-            Config::load_legacy(&root)
-                .unwrap()
-                .default_harness
-                .as_deref(),
-            Some("codex")
-        );
         assert_eq!(
             Config::load_workspace_in(&store, &root)
                 .unwrap()

@@ -3,3 +3,6 @@
 # macOS metadata
 ._*
 .DS_Store
+
+# unharness session state
+.unharness/

@@ -21,20 +21,15 @@ impl Registry {
     /// Build the registry, honouring per-harness transport settings.
     pub fn from_config(config: &crate::config::Config) -> Self {
         use crate::harness::acp::AcpHarness;
-        use crate::harness::agy::{AgyHarness, AgyTransport};
+        use crate::harness::agy::AgyHarness;
         use crate::harness::codex::{CodexHarness, CodexTransport};
-        let agy_transport = config
-            .harness("agy")
-            .and_then(|h| h.transport.as_deref())
-            .and_then(AgyTransport::parse)
-            .unwrap_or_default();
         let codex_transport = config
             .harness("codex")
             .and_then(|h| h.transport.as_deref())
             .and_then(CodexTransport::parse)
             .unwrap_or_default();
         let mut harnesses: Vec<Box<dyn Harness>> = vec![
-            Box::new(AgyHarness::new(agy_transport)),
+            Box::new(AgyHarness),
             Box::new(crate::harness::claude::ClaudeHarness {
                 relocate_config: config
                     .harness("claude")
