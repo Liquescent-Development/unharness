@@ -5,9 +5,11 @@ use anyhow::Result;
 use colored::*;
 
 use crate::config::Config;
+use crate::core::Rules;
 use crate::core::conversations::ConversationStore;
 use crate::core::mcp;
 use crate::core::registry::Registry;
+use crate::core::rules::Scope;
 use crate::core::sandbox::{
     self, Sandbox, SandboxEnv, SandboxLevel, SandboxPaths, SandboxRequest, SandboxSetup,
 };
@@ -180,6 +182,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
             println!("  {} extra {label}: {}", "↳".dimmed(), list.join(" "));
         }
     }
+    report_allow_rules(find_workspace_root(cwd).as_deref());
     println!();
 
     // The servers are started the way a session would start them: in the
@@ -330,6 +333,32 @@ const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// What an installed harness does with MCP servers: its name, what it
 /// declares, and the servers it has itself.
 type McpTaker = (&'static str, McpSupport, Vec<String>);
+
+/// What is allowed without asking, and where that is written down.
+fn report_allow_rules(ws_root: Option<&Path>) {
+    let rules = match Rules::load(ws_root) {
+        Ok(rules) => rules,
+        Err(e) => {
+            println!("Allow Rules: {} {e:#}", "[!]".yellow().bold());
+            return;
+        }
+    };
+    println!("Allow Rules: {}", rules.iter().count().to_string().bold());
+    for (scope, rule) in rules.iter() {
+        let scope = match scope {
+            Scope::Workspace => "workspace",
+            Scope::Global => "global",
+        };
+        println!("  {} [{scope}] {}", "↳".dimmed(), rule.describe());
+    }
+    for path in [Scope::Workspace, Scope::Global]
+        .into_iter()
+        .filter_map(|scope| rules.path(scope))
+    {
+        let missing = if path.exists() { "" } else { "(none yet)" };
+        println!("  {} {} {}", "↳".dimmed(), path.display(), missing.dimmed());
+    }
+}
 
 /// 1b. The configured MCP servers: whether each one answers, and which
 /// installed harnesses get it.

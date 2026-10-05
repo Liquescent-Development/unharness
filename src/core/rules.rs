@@ -537,13 +537,13 @@ impl Rules {
     pub fn path(&self, scope: Scope) -> Option<PathBuf> {
         let dir = self.dir.as_ref()?;
         match scope {
-            Scope::Global => Some(dir.join("rules.toml")),
+            Scope::Global => Some(dir.join("allow.toml")),
             Scope::Workspace => {
                 let root = self.root.as_ref()?;
                 let root = root.canonicalize().unwrap_or_else(|_| root.clone());
                 Some(
                     dir.join("workspaces")
-                        .join(format!("{}.rules.toml", project_key(&root))),
+                        .join(format!("{}.allow.toml", project_key(&root))),
                 )
             }
         }
@@ -632,7 +632,7 @@ impl Rules {
 
 fn parse(content: &str, path: &Path) -> Result<Vec<Rule>> {
     let file: RuleFile = toml::from_str(content)
-        .with_context(|| format!("{} is not a valid unharness rules file", path.display()))?;
+        .with_context(|| format!("{} is not a valid file of allow rules", path.display()))?;
     for (i, rule) in file.allow.iter().enumerate() {
         rule.validate()
             .with_context(|| format!("{}: rule {}", path.display(), i + 1))?;
@@ -931,7 +931,7 @@ mod tests {
         let global = rules
             .append(Scope::Global, &[Rule::shell("git status")])
             .unwrap();
-        assert_eq!(global, dir.path().join("rules.toml"));
+        assert_eq!(global, dir.path().join("allow.toml"));
 
         // A comment the user wrote, and a rule another unharness added.
         let mut content = std::fs::read_to_string(&global).unwrap();
@@ -956,7 +956,7 @@ mod tests {
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
-                .ends_with(".rules.toml")
+                .ends_with(".allow.toml")
         );
 
         let reloaded = Rules::load_in(dir.path(), Some(&root)).unwrap();
@@ -1008,9 +1008,9 @@ mod tests {
             "[[deny]]\ntool = \"x\"",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            std::fs::write(dir.path().join("rules.toml"), content).unwrap();
+            std::fs::write(dir.path().join("allow.toml"), content).unwrap();
             let err = Rules::load_in(dir.path(), None).unwrap_err();
-            assert!(format!("{err:#}").contains("rules.toml"), "{err:#}");
+            assert!(format!("{err:#}").contains("allow.toml"), "{err:#}");
             // And nothing is appended to a file that cannot be read.
             let mut rules = Rules {
                 dir: Some(dir.path().to_path_buf()),
@@ -1018,7 +1018,7 @@ mod tests {
             };
             assert!(rules.append(Scope::Global, &[Rule::tool("x")]).is_err());
             assert_eq!(
-                std::fs::read_to_string(dir.path().join("rules.toml")).unwrap(),
+                std::fs::read_to_string(dir.path().join("allow.toml")).unwrap(),
                 content
             );
         }

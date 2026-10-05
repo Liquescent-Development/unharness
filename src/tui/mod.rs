@@ -37,6 +37,7 @@ use futures::{FutureExt, StreamExt};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
+use crate::core::Rules;
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
 use crate::core::{
@@ -59,6 +60,7 @@ pub struct TuiLaunch {
     pub resume: Option<String>,
     pub harness_explicit: bool,
     pub initial_prompt: Option<String>,
+    pub rules: Rules,
 }
 
 /// Take over the terminal: raw mode, alternate screen, paste and key
@@ -156,6 +158,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         resume: launch.resume,
         harness_explicit: launch.harness_explicit,
         checkpoint_store: None,
+        rules: launch.rules,
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt).await;

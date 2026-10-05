@@ -27,11 +27,12 @@ use crate::core::conversations::{
 use crate::core::guard::{self, Watch};
 use crate::core::mcp::{self, McpServer};
 use crate::core::registry::Registry;
+use crate::core::rules::Scope;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
-    PermissionDecision, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo,
-    SessionCommand, StopReason, Usage, resolve_policy,
+    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId,
+    RateLimitInfo, Rule, Rules, SessionCommand, StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
 
@@ -170,6 +171,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
+    ("/allow", "List what is allowed without asking"),
     ("/clear", "Clear the transcript"),
     ("/help", "Show commands and shortcuts"),
     ("/quit", "Exit unharness"),
@@ -292,6 +294,8 @@ pub struct App {
 
     pub modal: Option<Modal>,
     pending_prompts: VecDeque<PermissionRequest>,
+    /// Requests these allow are answered without asking.
+    rules: Rules,
     pub suggestions: Vec<(String, String)>,
     pub selected_suggestion: usize,
 
@@ -317,6 +321,8 @@ pub struct AppInit {
     /// Where file-checkpoint shadow repositories go; `None` = the user's
     /// state directory.
     pub checkpoint_store: Option<PathBuf>,
+    /// The user's allow rules, and where "allow always" adds to them.
+    pub rules: Rules,
 }
 
 /// Transcript lines scrolled per wheel notch.
@@ -586,6 +592,7 @@ impl App {
             mcp_warned: HashSet::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
+            rules: init.rules,
             suggestions: Vec::new(),
             selected_suggestion: 0,
             should_quit: false,
@@ -1907,7 +1914,30 @@ impl App {
         self.actions.push_back(Action::Shutdown);
     }
 
+    /// The allow rule that answers a request, if the user has one for it.
+    fn allowing_rule(&self, req: &PermissionRequest) -> Option<&Rule> {
+        match &req.kind {
+            PermissionKind::ToolUse { tool, action, .. } => {
+                self.rules.allows(tool, action, &self.cwd)
+            }
+            _ => None,
+        }
+    }
+
     fn on_permission_request(&mut self, req: PermissionRequest) {
+        if let Some(rule) = self.allowing_rule(&req) {
+            // Said every time: what runs unasked should not also run unseen.
+            let notice = format!("allowed by your rule for {}", rule.describe());
+            self.transcript.push_notice(notice);
+            self.actions
+                .push_back(Action::Command(SessionCommand::RespondPermission {
+                    id: req.id,
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                }));
+            return;
+        }
         if self.modal.is_none() {
             self.modal = Some(Modal::for_request(req));
         } else {
@@ -2619,6 +2649,37 @@ impl App {
                 } else if !self.show_plan {
                     self.transcript
                         .push_system("Plan hidden (/plan shows it again).");
+                }
+            }
+            "/allow" => {
+                let list: Vec<String> = self
+                    .rules
+                    .iter()
+                    .map(|(scope, rule)| {
+                        let scope = match scope {
+                            Scope::Workspace => "workspace",
+                            Scope::Global => "global",
+                        };
+                        format!("• [{scope}] {}", rule.describe())
+                    })
+                    .collect();
+                let files: Vec<String> = [Scope::Workspace, Scope::Global]
+                    .into_iter()
+                    .filter_map(|scope| self.rules.path(scope))
+                    .map(|path| format!("  {}", path.display()))
+                    .collect();
+                let files = format!("Kept in (edit to change or remove):\n{}", files.join("\n"));
+                if list.is_empty() {
+                    self.transcript.push_system(format!(
+                        "Nothing is allowed without asking yet. Answering a \
+                         permission request with `a` adds a rule.\n{files}"
+                    ));
+                } else {
+                    self.transcript.push_system(format!(
+                        "Allowed without asking ({}):\n{}\n{files}",
+                        list.len(),
+                        list.join("\n")
+                    ));
                 }
             }
             "/skills" => {
@@ -3363,6 +3424,8 @@ pub(crate) mod tests {
         App::new(AppInit {
             // Tests never write to the real state directory.
             checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
+            // Nor to the real config directory.
+            rules: Rules::load_in(&cwd.join(".unharness/test-config"), Some(&cwd)).unwrap(),
             cwd: cwd.clone(),
             workspace_root: Some(cwd),
             registry: test_registry(),
@@ -4562,6 +4625,118 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), PermissionPolicy::Auto);
         assert!(app.policy_warning().is_none());
+    }
+
+    /// One command as each harness asks to run it, through its own parser.
+    fn cargo_test_requests(command: &str) -> Vec<AgentEvent> {
+        use crate::harness::acp::parse::AcpParser;
+        use crate::harness::claude::parse::ClaudeParser;
+        use crate::harness::codex::app_server_parse::CodexAppServerParser;
+        use serde_json::json;
+        let claude = json!({"type": "control_request", "request_id": "claude", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": "t1",
+            "input": {"command": command}}});
+        let codex = json!({"method": "item/commandExecution/requestApproval", "id": "codex",
+            "params": {"itemId": "i1", "cwd": "/w",
+                "command": format!("/usr/bin/zsh -lc '{command}'")}});
+        let acp = json!({"jsonrpc": "2.0", "id": "acp", "method": "session/request_permission",
+            "params": {"options": [], "toolCall": {"toolCallId": "t2", "name": "exec_command",
+                "kind": "execute", "rawInput": {"command": command, "cwd": "/w"}}}});
+        let mut events = ClaudeParser::new().feed(&claude.to_string());
+        events.extend(CodexAppServerParser::new().feed(&codex.to_string()));
+        events.extend(AcpParser::new(HarnessId::intern("acp-test")).feed(&acp.to_string()));
+        events.retain(|e| matches!(e, AgentEvent::PermissionRequest(_)));
+        assert_eq!(events.len(), 3, "{events:?}");
+        events
+    }
+
+    fn allowed(id: &str) -> Action {
+        Action::Command(SessionCommand::RespondPermission {
+            id: id.into(),
+            decision: PermissionDecision::Allow {
+                updated_input: None,
+            },
+        })
+    }
+
+    #[test]
+    fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.rules
+            .append(Scope::Workspace, &[Rule::shell("cargo test")])
+            .unwrap();
+        for ev in cargo_test_requests("cargo test --all") {
+            app.on_event(ev);
+        }
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.take_actions(),
+            vec![allowed("claude"), allowed("codex"), allowed("acp")]
+        );
+        let said = app
+            .transcript
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Notice(n) if n.contains("`cargo test`")))
+            .count();
+        assert_eq!(said, 3);
+
+        // More than the rule covers is still asked about, one at a time.
+        for ev in cargo_test_requests("cargo test && rm -rf x") {
+            app.on_event(ev);
+        }
+        assert_eq!(app.take_actions(), vec![]);
+        assert_eq!(
+            app.modal.as_ref().and_then(Modal::request_id),
+            Some("claude")
+        );
+        assert_eq!(app.pending_prompts.len(), 2);
+
+        // A subagent's request is answered the same way.
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.rules
+            .append(Scope::Global, &[Rule::shell("cargo test")])
+            .unwrap();
+        let ev = cargo_test_requests("cargo test").remove(0);
+        app.on_event(AgentEvent::Sub {
+            parent: "agent-1".into(),
+            event: Box::new(ev),
+        });
+        assert_eq!(app.take_actions(), vec![allowed("claude")]);
+    }
+
+    #[test]
+    fn allow_lists_the_rules_and_where_they_are_kept() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.handle_slash_command("/allow");
+        app.rules
+            .append(Scope::Workspace, &[Rule::edit("src/**")])
+            .unwrap();
+        app.rules
+            .append(Scope::Global, &[Rule::mcp("probe/*")])
+            .unwrap();
+        app.handle_slash_command("/allow");
+        let said: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::System(text) if text.contains("without asking") => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(said[0].contains("Nothing is allowed without asking yet"));
+        assert!(said[0].contains("allow.toml"));
+        assert!(
+            said[1].contains("• [workspace] edits to `src/**`"),
+            "{}",
+            said[1]
+        );
+        assert!(said[1].contains("• [global] every tool of the MCP server `probe`"));
+        assert!(said[1].contains(".allow.toml"));
     }
 
     #[test]
