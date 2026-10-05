@@ -109,6 +109,7 @@ capability caveat, and the key hints.
 | `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
 | `Ctrl+U` | Clear the prompt |
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
+| `@` | List the files under the working directory and narrow the list by typing; `Tab` or `Enter` puts the chosen one into the prompt (see below) |
 | `Ctrl+V`, `/paste` | Attach the image on the clipboard (a screenshot, say) to the next prompt |
 | `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
 | Mouse wheel | Scroll the transcript |
@@ -127,7 +128,7 @@ capability caveat, and the key hints.
 | `Down` past the prompt's last row | Into the list of subagents under the prompt: `Up`/`Down` choose one, `Enter` opens its own transcript, `Delete` takes a finished one off the list, `Esc` (or typing) returns to the prompt |
 | `Ctrl+S`, `/subagents` | Choose among all the conversation's subagents and open one's transcript |
 | In a subagent's transcript | `Esc` back to the conversation · `s` stop that subagent · `Tab` / `Shift+Tab` next / previous subagent · arrows, `PageUp`/`PageDown`, `End` scroll · `Ctrl+O`, `Ctrl+T` expand its tool calls |
-| `Esc` | Interrupt the running turn, else clear the prompt (never quits) |
+| `Esc` | Close the autocomplete list, else interrupt the running turn, else clear the prompt (never quits) |
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
@@ -136,6 +137,18 @@ Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, 
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
 Typing `/` opens autocomplete; Enter on a partial command completes it.
+
+An `@` at the start of a word opens the same list on the files under the
+working directory, hidden ones included, leaving out what `.gitignore`,
+`.ignore` and git's exclude files leave out. What you type after the `@`
+narrows it, fuzzily: `@tuiapp` finds `src/tui/app.rs`. `Tab` or `Enter`
+replaces the word with the file's path, written the way the active harness
+reads it: `@src/tui/app.rs` for Claude Code, which then puts the file's
+content into the turn itself, and the plain path for the others, whose
+agents open it with their own tools. `Esc` closes the list and leaves the
+word as typed. The path is ordinary text from then on: it is not rewritten
+when the prompt is later sent to another harness. The files are listed anew
+at each `@`, up to 50,000 of them.
 
 Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`,
 so on those `Shift+Enter` sends the prompt and `Ctrl+M` cannot open the model
@@ -146,8 +159,8 @@ asked to tell the keys apart, and there both work as listed.
 Sent prompts and commands are remembered per workspace (the newest 500, in
 `.unharness/prompt_history.jsonl`, removed by `unharness sessions --clear`).
 `Up` on the prompt's first line recalls them; whatever you had typed comes
-back when you step `Down` past the newest. While the `/` autocomplete list is
-open the arrows move in it instead.
+back when you step `Down` past the newest. While the `/` or `@` autocomplete
+list is open the arrows move in it instead.
 
 unharness takes the mouse, so the terminal's own selection is replaced by
 its own: drag in the transcript to select, and the text is copied when you

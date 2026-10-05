@@ -199,6 +199,17 @@ recorded ones. For anything else:
   files are not embedded. Codex's `UserInput` (0.157.0 schema: text, image,
   localImage, audio, localAudio, skill, mention), `codex exec` and pi's
   `prompt` (`images` only) have no document input.
+- File references (`@` completion, `tui/files.rs`, `Harness::
+  file_reference`): Claude Code 2.1.289 reads the file of an `@path` in a
+  stream-json user message into the turn (answered from with no tool call),
+  also after other text (the bridge prefix) and as `@"path with spaces"`,
+  and under the sandbox; a missing path is passed on as text. Codex 0.157.0
+  `app-server` and pi 0.87.1 `rpc` pass `@path` on as text and do not read
+  it, so they get the bare path, as does everything unverified: `codex
+  exec`, agy, the ACP agents (claude-agent-acp included), a Claude path
+  with a `"` in it. The list is of the session's `cwd`, not the workspace
+  root, and is walked again at each `@`; never tried on a tree past the
+  50,000 file cap.
 - Clipboard images (`tui/clipboard.rs`, `Ctrl+V` and `/paste`): the reader
   logic is tested against a stand-in tool only. No Wayland or X11 display
   and no Mac were available, so the real `wl-paste --list-types` /
