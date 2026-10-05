@@ -660,3 +660,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # regenerate .events after a parser 
 scripts/record-claude.py out.jsonl "prompt"  # record a new fixture (run from a scratch dir)
 scripts/record-acp.py out.jsonl "prompt" -- gemini --acp
 ```
+
+## License
+
+unharness is free software under the GNU Affero General Public License,
+version 3 or (at your option) any later version. See [`LICENSE`](LICENSE).
