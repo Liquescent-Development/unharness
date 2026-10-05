@@ -62,7 +62,9 @@ impl Registry {
             if let Ok(h) =
                 AcpHarness::new(name, settings.display_name.as_deref(), &settings.command)
             {
-                harnesses.push(Box::new(h));
+                harnesses.push(Box::new(
+                    h.asking_permission(settings.asks_permission.unwrap_or(false)),
+                ));
             }
         }
         let taken: Vec<HarnessId> = harnesses.iter().map(|h| h.descriptor().id).collect();

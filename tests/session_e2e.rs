@@ -890,6 +890,7 @@ fn acp_harness() -> unharness::harness::acp::AcpHarness {
         &[fake_harness().to_string_lossy().into_owned()],
     )
     .unwrap()
+    .asking_permission(true)
 }
 
 #[tokio::test]
