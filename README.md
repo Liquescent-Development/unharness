@@ -23,7 +23,7 @@ speaks a streaming JSON protocol with a permission channel:
 | Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | static list |
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list` |
 | pi | `pi --mode rpc` (long-lived) | yes, through an extension unharness loads | `--session-id` | `get_available_models`, many providers |
-| Antigravity | `agy --print= --input-format stream-json` (long-lived, unverified: no account yet) | no | `--conversation` | `agy models` |
+| Antigravity | `agy --print= --input-format stream-json` (long-lived) | no | `--conversation` | `agy models` |
 | ACP agents | Agent Client Protocol v1 over stdio (long-lived) | yes, when the agent asks | `session/resume` or `session/load` | from the session |
 
 unharness normalises those into one event model and one capability set, so
@@ -253,7 +253,8 @@ says what it is doing only through its tool calls.
 
 Policy, model and effort changes apply to the next turn on every harness
 (Claude via its control channel, Codex per `turn/start`, pi per RPC command,
-Antigravity by restarting its process on the same conversation).
+Antigravity by restarting its process on the same conversation). Antigravity has no
+effort setting of its own: the effort is the end of its model ids.
 
 Tool calls render as blocks: shell output wrapped in a gutter, file edits as
 syntax-coloured red/green replacements, reads highlighted by file type, and
@@ -270,7 +271,7 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
 |---|---|---|---|---|---|
 | `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available |
-| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits` |
+| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn |
 | `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
 | `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` |
 
@@ -493,9 +494,6 @@ relocate_config  = true          # keep .claude.json in ~/.claude so a sandboxed
 [harnesses.codex]
 transport = "auto"               # auto | app-server | exec
 
-[harnesses.agy]
-transport = "stream"             # stream | stream-prompt | per-turn (see AGENTS.md)
-
 [harnesses.pi]
 default_provider = "openai-codex"
 default_model    = "gpt-5.5"
@@ -632,7 +630,7 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   claude/      stream-json transport + parser + fixtures/
   codex/       app-server + exec transports + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/
-  agy/         stream-json transport (best effort, unverified) + per-turn fallback
+  agy/         stream-json transport
   acp/         generic Agent Client Protocol client: one instance per configured agent
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays

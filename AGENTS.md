@@ -138,16 +138,39 @@ recorded ones. For anything else:
 
 ## Status notes
 
-- Antigravity (`agy`, `src/harness/agy/`) is best effort: no account was
-  available. Verified on agy 1.2.15 without credentials: `--print=` (empty)
-  with `--input-format stream-json --output-format stream-json` parses, the
-  `result` event shape (`fixtures/auth_required.jsonl`), and the `AGY_ERROR:`
-  stderr marker. Unverified: the stdin message shape (Claude-compatible by
-  default, `transport = "stream-prompt"` sends `{"prompt": …}`), the `init`
-  and `step_update` field names (`fixtures/synthetic_turn.jsonl` is
-  hand-written and says so), and `agy --output-format json models`. First
-  thing to do with an account: `scripts/record-agy.py` from a scratch dir,
-  replace the synthetic fixture, regenerate `.events`, fix the parser.
+- Antigravity (`agy`, `src/harness/agy/`), recorded on agy 1.2.17 with an
+  account. A stdin line is `{"event":"user","message":{"content": …}}`;
+  anything without `event` ends the process with an error naming the
+  field, and every other event name is ignored with a warning (so there is
+  no interrupt, steer or permission answer). `init` comes once per
+  process, after the first message. Steps are `user_input`,
+  `agent_response`, `tool` and `system_message`; a tool's two updates
+  (`ACTIVE`, `DONE`) share only their `step_index`, its `parameters` are
+  cut down (a write shows its path, not its content), and neither a failed
+  command nor a refused call is marked. Thinking is counted, never sent.
+  `result.usage` and `num_turns` are totals over the conversation, also
+  after `--conversation` in a new process (the parser sums the steps);
+  `denied_actions` repeats earlier turns of the same process. Headless agy
+  refuses what it would have asked about and ends the turn there with an
+  empty response and `SUCCESS`: a write in the default mode, a shell
+  command under `--mode accept-edits` (reads and edits run). `--model`
+  takes the ids `agy --output-format json models` lists
+  (`command.data.models[].{id,label}`), which end in their effort, and is
+  refused beside `--effort` ("conflicts"); `--effort` alone picks the
+  default model's (`low`, `medium`, `high`; `xhigh` and `max` are valid
+  words the default model lacks). `--mode plan` writes
+  `brain/<conversation>/implementation_plan.md` under the state directory
+  and acts in the same turn, so plan mode is not declared. SIGINT gives a
+  `result` with `error: "interrupted"` and exit 1, and leaves the command
+  agy started running. Sign-in is the token file beside `settings.json`.
+  Headless runs did not touch `settings.json`, `~/.gemini/config/
+  config.json` or `mcp_config.json` (the guarded files). Not committed:
+  the plan recording, whose text carried the home path split across
+  deltas. Unverified: content blocks on stdin (the binary has a
+  `streamInputContentBlock`), `AGY_ERROR:` on stderr (from 1.2.15's
+  strings), agy's own interface (`--no-tui`): what `ask` means there and
+  what it writes to `settings.json` (`trustedWorkspaces`), a model other
+  than the default family's, sub-agents, MCP tool steps.
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
   in `[harnesses.codex]` forces the fallback.
 - ACP (`src/harness/acp/`) is verified against
@@ -256,15 +279,15 @@ recorded ones. For anything else:
   `session/resume` and `session/load` with servers, codex-acp, a same-name
   server in Claude's own config, how to answer the elicitation's `persist`
   offer (so "always allow" is not offered), agy (`agy mcp add` writes its
-  own config; no session flag on 1.2.16) and pi (no MCP client).
+  own config; no session flag on 1.2.17) and pi (no MCP client).
 - Plan mode (`Capabilities::plan_mode`) is declared, not driven: nothing in
   unharness enters it yet. What the flag stands on: Claude Code 2.1.289
   `--permission-mode plan`, Codex 0.157.0 `collaborationMode` on
-  `turn/start` (app-server schema; `exec` has none), agy 1.2.16 `--mode
-  plan`, all read from `--help` or the schema and none run; an ACP session
+  `turn/start` (app-server schema; `exec` has none), both read from
+  `--help` or the schema and neither run; an ACP session
   reports it when its `modes` list one with id `plan` (claude-agent-acp
   0.85.1 does, codex-acp 2.1.1 does not). pi plans only through an
-  extension.
+  extension, and agy's `--mode plan` does not wait (see above).
 - `ask` per harness. Codex 0.157.0 app-server: `approvalPolicy:
   "untrusted"` with `sandbox: "workspace-write"` (unharness's sandbox off)
   asked before a file change and before every command, `cat` of a file
@@ -321,7 +344,9 @@ recorded ones. For anything else:
   per-turn difference.
 
 - Sandbox (`src/core/sandbox/`), checked on Linux 7.2 (Landlock ABI 10) with
-  Claude Code 2.1.289, Codex 0.157.0 (app-server and exec) and pi 0.87.1: a
+  Claude Code 2.1.289, Codex 0.157.0 (app-server and exec), pi 0.87.1 and
+  agy 1.2.17 (`~/.gemini/antigravity-cli` writable; the one denial traced
+  was the updater's write test in `~/.local/bin`): a
   workspace write succeeds, a write to the home directory and a read of
   a denied credential directory fail, sessions resume. Landlock only allows, so reads are granted
   on everything around the denied paths (`linux::read_grants`); directory
@@ -340,8 +365,8 @@ recorded ones. For anything else:
   `~/.codex`, pi's lock files in `~/.pi/agent`, Claude's relocated config),
   which is why those files are watched and not write-protected.
   Unverified: the macOS backend (`seatbelt.rs`; only the profile text is
-  tested), a user-enabled Claude Code sandbox inside ours, agy's and the ACP
-  presets' state directories, `--no-tui` passthrough under the sandbox.
+  tested), a user-enabled Claude Code sandbox inside ours, agy's own
+  `--sandbox` flag (off unless given), the ACP presets' state directories, `--no-tui` passthrough under the sandbox.
 
 ## Commit style
 
