@@ -1,5 +1,5 @@
 //! `unharness models [--harness H] [--provider P]`: list providers and models
-//! through the v2 `Harness` trait.
+//! through the `Harness` trait.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,7 +28,7 @@ pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str
         Some(h) => match registry.parse(h) {
             Some(hz) => vec![hz],
             None => bail!(
-                "Harness '{}' is not available through the v2 model listing yet (ported: {})",
+                "Unknown harness '{}'. Supported: {}",
                 h,
                 registry
                     .ids()
