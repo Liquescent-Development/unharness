@@ -39,12 +39,7 @@ pub struct CommonRunArgs {
     pub sandbox: Option<String>,
 
     /// Shorthand for --policy bypass (dangerously skip all permissions)
-    #[arg(
-        short = 'y',
-        long = "yes",
-        alias = "dangerously-skip-permissions",
-        alias = "auto"
-    )]
+    #[arg(short = 'y', long = "yes")]
     pub auto: bool,
 
     /// Provider within the harness (e.g. anthropic, openai, google; pi supports many)
@@ -68,7 +63,7 @@ pub struct CommonRunArgs {
     pub format: Option<String>,
 
     /// Skip unharness TUI and run directly in the underlying harness CLI
-    #[arg(long, alias = "raw")]
+    #[arg(long)]
     pub no_tui: bool,
 
     /// Skip pre-flight sync of rules symlinks
