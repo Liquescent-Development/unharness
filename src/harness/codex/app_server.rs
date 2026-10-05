@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::OwnSandbox;
 use super::app_server_parse::CodexAppServerParser;
 use super::app_server_parse::ELICITATION_PREFIX;
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
+use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, HarnessId, ModelRef, PermissionDecision, PermissionKind,
     PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
@@ -26,36 +28,32 @@ pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
     Value::Array(items)
 }
 
-/// `turn/start` sandbox policy object for a policy.
+/// `turn/start` sandbox policy object.
 ///
-/// `confined` says unharness's sandbox is around the process. Codex's own
-/// (bubblewrap) cannot start inside it, so Codex is told the sandbox is
-/// someone else's. Otherwise Codex's own is the workspace one whatever the
-/// policy: what is asked about is `approvalPolicy` alone.
-pub fn sandbox_policy(policy: PermissionPolicy, confined: bool) -> Value {
-    if confined {
-        return json!({"type": "externalSandbox", "networkAccess": "enabled"});
-    }
-    match policy {
-        PermissionPolicy::Bypass => json!({"type": "dangerFullAccess"}),
-        _ => json!({"type": "workspaceWrite"}),
+/// Inside unharness's sandbox Codex is told the sandbox is someone else's:
+/// its own (bubblewrap) cannot start there. Otherwise Codex's own holds to
+/// the level the user set. The policy has no say: what is asked about is
+/// `approvalPolicy` alone.
+pub fn sandbox_policy(own: OwnSandbox) -> Value {
+    match own {
+        OwnSandbox::External => json!({"type": "externalSandbox", "networkAccess": "enabled"}),
+        OwnSandbox::Level(SandboxLevel::ReadOnly) => json!({"type": "readOnly"}),
+        OwnSandbox::Level(SandboxLevel::WorkspaceWrite) => json!({"type": "workspaceWrite"}),
+        OwnSandbox::Level(SandboxLevel::Off) => json!({"type": "dangerFullAccess"}),
     }
 }
 
-/// `thread/start` parameters for a policy.
-pub fn policy_params(policy: PermissionPolicy, confined: bool) -> (&'static str, &'static str) {
-    let (approval, sandbox) = match policy {
+/// `thread/start` parameters: the approval policy for a permission policy,
+/// and Codex's own sandbox mode.
+pub fn policy_params(policy: PermissionPolicy, own: OwnSandbox) -> (&'static str, &'static str) {
+    let approval = match policy {
         // Checked on 0.157.0: with `workspace-write`, `untrusted` asks before
         // every command and file change.
-        PermissionPolicy::Ask => ("untrusted", "workspace-write"),
-        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => ("on-request", "workspace-write"),
-        PermissionPolicy::Bypass => ("never", "danger-full-access"),
+        PermissionPolicy::Ask => "untrusted",
+        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => "on-request",
+        PermissionPolicy::Bypass => "never",
     };
-    if confined {
-        (approval, "danger-full-access")
-    } else {
-        (approval, sandbox)
-    }
+    (approval, own.mode())
 }
 
 /// The answer to an MCP tool-call approval, which Codex asks for as an
@@ -172,8 +170,8 @@ struct Driver {
     model: Option<ModelRef>,
     effort: Option<String>,
     policy: PermissionPolicy,
-    /// unharness's sandbox is around the process.
-    confined: bool,
+    /// What Codex's own sandbox holds to.
+    own_sandbox: OwnSandbox,
     /// A turn requested before the thread was ready.
     queued_turn: Option<(String, Vec<Attachment>)>,
 }
@@ -204,9 +202,9 @@ impl Driver {
         if let Some(e) = &self.effort {
             params["effort"] = json!(e);
         }
-        let (approval, _) = policy_params(self.policy, self.confined);
+        let (approval, _) = policy_params(self.policy, self.own_sandbox);
         params["approvalPolicy"] = json!(approval);
-        params["sandboxPolicy"] = sandbox_policy(self.policy, self.confined);
+        params["sandboxPolicy"] = sandbox_policy(self.own_sandbox);
         self.request("turn/start", params, Outstanding::TurnStart)
             .await?;
         Ok(())
@@ -232,7 +230,7 @@ async fn drive(
         model: cfg.model.clone(),
         effort: cfg.effort.clone(),
         policy: cfg.policy,
-        confined: cfg.sandbox.is_active(),
+        own_sandbox: OwnSandbox::for_session(&cfg.sandbox),
         queued_turn: None,
     };
     let mut shutting_down = false;
@@ -364,7 +362,7 @@ async fn drive(
                                 match kind {
                                     Some(Outstanding::Initialize) => {
                                         let _ = d.proc.write_line(&jsonrpc::notification("initialized", Value::Null)).await;
-                                        let (approval, sandbox) = policy_params(cfg.policy, d.confined);
+                                        let (approval, sandbox) = policy_params(cfg.policy, d.own_sandbox);
                                         let r = match &cfg.resume {
                                             // A fork answers like a start: with the new thread.
                                             Some(id) => {
@@ -567,37 +565,62 @@ mod tests {
             json!({"answers":{"q1":{"answers":["dev"]},"q2":{"answers":["a","b"]}}})
         );
         assert_eq!(
-            policy_params(PermissionPolicy::Bypass, false),
+            policy_params(
+                PermissionPolicy::Bypass,
+                OwnSandbox::Level(SandboxLevel::Off)
+            ),
             ("never", "danger-full-access")
         );
     }
 
     #[test]
     fn own_sandbox_is_off_inside_ours() {
-        // Codex's own sandbox does not follow the policy.
-        for policy in [
-            PermissionPolicy::Ask,
-            PermissionPolicy::AcceptEdits,
-            PermissionPolicy::Auto,
-        ] {
-            assert_eq!(
-                sandbox_policy(policy, false),
-                json!({"type": "workspaceWrite"})
-            );
-            assert_eq!(policy_params(policy, false).1, "workspace-write");
-        }
-        assert_eq!(policy_params(PermissionPolicy::Ask, false).0, "untrusted");
         // Approvals are untouched; only the sandbox is handed over.
         for policy in PermissionPolicy::ALL {
             assert_eq!(
-                sandbox_policy(policy, true),
+                sandbox_policy(OwnSandbox::External),
                 json!({"type": "externalSandbox", "networkAccess": "enabled"})
             );
             assert_eq!(
-                policy_params(policy, true).0,
-                policy_params(policy, false).0
+                policy_params(policy, OwnSandbox::External).0,
+                policy_params(policy, OwnSandbox::Level(SandboxLevel::WorkspaceWrite)).0
             );
-            assert_eq!(policy_params(policy, true).1, "danger-full-access");
+            assert_eq!(
+                policy_params(policy, OwnSandbox::External).1,
+                "danger-full-access"
+            );
         }
+        assert_eq!(
+            policy_params(PermissionPolicy::Ask, OwnSandbox::External).0,
+            "untrusted"
+        );
+    }
+
+    /// Where ours does not run, Codex's own sandbox holds to the level the
+    /// user set, whatever the policy: `bypass` does not widen it.
+    #[test]
+    fn own_sandbox_takes_the_level_not_the_policy() {
+        for (level, name, kind) in [
+            (SandboxLevel::ReadOnly, "read-only", "readOnly"),
+            (
+                SandboxLevel::WorkspaceWrite,
+                "workspace-write",
+                "workspaceWrite",
+            ),
+            (SandboxLevel::Off, "danger-full-access", "dangerFullAccess"),
+        ] {
+            let own = OwnSandbox::Level(level);
+            assert_eq!(sandbox_policy(own), json!({"type": kind}));
+            for policy in PermissionPolicy::ALL {
+                assert_eq!(policy_params(policy, own).1, name);
+            }
+        }
+        assert_eq!(
+            policy_params(
+                PermissionPolicy::Bypass,
+                OwnSandbox::Level(SandboxLevel::ReadOnly)
+            ),
+            ("never", "read-only")
+        );
     }
 }

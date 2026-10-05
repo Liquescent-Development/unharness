@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::core::conversations::ConversationSummary;
 use crate::core::rules::{Rule, Scope};
+use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
@@ -297,6 +298,7 @@ pub enum Modal {
     Model(ListPicker<ModelInfo>),
     Effort(ListPicker<String>),
     Policy(ListPicker<PermissionPolicy>),
+    Sandbox(ListPicker<SandboxLevel>),
     /// The conversation's subagents; the chosen one's transcript is opened.
     Subagents(ListPicker<super::app::SubagentOption>),
     Resume(ListPicker<ConversationSummary>),

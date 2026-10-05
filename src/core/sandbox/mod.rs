@@ -53,6 +53,15 @@ impl SandboxLevel {
             SandboxLevel::Off => "off",
         }
     }
+
+    /// One line for the picker and the help.
+    pub fn description(&self) -> &'static str {
+        match self {
+            SandboxLevel::ReadOnly => "No writes outside the harness's own state directories",
+            SandboxLevel::WorkspaceWrite => "Writes only inside the workspace",
+            SandboxLevel::Off => "No confinement",
+        }
+    }
 }
 
 impl fmt::Display for SandboxLevel {
@@ -185,6 +194,10 @@ pub enum Sandbox {
     Off {
         /// Set when the sandbox was wanted but no backend could provide it.
         unavailable: Option<String>,
+        /// The level that was wanted: `Off` when off by choice, otherwise
+        /// what no backend could provide. A harness with a sandbox of its
+        /// own holds to it instead.
+        wanted: SandboxLevel,
     },
     Active {
         backend: Arc<dyn SandboxBackend>,
@@ -201,12 +214,25 @@ impl Default for Sandbox {
 impl Sandbox {
     /// No confinement, by choice.
     pub fn off() -> Self {
-        Sandbox::Off { unavailable: None }
+        Sandbox::Off {
+            unavailable: None,
+            wanted: SandboxLevel::Off,
+        }
     }
 
+    /// The level unharness enforces: `Off` whenever the process runs
+    /// unconfined, also when that was not what was wanted.
     pub fn level(&self) -> SandboxLevel {
         match self {
             Sandbox::Off { .. } => SandboxLevel::Off,
+            Sandbox::Active { profile, .. } => profile.level,
+        }
+    }
+
+    /// The level the user asked for, whether or not unharness enforces it.
+    pub fn wanted(&self) -> SandboxLevel {
+        match self {
+            Sandbox::Off { wanted, .. } => *wanted,
             Sandbox::Active { profile, .. } => profile.level,
         }
     }
@@ -220,6 +246,7 @@ impl Sandbox {
         match self {
             Sandbox::Off {
                 unavailable: Some(why),
+                ..
             } => Some(format!("sandbox unavailable, running unconfined: {why}")),
             _ => None,
         }
@@ -257,6 +284,16 @@ impl SandboxSetup {
         }
     }
 
+    /// A backend that confines nothing, for tests of what happens around
+    /// the sandbox.
+    #[cfg(test)]
+    pub(crate) fn null(explicit: Option<SandboxLevel>) -> Self {
+        SandboxSetup {
+            explicit,
+            backend: Ok(Arc::new(NullBackend)),
+        }
+    }
+
     /// The level a session gets when `default` is its harness's, and why it
     /// is off if that is not what was wanted.
     pub fn level(&self, default: SandboxLevel) -> (SandboxLevel, Option<String>) {
@@ -274,9 +311,9 @@ impl SandboxSetup {
 /// Everything `resolve` needs to know about one session.
 #[derive(Debug, Clone)]
 pub struct SandboxRequest<'a> {
-    /// The level the user set (flag or config), if any.
+    /// The level the user set (flag, config or the TUI), if any.
     pub explicit: Option<SandboxLevel>,
-    /// The harness's level for the policy in effect, used otherwise.
+    /// The harness's default, used otherwise.
     pub default: SandboxLevel,
     pub workspace: &'a Path,
     pub harness: &'a SandboxPaths,
@@ -310,6 +347,7 @@ pub fn resolve(
         Err(why) => {
             return Ok(Sandbox::Off {
                 unavailable: Some(why.clone()),
+                wanted: level,
             });
         }
     };
@@ -443,25 +481,28 @@ fn expand_home(p: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct NullBackend;
+
+#[cfg(test)]
+impl SandboxBackend for NullBackend {
+    fn name(&self) -> &'static str {
+        "null"
+    }
+    fn detail(&self) -> String {
+        String::new()
+    }
+    fn wrap(&self, cmd: Command, _profile: &SandboxProfile) -> Result<Command> {
+        Ok(cmd)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
-    struct Null;
-    impl SandboxBackend for Null {
-        fn name(&self) -> &'static str {
-            "null"
-        }
-        fn detail(&self) -> String {
-            String::new()
-        }
-        fn wrap(&self, cmd: Command, _profile: &SandboxProfile) -> Result<Command> {
-            Ok(cmd)
-        }
-    }
-
     fn available() -> std::result::Result<Arc<dyn SandboxBackend>, String> {
-        Ok(Arc::new(Null))
+        Ok(Arc::new(NullBackend))
     }
 
     /// A home with a workspace, a harness state dir, credentials and
@@ -642,12 +683,19 @@ mod tests {
 
         let off = resolve(&request(&w, Some(SandboxLevel::Off)), &none, &w.env).unwrap();
         assert_eq!(off.level(), SandboxLevel::Off);
+        assert_eq!(off.wanted(), SandboxLevel::Off);
         assert!(off.warning().is_none());
 
         // The default degrades and says so; an explicit level does not.
+        // What was wanted stays known, for a harness's own sandbox.
         let degraded = resolve(&request(&w, None), &none, &w.env).unwrap();
         assert!(!degraded.is_active());
+        assert_eq!(degraded.level(), SandboxLevel::Off);
+        assert_eq!(degraded.wanted(), SandboxLevel::WorkspaceWrite);
         assert!(degraded.warning().unwrap().contains("no kernel"));
+
+        let active = resolve(&request(&w, None), &available(), &w.env).unwrap();
+        assert_eq!(active.wanted(), SandboxLevel::WorkspaceWrite);
         let err = resolve(
             &request(&w, Some(SandboxLevel::WorkspaceWrite)),
             &none,
