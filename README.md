@@ -22,7 +22,7 @@ speaks a streaming JSON protocol with a permission channel:
 |---|---|---|---|---|
 | Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | static list |
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list` |
-| pi | `pi --mode rpc` (long-lived) | extension dialogs | `--session-id` | `get_available_models`, many providers |
+| pi | `pi --mode rpc` (long-lived) | yes, through an extension unharness loads | `--session-id` | `get_available_models`, many providers |
 | Antigravity | `agy --print= --input-format stream-json` (long-lived, unverified: no account yet) | no | `--conversation` | `agy models` |
 | ACP agents | Agent Client Protocol v1 over stdio (long-lived) | yes, when the agent asks | `session/resume` or `session/load` | from the session |
 
@@ -30,8 +30,8 @@ unharness normalises those into one event model and one capability set, so
 the TUI never assumes what a harness can do. Anything a harness lacks is shown
 as a degraded capability rather than failing silently.
 
-The same goes for confinement. Codex sandboxes the commands its model runs,
-tied to the permission policy; Claude Code's sandbox is opt-in; pi,
+The same goes for confinement. Codex sandboxes the commands its model runs;
+Claude Code's sandbox is opt-in; pi,
 Antigravity and ACP agents have none, and under `bypass` nothing holds any
 of them. unharness puts one OS-level sandbox (Landlock on Linux,
 `sandbox-exec` on macOS) around the whole agent process, so the same limits
@@ -269,13 +269,37 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
 |---|---|---|---|---|---|
-| `ask` | default mode, prompts in the TUI | `untrusted` + read-only sandbox, prompts in the TUI | read-only sandbox, cannot prompt* | only extension dialogs prompt* | soft-denies tools that would prompt* |
-| `accept-edits` | `acceptEdits` | `on-request` + workspace-write | workspace-write | falls back to ask* | `--mode accept-edits` |
-| `auto` | `auto` (classifier) | `on-request` + workspace-write | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
-| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | dialogs auto-accepted* | `--dangerously-skip-permissions` |
+| `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available |
+| `accept-edits` | `acceptEdits` | `on-request` | workspace-write sandbox, no prompts | falls back to ask* | `--mode accept-edits` |
+| `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
+| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` |
 
-`*` shown as a warning in the header. A requested policy a harness cannot
-honour falls back to the nearest *less* permissive one it supports.
+`*` shown as a warning in the header.
+
+`ask` means the same wherever it is offered: nothing that writes, runs a
+command or reaches out happens without your answer or one of your allow
+rules. Reads may run. A harness that cannot hold to that does not have
+`ask`: `codex exec` and headless Antigravity cannot prompt, and an ACP
+agent has it only when you say it asks (see ACP agents).
+
+A requested policy a harness does not have falls back to the nearest *less*
+permissive one it has, never to a more permissive one. When there is none
+(`ask`, the default, on a harness without it) unharness does not pick for
+you: the TUI opens the policy picker and starts no session until you
+choose, and that choice holds for that harness only; `--print` and
+`--no-tui` stop with an error naming the policies to pass with `--policy`.
+`--print` on Codex is always `codex exec`, and Codex's own interface
+(`--no-tui`) takes no `untrusted` approval policy, so neither has `ask`.
+
+pi has no permission prompts of its own. unharness loads a small extension
+into it (`-e`, kept in unharness's state directory, your own extensions
+still load) that asks before every tool call except `read`, `grep`, `find`
+and `ls`, tools of other extensions included. In a `--print` run under
+`ask` there is no one to ask, so those calls are blocked.
+
+The policy does not choose a sandbox. Codex's own sandbox only matters with
+`--sandbox off`, and is then `workspace-write` under every policy but
+`bypass`.
 
 ### Allow rules
 
@@ -372,9 +396,8 @@ cannot be enforced and is refused at startup. On Linux the names inside a
 denied directory can still be listed; the contents cannot be read.
 
 Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX` or `[sandbox] level`.
-The default applies under every policy, `bypass` included; Codex `exec` under
-`ask` defaults to `read-only` because it cannot prompt. The level is on the
-status line and is fixed for a run.
+The default applies under every policy, `bypass` included. The level is on
+the status line and is fixed for a run.
 
 On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
 the process is launched through `sandbox-exec`. The macOS side has not been
@@ -386,8 +409,8 @@ Things to know:
 
 - The vendors' own sandboxes cannot start inside this one, so while it is
   active Codex is told the sandbox is external (its approvals are
-  unchanged). With `--sandbox off` Codex's sandbox follows the policy as in
-  the table above.
+  unchanged). With `--sandbox off` Codex's own sandbox is `workspace-write`
+  under every policy but `bypass`.
 - `~/.ssh` stays readable, since git over ssh and commit signing need it;
   keep keys in an agent or protect them with a passphrase if that matters.
 - An MCP server or extension that keeps data elsewhere needs its directory
@@ -519,8 +542,7 @@ Worth knowing:
   is used and unharness says so: Codex would mix the two definitions.
 - Each harness still applies its own permission rules to MCP tools. Under
   `ask`, Claude Code and Codex prompt for each call (Codex has no "always
-  allow" for these yet); `codex exec` cannot prompt, so under `ask` it
-  refuses the call (under `bypass` it runs it).
+  allow" for these yet); `codex exec` cannot prompt and has no `ask`.
 - A server that fails to start is reported in the transcript by Claude Code
   and Codex; an ACP agent does not say.
 - `unharness init` does not import MCP servers from an `unharness.toml` in
@@ -549,6 +571,7 @@ protocol     = "acp"
 command      = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 display_name = "Claude (ACP)"
 sandbox_writable = ["~/.claude", "~/.npm"]   # the agent's own state, for the sandbox
+asks_permission  = true                      # this agent asks before it acts: offer `ask`
 ```
 
 The table name is the harness id (`unharness -H claude-acp`, `/harness
@@ -558,10 +581,15 @@ launch commands from the ACP registry; those presets have not been run here
 yet, and `unharness doctor` says so. A table of the same name overrides a
 preset.
 
-The permission policy is applied by unharness, so it means the same for every
-ACP agent: `ask` shows each request, `accept-edits` answers file edits itself,
-`bypass` answers everything, `auto` falls back to `accept-edits`. An agent
-only asks for what it chooses to ask for, which is shown as a caveat on `ask`.
+The permission policy is applied by unharness to the requests an agent
+makes: `accept-edits` answers file edits itself and shows the rest, `bypass`
+answers everything, `auto` falls back to `accept-edits`, `ask` shows each
+one. But an agent only asks for what it chooses to ask for, and unharness
+cannot make it: codex-acp 2.1.1 ran a command, an edit and a network call
+without asking. So `ask` is offered only for an agent whose table has
+`asks_permission = true`; set it for one you have seen ask before it
+writes, runs a command or reaches out (claude-agent-acp 0.85.1 does). The
+presets do not have it until you add a table for them.
 Models and effort levels come from the running session, so the pickers fill
 in after the first prompt. ACP agents have no print or `--no-tui` mode, and
 sign-in is done with the agent's own CLI.
