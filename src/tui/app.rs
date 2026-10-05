@@ -132,6 +132,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/effort", "Open the reasoning effort picker"),
     ("/think", "Alias for /effort"),
     ("/policy", "Open the permission policy picker"),
+    ("/sandbox", "Open the sandbox level picker"),
     (
         "/resume",
         "Resume a saved conversation (all harnesses in it)",
@@ -196,8 +197,11 @@ pub struct App {
     /// What the user chose on a harness where the requested policy is not
     /// available. It holds for that harness only.
     pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
-    /// The sandbox level asked for and the platform's backend, fixed at launch.
+    /// The sandbox level asked for (flag, config, or `/sandbox`) and the
+    /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
+    /// The level the live session's process was started under.
+    pub session_sandbox_level: Option<SandboxLevel>,
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
@@ -553,6 +557,7 @@ impl App {
             policy_explicit: init.policy,
             policy_choice: HashMap::new(),
             sandbox: init.sandbox,
+            session_sandbox_level: None,
             guard: None,
             providers,
             models,
@@ -624,7 +629,7 @@ impl App {
         };
 
         app.transcript.push_system(format!(
-            "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
+            "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
             app.display_name(),
             app.policy_label(),
             app.sandbox_level().0
@@ -859,7 +864,8 @@ impl App {
 
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
-        match (self.sandbox_level().1, self.policy_warning()) {
+        let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
+        match (sandbox, self.policy_warning()) {
             (Some(s), Some(p)) => Some(format!("{s}; {p}")),
             (s, p) => s.or(p),
         }
@@ -2148,6 +2154,39 @@ impl App {
         true
     }
 
+    /// Choose the sandbox level for the run. Returns whether it could be
+    /// set. The sandbox is applied when a process is spawned, so a live
+    /// session is shut down and comes back under the new level with the
+    /// next prompt, resumed where the harness can.
+    pub fn set_sandbox(&mut self, level: SandboxLevel) -> bool {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before changing the sandbox");
+            return false;
+        }
+        if let Err(why) = &self.sandbox.backend
+            && level != SandboxLevel::Off
+        {
+            self.transcript
+                .push_error(format!("sandbox '{level}' is unavailable: {why}"));
+            return false;
+        }
+        self.sandbox.explicit = Some(level);
+        let restart = self.session_alive && self.session_sandbox_level != Some(level);
+        self.transcript.push_system(if restart {
+            format!(
+                "Sandbox: {level} ({} restarts under it with the next prompt)",
+                self.display_name()
+            )
+        } else {
+            format!("Sandbox: {level}")
+        });
+        if restart {
+            self.shutdown_session();
+        }
+        true
+    }
+
     pub fn set_provider(&mut self, provider: ProviderId) {
         if self.current_provider() != Some(&provider) {
             self.models.remove(&self.active);
@@ -2376,6 +2415,14 @@ impl App {
         ));
     }
 
+    pub fn open_sandbox_picker(&mut self) {
+        let wanted = self.sandbox_level().0;
+        let idx = SandboxLevel::ALL.iter().position(|l| *l == wanted);
+        self.modal = Some(Modal::Sandbox(
+            ListPicker::new(SandboxLevel::ALL.to_vec()).with_selected(idx),
+        ));
+    }
+
     pub fn open_resume_picker(&mut self) {
         let rows = self.store.list();
         if rows.is_empty() {
@@ -2421,6 +2468,8 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|e| ModalChoice::Effort(e.clone())))),
             Modal::Policy(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
+            Modal::Sandbox(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|l| ModalChoice::Sandbox(*l)))),
             Modal::Subagents(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|a| ModalChoice::Subagent(a.id.clone())))),
             Modal::Resume(p) => picker_nav(p, key.code)
@@ -2673,6 +2722,11 @@ impl App {
                             self.modal = None;
                         }
                     }
+                    ModalChoice::Sandbox(l) => {
+                        if self.set_sandbox(l) {
+                            self.modal = None;
+                        }
+                    }
                     ModalChoice::Subagent(id) => {
                         self.modal = None;
                         self.open_subagent(&id);
@@ -2732,6 +2786,17 @@ impl App {
                     )),
                 },
                 None => self.open_policy_picker(),
+            },
+            "/sandbox" => match arg {
+                Some(a) => match SandboxLevel::parse(&a) {
+                    Some(l) => {
+                        self.set_sandbox(l);
+                    }
+                    None => self.transcript.push_error(format!(
+                        "unknown sandbox level '{a}' (read-only, workspace-write, off)"
+                    )),
+                },
+                None => self.open_sandbox_picker(),
             },
             "/resume" => match arg {
                 Some(a) => self.resume_conversation(a),
@@ -2945,6 +3010,13 @@ impl App {
                 for p in PermissionPolicy::ALL {
                     if p.as_str().starts_with(s) {
                         out.push((format!("/policy {p}"), p.description().to_string()));
+                    }
+                }
+            }
+            ("/sandbox", Some(s)) => {
+                for l in SandboxLevel::ALL {
+                    if l.as_str().starts_with(s) {
+                        out.push((format!("/sandbox {l}"), l.description().to_string()));
                     }
                 }
             }
@@ -3634,6 +3706,7 @@ enum ModalChoice {
     Model(String),
     Effort(String),
     Policy(PermissionPolicy),
+    Sandbox(SandboxLevel),
     Subagent(String),
     Resume(String),
     /// (user block, also restore files)
@@ -5005,6 +5078,78 @@ pub(crate) mod tests {
         assert!(app.modal.is_none());
     }
 
+    /// The sandbox is unharness's, so the level is for the run, and a
+    /// live session comes back under it with the next prompt.
+    #[test]
+    fn the_sandbox_level_is_chosen_for_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        app.sandbox = SandboxSetup::null(None);
+        assert_eq!(app.sandbox_level().0, SandboxLevel::WorkspaceWrite);
+
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.session_sandbox_level = Some(SandboxLevel::WorkspaceWrite);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        // Not during a turn.
+        assert!(!app.set_sandbox(SandboxLevel::ReadOnly));
+        assert_eq!(app.sandbox_level().0, SandboxLevel::WorkspaceWrite);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        // The level the session already runs under restarts nothing.
+        assert!(app.set_sandbox(SandboxLevel::WorkspaceWrite));
+        assert!(app.take_actions().is_empty());
+        assert!(app.session_alive);
+
+        assert!(app.set_sandbox(SandboxLevel::ReadOnly));
+        assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+        app.submit_prompt("again".into());
+        let actions = app.take_actions();
+        assert!(
+            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+        );
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        // The choice holds across harnesses.
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
+        assert!(app.status_warning().is_none());
+    }
+
+    #[test]
+    fn an_unavailable_sandbox_level_is_refused() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.sandbox = SandboxSetup {
+            explicit: None,
+            backend: Err("no kernel".into()),
+        };
+        assert!(app.status_warning().unwrap().contains("(/sandbox)"));
+        assert!(!app.set_sandbox(SandboxLevel::ReadOnly));
+        assert_eq!(app.sandbox.explicit, None);
+
+        // The picker opens on the level in effect and stays open on a row
+        // that cannot be had.
+        app.open_sandbox_picker();
+        app.handle_modal_key(key(KeyCode::Up));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(matches!(app.modal, Some(Modal::Sandbox(_))));
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
+        assert!(app.status_warning().is_none());
+    }
+
     #[test]
     fn prompts_held_for_a_policy_keep_their_order() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5704,6 +5849,16 @@ pub(crate) mod tests {
         app.insert_char(' ');
         app.insert_char('b');
         assert_eq!(app.suggestions[0].0, "/policy bypass");
+        app.set_input("");
+        for c in "/sandbox r".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.suggestions[0].0, "/sandbox read-only");
+        app.handle_slash_command("/sandbox bogus");
+        assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
+        app.handle_slash_command("/sandbox");
+        assert!(matches!(app.modal, Some(Modal::Sandbox(_))));
+        app.modal = None;
 
         app.handle_slash_command("/effort xhigh");
         assert_eq!(app.current_effort(), Some("xhigh"));

@@ -284,6 +284,16 @@ impl SandboxSetup {
         }
     }
 
+    /// A backend that confines nothing, for tests of what happens around
+    /// the sandbox.
+    #[cfg(test)]
+    pub(crate) fn null(explicit: Option<SandboxLevel>) -> Self {
+        SandboxSetup {
+            explicit,
+            backend: Ok(Arc::new(NullBackend)),
+        }
+    }
+
     /// The level a session gets when `default` is its harness's, and why it
     /// is off if that is not what was wanted.
     pub fn level(&self, default: SandboxLevel) -> (SandboxLevel, Option<String>) {
@@ -471,25 +481,28 @@ fn expand_home(p: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct NullBackend;
+
+#[cfg(test)]
+impl SandboxBackend for NullBackend {
+    fn name(&self) -> &'static str {
+        "null"
+    }
+    fn detail(&self) -> String {
+        String::new()
+    }
+    fn wrap(&self, cmd: Command, _profile: &SandboxProfile) -> Result<Command> {
+        Ok(cmd)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
-    struct Null;
-    impl SandboxBackend for Null {
-        fn name(&self) -> &'static str {
-            "null"
-        }
-        fn detail(&self) -> String {
-            String::new()
-        }
-        fn wrap(&self, cmd: Command, _profile: &SandboxProfile) -> Result<Command> {
-            Ok(cmd)
-        }
-    }
-
     fn available() -> std::result::Result<Arc<dyn SandboxBackend>, String> {
-        Ok(Arc::new(Null))
+        Ok(Arc::new(NullBackend))
     }
 
     /// A home with a workspace, a harness state dir, credentials and

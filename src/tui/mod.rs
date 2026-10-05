@@ -514,6 +514,7 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                     Ok(handle) => {
                         *session = Some(handle);
                         app.session_alive = true;
+                        app.session_sandbox_level = Some(app.sandbox_level().0);
                     }
                     Err(e) => {
                         app.on_event(crate::core::AgentEvent::TurnCompleted {
