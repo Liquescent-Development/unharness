@@ -4,6 +4,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod code;
+pub mod drop;
 pub mod editor;
 pub mod history;
 pub mod markdown;

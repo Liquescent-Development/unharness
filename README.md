@@ -163,6 +163,12 @@ sent until you press Enter (this relies on the terminal's bracketed paste,
 which every current terminal has). A paste while a dialog is open goes into
 the dialog's text field if it has one and is otherwise ignored.
 
+Dropping files onto the terminal attaches them, as `/attach` would: a paste
+that is nothing but the paths of existing files (absolute or `~/`, bare,
+quoted or backslash-escaped as terminals write them, or `file://` URIs) is
+read as a drop. A file the active harness cannot take stays a path in the
+prompt, with a notice saying why.
+
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it), prompts waiting in the queue, and files
 attached to the next prompt. The usage line shows how full the model's
