@@ -2,7 +2,7 @@
 //! `Action`s that the event loop in `mod.rs` executes against the session.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,8 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use serde_json::Value;
 
+use super::clipboard::{self, Pasted};
+use super::drop;
 use super::history::PromptHistory;
 use super::modal::{HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
 use super::prompt;
@@ -161,6 +163,10 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
         "/attach",
         "Attach an image, PDF or text file to the next prompt: /attach <path>",
     ),
+    (
+        "/paste",
+        "Attach the image on the clipboard to the next prompt (Ctrl+V)",
+    ),
     ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/clear", "Clear the transcript"),
@@ -229,6 +235,9 @@ pub struct App {
     /// The user asked to edit the prompt in their editor; the event loop
     /// owns the terminal, so it does the work.
     edit_requested: bool,
+    /// The user asked for the clipboard's image; reading it runs tools, so
+    /// the event loop does it.
+    clipboard_requested: bool,
     pub scroll: u16,
     pub auto_scroll: bool,
 
@@ -542,6 +551,7 @@ impl App {
             copy_request: None,
             flash: None,
             edit_requested: false,
+            clipboard_requested: false,
             scroll: 0,
             auto_scroll: true,
             is_generating: false,
@@ -1363,6 +1373,23 @@ impl App {
         sent
     }
 
+    /// The attachment `path` makes, or why the active harness gets none.
+    fn attachable(&self, path: &Path) -> Result<Attachment, String> {
+        match Attachment::from_path(path) {
+            Some(a) if !self.caps().accepts(&a) => Err(self.refusal(&a)),
+            Some(a) => Ok(a),
+            None => {
+                Err("only images (png, jpg, gif, webp), PDFs and text files can be attached".into())
+            }
+        }
+    }
+
+    fn push_attachment(&mut self, a: Attachment) {
+        self.transcript
+            .push_system(format!("Attached {} to the next prompt.", a.label()));
+        self.attachments.push(a);
+    }
+
     /// Queue an image or a document for the next prompt.
     pub fn attach(&mut self, path: &str) {
         let path = path.trim().trim_matches(['"', '\'']);
@@ -1375,19 +1402,30 @@ impl App {
                 .push_error(format!("no such file: {}", path.display()));
             return;
         }
-        match Attachment::from_path(&path) {
-            Some(a) if !self.caps().accepts(&a) => {
-                let why = self.refusal(&a);
-                self.transcript.push_error(why);
+        match self.attachable(&path) {
+            Ok(a) => self.push_attachment(a),
+            Err(why) => self.transcript.push_error(why),
+        }
+    }
+
+    /// Files dropped onto the terminal: attach those the harness takes.
+    /// The others stay what they were, paths in the prompt.
+    fn attach_dropped(&mut self, pasted: &str, paths: Vec<PathBuf>) {
+        let mut refused = Vec::new();
+        for path in &paths {
+            match self.attachable(path) {
+                Ok(a) => self.push_attachment(a),
+                Err(why) => {
+                    self.transcript
+                        .push_notice(format!("{} not attached: {why}", path.display()));
+                    refused.push(path.display().to_string());
+                }
             }
-            Some(a) => {
-                self.transcript
-                    .push_system(format!("Attached {} to the next prompt.", a.label()));
-                self.attachments.push(a);
-            }
-            None => self.transcript.push_error(
-                "only images (png, jpg, gif, webp), PDFs and text files can be attached",
-            ),
+        }
+        if refused.len() == paths.len() {
+            self.insert_str(pasted);
+        } else if !refused.is_empty() {
+            self.insert_str(&refused.join(" "));
         }
     }
 
@@ -2543,6 +2581,7 @@ impl App {
                         .push_system(format!("Attached: {}", names.join(", ")));
                 }
             },
+            "/paste" => self.request_clipboard(),
             "/detach" => {
                 self.attachments.clear();
                 self.transcript.push_system("Attachments cleared.");
@@ -2600,7 +2639,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -2809,12 +2848,16 @@ impl App {
         self.suggestions.clear();
     }
 
-    /// A paste goes in whole, into whichever text field has the keyboard.
+    /// A paste goes in whole, into whichever text field has the keyboard;
+    /// one that is the paths of dropped files attaches them instead.
     /// It never acts as keystrokes: a modal without a text field ignores
     /// it rather than treat its letters as answers.
     pub fn paste(&mut self, text: &str) {
         let Some(modal) = self.modal.as_mut() else {
-            self.insert_str(text);
+            match drop::files(text) {
+                Some(paths) => self.attach_dropped(text, paths),
+                None => self.insert_str(text),
+            }
             return;
         };
         if let Some((field, multiline)) = modal.text_field() {
@@ -2824,6 +2867,48 @@ impl App {
             } else {
                 field.push_str(&text.replace('\n', " "));
             }
+        }
+    }
+
+    pub fn request_clipboard(&mut self) {
+        self.clipboard_requested = true;
+    }
+
+    pub fn take_clipboard_request(&mut self) -> bool {
+        std::mem::take(&mut self.clipboard_requested)
+    }
+
+    /// Attach what was read off the clipboard: an image, saved into `dir`
+    /// first, or the files copied to it.
+    pub fn attach_pasted(&mut self, pasted: anyhow::Result<Pasted>, dir: &Path) {
+        match pasted {
+            Ok(Pasted::Image { extension, bytes }) => {
+                if !self.caps().image_input {
+                    let why = format!(
+                        "{} does not accept images with the current model",
+                        self.short_name()
+                    );
+                    return self.transcript.push_error(why);
+                }
+                match clipboard::save_image(dir, extension, &bytes) {
+                    Ok(path) => match self.attachable(&path) {
+                        Ok(a) => self.push_attachment(a),
+                        Err(why) => self.transcript.push_error(why),
+                    },
+                    Err(e) => self.transcript.push_error(format!("not pasted: {e:#}")),
+                }
+            }
+            Ok(Pasted::Files(paths)) => {
+                for path in paths {
+                    match self.attachable(&path) {
+                        Ok(a) => self.push_attachment(a),
+                        Err(why) => self
+                            .transcript
+                            .push_error(format!("{} not attached: {why}", path.display())),
+                    }
+                }
+            }
+            Err(e) => self.transcript.push_error(format!("not pasted: {e:#}")),
         }
     }
 
@@ -4588,6 +4673,100 @@ pub(crate) mod tests {
         app.take_input();
         app.paste("/model\nsonnet");
         assert!(app.suggestions.is_empty());
+    }
+
+    #[test]
+    fn dropped_files_are_attached_instead_of_pasted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = |name: &str, content: &[u8]| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, content).unwrap();
+            path.to_str().unwrap().to_string()
+        };
+        let shot = file("my shot.png", b"png");
+        let notes = file("notes.txt", b"txt");
+        let binary = file("a.out", &[0xff, 0xfe]);
+        let labels =
+            |app: &App| -> Vec<String> { app.attachments.iter().map(|a| a.label()).collect() };
+
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        app.paste(&format!("'{shot}' "));
+        app.paste(&format!("file://{}\n", notes.replace(' ', "%20")));
+        assert_eq!(labels(&app), ["my shot.png", "notes.txt"]);
+        assert!(app.input.is_empty());
+
+        // Paths in a sentence, and paths of no file, are text.
+        app.paste(&format!("see {notes}"));
+        app.paste(&format!(" {notes}.missing"));
+        assert_eq!(app.input, format!("see {notes} {notes}.missing"));
+        assert_eq!(app.attachments.len(), 2);
+
+        // Codex takes the image; the others stay paths, with the reason.
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CODEX, None, false);
+        app.paste(&format!("{notes}\n{shot}\n{binary}"));
+        assert_eq!(labels(&app), ["my shot.png"]);
+        assert_eq!(app.input, format!("{notes} {binary}"));
+        let notices: Vec<&str> = app
+            .transcript
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                super::super::transcript::Block::Notice(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|text| text.contains("not attached"))
+            .collect();
+        assert_eq!(notices.len(), 2);
+        assert!(
+            notices[0].contains("does not accept file attachments")
+                && notices[0].contains("notes.txt not attached: ")
+        );
+        assert!(notices[1].contains("a.out not attached: only images"));
+
+        // Nothing it can take: the paste goes in as it came.
+        app.take_input();
+        app.paste(&format!("'{notes}' "));
+        assert_eq!(app.input, format!("'{notes}' "));
+    }
+
+    #[test]
+    fn clipboard_images_are_saved_and_attached() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("pasted");
+        let image = || {
+            Ok(Pasted::Image {
+                extension: "png",
+                bytes: b"png".to_vec(),
+            })
+        };
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+        app.handle_slash_command("/paste");
+        assert!(app.take_clipboard_request() && !app.take_clipboard_request());
+        app.attach_pasted(image(), &dir);
+        let [a] = &app.attachments[..] else {
+            panic!("one attachment expected");
+        };
+        assert!(a.is_image() && a.path().starts_with(&dir));
+        assert_eq!(std::fs::read(a.path()).unwrap(), b"png");
+
+        // Copied files are attached where they are.
+        std::fs::write(tmp.path().join("notes.txt"), b"txt").unwrap();
+        app.attach_pasted(Ok(Pasted::Files(vec![tmp.path().join("notes.txt")])), &dir);
+        assert_eq!(app.attachments[1].path(), tmp.path().join("notes.txt"));
+
+        // Nothing read, and the reason, when there was nothing to read.
+        app.attach_pasted(Err(anyhow::anyhow!("over ssh …")), &dir);
+        assert_eq!(app.attachments.len(), 2);
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(super::super::transcript::Block::Error(text)) if text == "not pasted: over ssh …"
+        ));
+
+        // No image is written for a harness that takes none.
+        let dir = tmp.path().join("unused");
+        let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
+        app.attach_pasted(image(), &dir);
+        assert!(app.attachments.is_empty() && !dir.exists());
     }
 
     #[test]

@@ -4,6 +4,7 @@
 pub mod app;
 pub mod clipboard;
 pub mod code;
+pub mod drop;
 pub mod editor;
 pub mod history;
 pub mod markdown;
@@ -239,6 +240,12 @@ async fn event_loop(
             app.flash(message);
         }
 
+        if app.take_clipboard_request() {
+            let pasted = clipboard::read(clipboard::Desktop::detect());
+            app.attach_pasted(pasted, &clipboard::default_image_dir());
+            needs_redraw = true;
+        }
+
         if app.take_edit_request() {
             // The editor needs the keyboard to itself: stop our reader for
             // as long as it runs.
@@ -361,6 +368,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         // from terminals that report modifiers on Enter.
         (true, KeyCode::Char('j')) => app.insert_newline(),
         (true, KeyCode::Char('g')) => app.request_edit(),
+        // Terminals paste text themselves and send nothing for an image.
+        (true, KeyCode::Char('v')) => app.request_clipboard(),
         (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
@@ -870,6 +879,14 @@ mod tests {
         assert!(app.viewing.is_none() && app.take_actions().is_empty());
         assert_eq!(app.subagents.len(), 2);
         assert_eq!(app.input, "draft");
+    }
+
+    #[test]
+    fn ctrl_v_asks_for_the_clipboard_and_types_nothing() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('v'));
+        assert!(app.input.is_empty());
+        assert!(app.take_clipboard_request() && !app.take_clipboard_request());
     }
 
     #[test]
