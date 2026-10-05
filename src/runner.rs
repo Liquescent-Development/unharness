@@ -171,12 +171,13 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             None => eprintln!("{} sandbox: {}", "[unharness]".dimmed(), sandbox.level()),
         }
         let (servers, problems) = config.mcp_servers();
-        let (mcp_servers, mcp_warning) = mcp::for_harness(
+        let (mcp_servers, mcp_warnings) = mcp::for_harness(
             &servers,
             harness.capabilities().mcp,
             harness.descriptor().short_name,
+            &harness.own_mcp_servers(),
         );
-        for w in problems.into_iter().chain(mcp_warning) {
+        for w in problems.into_iter().chain(mcp_warnings) {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
         let model_ref = model.map(|m| {

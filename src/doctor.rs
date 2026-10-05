@@ -8,8 +8,10 @@ use crate::config::Config;
 use crate::core::conversations::ConversationStore;
 use crate::core::mcp;
 use crate::core::registry::Registry;
-use crate::core::sandbox::{SandboxLevel, SandboxSetup};
-use crate::core::{McpSupport, PermissionPolicy};
+use crate::core::sandbox::{
+    self, Sandbox, SandboxEnv, SandboxLevel, SandboxPaths, SandboxRequest, SandboxSetup,
+};
+use crate::core::{McpChannel, McpSupport, PermissionPolicy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -38,7 +40,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     for (h, probe) in registry.probe_all(&overrides) {
         let d = h.descriptor();
         if probe.binary.is_some() {
-            mcp_support.push((d.short_name, h.capabilities().mcp));
+            mcp_support.push((d.short_name, h.capabilities().mcp, h.own_mcp_servers()));
         }
         match probe.binary {
             Some(path) => {
@@ -180,7 +182,29 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     }
     println!();
 
-    report_mcp_servers(config, &mcp_support);
+    // The servers are started the way a session would start them: in the
+    // workspace, inside the sandbox (without any one harness's own paths).
+    let workspace = find_workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    match sandbox::resolve(
+        &SandboxRequest {
+            explicit: sandbox.explicit,
+            default: SandboxLevel::WorkspaceWrite,
+            workspace: &workspace,
+            harness: &SandboxPaths::default(),
+            extra_writable: &config.sandbox.writable,
+            extra_readable: &config.sandbox.readable,
+            extra_deny_read: &config.sandbox.deny_read,
+        },
+        &sandbox.backend,
+        &SandboxEnv::current(),
+    ) {
+        Ok(probe_sandbox) => report_mcp_servers(config, &mcp_support, &probe_sandbox, cwd),
+        Err(e) => println!(
+            "{} {}\n",
+            "MCP Servers:".bold(),
+            format!("not checked, the sandbox could not be set up: {e:#}").yellow()
+        ),
+    }
 
     // 2. Skills CLI
     println!("{}", "Skills CLI:".bold());
@@ -303,9 +327,13 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
 /// How long an MCP server gets to answer the handshake.
 const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// What an installed harness does with MCP servers: its name, what it
+/// declares, and the servers it has itself.
+type McpTaker = (&'static str, McpSupport, Vec<String>);
+
 /// 1b. The configured MCP servers: whether each one answers, and which
 /// installed harnesses get it.
-fn report_mcp_servers(config: &Config, harnesses: &[(&str, McpSupport)]) {
+fn report_mcp_servers(config: &Config, harnesses: &[McpTaker], sandbox: &Sandbox, cwd: &Path) {
     if config.mcp_servers.is_empty() {
         return;
     }
@@ -315,8 +343,15 @@ fn report_mcp_servers(config: &Config, harnesses: &[(&str, McpSupport)]) {
         let status = if server.is_http() {
             Ok("remote (not contacted)".to_string())
         } else {
-            mcp::probe_stdio(server, MCP_PROBE_TIMEOUT)
-                .map(|p| format!("{} · tools: {}", p.server, p.tools))
+            mcp::probe_stdio(server, MCP_PROBE_TIMEOUT, sandbox, cwd)
+                .map(|p| {
+                    let more = if p.more_tools { "+" } else { "" };
+                    format!("{} · tools: {}{more}", p.server, p.tools)
+                })
+                .map_err(|e| match sandbox.level() {
+                    SandboxLevel::Off => e,
+                    level => format!("{e} (started in the {level} sandbox, as a harness would)"),
+                })
         };
         let (marker, status) = match status {
             Ok(s) => ("[✓]".green().bold(), s.normal()),
@@ -329,27 +364,37 @@ fn report_mcp_servers(config: &Config, harnesses: &[(&str, McpSupport)]) {
             server.target().dimmed()
         );
         println!("      {} {}", "↳".dimmed(), status);
-        let (takes, lacks): (Vec<_>, Vec<_>) = harnesses.iter().partition(|(name, support)| {
-            !mcp::for_harness(std::slice::from_ref(server), *support, name)
+
+        let mut reach: [(&str, Vec<&str>); 4] = [
+            ("passed to", vec![]),
+            ("if the agent takes http servers", vec![]),
+            ("its own server of this name is used by", vec![]),
+            ("not to", vec![]),
+        ];
+        for (name, support, own) in harnesses {
+            let passed = !mcp::for_harness(std::slice::from_ref(server), *support, name, own)
                 .0
-                .is_empty()
-        });
-        let names = |list: &[&(&str, McpSupport)]| -> String {
-            let names: Vec<&str> = list.iter().map(|(name, _)| *name).collect();
-            names.join(", ")
-        };
-        let mut reach = vec![format!(
-            "passed to: {}",
-            if takes.is_empty() {
-                "no installed harness".to_string()
-            } else {
-                names(&takes)
-            }
-        )];
-        if !lacks.is_empty() {
-            reach.push(format!("not to: {}", names(&lacks)));
+                .is_empty();
+            // Over a protocol, http servers go along only if the session
+            // says it takes them.
+            let undecided =
+                server.is_http() && support.channel == Some(McpChannel::Protocol) && !support.http;
+            let group = match (passed, undecided) {
+                (true, false) => 0,
+                (true, true) => 1,
+                (false, _) if own.contains(&server.name) => 2,
+                (false, _) => 3,
+            };
+            reach[group].1.push(name);
         }
-        println!("      {} {}", "↳".dimmed(), reach.join(" · ").dimmed());
+        let reach: Vec<String> = reach
+            .iter()
+            .filter(|(_, names)| !names.is_empty())
+            .map(|(label, names)| format!("{label}: {}", names.join(", ")))
+            .collect();
+        if !reach.is_empty() {
+            println!("      {} {}", "↳".dimmed(), reach.join(" · ").dimmed());
+        }
     }
     for (name, _) in config
         .mcp_servers

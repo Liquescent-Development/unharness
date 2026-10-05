@@ -1,6 +1,6 @@
 //! Long-lived Codex session over `codex app-server` (JSON-RPC 2.0 on stdio).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::app_server_parse::CodexAppServerParser;
-use super::app_server_parse::{ELICITATION_PREFIX, MCP_APPROVAL};
+use super::app_server_parse::ELICITATION_PREFIX;
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
@@ -56,6 +56,18 @@ pub fn policy_params(policy: PermissionPolicy, confined: bool) -> (&'static str,
     }
 }
 
+/// The answer to an MCP tool-call approval, which Codex asks for as an
+/// elicitation with nothing to fill in.
+pub fn encode_mcp_approval(decision: &PermissionDecision) -> Value {
+    match decision {
+        PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
+            json!({"action": "accept", "content": {}})
+        }
+        PermissionDecision::Deny { .. } => json!({"action": "decline"}),
+        PermissionDecision::Answer(_) => json!({"action": "cancel"}),
+    }
+}
+
 pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> Value {
     if let PermissionKind::Input { title, .. } = kind
         && title.starts_with(ELICITATION_PREFIX)
@@ -68,22 +80,6 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
             PermissionDecision::Answer(Value::Bool(b)) => {
                 json!({"action": "accept", "content": {"value": b}})
             }
-            PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
-                json!({"action": "accept", "content": {}})
-            }
-            PermissionDecision::Deny { .. } => json!({"action": "decline"}),
-            PermissionDecision::Answer(_) => json!({"action": "cancel"}),
-        };
-    }
-    if let PermissionKind::ToolUse {
-        suggestions: Some(s),
-        ..
-    } = kind
-        && s.get(MCP_APPROVAL).is_some()
-    {
-        // The request offers to remember the answer (`persist`); how to ask
-        // for that is not in the schema, so "always" allows this call only.
-        return match decision {
             PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
                 json!({"action": "accept", "content": {}})
             }
@@ -130,9 +126,11 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         // that it cannot create user namespaces.
         cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
     }
-    for o in super::mcp_overrides(&cfg.mcp_servers) {
+    let mcp = super::mcp_args(&cfg.mcp_servers);
+    for o in &mcp.overrides {
         cmd.arg("-c").arg(o);
     }
+    cmd.envs(mcp.env);
     cmd.args(&cfg.extra_args);
     for (k, v) in &cfg.env {
         cmd.env(k, v);
@@ -164,6 +162,8 @@ struct Driver {
     outstanding: HashMap<u64, Outstanding>,
     /// Server requests awaiting a decision: our string id → (rpc id, kind).
     pending: HashMap<String, (Value, PermissionKind)>,
+    /// The pending requests that are elicitations (by our string id).
+    elicitations: HashSet<String>,
     thread_id: Option<String>,
     turn_id: Option<String>,
     /// Sub-agent thread id → its running turn.
@@ -224,6 +224,7 @@ async fn drive(
         next_id: 0,
         outstanding: HashMap::new(),
         pending: HashMap::new(),
+        elicitations: HashSet::new(),
         thread_id: None,
         turn_id: None,
         child_turns: HashMap::new(),
@@ -314,10 +315,16 @@ async fn drive(
                         }
                     }
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some((rpc_id, kind)) => d
-                            .proc
-                            .write_line(&jsonrpc::response(&rpc_id, encode_decision(&kind, &decision)))
-                            .await,
+                        Some((rpc_id, kind)) => {
+                            let approval = d.elicitations.remove(&id)
+                                && matches!(kind, PermissionKind::ToolUse { .. });
+                            let answer = if approval {
+                                encode_mcp_approval(&decision)
+                            } else {
+                                encode_decision(&kind, &decision)
+                            };
+                            d.proc.write_line(&jsonrpc::response(&rpc_id, answer)).await
+                        }
                         None => {
                             let _ = events.send(AgentEvent::Notice(format!("no pending codex request {id}"))).await;
                             Ok(())
@@ -470,6 +477,9 @@ async fn drive(
                                 if !supported {
                                     let _ = d.proc.write_line(&jsonrpc::error_response(id, -32601, "unsupported by unharness")).await;
                                 } else {
+                                    if method == "mcpServer/elicitation/request" {
+                                        d.elicitations.insert(rid.clone());
+                                    }
                                     d.pending.insert(rid, (id.clone(), PermissionKind::Confirm { title: String::new(), message: None }));
                                 }
                             }

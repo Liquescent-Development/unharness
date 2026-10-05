@@ -16,11 +16,6 @@ use crate::core::{
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
 pub const ELICITATION_PREFIX: &str = "MCP ";
 
-/// Key in a tool permission's `suggestions` marking the approval of an MCP
-/// tool call, which Codex asks for as an elicitation and which is answered
-/// like one.
-pub const MCP_APPROVAL: &str = "mcpToolCallApproval";
-
 #[derive(Debug, Default)]
 pub struct CodexAppServerParser {
     turn_started: bool,
@@ -36,11 +31,25 @@ pub struct CodexAppServerParser {
     child_names: HashMap<String, String>,
     /// Sub-agent threads with a turn in progress.
     running_children: HashSet<String>,
-    /// The MCP tool call that started last: (item id, name). The request to
-    /// approve it follows and names neither.
-    mcp_call: Option<(String, String)>,
+    /// The MCP tool call in progress on each thread: thread id → (item id,
+    /// name). The request to approve it follows and names only the thread.
+    mcp_calls: HashMap<String, (String, String)>,
     /// MCP servers already reported as failed; Codex retries and says so again.
     failed_mcp_servers: HashSet<String>,
+}
+
+/// An `mcpToolCall` item's (id, `server/tool`).
+fn mcp_call(item: &Value) -> Option<(String, String)> {
+    (s(item.get("type")?) == "mcpToolCall").then(|| {
+        (
+            s(item.get("id").unwrap_or(&Value::Null)).to_string(),
+            format!(
+                "{}/{}",
+                s(item.get("server").unwrap_or(&Value::Null)),
+                s(item.get("tool").unwrap_or(&Value::Null))
+            ),
+        )
+    })
 }
 
 impl CodexAppServerParser {
@@ -189,11 +198,19 @@ impl CodexAppServerParser {
             }
             "item/started" => {
                 if let Some(item) = p.get("item") {
+                    if let Some(call) = mcp_call(item) {
+                        let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+                        self.mcp_calls.insert(thread.to_string(), call);
+                    }
                     self.on_item_started(item, &mut out);
                 }
             }
             "item/completed" => {
                 if let Some(item) = p.get("item") {
+                    if mcp_call(item).is_some() {
+                        self.mcp_calls
+                            .remove(s(p.get("threadId").unwrap_or(&Value::Null)));
+                    }
                     self.on_item_completed(item, &mut out);
                 }
             }
@@ -365,19 +382,11 @@ impl CodexAppServerParser {
                 name: "apply_patch".into(),
                 input: json!({"changes": item.get("changes").cloned().unwrap_or(Value::Null)}),
             }),
-            "mcpToolCall" => {
-                let name = format!(
-                    "{}/{}",
-                    s(item.get("server").unwrap_or(&Value::Null)),
-                    s(item.get("tool").unwrap_or(&Value::Null))
-                );
-                self.mcp_call = Some((id.clone(), name.clone()));
-                out.push(AgentEvent::ToolCallStarted {
-                    id,
-                    name,
-                    input: item.get("arguments").cloned().unwrap_or(Value::Null),
-                });
-            }
+            "mcpToolCall" => out.push(AgentEvent::ToolCallStarted {
+                id,
+                name: mcp_call(item).map(|(_, name)| name).unwrap_or_default(),
+                input: item.get("arguments").cloned().unwrap_or(Value::Null),
+            }),
             "dynamicToolCall" => out.push(AgentEvent::ToolCallStarted {
                 id,
                 name: s(item.get("tool").unwrap_or(&Value::Null)).to_string(),
@@ -613,8 +622,9 @@ impl CodexAppServerParser {
                     .and_then(Value::as_str)
                     == Some("mcp_tool_call") =>
             {
-                let (call, tool) = match self.mcp_call.take() {
-                    Some((id, name)) => (Some(id), name),
+                let thread = s(p.get("threadId").unwrap_or(&Value::Null));
+                let (call, tool) = match self.mcp_calls.get(thread) {
+                    Some((id, name)) => (Some(id.clone()), name.clone()),
                     None => (
                         None,
                         s(p.get("serverName").unwrap_or(&Value::Null)).to_string(),
@@ -627,9 +637,10 @@ impl CodexAppServerParser {
                         .pointer("/_meta/tool_params")
                         .cloned()
                         .unwrap_or(json!({})),
-                    suggestions: Some(json!({
-                        MCP_APPROVAL: p.pointer("/_meta/persist").cloned().unwrap_or(Value::Null),
-                    })),
+                    // The request offers to remember the answer (`persist`);
+                    // how to ask for that is not in the schema, so "always"
+                    // is not offered.
+                    suggestions: None,
                     description: p.get("message").and_then(Value::as_str).map(str::to_string),
                 }
             }

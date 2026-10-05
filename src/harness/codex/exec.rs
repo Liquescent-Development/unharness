@@ -98,9 +98,11 @@ impl PerTurnProtocol for CodexExec {
                 .arg("-c")
                 .arg(format!("model_reasoning_effort=\"{e}\""));
         }
-        for o in super::mcp_overrides(&state.mcp_servers) {
+        let mcp = super::mcp_args(&state.mcp_servers);
+        for o in &mcp.overrides {
             command.arg("-c").arg(o);
         }
+        command.envs(mcp.env);
         command.args(&state.extra_args);
         command.arg("-");
         for (k, v) in &state.env {

@@ -127,6 +127,13 @@ pub trait Harness: Send + Sync {
         Vec::new()
     }
 
+    /// The MCP servers this CLI has in its own configuration, when one of
+    /// the same name handed over for a session would be mixed with it
+    /// instead of replacing it. Those are left to the CLI.
+    fn own_mcp_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The sandbox level when the user set none.
     fn default_sandbox(&self, _policy: PermissionPolicy) -> SandboxLevel {
         SandboxLevel::WorkspaceWrite

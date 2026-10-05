@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::core::checkpoints::project_key;
@@ -112,16 +112,32 @@ impl Config {
     /// Both live under the user's config directory. Nothing is read from the
     /// workspace itself: an agent can write there, and a config it edited
     /// would decide its own sandbox and permissions on the next run.
-    pub fn load_effective(workspace_root: Option<&Path>) -> Self {
-        let global_config = Self::load_global().unwrap_or_default();
-        let workspace_config = workspace_root
-            .zip(Self::workspace_store())
-            .and_then(|(root, store)| Self::load_workspace_in(&store, root));
-
-        match workspace_config {
+    ///
+    /// A file that does not parse is an error, not an empty config: the
+    /// defaults it would silently fall back to include the sandbox level
+    /// and the permission policy.
+    pub fn load_effective(workspace_root: Option<&Path>) -> Result<Self> {
+        let global_config = Self::load_global()?;
+        let workspace_config = match workspace_root.zip(Self::workspace_store()) {
+            Some((root, store)) => Self::load_workspace_in(&store, root)?,
+            None => None,
+        };
+        Ok(match workspace_config {
             Some(local) => Self::merge(global_config, local),
             None => global_config,
-        }
+        })
+    }
+
+    /// Read and parse a config file; `None` when there is none.
+    fn load_file(path: &Path) -> Result<Option<Self>> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        toml::from_str(&content)
+            .map(Some)
+            .with_context(|| format!("{} is not a valid unharness config", path.display()))
     }
 
     /// Where workspace overrides are kept: `<config dir>/unharness/workspaces`.
@@ -135,9 +151,8 @@ impl Config {
         store.join(format!("{}.toml", project_key(&root)))
     }
 
-    pub fn load_workspace_in(store: &Path, root: &Path) -> Option<Self> {
-        let content = std::fs::read_to_string(Self::workspace_path_in(store, root)).ok()?;
-        toml::from_str(&content).ok()
+    pub fn load_workspace_in(store: &Path, root: &Path) -> Result<Option<Self>> {
+        Self::load_file(&Self::workspace_path_in(store, root))
     }
 
     pub fn save_workspace_in(&self, store: &Path, root: &Path) -> Result<PathBuf> {
@@ -176,13 +191,10 @@ impl Config {
     }
 
     pub fn load_global() -> Result<Self> {
-        if let Some(path) = Self::global_path()
-            && path.exists()
-        {
-            let content = std::fs::read_to_string(&path)?;
-            return Ok(toml::from_str(&content)?);
+        match Self::global_path() {
+            Some(path) => Ok(Self::load_file(&path)?.unwrap_or_default()),
+            None => Ok(Config::default()),
         }
-        Ok(Config::default())
     }
 
     /// Parse the workspace's old in-tree config, for importing it.
@@ -361,7 +373,7 @@ url = "https://example.com/mcp"
         let tmp = tempfile::tempdir().unwrap();
         let (store, root) = (tmp.path().join("store"), tmp.path().join("proj"));
         std::fs::create_dir_all(&root).unwrap();
-        assert!(Config::load_workspace_in(&store, &root).is_none());
+        assert!(Config::load_workspace_in(&store, &root).unwrap().is_none());
 
         let cfg = Config {
             default_harness: Some("pi".into()),
@@ -376,6 +388,7 @@ url = "https://example.com/mcp"
         );
         assert_eq!(
             Config::load_workspace_in(&store, &root)
+                .unwrap()
                 .unwrap()
                 .default_harness
                 .as_deref(),
@@ -398,9 +411,33 @@ url = "https://example.com/mcp"
         assert_eq!(
             Config::load_workspace_in(&store, &root)
                 .unwrap()
+                .unwrap()
                 .default_harness
                 .as_deref(),
             Some("pi")
+        );
+    }
+
+    #[test]
+    fn a_config_that_does_not_parse_is_an_error_naming_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, root) = (tmp.path().join("store"), tmp.path().join("proj"));
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let path = Config::workspace_path_in(&store, &root);
+        // A number where a string belongs, in a table that is easy to get wrong.
+        std::fs::write(
+            &path,
+            "[sandbox]\nlevel = \"read-only\"\n[mcp_servers.x]\ncommand = \"x\"\nenv = { PORT = 8080 }\n",
+        )
+        .unwrap();
+        let error = format!(
+            "{:#}",
+            Config::load_workspace_in(&store, &root).unwrap_err()
+        );
+        assert!(
+            error.contains(&path.display().to_string()) && error.contains("PORT"),
+            "{error}"
         );
     }
 

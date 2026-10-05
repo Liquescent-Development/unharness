@@ -74,13 +74,26 @@ pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
     if !config_path.exists() {
         match Config::legacy_workspace_file(cwd) {
             Some(legacy) => {
-                Config::load_legacy(cwd)?.save_workspace_in(store, cwd)?;
+                let mut imported = Config::load_legacy(cwd)?;
+                // The in-tree file is older than the MCP table, and an agent
+                // can write it: commands to run are not taken from there.
+                let left_out = std::mem::take(&mut imported.mcp_servers);
+                imported.save_workspace_in(store, cwd)?;
                 println!(
                     "{} Imported {} into {}",
                     "[✓]".green().bold(),
                     legacy.display(),
                     config_path.display().to_string().bold()
                 );
+                if !left_out.is_empty() {
+                    let names: Vec<&str> = left_out.keys().map(String::as_str).collect();
+                    println!(
+                        "    {} its MCP servers were not imported ({}); add the ones you want to {}",
+                        "[!]".yellow().bold(),
+                        names.join(", "),
+                        config_path.display()
+                    );
+                }
                 println!(
                     "    {} is no longer read and can be deleted",
                     legacy.display()
@@ -183,12 +196,18 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("unharness.toml"),
-            "default_harness = \"codex\"\n",
+            "default_harness = \"codex\"\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
         )
         .unwrap();
         init_workspace_in(dir.path(), store.path()).unwrap();
-        let load = || Config::load_workspace_in(store.path(), dir.path()).unwrap();
+        let load = || {
+            Config::load_workspace_in(store.path(), dir.path())
+                .unwrap()
+                .unwrap()
+        };
         assert_eq!(load().default_harness.as_deref(), Some("codex"));
+        // Commands to run are not taken from a file an agent can write.
+        assert!(load().mcp_servers.is_empty());
 
         // Later edits to the in-tree file change nothing.
         fs::write(

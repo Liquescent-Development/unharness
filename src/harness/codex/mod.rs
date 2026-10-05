@@ -266,6 +266,19 @@ impl Harness for CodexHarness {
         guarded
     }
 
+    /// Codex merges a `-c mcp_servers.<name>` override key by key into a
+    /// server of that name in `config.toml` (checked on 0.157.0 with `codex
+    /// mcp get`): a `command` over its `url` stops Codex from starting, and
+    /// its `args` and `env` stay.
+    fn own_mcp_servers(&self) -> Vec<String> {
+        let home = dirs::home_dir().unwrap_or_default();
+        let dir = codex_home();
+        let dir = dir.strip_prefix("~").map(|p| home.join(p)).unwrap_or(dir);
+        std::fs::read_to_string(dir.join("config.toml"))
+            .map(|text| mcp_server_names(&text))
+            .unwrap_or_default()
+    }
+
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
             writable: vec![codex_home()],
@@ -325,9 +338,7 @@ impl Harness for CodexHarness {
         if let Some(e) = &cfg.effort {
             cmd.arg("-c").arg(format!("model_reasoning_effort=\"{e}\""));
         }
-        for o in mcp_overrides(&cfg.mcp_servers) {
-            cmd.arg("-c").arg(o);
-        }
+        mcp_args(&cfg.mcp_servers).apply(&mut cmd);
         cmd.args(&cfg.extra_args);
         if let Some(p) = &cfg.prompt {
             cmd.arg(p);
@@ -336,17 +347,50 @@ impl Harness for CodexHarness {
     }
 }
 
-/// `-c` overrides that define these servers for one run, in the shape of
-/// `[mcp_servers.<name>]` in Codex's `config.toml`, which is not written.
-pub fn mcp_overrides(servers: &[McpServer]) -> Vec<String> {
+/// The `[mcp_servers.<name>]` tables of a Codex `config.toml`.
+fn mcp_server_names(config: &str) -> Vec<String> {
+    config
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| Some(t.get("mcp_servers")?.as_table()?.keys().cloned().collect()))
+        .unwrap_or_default()
+}
+
+/// How a set of MCP servers is handed to one Codex process.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct McpArgs {
+    /// `-c` values, in the shape of `[mcp_servers.<name>]` in Codex's
+    /// `config.toml`, which is not written.
+    pub overrides: Vec<String>,
+    /// Environment for the Codex process: the header values, which the
+    /// overrides only name (`env_http_headers`).
+    pub env: Vec<(String, String)>,
+}
+
+impl McpArgs {
+    pub fn apply(&self, cmd: &mut Command) {
+        for o in &self.overrides {
+            cmd.arg("-c").arg(o);
+        }
+        cmd.envs(self.env.iter().map(|(k, v)| (k, v)));
+    }
+}
+
+/// Define these servers for one run. Header values go through the
+/// environment, since a command line is readable by every local user. A
+/// command server's `env` has no such way: Codex can pass on variables of
+/// its own environment (`env_vars`), but only under the same name, and
+/// setting them on Codex would hand them to everything else it starts.
+pub fn mcp_args(servers: &[McpServer]) -> McpArgs {
     let text = |s: &String| toml::Value::String(s.clone());
     let table = |map: &std::collections::BTreeMap<String, String>| {
         toml::Value::Table(map.iter().map(|(k, v)| (k.clone(), text(v))).collect())
     };
-    let mut overrides = Vec::new();
+    let mut out = McpArgs::default();
     for s in servers {
         let mut set = |key: &str, value: toml::Value| {
-            overrides.push(format!("mcp_servers.{}.{key}={value}", s.name));
+            out.overrides
+                .push(format!("mcp_servers.{}.{key}={value}", s.name));
         };
         match &s.transport {
             McpTransport::Stdio { command, args, env } => {
@@ -360,13 +404,23 @@ pub fn mcp_overrides(servers: &[McpServer]) -> Vec<String> {
             }
             McpTransport::Http { url, headers } => {
                 set("url", text(url));
-                if !headers.is_empty() {
-                    set("http_headers", table(headers));
+                let mut named = std::collections::BTreeMap::new();
+                for (header, value) in headers {
+                    let var = format!("UNHARNESS_MCP_HEADER_{}", out.env.len());
+                    out.env.push((var.clone(), value.clone()));
+                    named.insert(header.clone(), var);
+                }
+                if !named.is_empty() {
+                    out.overrides.push(format!(
+                        "mcp_servers.{}.env_http_headers={}",
+                        s.name,
+                        table(&named)
+                    ));
                 }
             }
         }
     }
-    overrides
+    out
 }
 
 /// `config.toml` without the trust entry of `workspace`, which Codex adds by
@@ -568,20 +622,34 @@ mod tests {
     }
 
     #[test]
+    fn own_servers_are_read_from_the_config() {
+        let config = "model = \"x\"\n[mcp_servers.cq]\ncommand = \"cq\"\n[mcp_servers.docs]\nurl = \"https://e.com\"\n";
+        assert_eq!(mcp_server_names(config), ["cq", "docs"]);
+        assert!(mcp_server_names("model = \"x\"").is_empty());
+        assert!(mcp_server_names("not toml [").is_empty());
+    }
+
+    #[test]
     fn mcp_servers_are_config_overrides() {
         let servers = crate::core::testing::sample_mcp_servers();
+        let mcp = mcp_args(&servers);
         assert_eq!(
-            mcp_overrides(&servers),
+            mcp.overrides,
             [
                 r#"mcp_servers.files.command="/usr/bin/files-mcp""#,
                 r#"mcp_servers.files.args=["--root", "/my work"]"#,
                 r#"mcp_servers.files.env={ TOKEN = 't"1' }"#,
                 r#"mcp_servers.docs.url="https://example.com/mcp""#,
-                r#"mcp_servers.docs.http_headers={ Authorization = "Bearer x" }"#,
+                r#"mcp_servers.docs.env_http_headers={ Authorization = "UNHARNESS_MCP_HEADER_0" }"#,
             ]
         );
+        // The header's value is in the environment, not on the command line.
+        assert_eq!(
+            mcp.env,
+            [("UNHARNESS_MCP_HEADER_0".to_string(), "Bearer x".to_string())]
+        );
         // Each value is TOML, as `-c` parses it.
-        for o in mcp_overrides(&servers) {
+        for o in &mcp.overrides {
             let (_, value) = o.split_once('=').unwrap();
             assert!(format!("v = {value}").parse::<toml::Table>().is_ok(), "{o}");
         }
@@ -591,14 +659,20 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             prompt: Some("fix it".into()),
             print_mode: true,
-            mcp_servers: servers[..1].to_vec(),
+            mcp_servers: servers,
             ..Default::default()
         };
-        let a = args(&CodexHarness::default().build_print_command(&cfg).unwrap());
+        let cmd = CodexHarness::default().build_print_command(&cfg).unwrap();
+        let a = args(&cmd);
         assert!(
             a.starts_with("exec --skip-git-repo-check -c mcp_servers.files.command=")
-                && a.ends_with(" fix it"),
+                && a.ends_with(" fix it")
+                && !a.contains("Bearer"),
             "{a}"
+        );
+        assert!(
+            cmd.get_envs()
+                .any(|(k, v)| k == "UNHARNESS_MCP_HEADER_0" && v.is_some_and(|v| v == "Bearer x"))
         );
     }
 }

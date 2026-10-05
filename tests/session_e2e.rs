@@ -901,23 +901,6 @@ async fn acp_handshake_turns_and_permission_round_trip() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    cfg.mcp_servers = vec![
-        McpServer {
-            name: "files".into(),
-            transport: McpTransport::Stdio {
-                command: "/usr/bin/files-mcp".into(),
-                args: vec!["/work".into()],
-                env: Default::default(),
-            },
-        },
-        McpServer {
-            name: "docs".into(),
-            transport: McpTransport::Http {
-                url: "https://example.com/mcp".into(),
-                headers: Default::default(),
-            },
-        },
-    ];
     let mut handle = acp_harness().start_session(cfg).unwrap();
 
     // Sent before the handshake finishes: the driver holds it until the
@@ -961,14 +944,7 @@ async fn acp_handshake_turns_and_permission_round_trip() {
     assert_eq!(sent[0]["method"], "initialize");
     assert_eq!(sent[0]["params"]["protocolVersion"], 1);
     assert_eq!(sent[1]["method"], "session/new");
-    // The agent announced `mcpCapabilities.http`, so both servers go along.
-    assert_eq!(
-        sent[1]["params"]["mcpServers"],
-        serde_json::json!([
-            {"name": "files", "command": "/usr/bin/files-mcp", "args": ["/work"], "env": []},
-            {"type": "http", "name": "docs", "url": "https://example.com/mcp", "headers": []},
-        ])
-    );
+    assert_eq!(sent[1]["params"]["mcpServers"], serde_json::json!([]));
     assert_eq!(sent[2]["method"], "session/prompt");
     assert_eq!(sent[2]["params"]["prompt"][0]["text"], "pong?");
     assert!(
@@ -988,6 +964,67 @@ async fn acp_handshake_turns_and_permission_round_trip() {
         next_event(&mut handle).await,
         AgentEvent::ProcessExited { .. }
     ));
+}
+
+#[tokio::test]
+async fn acp_session_gets_the_mcp_servers_and_runs_their_tools() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_mcp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    // The server of the recording, and an http one the agent also takes.
+    cfg.mcp_servers = vec![
+        McpServer {
+            name: "probe".into(),
+            transport: McpTransport::Stdio {
+                command: "/usr/bin/python3".into(),
+                args: vec!["/WORKSPACE/probe_mcp.py".into(), "argA".into()],
+                env: [("PROBE_WORD".to_string(), "zanzibar".to_string())].into(),
+            },
+        },
+        McpServer {
+            name: "docs".into(),
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: Default::default(),
+            },
+        },
+    ];
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle.send(SessionCommand::turn("call it")).await.unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult { output, is_error: false, .. } if output == "zanzibar argA"
+    )));
+
+    // What the recorder sent for the probe server is what the driver sends.
+    let recorded: Value = std::fs::read_to_string(&fixture)
+        .unwrap()
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l.strip_prefix(">> ")?).ok())
+        .find(|v| v["method"] == "session/new")
+        .expect("the recorded session/new");
+    let sent = fake.sent_lines();
+    let servers = &sent[1]["params"]["mcpServers"];
+    assert_eq!(sent[1]["method"], "session/new");
+    assert_eq!(servers[0], recorded["params"]["mcpServers"][0]);
+    // The agent announced `mcpCapabilities.http`, so the http one goes along.
+    assert_eq!(
+        servers[1],
+        serde_json::json!({"type": "http", "name": "docs", "url": "https://example.com/mcp", "headers": []})
+    );
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
 #[tokio::test]

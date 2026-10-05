@@ -48,7 +48,7 @@ pub fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Result<Value> {
 /// `mcpServers` of a session request, and the names of the http servers
 /// left out because the agent does not take any (`http`, from its
 /// `mcpCapabilities`). Every agent must take stdio servers.
-pub fn mcp_servers_param(servers: &[McpServer], http: bool) -> (Value, Vec<String>) {
+pub fn mcp_servers_param(servers: &[McpServer], http: bool, cwd: &Path) -> (Value, Vec<String>) {
     let pairs = |map: &std::collections::BTreeMap<String, String>| -> Vec<Value> {
         map.iter()
             .map(|(name, value)| json!({"name": name, "value": value}))
@@ -58,12 +58,17 @@ pub fn mcp_servers_param(servers: &[McpServer], http: bool) -> (Value, Vec<Strin
     for s in servers {
         match &s.transport {
             McpTransport::Stdio { command, args, env } => {
-                // The protocol asks for an absolute path.
-                let command = match which(command) {
-                    Some(path) if !Path::new(command).is_absolute() => {
-                        path.to_string_lossy().into_owned()
-                    }
-                    _ => command.clone(),
+                // The protocol asks for an absolute path: a bare name is
+                // looked up, a relative path is one in the session's directory.
+                let path = Path::new(command);
+                let command = if path.is_absolute() {
+                    command.clone()
+                } else if path.components().count() > 1 {
+                    cwd.join(path).to_string_lossy().into_owned()
+                } else {
+                    which(command)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| command.clone())
                 };
                 list.push(json!({
                     "name": s.name, "command": command, "args": args, "env": pairs(env),
@@ -415,7 +420,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             match (kind, error) {
                 (Some(Outstanding::Initialize), None) => {
                     let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
-                    let (servers, dropped) = mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps));
+                    let (servers, dropped) =
+                        mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps), &d.cfg.cwd);
                     d.mcp_servers = servers;
                     if !dropped.is_empty() {
                         let warning = mcp::not_http(d.harness.as_str(), &dropped.join(", "));
@@ -673,7 +679,8 @@ mod tests {
             "args": ["--root", "/my work"],
             "env": [{"name": "TOKEN", "value": "t\"1"}],
         });
-        let (param, dropped) = mcp_servers_param(&servers, true);
+        let cwd = Path::new("/work");
+        let (param, dropped) = mcp_servers_param(&servers, true, cwd);
         assert!(dropped.is_empty());
         assert_eq!(param[0], files);
         assert_eq!(
@@ -687,16 +694,20 @@ mod tests {
         );
 
         // An agent without the http capability gets the stdio ones only.
-        let (param, dropped) = mcp_servers_param(&servers, false);
+        let (param, dropped) = mcp_servers_param(&servers, false, cwd);
         assert_eq!(param, json!([files]));
         assert_eq!(dropped, ["docs"]);
 
-        // A bare command is looked up, as the protocol wants a path.
-        let mut bare = servers[0].clone();
-        if let McpTransport::Stdio { command, .. } = &mut bare.transport {
-            *command = "sh".into();
-        }
-        let (param, _) = mcp_servers_param(&[bare], false);
-        assert!(param[0]["command"].as_str().unwrap().ends_with("/sh"));
+        // The protocol wants a path: a bare command is looked up, a
+        // relative one is in the session's directory.
+        let with_command = |c: &str| {
+            let mut server = servers[0].clone();
+            if let McpTransport::Stdio { command, .. } = &mut server.transport {
+                *command = c.into();
+            }
+            mcp_servers_param(&[server], false, cwd).0[0]["command"].clone()
+        };
+        assert!(with_command("sh").as_str().unwrap().ends_with("/sh"));
+        assert_eq!(with_command("./tools/server"), "/work/./tools/server");
     }
 }

@@ -3,7 +3,8 @@
 //! (`src/harness/<name>/`); nothing is written to a vendor's configuration.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -12,11 +13,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::caps::{McpChannel, McpSupport};
+use super::sandbox::Sandbox;
 
 /// One `[mcp_servers.<name>]` table: a `command` unharness's harnesses
 /// launch (with `args` and `env`), or the `url` of a server reached over
 /// HTTP (with `headers`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct McpServerSettings {
     pub command: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -124,7 +127,9 @@ pub fn resolve(table: &BTreeMap<String, McpServerSettings>) -> (Vec<McpServer>, 
 }
 
 /// The servers to hand a harness with this `support`, and what to tell the
-/// user about the ones it will not have.
+/// user about the ones it will not have. `own` are the names the harness
+/// already has in its own configuration and would mix with ours
+/// (`Harness::own_mcp_servers`).
 ///
 /// A harness that takes servers over its protocol gets all of them: whether
 /// it takes http ones is only known once its session answers, so its
@@ -133,7 +138,8 @@ pub fn for_harness(
     servers: &[McpServer],
     support: McpSupport,
     harness: &str,
-) -> (Vec<McpServer>, Option<String>) {
+    own: &[String],
+) -> (Vec<McpServer>, Vec<String>) {
     let names = |list: &[&McpServer]| -> String {
         let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
         names.join(", ")
@@ -147,15 +153,25 @@ pub fn for_harness(
                 names(&all)
             )
         });
-        return (Vec::new(), warning);
+        return (Vec::new(), warning.into_iter().collect());
     };
-    if support.http || channel == McpChannel::Protocol {
-        return (servers.to_vec(), None);
+    let mut warnings = Vec::new();
+    let (shadowed, free): (Vec<&McpServer>, Vec<&McpServer>) =
+        servers.iter().partition(|s| own.contains(&s.name));
+    if !shadowed.is_empty() {
+        warnings.push(format!(
+            "{harness} has MCP servers of the same name in its own configuration, which it \
+             uses instead; not passed on: {}",
+            names(&shadowed)
+        ));
     }
+    let takes_http = support.http || channel == McpChannel::Protocol;
     let (kept, dropped): (Vec<&McpServer>, Vec<&McpServer>) =
-        servers.iter().partition(|s| !s.is_http());
-    let warning = (!dropped.is_empty()).then(|| not_http(harness, &names(&dropped)));
-    (kept.into_iter().cloned().collect(), warning)
+        free.into_iter().partition(|s| takes_http || !s.is_http());
+    if !dropped.is_empty() {
+        warnings.push(not_http(harness, &names(&dropped)));
+    }
+    (kept.into_iter().cloned().collect(), warnings)
 }
 
 /// The warning for http servers a harness does not take.
@@ -168,31 +184,64 @@ pub fn not_http(harness: &str, names: &str) -> String {
 pub struct McpProbe {
     /// `serverInfo` name and version.
     pub server: String,
+    /// Tools on the first page of `tools/list`.
     pub tools: usize,
+    /// The list goes on (`nextCursor`).
+    pub more_tools: bool,
 }
 
-/// Start a command server, do the MCP handshake, count its tools and stop
-/// it again. For `doctor`: it runs outside the sandbox, like the other
-/// probes.
-pub fn probe_stdio(server: &McpServer, timeout: Duration) -> Result<McpProbe, String> {
+/// The longest stdout line the probe reads in one piece.
+const PROBE_LINE_LIMIT: u64 = 1 << 20;
+
+/// Start a command server in `cwd`, do the MCP handshake, count its tools
+/// and stop it again. For `doctor`. The command is the user's, but what it
+/// runs may be a file in the workspace, so it is started inside `sandbox`
+/// like a harness would start it.
+pub fn probe_stdio(
+    server: &McpServer,
+    timeout: Duration,
+    sandbox: &Sandbox,
+    cwd: &Path,
+) -> Result<McpProbe, String> {
     let McpTransport::Stdio { command, args, env } = &server.transport else {
         return Err("not a command server".into());
     };
-    let mut child = Command::new(command)
-        .args(args)
+    let mut cmd = Command::new(command);
+    cmd.args(args)
         .envs(env)
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    // Its own process group, so that what a launcher (npx, a shell) started
+    // can be stopped with it.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let mut child = sandbox
+        .wrap(cmd)
+        .map_err(|e| format!("could not set up the sandbox: {e:#}"))?
         .spawn()
         .map_err(|e| format!("could not start '{command}': {e}"))?;
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = mpsc::channel();
+    // Bounded, and the reader stops when the probe is done: a server that
+    // floods its output cannot outrun the deadline or fill memory.
+    let (tx, rx) = mpsc::sync_channel(16);
     std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
+        let mut reader = BufReader::new(stdout);
+        loop {
+            let mut line = Vec::new();
+            let mut limited = (&mut reader).take(PROBE_LINE_LIMIT);
+            match limited.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx
+                        .send(String::from_utf8_lossy(&line).into_owned())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -201,12 +250,13 @@ pub fn probe_stdio(server: &McpServer, timeout: Duration) -> Result<McpProbe, St
     let call = |stdin: &mut ChildStdin, id: u64, method: &str, params: Value| {
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         writeln!(stdin, "{request}").map_err(|e| format!("it closed its input: {e}"))?;
+        let late = || format!("no answer to {method} within {timeout:?}");
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(late)?;
             let line = rx.recv_timeout(left).map_err(|e| match e {
-                mpsc::RecvTimeoutError::Timeout => {
-                    format!("no answer to {method} within {}s", timeout.as_secs())
-                }
+                mpsc::RecvTimeoutError::Timeout => late(),
                 mpsc::RecvTimeoutError::Disconnected => {
                     format!("it exited before answering {method}")
                 }
@@ -242,18 +292,31 @@ pub fn probe_stdio(server: &McpServer, timeout: Duration) -> Result<McpProbe, St
         let server = format!("{} {}", text("name"), text("version"))
             .trim()
             .to_string();
-        let mut tools = 0;
+        let (mut tools, mut more_tools) = (0, false);
         if info.pointer("/capabilities/tools").is_some() {
             let ready = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
             writeln!(stdin, "{ready}").map_err(|e| format!("it closed its input: {e}"))?;
-            tools = call(&mut stdin, 2, "tools/list", json!({}))?
+            let list = call(&mut stdin, 2, "tools/list", json!({}))?;
+            tools = list
                 .get("tools")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            more_tools = list.get("nextCursor").is_some_and(|c| !c.is_null());
         }
-        Ok(McpProbe { server, tools })
+        Ok(McpProbe {
+            server,
+            tools,
+            more_tools,
+        })
     };
     let outcome = handshake();
+    // A server that stops at end of input gets to; the rest is killed.
+    drop(stdin);
+    #[cfg(unix)]
+    // SAFETY: a plain syscall on the group created above for this child.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
     outcome
@@ -346,27 +409,54 @@ headers = { A = "b" }
         let servers = [stdio("files", "npx", &[]), http("docs")];
         let all = McpSupport::via(McpChannel::CommandLine, true);
         assert_eq!(
-            for_harness(&servers, all, "Claude"),
-            (servers.to_vec(), None)
+            for_harness(&servers, all, "Claude", &[]),
+            (servers.to_vec(), vec![])
         );
 
-        let (kept, warning) = for_harness(&servers, McpSupport::NONE, "pi");
+        let (kept, warnings) = for_harness(&servers, McpSupport::NONE, "pi", &[]);
         assert!(kept.is_empty());
-        let warning = warning.unwrap();
         assert!(
-            warning.starts_with("pi takes no MCP servers") && warning.ends_with("files, docs"),
-            "{warning}"
+            warnings[0].starts_with("pi takes no MCP servers")
+                && warnings[0].ends_with("files, docs"),
+            "{warnings:?}"
         );
-        assert_eq!(for_harness(&[], McpSupport::NONE, "pi"), (vec![], None));
+        assert_eq!(
+            for_harness(&[], McpSupport::NONE, "pi", &[]),
+            (vec![], vec![])
+        );
 
         let stdio_only = McpSupport::via(McpChannel::CommandLine, false);
-        let (kept, warning) = for_harness(&servers, stdio_only, "X");
+        let (kept, warnings) = for_harness(&servers, stdio_only, "X", &[]);
         assert_eq!(kept, [servers[0].clone()]);
-        assert!(warning.unwrap().ends_with("not passed on: docs"));
+        assert!(warnings[0].ends_with("not passed on: docs"));
 
         // Over a protocol the session decides about http, later.
         let protocol = McpSupport::via(McpChannel::Protocol, false);
-        assert_eq!(for_harness(&servers, protocol, "ACP").0.len(), 2);
+        assert_eq!(for_harness(&servers, protocol, "ACP", &[]).0.len(), 2);
+
+        // A name the harness has itself is left to it.
+        let (kept, warnings) = for_harness(&servers, all, "Codex", &["files".to_string()]);
+        assert_eq!(kept, [servers[1].clone()]);
+        assert!(
+            warnings[0].contains("same name") && warnings[0].ends_with("not passed on: files"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_table_with_a_misspelt_key_does_not_parse() {
+        let parsed: Result<BTreeMap<String, McpServerSettings>, _> =
+            toml::from_str("[files]\ncommand = \"x\"\ncwd = \"/tmp\"\n");
+        assert!(
+            parsed
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field `cwd`")
+        );
+    }
+
+    fn probe(server: &McpServer, timeout: Duration) -> Result<McpProbe, String> {
+        probe_stdio(server, timeout, &Sandbox::off(), Path::new("."))
     }
 
     #[test]
@@ -380,25 +470,61 @@ for line in sys.stdin:
     if m["method"] == "initialize":
         r = {"capabilities": {"tools": {}}, "serverInfo": {"name": "fake", "version": "1.2"}}
     else:
-        r = {"tools": [{"name": "a"}, {"name": "b"}]}
+        r = {"tools": [{"name": "a"}, {"name": "b"}], "nextCursor": "page2"}
     print("a log line")
     print(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": r}), flush=True)
 "#;
         let timeout = Duration::from_secs(20);
-        let probe = probe_stdio(&stdio("fake", "python3", &["-c", SERVER]), timeout).unwrap();
         assert_eq!(
-            probe,
+            probe(&stdio("fake", "python3", &["-c", SERVER]), timeout).unwrap(),
             McpProbe {
                 server: "fake 1.2".into(),
-                tools: 2
+                tools: 2,
+                more_tools: true,
             }
         );
 
-        let gone = probe_stdio(&stdio("gone", "/nonexistent/mcp-server", &[]), timeout);
+        let gone = probe(&stdio("gone", "/nonexistent/mcp-server", &[]), timeout);
         assert!(gone.unwrap_err().starts_with("could not start"));
-        let quiet = probe_stdio(&stdio("quiet", "true", &[]), timeout);
-        assert!(quiet.is_err());
-        let slow = probe_stdio(&stdio("slow", "sleep", &["30"]), Duration::from_millis(200));
-        assert!(slow.unwrap_err().contains("no answer to initialize"));
+        assert!(probe(&stdio("quiet", "true", &[]), timeout).is_err());
+        let slow = probe(&stdio("slow", "sleep", &["30"]), Duration::from_millis(200));
+        assert_eq!(slow.unwrap_err(), "no answer to initialize within 200ms");
+    }
+
+    #[test]
+    fn probe_gives_up_on_a_server_that_floods_its_output() {
+        let started = Instant::now();
+        let flood = probe(&stdio("flood", "yes", &[]), Duration::from_millis(300));
+        assert!(flood.unwrap_err().starts_with("no answer to initialize"));
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_stops_what_a_launcher_started() {
+        // The shell starts the real "server" and waits; neither answers.
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let script = format!("sleep 600 & echo $! > {}; wait", pid_file.display());
+        let _ = probe(
+            &stdio("wrapped", "sh", &["-c", &script]),
+            Duration::from_millis(500),
+        );
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        let stat = Path::new("/proc").join(pid.trim()).join("stat");
+        // Gone, or a zombie about to be reaped by init. The kill is not
+        // instant, so look for a moment.
+        let running = || {
+            let state = std::fs::read_to_string(&stat).unwrap_or_default();
+            state
+                .rsplit(") ")
+                .next()
+                .is_some_and(|s| s.starts_with(['R', 'S']))
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!running());
     }
 }

@@ -364,7 +364,9 @@ overrides merged over it. The overrides are kept outside the workspace, in
 prints the path, `unharness init` creates it), because a file inside the
 workspace could be edited by the agent it is meant to configure. An
 `unharness.toml` left in a workspace from an earlier version is not read;
-`unharness init` imports it once.
+`unharness init` imports it once. A config file that does not parse stops
+unharness with the file and the line, rather than running on defaults
+without your sandbox and policy settings.
 
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
@@ -425,19 +427,30 @@ for that workspace.
 
 `unharness doctor` lists the servers, starts each `command` one to check
 that it answers (name, version, number of tools), and shows which installed
-harnesses get it. A `url` server is listed, not contacted.
+harnesses get it. The server is started the way a session starts it, in the
+workspace and inside the sandbox, so a server that cannot run there fails
+here too. A `url` server is listed, not contacted.
 
 Worth knowing:
 
 - The server is started by the harness, inside the sandbox: a server that
   writes outside the workspace needs its directory in `[sandbox] writable`.
-- `env` and `headers` values travel on the harness's command line (Claude,
-  Codex), where other local users can read them.
+- `env` and `headers` often hold tokens. For Claude Code the definitions go
+  in a file only you can read (under unharness's state directory), for ACP
+  agents over the protocol, and for Codex `headers` go through its
+  environment. A Codex command server's `env` is the exception: it is on
+  Codex's command line, where other local users can read it.
+- If Codex has a server of the same name in its own `config.toml`, that one
+  is used and unharness says so: Codex would mix the two definitions.
 - Each harness still applies its own permission rules to MCP tools. Under
-  `ask`, Claude Code and Codex prompt for each call; `codex exec` cannot
-  prompt, so under `ask` it refuses the call (under `bypass` it runs it).
+  `ask`, Claude Code and Codex prompt for each call (Codex has no "always
+  allow" for these yet); `codex exec` cannot prompt, so under `ask` it
+  refuses the call (under `bypass` it runs it).
 - A server that fails to start is reported in the transcript by Claude Code
   and Codex; an ACP agent does not say.
+- `unharness init` does not import MCP servers from an `unharness.toml` in
+  the workspace, where an agent could have written them; it names the ones
+  it left out.
 
 ### Conversations
 

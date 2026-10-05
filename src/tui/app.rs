@@ -750,15 +750,16 @@ impl App {
     /// The configured MCP servers the active harness takes for a session.
     /// The ones it does not take are named once per harness.
     pub fn session_mcp_servers(&mut self) -> Vec<McpServer> {
-        let (servers, warning) = mcp::for_harness(
+        let (servers, warnings) = mcp::for_harness(
             &self.config.mcp_servers().0,
             self.caps().mcp,
             self.short_name(),
+            &self.harness().own_mcp_servers(),
         );
-        if let Some(w) = warning
-            && self.mcp_warned.insert(self.active)
-        {
-            self.transcript.push_notice(w);
+        if !warnings.is_empty() && self.mcp_warned.insert(self.active) {
+            for w in warnings {
+                self.transcript.push_notice(w);
+            }
         }
         servers
     }
