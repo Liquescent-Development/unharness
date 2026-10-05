@@ -19,9 +19,11 @@ use crate::core::checkpoints::project_key;
 /// What a tool call does, as far as rules are concerned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolAction {
-    /// A shell command line, without the `sh -c` a harness wraps it in.
+    /// A shell command line, without the `sh -c` a harness wraps it in, and
+    /// the directory it runs in when the harness says.
     Shell {
         command: String,
+        cwd: Option<PathBuf>,
     },
     /// Files created or changed.
     Edit {
@@ -45,7 +47,7 @@ impl ToolAction {
     /// For fixture summaries.
     pub fn summary(&self) -> String {
         match self {
-            ToolAction::Shell { command } => format!("shell {command:?}"),
+            ToolAction::Shell { command, .. } => format!("shell {command:?}"),
             ToolAction::Edit { paths } => format!(
                 "edit {}",
                 paths
@@ -179,7 +181,17 @@ impl Rule {
                 _ => bail!("`name = {name:?}` must be `server/tool` or `server/*`"),
             },
             ("mcp", _) => bail!("an `mcp` rule takes a `name` and nothing else"),
-            (_, (None, None, None)) => Ok(()),
+            // A rule that reads as "every shell command" and is not one: on
+            // most harnesses it would match nothing, on another everything.
+            (tool, (None, None, None)) => match ALIASES
+                .iter()
+                .find(|(alias, _)| alias.eq_ignore_ascii_case(tool))
+            {
+                Some((_, kind)) => {
+                    bail!("`tool = {tool:?}` needs to be `tool = \"{kind}\"` with a pattern")
+                }
+                None => Ok(()),
+            },
             (tool, _) => bail!("a rule for `{tool}` takes no pattern"),
         }
     }
@@ -205,53 +217,85 @@ impl Rule {
     }
 }
 
+/// Names harnesses give the tools that rules know by what they do.
+const ALIASES: &[(&str, &str)] = &[
+    ("shell", "shell"),
+    ("bash", "shell"),
+    ("exec_command", "shell"),
+    ("execute", "shell"),
+    ("run_command", "shell"),
+    ("edit", "edit"),
+    ("write", "edit"),
+    ("multiedit", "edit"),
+    ("notebookedit", "edit"),
+    ("apply_patch", "edit"),
+    ("read", "read"),
+    ("mcp", "mcp"),
+];
+
 /// The directories patterns and paths are relative to.
 #[derive(Debug, Clone, Copy)]
 struct Dirs<'a> {
-    /// Where a relative pattern starts: the workspace, else the session's
-    /// directory.
+    /// Where a relative pattern starts, and where commands are expected to
+    /// run: the workspace, else the session's directory.
     base: &'a Path,
-    cwd: &'a Path,
 }
 
-/// The rule that allows a request, if the rules do. A command line of
-/// several commands, or an edit of several files, may take a rule for each:
-/// the first one is returned.
+/// The rules that allow a request, if the rules do. A command line of
+/// several commands, or an edit of several files, may take a rule for each.
 fn find_allowing<'r>(
     rules: &[&'r Rule],
     tool: &str,
     action: &ToolAction,
     dirs: Dirs,
-) -> Option<&'r Rule> {
+) -> Option<Vec<&'r Rule>> {
     let of = |name: &'static str| rules.iter().copied().filter(move |r| r.tool == name);
     fn each<'r, T>(
         parts: &[T],
         mut rule_for: impl FnMut(&T) -> Option<&'r Rule>,
-    ) -> Option<&'r Rule> {
-        let mut first = None;
+    ) -> Option<Vec<&'r Rule>> {
+        let mut used: Vec<&Rule> = Vec::new();
         for part in parts {
             let rule = rule_for(part)?;
-            first.get_or_insert(rule);
+            if !used.contains(&rule) {
+                used.push(rule);
+            }
         }
-        first
+        (!used.is_empty()).then_some(used)
     }
     match action {
-        ToolAction::Shell { command } => each(&shell_segments(command)?, |segment| {
-            of("shell").find(|r| shell_rule_covers(r, segment))
-        }),
+        ToolAction::Shell { command, cwd } => {
+            // A rule is for commands run in the workspace: the same words
+            // somewhere else are another command.
+            if let Some(cwd) = cwd {
+                let base = real_path(dirs.base)?;
+                if !real_path(cwd)?.starts_with(base) {
+                    return None;
+                }
+            }
+            each(&shell_segments(command)?, |segment| {
+                of("shell").find(|r| shell_rule_covers(r, segment))
+            })
+        }
         ToolAction::Edit { paths } => each(paths, |path| {
             of("edit").find(|r| path_rule_covers(r, path, dirs))
         }),
-        ToolAction::Read { path } => of("read").find(|r| path_rule_covers(r, path, dirs)),
-        ToolAction::Mcp { server, tool } => of("mcp").find(|r| {
-            r.name
-                .as_deref()
-                .and_then(|name| name.split_once('/'))
-                .is_some_and(|(s, t)| s == server && (t == "*" || t == tool))
+        ToolAction::Read { path } => each(std::slice::from_ref(path), |path| {
+            of("read").find(|r| path_rule_covers(r, path, dirs))
         }),
-        ToolAction::Other => rules.iter().copied().find(|r| {
-            r.tool == tool
-                && (r.command.as_ref(), r.path.as_ref(), r.name.as_ref()) == (None, None, None)
+        ToolAction::Mcp { server, tool } => each(&[()], |()| {
+            of("mcp").find(|r| {
+                r.name
+                    .as_deref()
+                    .and_then(|name| name.split_once('/'))
+                    .is_some_and(|(s, t)| s == server && (t == "*" || t == tool))
+            })
+        }),
+        ToolAction::Other => each(&[()], |()| {
+            rules.iter().copied().find(|r| {
+                r.tool == tool
+                    && (r.command.as_ref(), r.path.as_ref(), r.name.as_ref()) == (None, None, None)
+            })
         }),
         ToolAction::Opaque => None,
     }
@@ -266,7 +310,7 @@ fn shell_rule_covers(rule: &Rule, segment: &[String]) -> bool {
 }
 
 fn path_rule_covers(rule: &Rule, path: &Path, dirs: Dirs) -> bool {
-    let (Some(pattern), Some(path)) = (rule.path.as_deref(), real_path(path, dirs.cwd)) else {
+    let (Some(pattern), Some(path)) = (rule.path.as_deref(), real_path(path)) else {
         return false;
     };
     let pattern = if pattern.starts_with('/') {
@@ -277,11 +321,15 @@ fn path_rule_covers(rule: &Rule, path: &Path, dirs: Dirs) -> bool {
             None => return false,
         }
     } else {
-        dirs.base
-            .canonicalize()
-            .unwrap_or_else(|_| dirs.base.to_path_buf())
-            .join(pattern)
+        dirs.base.join(pattern)
     };
+    // The path is compared as the file it really is, so the part of the
+    // pattern that names a directory has to be too (a home directory that
+    // is itself a link, say).
+    let wild = |c: &std::path::Component| c.as_os_str().to_string_lossy().contains(['*', '?']);
+    let literal: PathBuf = pattern.components().take_while(|c| !wild(c)).collect();
+    let rest: PathBuf = pattern.components().skip_while(|c| !wild(c)).collect();
+    let pattern = real_path(&literal).unwrap_or(literal).join(rest);
     let pattern = pattern.to_string_lossy().into_owned();
     let path = path.to_string_lossy().into_owned();
     let segments = |s: &str| -> Vec<Vec<char>> {
@@ -296,17 +344,23 @@ fn path_rule_covers(rule: &Rule, path: &Path, dirs: Dirs) -> bool {
 /// The file a path names once symbolic links are followed, so that a link
 /// inside an allowed directory does not carry the rule to wherever it
 /// points. The path need not exist yet: what does exist of it is resolved.
-/// `None` when that cannot be told (`..` after a missing directory).
-fn real_path(path: &Path, cwd: &Path) -> Option<PathBuf> {
-    let mut head = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        cwd.join(path)
-    };
+///
+/// `None` when that cannot be told: a relative path (a tool resolves it
+/// against a directory of its own, which need not be the session's), `..`
+/// after a missing directory, or a link to something that does not exist
+/// yet, which a write would create wherever the link points.
+fn real_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut head = path.to_path_buf();
     let mut tail = Vec::new();
     loop {
         if let Ok(real) = head.canonicalize() {
             return Some(tail.iter().rev().fold(real, |p, name| p.join(name)));
+        }
+        if head.symlink_metadata().is_ok_and(|m| m.is_symlink()) {
+            return None;
         }
         tail.push(head.file_name()?.to_owned());
         if !head.pop() {
@@ -366,7 +420,7 @@ pub fn shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
                     match chars.next()? {
                         '"' => break,
                         '`' => return None,
-                        '$' if chars.peek() == Some(&'(') => return None,
+                        '$' if !plain_variable(&mut chars.clone()) => return None,
                         '\\' => match chars.next()? {
                             '\n' => {}
                             c @ ('"' | '\\' | '$' | '`') => w.push(c),
@@ -383,7 +437,7 @@ pub fn shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
                 '\n' => {}
                 c => word.get_or_insert_with(String::new).push(c),
             },
-            '$' if matches!(chars.peek(), Some('(' | '\'' | '"')) => return None,
+            '$' if !plain_variable(&mut chars.clone()) => return None,
             '`' | '<' | '>' | '(' | ')' => return None,
             '#' if word.is_none() => return None,
             ';' | '&' | '|' | '\n' => {
@@ -392,7 +446,10 @@ pub fn shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
                     segments.push(std::mem::take(&mut words));
                 }
             }
-            c if c.is_whitespace() => words.extend(word.take()),
+            ' ' | '\t' => words.extend(word.take()),
+            // Other blanks and control characters separate words for some
+            // readers and not for a shell.
+            c if c.is_whitespace() || c.is_control() => return None,
             c => word.get_or_insert_with(String::new).push(c),
         }
     }
@@ -403,16 +460,45 @@ pub fn shell_segments(command: &str) -> Option<Vec<Vec<String>>> {
     Some(segments)
 }
 
+/// Whether what follows a `$` is just a variable's name (`$HOME`). Anything
+/// else can run a command: `$(…)`, and `${…}` with zsh's `(e)` flag or
+/// bash's `@P`; so can a subscript after the name.
+fn plain_variable(rest: &mut impl Iterator<Item = char>) -> bool {
+    let mut rest = rest.peekable();
+    if !rest
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return false;
+    }
+    while rest
+        .peek()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+    {
+        rest.next();
+    }
+    rest.peek() != Some(&'[')
+}
+
 /// A command line without the shell a harness runs it through
 /// (`/bin/zsh -lc '<command>'`): rules are about the command.
 pub fn unwrap_shell(command: &str) -> String {
+    // Only a shell where the system keeps its shells: a program of the same
+    // name anywhere else is whatever the agent put there.
+    let is_shell = |program: &str| {
+        let (dir, name) = match program.rsplit_once('/') {
+            Some((dir, name)) => (dir, name),
+            None => ("", program),
+        };
+        matches!(
+            dir,
+            "" | "/bin" | "/usr/bin" | "/usr/local/bin" | "/opt/homebrew/bin"
+        ) && matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+    };
     if let Some([words]) = shell_segments(command).as_deref()
         && let [shell, flag, inner] = words.as_slice()
-        && matches!(
-            shell.rsplit('/').next(),
-            Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")
-        )
-        && matches!(flag.as_str(), "-c" | "-lc" | "-ic" | "-lic")
+        && is_shell(shell)
+        && matches!(flag.as_str(), "-c" | "-lc")
     {
         return inner.clone();
     }
@@ -435,31 +521,60 @@ pub fn propose(tool: &str, action: &ToolAction, root: Option<&Path>, cwd: &Path)
     let base = root.unwrap_or(cwd);
     let base = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
     let path_pattern = |path: &Path| -> Option<String> {
-        let real = real_path(path, cwd)?;
-        let (inside, rel) = match real.strip_prefix(&base) {
-            Ok(rel) => (true, rel.to_path_buf()),
-            Err(_) => (false, real),
-        };
-        Some(match rel.parent() {
-            // A file at the top of the workspace: a rule for its directory
-            // would be a rule for everything.
-            Some(dir) if inside && dir.as_os_str().is_empty() => rel.display().to_string(),
-            Some(dir) => format!("{}/**", dir.display()).replace("//", "/"),
-            None => rel.display().to_string(),
-        })
+        let real = real_path(path)?;
+        Some(
+            match real.strip_prefix(&base).map(|rel| (rel, rel.parent())) {
+                // A directory of the workspace: the files beside this one too.
+                Ok((_, Some(dir))) if !dir.as_os_str().is_empty() => {
+                    format!("{}/**", dir.display())
+                }
+                // A file at the top of the workspace: a rule for its directory
+                // would be a rule for everything.
+                Ok((rel, _)) => rel.display().to_string(),
+                // Outside the workspace nothing says what else is in the
+                // directory (a home directory, `/etc`): this file only.
+                Err(_) => real.display().to_string(),
+            },
+        )
     };
     let mut rules: Vec<Rule> = match action {
-        ToolAction::Shell { command } => shell_segments(command)
+        ToolAction::Shell { command, .. } => shell_segments(command)
             .unwrap_or_default()
             .iter()
             .map(|words| {
                 // `cargo test`, `git status`: the second word is the command
                 // that matters. Otherwise the whole command, to be shortened
-                // by whoever knows what it does.
-                let subcommand = words.get(1).is_some_and(|w| {
-                    w.starts_with(|c: char| c.is_ascii_lowercase())
-                        && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                });
+                // by whoever knows what it does. Not for a command that runs
+                // another (`sudo rm`, `env sh`): its second word is a
+                // program, and the rule would be for all that program does.
+                let runs_another = words[0].contains('=')
+                    || matches!(
+                        words[0].rsplit('/').next().unwrap_or_default(),
+                        "sudo"
+                            | "doas"
+                            | "env"
+                            | "xargs"
+                            | "nohup"
+                            | "time"
+                            | "timeout"
+                            | "nice"
+                            | "exec"
+                            | "command"
+                            | "builtin"
+                            | "eval"
+                            | "watch"
+                            | "sh"
+                            | "bash"
+                            | "zsh"
+                            | "dash"
+                            | "ksh"
+                            | "fish"
+                    );
+                let subcommand = !runs_another
+                    && words.get(1).is_some_and(|w| {
+                        w.starts_with(|c: char| c.is_ascii_lowercase())
+                            && w.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    });
                 let keep = if subcommand { 2 } else { words.len() };
                 let quoted: Vec<String> = words[..keep].iter().map(|w| shell_quote(w)).collect();
                 Rule::shell(quoted.join(" "))
@@ -494,6 +609,9 @@ pub struct Rules {
     /// `<config dir>/unharness`; `None` when there is nowhere to keep rules.
     dir: Option<PathBuf>,
     root: Option<PathBuf>,
+    /// Where unharness keeps what decides how an agent is run, these rules
+    /// among it. No rule allows a write or a read there.
+    protected: Vec<PathBuf>,
     global: Vec<Rule>,
     workspace: Vec<Rule>,
 }
@@ -509,7 +627,12 @@ impl Rules {
 
     pub fn load(root: Option<&Path>) -> Result<Self> {
         match Self::default_dir() {
-            Some(dir) => Self::load_in(&dir, root),
+            Some(dir) => {
+                let mut rules = Self::load_in(&dir, root)?;
+                let state = dirs::state_dir().or_else(dirs::data_local_dir);
+                rules.protected.extend(state.map(|d| d.join("unharness")));
+                Ok(rules)
+            }
             None => Ok(Rules {
                 root: root.map(Path::to_path_buf),
                 ..Rules::default()
@@ -523,6 +646,7 @@ impl Rules {
         let mut rules = Rules {
             dir: Some(dir.to_path_buf()),
             root: root.map(Path::to_path_buf),
+            protected: vec![dir.to_path_buf()],
             ..Rules::default()
         };
         rules.global = read_file(&rules.path(Scope::Global).expect("has a directory"))?;
@@ -561,13 +685,27 @@ impl Rules {
     fn dirs<'a>(&'a self, cwd: &'a Path) -> Dirs<'a> {
         Dirs {
             base: self.root.as_deref().unwrap_or(cwd),
-            cwd,
         }
     }
 
-    /// The rule that allows a request, if one does. `cwd` is the session's
-    /// directory, which relative paths in a request are relative to.
-    pub fn allows(&self, tool: &str, action: &ToolAction, cwd: &Path) -> Option<&Rule> {
+    /// The rules that allow a request, if they do. `cwd` is the session's
+    /// directory, which stands in for the workspace when there is none.
+    pub fn allows(&self, tool: &str, action: &ToolAction, cwd: &Path) -> Option<Vec<&Rule>> {
+        let paths: &[PathBuf] = match action {
+            ToolAction::Edit { paths } => paths,
+            ToolAction::Read { path } => std::slice::from_ref(path),
+            _ => &[],
+        };
+        // Whatever the rules say: an agent that could write them, or the
+        // settings beside them, would be granting itself permissions.
+        let kept: Vec<PathBuf> = self.protected.iter().filter_map(|p| real_path(p)).collect();
+        if paths
+            .iter()
+            .filter_map(|p| real_path(p))
+            .any(|p| kept.iter().any(|k| p.starts_with(k)))
+        {
+            return None;
+        }
         let rules: Vec<&Rule> = self.iter().map(|(_, r)| r).collect();
         find_allowing(&rules, tool, action, self.dirs(cwd))
     }
@@ -621,9 +759,17 @@ impl Rules {
             content.push_str(&toml::to_string(&RuleFile {
                 allow: added.clone(),
             })?);
-            // What is about to be written has to read back.
-            parse(&content, &path)?;
-            write_atomic(&path, &content)
+            // What is about to be written has to read back. It does not when
+            // the file gives its rules another way (`allow = [...]`).
+            if parse(&content, &path).is_err() {
+                bail!(
+                    "{} has to list its rules as [[allow]] tables to be added to",
+                    path.display()
+                );
+            }
+            // A file that is a link (a dotfiles checkout) stays one.
+            let target = path.canonicalize().unwrap_or_else(|_| path.clone());
+            write_atomic(&target, &content)
                 .with_context(|| format!("could not write {}", path.display()))?;
             rules.extend(added);
         }
@@ -658,7 +804,9 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let partial = path.with_extension(format!("toml.{}.partial", std::process::id()));
-    std::fs::write(&partial, content)?;
+    let mut file = std::fs::File::create(&partial)?;
+    std::io::Write::write_all(&mut file, content.as_bytes())?;
+    file.sync_all()?;
     std::fs::rename(&partial, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&partial);
     })
@@ -671,11 +819,12 @@ mod tests {
     fn shell(command: &str) -> ToolAction {
         ToolAction::Shell {
             command: command.to_string(),
+            cwd: None,
         }
     }
 
     fn rules_with(dir: &Path, root: &Path, rules: &[Rule]) -> Rules {
-        let mut r = Rules::load_in(dir, Some(root)).unwrap();
+        let mut r = Rules::load_in(&dir.join("config"), Some(root)).unwrap();
         r.append(Scope::Workspace, rules).unwrap();
         r
     }
@@ -694,6 +843,10 @@ mod tests {
         );
         assert_eq!(words("a | b; c &\nd"), [["a"], ["b"], ["c"], ["d"]]);
         assert_eq!(words("echo ''"), [["echo", ""]]);
+        assert_eq!(
+            words("echo $HOME \"$USER_1\"\t$x"),
+            [["echo", "$HOME", "$USER_1", "$x"]]
+        );
         assert_eq!(words("  "), Vec::<Vec<String>>::new());
     }
 
@@ -706,7 +859,16 @@ mod tests {
         );
         assert_eq!(unwrap_shell("cargo test"), "cargo test");
         // Not just a wrapper: left as it is, and no rule will cover it.
+        assert_eq!(unwrap_shell("/bin/sh -c ls"), "ls");
         for command in [
+            // A program that only has a shell's name.
+            "./evil/sh -c 'cargo test'",
+            "/WORKSPACE/node_modules/.bin/bash -lc 'cargo test'",
+            "../zsh -c 'cargo test'",
+            // A shell that reads quotes its own way.
+            "fish -c 'cargo test'",
+            // An interactive one reads the user's aliases.
+            "zsh -ic 'cargo test'",
             "zsh -lc 'echo ok' && rm -rf x",
             "zsh -lc 'echo ok' extra",
             "zsh -lc \"echo $(date)\"",
@@ -732,6 +894,23 @@ mod tests {
             "echo 'open",
             "echo \"open",
             "echo trailing\\",
+            // Expansions that run a command: zsh's (e) flag, bash's @P.
+            "cargo test \"${(e):-\\$(touch pwned)}\"",
+            "cargo test \"${x:=\\$(touch pwned)}\" \"${x@P}\"",
+            "cargo test ${x}",
+            "cargo test $x[1]",
+            "cargo test \"$x[$y]\"",
+            "cargo test $[1+1]",
+            "cargo test $~x",
+            "cargo test $",
+            "cargo test $1",
+            "echo \"$\"",
+            // Blanks that are part of a word to a shell.
+            "cargo\u{a0}test",
+            "cargo test\u{b}x",
+            "git status\r",
+            "cargo\u{2003}test",
+            "cargo test\u{0}",
         ] {
             assert_eq!(shell_segments(command), None, "{command}");
         }
@@ -798,20 +977,19 @@ mod tests {
         assert!(!allowed(&edit(&[])));
         assert!(!allowed(&edit(&["src/../Cargo.toml"])));
         assert!(!allowed(&edit(&["src/missing/../../Cargo.toml"])));
-        // Relative to the session's directory.
-        let relative = ToolAction::Edit {
-            paths: vec![PathBuf::from("main.rs")],
-        };
-        assert!(
-            rules
-                .allows("Write", &relative, &root.join("src"))
-                .is_some()
-        );
-        assert!(
-            rules
-                .allows("Write", &relative, &root.join("docs"))
-                .is_none()
-        );
+        // A relative path is relative to the tool's directory, which may
+        // not be the session's: never covered.
+        for path in ["main.rs", "src/main.rs", "./src/main.rs"] {
+            let relative = ToolAction::Edit {
+                paths: vec![PathBuf::from(path)],
+            };
+            assert!(rules.allows("Write", &relative, &root).is_none());
+            assert!(
+                rules
+                    .allows("Write", &relative, &root.join("src"))
+                    .is_none()
+            );
+        }
         // An edit rule says nothing about reads, and the other way round.
         let read = |p: &str| ToolAction::Read { path: p.into() };
         assert!(allowed(&read("/etc/hosts")));
@@ -836,10 +1014,118 @@ mod tests {
         };
         assert!(rules.allows("Write", &edit("src/a.rs"), &root).is_some());
         assert!(rules.allows("Write", &edit("src/link/a"), &root).is_none());
+        // A link to a file that is not there yet: writing it creates the
+        // file where the link points.
+        std::os::unix::fs::symlink(outside.join("new.txt"), root.join("src/gen.rs")).unwrap();
+        assert!(rules.allows("Write", &edit("src/gen.rs"), &root).is_none());
+        std::os::unix::fs::symlink(root.join("src/later.rs"), root.join("src/inside.rs")).unwrap();
+        assert!(
+            rules
+                .allows("Write", &edit("src/inside.rs"), &root)
+                .is_none()
+        );
         assert!(
             rules
                 .allows("Write", &edit("src/link/../a"), &root)
                 .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pattern_through_a_linked_directory_matches_the_real_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(dir.path().join("real/notes")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let pattern = format!("{}/link/notes/*.md", dir.path().display());
+        let rules = rules_with(dir.path(), &root, &[Rule::edit(pattern)]);
+        let edit = |p: &str| ToolAction::Edit {
+            paths: vec![dir.path().join(p)],
+        };
+        assert!(
+            rules
+                .allows("Write", &edit("link/notes/a.md"), &root)
+                .is_some()
+        );
+        assert!(
+            rules
+                .allows("Write", &edit("real/notes/a.md"), &root)
+                .is_some()
+        );
+        assert!(
+            rules
+                .allows("Write", &edit("real/notes/a.txt"), &root)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn no_rule_reaches_what_unharness_keeps_for_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        // As wide as rules get.
+        let mut rules = rules_with(dir.path(), &root, &[Rule::edit("/**"), Rule::read("/**")]);
+        let state = dir.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        rules.protected.push(state.clone());
+        let allowed = |a: &ToolAction| rules.allows("Write", a, &root).is_some();
+        let edit = |paths: &[PathBuf]| ToolAction::Edit {
+            paths: paths.to_vec(),
+        };
+        assert!(allowed(&edit(&[dir.path().join("elsewhere/a")])));
+        for kept in [
+            rules.path(Scope::Workspace).unwrap(),
+            rules.path(Scope::Global).unwrap(),
+            config.join("config.toml"),
+            config.join("workspaces/new.toml"),
+            state.join("mcp/claude.json"),
+        ] {
+            assert!(!allowed(&edit(std::slice::from_ref(&kept))), "{kept:?}");
+            assert!(!allowed(&edit(&[root.join("a"), kept.clone()])), "{kept:?}");
+            assert!(!allowed(&ToolAction::Read { path: kept }));
+        }
+    }
+
+    #[test]
+    fn a_command_run_outside_the_workspace_is_not_the_command_of_a_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("ws");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let rules = rules_with(dir.path(), &root, &[Rule::shell("make")]);
+        let run_in = |cwd: Option<PathBuf>| {
+            let action = ToolAction::Shell {
+                command: "make".into(),
+                cwd,
+            };
+            rules.allows("shell", &action, &root).is_some()
+        };
+        assert!(run_in(None));
+        assert!(run_in(Some(root.clone())));
+        assert!(run_in(Some(root.join("sub"))));
+        assert!(!run_in(Some(dir.path().to_path_buf())));
+        assert!(!run_in(Some(root.join("sub/../.."))));
+        assert!(!run_in(Some("sub".into())));
+    }
+
+    #[test]
+    fn every_rule_that_answered_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = rules_with(
+            dir.path(),
+            dir.path(),
+            &[Rule::shell("cargo test"), Rule::shell("git push")],
+        );
+        assert_eq!(
+            rules.allows(
+                "Bash",
+                &shell("cargo test && git push && cargo test -q"),
+                dir.path()
+            ),
+            Some(vec![&Rule::shell("cargo test"), &Rule::shell("git push")])
         );
     }
 
@@ -897,7 +1183,32 @@ mod tests {
         let outside = ToolAction::Read {
             path: "/etc/ssl/openssl.cnf".into(),
         };
-        assert_eq!(propose("Read", &outside), [Rule::read("/etc/ssl/**")]);
+        // Outside the workspace: that file, not what happens to be beside it.
+        assert_eq!(
+            propose("Read", &outside),
+            [Rule::read("/etc/ssl/openssl.cnf")]
+        );
+        for (path, pattern) in [("/etc/hosts", "/etc/hosts"), ("/vmlinuz", "/vmlinuz")] {
+            let edit = ToolAction::Edit {
+                paths: vec![path.into()],
+            };
+            assert_eq!(propose("Write", &edit), [Rule::edit(pattern)]);
+        }
+        // A command that runs another is proposed whole.
+        for (command, rule) in [
+            ("sudo rm -rf x", "sudo rm -rf x"),
+            ("env sh -c ls", "env sh -c ls"),
+            ("FOO=1 cargo install x", "FOO=1 cargo install x"),
+            ("/usr/bin/xargs rm", "/usr/bin/xargs rm"),
+            ("npm run build", "npm run"),
+        ] {
+            assert_eq!(propose("Bash", &shell(command)), [Rule::shell(rule)]);
+        }
+        // Nothing can be said about a path relative to who knows where.
+        let relative = ToolAction::Edit {
+            paths: vec!["src/a.rs".into()],
+        };
+        assert_eq!(propose("Write", &relative), []);
         assert_eq!(
             propose(
                 "x",
@@ -915,7 +1226,7 @@ mod tests {
         assert_eq!(propose("permissions", &ToolAction::Opaque), []);
 
         // What is proposed allows what it was proposed for.
-        let rules = Rules::load_in(dir.path(), Some(&root)).unwrap();
+        let rules = Rules::load_in(&dir.path().join("config"), Some(&root)).unwrap();
         for (tool, action) in [
             ("Bash", shell("cargo test --all && ls -la 'my dir'")),
             ("apply_patch", edit),
@@ -987,6 +1298,49 @@ mod tests {
         assert_eq!(left, Vec::<String>::new());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_rules_file_that_is_a_link_stays_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("dotfiles/allow.toml");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "# mine\n").unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::os::unix::fs::symlink(&real, config.join("allow.toml")).unwrap();
+        let mut rules = Rules::load_in(&config, None).unwrap();
+        rules
+            .append(Scope::Global, &[Rule::tool("WebFetch")])
+            .unwrap();
+        assert!(config.join("allow.toml").is_symlink());
+        let written = std::fs::read_to_string(&real).unwrap();
+        assert!(
+            written.starts_with("# mine\n") && written.contains("WebFetch"),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_lists_its_rules_inline_is_read_but_not_added_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "allow = [{ tool = \"WebFetch\" }]\n";
+        std::fs::write(dir.path().join("allow.toml"), content).unwrap();
+        let mut rules = Rules::load_in(dir.path(), None).unwrap();
+        assert!(
+            rules
+                .allows("WebFetch", &ToolAction::Other, dir.path())
+                .is_some()
+        );
+        let err = rules
+            .append(Scope::Global, &[Rule::tool("WebSearch")])
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("[[allow]] tables"), "{err:#}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("allow.toml")).unwrap(),
+            content
+        );
+    }
+
     #[test]
     fn without_a_workspace_only_global_rules_can_be_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -1009,6 +1363,12 @@ mod tests {
             "[[allow]]\ntool = \"edit\"\ncommand = \"ls\"",
             "[[allow]]\ntool = \"mcp\"\nname = \"probe\"",
             "[[allow]]\ntool = \"WebFetch\"\npath = \"x\"",
+            "[[allow]]\ntool = \"Bash\"",
+            "[[allow]]\ntool = \"SHELL\"",
+            "[[allow]]\ntool = \"apply_patch\"",
+            "[[allow]]\ntool = \"Write\"",
+            "[[allow]]\ntool = \"shell\"\ncommand = \"cargo\u{a0}test\"",
+            "[[allow]]\ntool = \"shell\"\ncommand = \"echo ${x}\"",
             "[[allow]]\ntool = \"shell\"\ncommand = \"ls\"\ncomand = \"x\"",
             "[[deny]]\ntool = \"x\"",
         ] {

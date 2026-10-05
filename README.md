@@ -271,11 +271,14 @@ honour falls back to the nearest *less* permissive one it supports.
 `/harness` and in the next session, whichever harness asks. `Tab` switches
 between this workspace and every workspace, and a rule's pattern can be
 edited before it is kept (it has to still cover the request in front of you).
+What is proposed is narrow: the first words of each command, the directory
+of a file inside the workspace, the one file outside it.
 The harness itself is only told "allow": nothing is written to its settings.
 
 Rules are kept in `~/.config/unharness/allow.toml` and, per workspace, in
 `~/.config/unharness/workspaces/<name>-<hash>.allow.toml`. `/allow` and
-`unharness doctor` list them; to change or remove one, edit the file.
+`unharness doctor` list them; to change or remove one, edit the file. Rules
+are read when unharness starts, so an edit holds from the next start.
 
 ```toml
 [[allow]]
@@ -298,17 +301,29 @@ tool = "WebFetch"            # any other tool, by the harness's own name for it
   (app-server) and ACP agents: Claude's `Bash`, Codex's `shell` and its
   `/bin/zsh -lc '…'` wrapper, and an ACP `execute` call are one thing to a
   rule. Any other tool is matched by name, and names differ between
-  harnesses.
+  harnesses. An `mcp` rule names a server as the harness knows it: the same
+  name in two harnesses' own settings may be two different servers.
 - A command line of several commands (`&&`, `;`, `|`) is allowed only when
   every one of them is covered. One that uses command substitution,
-  redirection, a subshell or a comment is always asked about.
+  `${…}` or any `$` that is more than a variable's name, redirection, a
+  subshell, a comment or an unusual blank is always asked about. So is a
+  command the harness says it would run outside the workspace.
 - A path is compared after following symbolic links, so a link inside an
-  allowed directory does not extend the rule to where it points.
+  allowed directory does not extend the rule to where it points. A relative
+  path in a request, and a link to a file that does not exist yet, are
+  always asked about.
+- No rule allows a write or a read in unharness's own config and state
+  directories, however wide its pattern.
+- When a request does not say exactly what it would do, it is asked about:
+  a Codex request with a `grantRoot` or a reason attached, an ACP read,
+  move or delete (only described by the protocol), an MCP approval that
+  cannot be tied to one call.
 - Rules only allow. They apply under every policy, to every request that
   reaches unharness; what a harness decides without asking (see the table
   above) never gets here, and neither does anything in `--print` and
   `--no-tui` runs.
-- Every request a rule answers is noted in the transcript.
+- Every request a rule answers is noted in the transcript, with the rules
+  that answered it.
 - A rules file that does not parse stops unharness, like a config file.
 
 ### Sandbox

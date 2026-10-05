@@ -98,10 +98,13 @@ fn file_uri(path: &Path) -> String {
 }
 
 /// Map a decision onto the options the agent offered. ACP has no free-form
-/// denial, so a deny reason is not passed on.
+/// denial, so a deny reason is not passed on. Allowing never picks the
+/// agent's `allow_always`: what is allowed from now on is unharness's to
+/// remember (allow rules), and an agent that offers nothing else is not
+/// answered for.
 pub fn permission_outcome(options: &Value, decision: &PermissionDecision) -> Value {
     let wanted: &[&str] = match decision {
-        PermissionDecision::Allow { .. } => &["allow_once", "allow_always"],
+        PermissionDecision::Allow { .. } => &["allow_once"],
         PermissionDecision::Deny { .. } => &["reject_once", "reject_always"],
         PermissionDecision::Answer(_) => &[],
     };
@@ -338,10 +341,17 @@ async fn drive(
                         None => Ok(()),
                     },
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some((rpc_id, options)) => d
-                            .proc
-                            .write_line(&jsonrpc::response(&rpc_id, permission_outcome(&options, &decision)))
-                            .await,
+                        Some((rpc_id, options)) => {
+                            let outcome = permission_outcome(&options, &decision);
+                            if matches!(decision, PermissionDecision::Allow { .. })
+                                && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
+                            {
+                                let _ = events.send(AgentEvent::Notice(
+                                    "the agent offered no way to allow this just once; the request was cancelled".into(),
+                                )).await;
+                            }
+                            d.proc.write_line(&jsonrpc::response(&rpc_id, outcome)).await
+                        }
                         None => {
                             let _ = events.send(AgentEvent::Notice(format!("no pending permission request {id}"))).await;
                             Ok(())
@@ -618,8 +628,12 @@ mod tests {
             pick(PermissionDecision::Answer(Value::Null)),
             json!({"outcome":{"outcome":"cancelled"}})
         );
-        // An agent that offers no way to allow gets a cancel, never a guess.
-        let only_reject = json!([{"optionId":"r","kind":"reject_once"}]);
+        // An agent that offers no way to allow once gets a cancel, never a
+        // guess, and never its own "always".
+        let only_reject = json!([
+            {"optionId":"r","kind":"reject_once"},
+            {"optionId":"a","kind":"allow_always"}
+        ]);
         assert_eq!(
             permission_outcome(
                 &only_reject,

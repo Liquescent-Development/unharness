@@ -2535,6 +2535,7 @@ mod tests {
         };
         let shell = ToolAction::Shell {
             command: "cargo test --all".into(),
+            cwd: None,
         };
         app.on_event(request("1", "Bash", shell));
         let text = screen(&mut app, 100, 40).0.join("\n");

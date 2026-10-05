@@ -36,6 +36,7 @@ pub fn tool_action(tool: &str, input: &Value) -> ToolAction {
         "Bash" => match text("command") {
             Some(command) => ToolAction::Shell {
                 command: command.to_string(),
+                cwd: None,
             },
             None => ToolAction::Opaque,
         },
@@ -45,8 +46,11 @@ pub fn tool_action(tool: &str, input: &Value) -> ToolAction {
             Some(path) => ToolAction::Read { path: path.into() },
             None => ToolAction::Opaque,
         },
-        _ => match tool.strip_prefix("mcp__").and_then(|t| t.split_once("__")) {
-            Some((server, tool)) => ToolAction::Mcp {
+        _ => match tool.strip_prefix("mcp__").map(|t| (t, t.split_once("__"))) {
+            // `mcp__a__b__c`: server `a` or server `a__b`, there is no telling.
+            Some((_, Some((_, tool)))) if tool.contains("__") => ToolAction::Opaque,
+            Some((_, None)) => ToolAction::Opaque,
+            Some((_, Some((server, tool)))) => ToolAction::Mcp {
                 server: server.to_string(),
                 tool: tool.to_string(),
             },
@@ -902,6 +906,7 @@ mod tests {
         use serde_json::json;
         let shell = |command: &str| ToolAction::Shell {
             command: command.into(),
+            cwd: None,
         };
         let edit = |path: &str| ToolAction::Edit {
             paths: vec![path.into()],
@@ -945,6 +950,10 @@ mod tests {
                 tool: "magic_word".into()
             }
         );
+        // Which part is the server's name cannot be told.
+        for tool in ["mcp__a__b__c", "mcp__probe", "mcp__"] {
+            assert_eq!(tool_action(tool, &json!({})), ToolAction::Opaque, "{tool}");
+        }
         assert_eq!(
             tool_action("WebFetch", &json!({"url": "https://example.com"})),
             ToolAction::Other

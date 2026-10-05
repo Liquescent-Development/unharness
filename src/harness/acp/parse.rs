@@ -9,6 +9,7 @@
 //! ids: the handshake, failed requests, and answering the agent's requests.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
@@ -469,35 +470,23 @@ fn started_event(id: &str, tool: &ToolState) -> AgentEvent {
 }
 
 /// What a tool call does, for allow rules. Claude's tools are known by name.
-/// For any other agent there is the protocol's `kind`: a command (codex-acp
-/// sends it as `rawInput.command`, an MCP call as `server` and `tool`), or
-/// the files in `locations` and in `diff` content.
+/// For any other agent there is the protocol's `kind`, and only what says
+/// exactly what will happen counts: a command (codex-acp sends it as
+/// `rawInput.command`, an MCP call as `server` and `tool`), or the files of
+/// an edit's `diff` content. `locations` only describe a call ("where to
+/// look"), so a read, a move or a delete is not known well enough.
 fn tool_action(tool: &ToolState) -> ToolAction {
     if tool.claude {
         return claude_tool_action(&tool.name, &tool.input);
     }
     let raw = |key: &str| tool.input.get(key).and_then(Value::as_str);
-    let paths = || -> Vec<std::path::PathBuf> {
-        let listed = |list: &Value| -> Vec<std::path::PathBuf> {
-            list.as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry.get("path").and_then(Value::as_str))
-                .map(Into::into)
-                .collect()
-        };
-        let mut paths = listed(&tool.locations);
-        for path in listed(&tool.content) {
-            if !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        paths
-    };
+    let entries = |list: &Value| list.as_array().cloned().unwrap_or_default();
+    let path = |entry: &Value| entry.get("path").and_then(Value::as_str).map(PathBuf::from);
     match tool.kind.as_str() {
         "execute" => match (raw("command"), raw("server"), raw("tool")) {
             (Some(command), _, _) => ToolAction::Shell {
                 command: unwrap_shell(command),
+                cwd: raw("cwd").map(Into::into),
             },
             (None, Some(server), Some(name)) => ToolAction::Mcp {
                 server: server.to_string(),
@@ -505,14 +494,29 @@ fn tool_action(tool: &ToolState) -> ToolAction {
             },
             _ => ToolAction::Opaque,
         },
-        "edit" | "delete" | "move" => match paths() {
-            paths if paths.is_empty() => ToolAction::Opaque,
-            paths => ToolAction::Edit { paths },
-        },
-        "read" => match paths().as_slice() {
-            [path] => ToolAction::Read { path: path.clone() },
-            _ => ToolAction::Opaque,
-        },
+        "edit" => {
+            let content = entries(&tool.content);
+            let diffs: Option<Vec<PathBuf>> = content
+                .iter()
+                .map(|c| {
+                    (c.get("type").and_then(Value::as_str) == Some("diff")).then(|| path(c))?
+                })
+                .collect();
+            match diffs {
+                // Every piece of content is a diff, and nothing is located
+                // anywhere the diffs do not account for.
+                Some(paths)
+                    if !paths.is_empty()
+                        && entries(&tool.locations)
+                            .iter()
+                            .all(|l| path(l).is_some_and(|p| paths.contains(&p))) =>
+                {
+                    ToolAction::Edit { paths }
+                }
+                _ => ToolAction::Opaque,
+            }
+        }
+        "read" | "delete" | "move" => ToolAction::Opaque,
         // A name of the agent's own can be held on to; a kind is too wide.
         _ if tool.named => ToolAction::Other,
         _ => ToolAction::Opaque,
@@ -627,62 +631,66 @@ mod tests {
     /// and a recording of an edit); it asked for no permission while recorded.
     #[test]
     fn a_tool_without_claudes_names_is_known_by_its_kind() {
+        let call = |fields: Value| {
+            let mut call = json!({"toolCallId": "t"});
+            call.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            requested(call)
+        };
         assert_eq!(
-            requested(
-                json!({"toolCallId": "t", "name": "exec_command", "kind": "execute",
-                "rawInput": {"command": "/usr/bin/zsh -lc 'cargo test'", "cwd": "/w"}})
-            ),
+            call(json!({"name": "exec_command", "kind": "execute",
+                "rawInput": {"command": "/usr/bin/zsh -lc 'cargo test'", "cwd": "/w"}})),
             ToolAction::Shell {
-                command: "cargo test".into()
+                command: "cargo test".into(),
+                cwd: Some("/w".into())
             }
         );
         assert_eq!(
-            requested(
-                json!({"toolCallId": "t", "kind": "execute", "title": "mcp.docs.search",
-                "rawInput": {"server": "docs", "tool": "search", "arguments": {}}})
-            ),
+            call(json!({"kind": "execute", "title": "mcp.docs.search",
+                "rawInput": {"server": "docs", "tool": "search", "arguments": {}}})),
             ToolAction::Mcp {
                 server: "docs".into(),
                 tool: "search".into()
             }
         );
+        let diff = |path: &str| json!({"type": "diff", "path": path, "newText": "x"});
         assert_eq!(
-            requested(
-                json!({"toolCallId": "t", "kind": "edit", "title": "Editing files",
-                "locations": [{"path": "/w/a"}],
-                "content": [{"type": "diff", "path": "/w/a", "newText": "x"},
-                            {"type": "diff", "path": "/w/b", "newText": "y"}]})
-            ),
+            call(json!({"kind": "edit", "title": "Editing files",
+                "locations": [{"path": "/w/a"}], "content": [diff("/w/a"), diff("/w/b")]})),
             ToolAction::Edit {
                 paths: vec!["/w/a".into(), "/w/b".into()]
             }
         );
-        assert_eq!(
-            requested(json!({"toolCallId": "t", "kind": "read", "locations": [{"path": "/w/a"}]})),
-            ToolAction::Read {
-                path: "/w/a".into()
-            }
-        );
         // A name can be held on to, a bare kind cannot.
         assert_eq!(
-            requested(json!({"toolCallId": "t", "name": "web_search", "kind": "fetch"})),
+            call(json!({"name": "web_search", "kind": "fetch"})),
             ToolAction::Other
         );
-        for call in [
-            json!({"toolCallId": "t", "kind": "fetch"}),
-            json!({"toolCallId": "t", "kind": "execute", "title": "something"}),
-            json!({"toolCallId": "t", "kind": "edit"}),
-            json!({"toolCallId": "t"}),
+        // What does not say exactly which files or which command: asked about.
+        for fields in [
+            json!({"kind": "fetch"}),
+            json!({"kind": "execute", "title": "something"}),
+            json!({"kind": "edit"}),
+            json!({"kind": "edit", "locations": [{"path": "/w/a"}]}),
+            json!({"kind": "edit", "locations": [{"path": "/w/c"}], "content": [diff("/w/a")]}),
+            json!({"kind": "edit", "content": [diff("/w/a"), {"type": "content"}]}),
+            json!({"kind": "read", "locations": [{"path": "/w/a"}]}),
+            json!({"kind": "move", "locations": [{"path": "/w/a"}]}),
+            json!({"kind": "delete", "locations": [{"path": "/w/a"}]}),
+            json!({}),
         ] {
-            assert_eq!(requested(call), ToolAction::Opaque);
+            assert_eq!(call(fields.clone()), ToolAction::Opaque, "{fields}");
         }
         // Claude's tools, passed on, are known by name whatever the kind.
         assert_eq!(
-            requested(json!({"toolCallId": "t", "name": "Bash", "kind": "execute",
-                "rawInput": {"command": "ls"},
-                "_meta": {"claudeCode": {"toolName": "Bash"}}})),
+            call(
+                json!({"name": "Bash", "kind": "execute", "rawInput": {"command": "ls"},
+                "_meta": {"claudeCode": {"toolName": "Bash"}}})
+            ),
             ToolAction::Shell {
-                command: "ls".into()
+                command: "ls".into(),
+                cwd: None
             }
         );
     }

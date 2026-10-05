@@ -1914,8 +1914,8 @@ impl App {
         self.actions.push_back(Action::Shutdown);
     }
 
-    /// The allow rule that answers a request, if the user has one for it.
-    fn allowing_rule(&self, req: &PermissionRequest) -> Option<&Rule> {
+    /// The allow rules that answer a request, if the user has them for it.
+    fn allowing_rules(&self, req: &PermissionRequest) -> Option<Vec<&Rule>> {
         match &req.kind {
             PermissionKind::ToolUse { tool, action, .. } => {
                 self.rules.allows(tool, action, &self.cwd)
@@ -1925,9 +1925,13 @@ impl App {
     }
 
     fn on_permission_request(&mut self, req: PermissionRequest) {
-        if let Some(rule) = self.allowing_rule(&req) {
+        if let Some(rules) = self.allowing_rules(&req) {
             // Said every time: what runs unasked should not also run unseen.
-            let notice = format!("allowed by your rule for {}", rule.describe());
+            let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
+            let notice = match rules.as_slice() {
+                [rule] => format!("allowed by your rule for {rule}"),
+                rules => format!("allowed by your rules for {}", rules.join(", and for ")),
+            };
             self.transcript.push_notice(notice);
             self.actions
                 .push_back(Action::Command(SessionCommand::RespondPermission {
@@ -2363,7 +2367,12 @@ impl App {
                                 pattern.pop();
                             }
                         }
-                        KeyCode::Char(c) => {
+                        // Not Ctrl+C and the like: those are not text.
+                        KeyCode::Char(c)
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
                             draft.problem = None;
                             if let Some(pattern) = &mut draft.pattern {
                                 pattern.push(c);
@@ -4710,6 +4719,12 @@ pub(crate) mod tests {
 
     /// One command as each harness asks to run it, through its own parser.
     fn cargo_test_requests(command: &str) -> Vec<AgentEvent> {
+        requests_in(command, None)
+    }
+
+    /// `cwd`: where Codex and the ACP agent say they would run it (they do
+    /// say; Claude does not). `None` leaves it out.
+    fn requests_in(command: &str, cwd: Option<&Path>) -> Vec<AgentEvent> {
         use crate::harness::acp::parse::AcpParser;
         use crate::harness::claude::parse::ClaudeParser;
         use crate::harness::codex::app_server_parse::CodexAppServerParser;
@@ -4718,11 +4733,11 @@ pub(crate) mod tests {
             "subtype": "can_use_tool", "tool_name": "Bash", "tool_use_id": "t1",
             "input": {"command": command}}});
         let codex = json!({"method": "item/commandExecution/requestApproval", "id": "codex",
-            "params": {"itemId": "i1", "cwd": "/w",
+            "params": {"itemId": "i1", "cwd": cwd,
                 "command": format!("/usr/bin/zsh -lc '{command}'")}});
         let acp = json!({"jsonrpc": "2.0", "id": "acp", "method": "session/request_permission",
             "params": {"options": [], "toolCall": {"toolCallId": "t2", "name": "exec_command",
-                "kind": "execute", "rawInput": {"command": command, "cwd": "/w"}}}});
+                "kind": "execute", "rawInput": {"command": command, "cwd": cwd}}}});
         let mut events = ClaudeParser::new().feed(&claude.to_string());
         events.extend(CodexAppServerParser::new().feed(&codex.to_string()));
         events.extend(AcpParser::new(HarnessId::intern("acp-test")).feed(&acp.to_string()));
@@ -4764,6 +4779,20 @@ pub(crate) mod tests {
             .count();
         assert_eq!(said, 3);
 
+        // Several commands, several rules: all of them are named.
+        app.rules
+            .append(Scope::Workspace, &[Rule::shell("git push")])
+            .unwrap();
+        app.on_event(cargo_test_requests("cargo test && git push").remove(0));
+        assert_eq!(app.take_actions(), vec![allowed("claude")]);
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Notice(n)
+            if n.contains("`cargo test`, and for shell commands starting with `git push`")))
+        );
+
         // More than the rule covers is still asked about, one at a time.
         for ev in cargo_test_requests("cargo test && rm -rf x") {
             app.on_event(ev);
@@ -4774,6 +4803,25 @@ pub(crate) mod tests {
             Some("claude")
         );
         assert_eq!(app.pending_prompts.len(), 2);
+
+        // Run in the workspace it is the rule's command, elsewhere it is not.
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.rules
+            .append(Scope::Workspace, &[Rule::shell("cargo test")])
+            .unwrap();
+        let cwd = app.cwd.clone();
+        for ev in requests_in("cargo test", Some(&cwd)).split_off(1) {
+            app.on_event(ev);
+        }
+        assert_eq!(app.take_actions(), vec![allowed("codex"), allowed("acp")]);
+        for ev in requests_in("cargo test", Some(Path::new("/tmp"))).split_off(1) {
+            app.on_event(ev);
+        }
+        assert_eq!(app.take_actions(), vec![]);
+        assert_eq!(
+            app.modal.as_ref().and_then(Modal::request_id),
+            Some("codex")
+        );
 
         // A subagent's request is answered the same way.
         let mut app = test_app(HarnessId::CLAUDE);
@@ -4863,6 +4911,10 @@ pub(crate) mod tests {
         app.handle_modal_key(key(KeyCode::Tab));
         assert_eq!(draft(&app).rules(), [Rule::shell("cargo")]);
         assert_eq!(draft(&app).scope, Scope::Global);
+
+        // Ctrl+C is not a letter of the pattern.
+        app.handle_modal_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert_eq!(draft(&app).rules(), [Rule::shell("cargo")]);
 
         // A pattern that would not have allowed this request is refused.
         type_keys(&mut app, " build");

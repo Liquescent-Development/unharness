@@ -58,7 +58,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   (`allow.toml`, `workspaces/<key>.allow.toml`), and match on the
   `ToolAction` each parser derives in `src/harness/<name>/`, which is part
   of the `.events` summary. When a command or path cannot be read off a
-  request with certainty the action is `Opaque` and the user is asked.
+  request with certainty the action is `Opaque` and the user is asked; a
+  field that only describes a call (ACP `locations`) is not certainty, and
+  neither is a request carrying fields no recording had. The shell splitter
+  (`shell_segments`) refuses what it does not model instead of guessing;
+  a new construct it accepts needs a test showing a shell reads it the
+  same way. No rule reaches unharness's own config and state directories.
 - **A change to a harness's own configuration is never silent.** The files
   that decide a CLI's next run are declared in `src/harness/<name>/`
   (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
@@ -248,12 +253,20 @@ recorded ones. For anything else:
   `item/fileChange/requestApproval` has no changes of its own, only the
   `itemId` of the `fileChange` item that does
   (`fixtures/app_server_file_change.jsonl`). Unverified: codex-acp 2.1.1
-  asked for no permission in its default mode in two recordings (a shell
+  asked for no permission in its default mode in three recordings (a shell
   command, an edit, a network command), so the action of a non-Claude ACP
-  request is built from its tool calls' shapes (`rawInput.command`, `diff`
-  content paths) and the spec's `kind`; Codex's `move_path` on a rename;
-  Claude's `NotebookEdit` and `MultiEdit` inputs (field names from the tool
-  schemas, no request recorded).
+  request is built from its tool calls' shapes (`rawInput.command` and
+  `cwd`, `diff` content paths) and the spec's `kind`, and a read, move or
+  delete is `Opaque`; Codex's `move_path` on a rename, and a command or
+  file approval with `reason`, `grantRoot` or any field the recordings
+  lack (`Opaque`); the wording of Codex's MCP approval question, which the
+  parser checks for the server and tool (one recording); Claude's
+  `NotebookEdit` and `MultiEdit` inputs (field names from the tool schemas,
+  no request recorded). An ACP agent that offers `allow_always` and no
+  `allow_once` gets a cancel and the user a notice. Not done: a lock
+  around appending to a rules file (two unharness saving at once can lose
+  one rule), re-reading rules while running, closing the modal when Claude
+  cancels a request.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.
