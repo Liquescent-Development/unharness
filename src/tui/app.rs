@@ -25,6 +25,7 @@ use crate::core::conversations::{
     truncate_title,
 };
 use crate::core::guard::{self, Watch};
+use crate::core::mcp::{self, McpServer};
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
@@ -286,6 +287,8 @@ pub struct App {
     compacting: bool,
     /// What live sessions reported on top of the declared capabilities.
     live_caps: HashMap<HarnessId, CapsUpdate>,
+    /// The harnesses already told which MCP servers they do not get.
+    mcp_warned: HashSet<HarnessId>,
 
     pub modal: Option<Modal>,
     pending_prompts: VecDeque<PermissionRequest>,
@@ -580,6 +583,7 @@ impl App {
             queued: VecDeque::new(),
             compacting: false,
             live_caps: HashMap::new(),
+            mcp_warned: HashSet::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
             suggestions: Vec::new(),
@@ -607,6 +611,9 @@ impl App {
             .and_then(Config::legacy_warning)
         {
             app.transcript.push_notice(w);
+        }
+        for problem in app.config.mcp_servers().1 {
+            app.transcript.push_notice(problem);
         }
         if let Some(e) = resume_error {
             app.transcript.push_error(e);
@@ -738,6 +745,22 @@ impl App {
             &self.config,
             self.workspace_root.as_deref().unwrap_or(&self.cwd),
         )
+    }
+
+    /// The configured MCP servers the active harness takes for a session.
+    /// The ones it does not take are named once per harness.
+    pub fn session_mcp_servers(&mut self) -> Vec<McpServer> {
+        let (servers, warning) = mcp::for_harness(
+            &self.config.mcp_servers().0,
+            self.caps().mcp,
+            self.short_name(),
+        );
+        if let Some(w) = warning
+            && self.mcp_warned.insert(self.active)
+        {
+            self.transcript.push_notice(w);
+        }
+        servers
     }
 
     /// Start watching the active harness's configuration files, before its
@@ -4862,5 +4885,32 @@ pub(crate) mod tests {
             ..Default::default()
         }));
         assert_eq!(app.session_usage.input, 100);
+    }
+
+    #[test]
+    fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.config.mcp_servers.insert(
+            "files".into(),
+            crate::core::mcp::McpServerSettings {
+                command: Some("files-mcp".into()),
+                ..Default::default()
+            },
+        );
+        let notices = |app: &App| {
+            app.transcript
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Notice(n) if n.contains("MCP")))
+                .count()
+        };
+        assert_eq!(app.session_mcp_servers().len(), 1);
+        assert_eq!(notices(&app), 0);
+
+        app.switch_harness(HarnessId::PI);
+        assert!(app.session_mcp_servers().is_empty());
+        assert!(app.session_mcp_servers().is_empty());
+        assert_eq!(notices(&app), 1);
     }
 }

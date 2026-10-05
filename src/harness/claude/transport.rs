@@ -16,8 +16,9 @@ use tokio::sync::mpsc;
 use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision, PermissionKind,
+    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -45,6 +46,29 @@ pub fn policy_mode_name(policy: PermissionPolicy) -> &'static str {
     }
 }
 
+/// The `--mcp-config` value for these servers: Claude's own JSON shape. They
+/// are added to the servers Claude already has from its configuration.
+pub fn mcp_config(servers: &[McpServer]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|s| {
+            let definition = match &s.transport {
+                McpTransport::Stdio { command, args, env } => {
+                    json!({"type": "stdio", "command": command, "args": args, "env": env})
+                }
+                McpTransport::Http { url, headers } => {
+                    json!({"type": "http", "url": url, "headers": headers})
+                }
+            };
+            (s.name.clone(), definition)
+        })
+        .collect();
+    Some(json!({"mcpServers": servers}).to_string())
+}
+
 /// The exact argv (after the binary) for an interactive session.
 pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
     let mut args: Vec<String> = [
@@ -65,6 +89,11 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
     .map(|s| s.to_string())
     .collect();
 
+    // `--mcp-config` takes every word up to the next flag; one always follows.
+    if let Some(config) = mcp_config(&cfg.mcp_servers) {
+        args.push("--mcp-config".into());
+        args.push(config);
+    }
     if let Some(m) = &cfg.model {
         args.push("--model".into());
         args.push(m.model.clone());
@@ -403,6 +432,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--bare".into()],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         }
     }
@@ -557,6 +587,35 @@ mod tests {
         assert_eq!(
             v,
             json!({"type":"user","message":{"role":"user","content":"hi"}})
+        );
+    }
+
+    #[test]
+    fn mcp_servers_go_in_one_flag_before_the_others() {
+        let mut c = cfg(PermissionPolicy::Ask);
+        assert!(!session_args(&c).contains(&"--mcp-config".to_string()));
+
+        c.mcp_servers = crate::core::testing::sample_mcp_servers();
+        let a = session_args(&c);
+        let at = a.iter().position(|x| x == "--mcp-config").unwrap();
+        // The flag is greedy: the word after its value must be a flag.
+        assert!(a[at + 2].starts_with("--"));
+        let config: Value = serde_json::from_str(&a[at + 1]).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers": {
+                "files": {
+                    "type": "stdio",
+                    "command": "/usr/bin/files-mcp",
+                    "args": ["--root", "/my work"],
+                    "env": {"TOKEN": "t\"1"},
+                },
+                "docs": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer x"},
+                },
+            }})
         );
     }
 }

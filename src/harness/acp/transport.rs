@@ -13,13 +13,16 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::parse::{AcpParser, SessionOptions, can_load, can_resume, error_text};
+use super::parse::{AcpParser, SessionOptions, can_load, can_resume, error_text, mcp_http};
 use crate::core::jsonrpc::{self, RpcMessage};
+use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionPolicy, ProcessModel,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision,
+    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason,
 };
+use crate::harness::which;
 
 /// `session/prompt` content: the text, then each image inline and each
 /// file as a `resource_link` (the block every agent must accept; the agent
@@ -40,6 +43,39 @@ pub fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Result<Value> {
         });
     }
     Ok(Value::Array(blocks))
+}
+
+/// `mcpServers` of a session request, and the names of the http servers
+/// left out because the agent does not take any (`http`, from its
+/// `mcpCapabilities`). Every agent must take stdio servers.
+pub fn mcp_servers_param(servers: &[McpServer], http: bool) -> (Value, Vec<String>) {
+    let pairs = |map: &std::collections::BTreeMap<String, String>| -> Vec<Value> {
+        map.iter()
+            .map(|(name, value)| json!({"name": name, "value": value}))
+            .collect()
+    };
+    let (mut list, mut dropped) = (Vec::new(), Vec::new());
+    for s in servers {
+        match &s.transport {
+            McpTransport::Stdio { command, args, env } => {
+                // The protocol asks for an absolute path.
+                let command = match which(command) {
+                    Some(path) if !Path::new(command).is_absolute() => {
+                        path.to_string_lossy().into_owned()
+                    }
+                    _ => command.clone(),
+                };
+                list.push(json!({
+                    "name": s.name, "command": command, "args": args, "env": pairs(env),
+                }));
+            }
+            McpTransport::Http { url, headers } if http => list.push(json!({
+                "type": "http", "name": s.name, "url": url, "headers": pairs(headers),
+            })),
+            McpTransport::Http { .. } => dropped.push(s.name.clone()),
+        }
+    }
+    (Value::Array(list), dropped)
 }
 
 /// `file://` URI of an absolute path.
@@ -132,6 +168,9 @@ struct Driver {
     next_id: u64,
     outstanding: HashMap<u64, Outstanding>,
     session_id: Option<String>,
+    /// `mcpServers` for every session request, once the agent has said
+    /// which kinds it takes.
+    mcp_servers: Value,
     options: SessionOptions,
     policy: PermissionPolicy,
     /// Permission requests awaiting the user: our id → (rpc id, offered options).
@@ -151,7 +190,7 @@ impl Driver {
     }
 
     async fn new_session(&mut self) -> Result<()> {
-        let params = json!({"cwd": self.cfg.cwd, "mcpServers": []});
+        let params = json!({"cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
         self.request(
             "session/new",
             params,
@@ -224,6 +263,7 @@ async fn drive(
         next_id: 0,
         outstanding: HashMap::new(),
         session_id: None,
+        mcp_servers: json!([]),
         options: SessionOptions::default(),
         pending: HashMap::new(),
         queued_turn: None,
@@ -375,6 +415,12 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             match (kind, error) {
                 (Some(Outstanding::Initialize), None) => {
                     let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
+                    let (servers, dropped) = mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps));
+                    d.mcp_servers = servers;
+                    if !dropped.is_empty() {
+                        let warning = mcp::not_http(d.harness.as_str(), &dropped.join(", "));
+                        let _ = events.send(AgentEvent::Notice(warning)).await;
+                    }
                     match d.cfg.resume.clone() {
                         Some(id) if can_resume(caps) || can_load(caps) => {
                             // `resume` reattaches silently; `load` replays the
@@ -385,8 +431,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                                 d.parser.set_replaying(true);
                                 "session/load"
                             };
-                            let params =
-                                json!({"sessionId": id, "cwd": d.cfg.cwd, "mcpServers": []});
+                            let params = json!({
+                                "sessionId": id, "cwd": d.cfg.cwd, "mcpServers": d.mcp_servers,
+                            });
                             d.request(method, params, Outstanding::Session { reattach: true })
                                 .await?;
                         }
@@ -615,5 +662,41 @@ mod tests {
                 {"type":"resource_link","uri":uri,"name":"my notes.txt","mimeType":"text/plain"}
             ])
         );
+    }
+
+    #[test]
+    fn mcp_servers_in_the_session_request() {
+        let servers = crate::core::testing::sample_mcp_servers();
+        let files = json!({
+            "name": "files",
+            "command": "/usr/bin/files-mcp",
+            "args": ["--root", "/my work"],
+            "env": [{"name": "TOKEN", "value": "t\"1"}],
+        });
+        let (param, dropped) = mcp_servers_param(&servers, true);
+        assert!(dropped.is_empty());
+        assert_eq!(param[0], files);
+        assert_eq!(
+            param[1],
+            json!({
+                "type": "http",
+                "name": "docs",
+                "url": "https://example.com/mcp",
+                "headers": [{"name": "Authorization", "value": "Bearer x"}],
+            })
+        );
+
+        // An agent without the http capability gets the stdio ones only.
+        let (param, dropped) = mcp_servers_param(&servers, false);
+        assert_eq!(param, json!([files]));
+        assert_eq!(dropped, ["docs"]);
+
+        // A bare command is looked up, as the protocol wants a path.
+        let mut bare = servers[0].clone();
+        if let McpTransport::Stdio { command, .. } = &mut bare.transport {
+            *command = "sh".into();
+        }
+        let (param, _) = mcp_servers_param(&[bare], false);
+        assert!(param[0]["command"].as_str().unwrap().ends_with("/sh"));
     }
 }

@@ -8,6 +8,7 @@ pub mod event;
 pub mod guard;
 pub mod ids;
 pub mod jsonrpc;
+pub mod mcp;
 pub mod per_turn;
 pub mod process;
 pub mod registry;
@@ -25,6 +26,7 @@ pub use event::{
     Usage,
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
+pub use mcp::{McpServer, McpTransport};
 pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,

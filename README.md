@@ -54,12 +54,13 @@ What each harness supports beyond a plain turn:
 | Rate-limit windows | yes | yes | no | no | no |
 | Native rewind | yes | yes | yes | no (fresh session) | no (fresh session) |
 | Native fork | yes | yes | yes | no (fresh session) | no (fresh session) |
+| MCP servers from unharness's config | yes | yes | no | yes (http ones per agent) | exec only |
 
 ## Install
 
 ```bash
 cargo install --path .
-unharness doctor          # harnesses, auth, capabilities, sandbox, skills CLI, rules
+unharness doctor          # harnesses, auth, capabilities, sandbox, MCP servers, skills CLI, rules
 ```
 
 Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
@@ -397,7 +398,46 @@ transport = "stream"             # stream | stream-prompt | per-turn (see AGENTS
 [harnesses.pi]
 default_provider = "openai-codex"
 default_model    = "gpt-5.5"
+
+[mcp_servers.files]              # an MCP server the harness launches (see MCP servers)
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env     = { LOG_LEVEL = "warn" }
+
+[mcp_servers.docs]               # or one reached over HTTP
+url     = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
+# enabled = false                # keep the definition, pass it to no harness
 ```
+
+### MCP servers
+
+A server defined under `[mcp_servers.<name>]` is handed to every harness
+that can take one for the session: Claude Code through `--mcp-config`, Codex
+through `-c mcp_servers.…` overrides, ACP agents in the session request
+(http servers only when the agent announces it takes them). Nothing is
+written to `~/.claude`, `~/.codex` or any other vendor configuration, and
+the servers a harness already has there stay available. pi and Antigravity
+have no way to take a server for one session; unharness says so when a
+session starts and passes none. A workspace's table of the same name
+replaces the global one, so `enabled = false` there switches a server off
+for that workspace.
+
+`unharness doctor` lists the servers, starts each `command` one to check
+that it answers (name, version, number of tools), and shows which installed
+harnesses get it. A `url` server is listed, not contacted.
+
+Worth knowing:
+
+- The server is started by the harness, inside the sandbox: a server that
+  writes outside the workspace needs its directory in `[sandbox] writable`.
+- `env` and `headers` values travel on the harness's command line (Claude,
+  Codex), where other local users can read them.
+- Each harness still applies its own permission rules to MCP tools. Under
+  `ask`, Claude Code and Codex prompt for each call; `codex exec` cannot
+  prompt, so under `ask` it refuses the call (under `bypass` it runs it).
+- A server that fails to start is reported in the transcript by Claude Code
+  and Codex; an ACP agent does not say.
 
 ### Conversations
 

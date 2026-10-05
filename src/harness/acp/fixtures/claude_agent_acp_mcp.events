@@ -1,0 +1,18 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
+SessionStarted id=adf55e45-4fa9-4e1f-90ef-dc51bdd04068 model=claude-fable-5-1[1m]
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
+Context used=25328 window=1000000
+Context used=25509 window=1000000
+Context used=25509 window=1000000
+ToolCallStarted id=toolu_01EtFXMAAhLezqbMDcYryyWW name=ToolSearch input={"max_results":1,"query":"select:mcp__probe__magic_word"}
+ToolCallResult id=toolu_01EtFXMAAhLezqbMDcYryyWW error=false "Tool: mcp__probe__magic_word"
+Context used=25618 window=1000000
+ToolCallStarted id=toolu_01E5e8VgaWBNBNxZALx8nNZ3 name=mcp__probe__magic_word input={"description":"mcp__probe__magic_word"}
+PermissionRequest id=0 ToolUse mcp__probe__magic_word
+Context used=25628 window=1000000
+ToolCallResult id=toolu_01E5e8VgaWBNBNxZALx8nNZ3 error=false "zanzibar argA"
+Context used=25649 window=1000000
+TextDelta "zanzibar argA"
+Context used=25649 window=1000000
+Usage in=8 out=229 cache_read=61649 cache_write=14900 cost=0.3259 cumulative=false
+TurnCompleted Done

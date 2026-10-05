@@ -190,6 +190,25 @@ recorded ones. For anything else:
   are read from a bracketed paste; the quoting forms come from terminal
   documentation, and only the bare and single-quoted ones were sent
   through a real pty.
+- MCP servers (`core/mcp.rs`, `[mcp_servers.<name>]`), each run with a stdio
+  server defined only in unharness's config, which the model then called:
+  Claude Code 2.1.289 `--mcp-config '<json>'` (added to its own servers;
+  the flag takes every word up to the next flag, hence its position and
+  the `--` before a print prompt), Codex 0.157.0 `-c
+  mcp_servers.<name>.command|args|env` on `app-server` and `exec`,
+  claude-agent-acp 0.85.1 `mcpServers` on `session/new`. Codex asks to
+  approve an MCP tool call with `mcpServer/elicitation/request` carrying
+  `_meta.codex_approval_kind: "mcp_tool_call"` and no item id (the parser
+  ties it to the `mcpToolCall` item started just before); under `never`
+  with a read-only sandbox it refuses the call instead, under `never`
+  with full access it runs it. Failed servers: Claude's `init` lists
+  `status: "failed"`, Codex sends `mcpServer/startupStatus/updated`
+  (twice, it retries). Unverified: http servers on any harness (Codex
+  did try to connect to the `url`; `http_headers` is its config key name,
+  read from the binary), `session/resume` and `session/load` with
+  servers, codex-acp, how to answer the elicitation's `persist` offer
+  ("always allow" allows once), agy (`agy mcp add` writes its own config;
+  no session flag on 1.2.16) and pi (no MCP client).
 - Plan mode (`Capabilities::plan_mode`) is declared, not driven: nothing in
   unharness enters it yet. What the flag stands on: Claude Code 2.1.289
   `--permission-mode plan`, Codex 0.157.0 `collaborationMode` on

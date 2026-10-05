@@ -1,10 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::core::checkpoints::project_key;
+use crate::core::mcp::{self, McpServer, McpServerSettings};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
@@ -37,6 +38,11 @@ pub struct Config {
     /// Harness-specific settings keyed by harness id.
     #[serde(default)]
     pub harnesses: HashMap<String, HarnessSettings>,
+
+    /// MCP servers by name, passed for the session to every harness that
+    /// can take them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, McpServerSettings>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -220,7 +226,15 @@ impl Config {
             .unwrap_or(&[])
     }
 
+    /// The enabled MCP servers, and what is wrong with the entries left out.
+    pub fn mcp_servers(&self) -> (Vec<McpServer>, Vec<String>) {
+        mcp::resolve(&self.mcp_servers)
+    }
+
     pub fn merge(global: Self, local: Self) -> Self {
+        // A workspace's table of the same name replaces the global one.
+        let mut mcp_servers = global.mcp_servers;
+        mcp_servers.extend(local.mcp_servers);
         let mut harnesses = global.harnesses;
         for (id, local_settings) in local.harnesses {
             let merged = match harnesses.remove(&id) {
@@ -243,6 +257,7 @@ impl Config {
                 deny_read: [global.sandbox.deny_read, local.sandbox.deny_read].concat(),
             },
             harnesses,
+            mcp_servers,
         }
     }
 
@@ -320,6 +335,16 @@ readable = ["~/.ssh"]
 default_provider = "anthropic"
 default_model = "claude-sonnet-4-5"
 transport = "rpc"
+
+[mcp_servers.files]
+command = "npx"
+args = ["-y", "server-filesystem"]
+
+[mcp_servers.files.env]
+TOKEN = "t"
+
+[mcp_servers.docs]
+url = "https://example.com/mcp"
 "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         let serialized = toml::to_string_pretty(&cfg).unwrap();
@@ -434,7 +459,31 @@ transport = "rpc"
             },
         );
 
+        let server = |command: Option<&str>, enabled: Option<bool>| McpServerSettings {
+            command: command.map(str::to_string),
+            enabled,
+            ..Default::default()
+        };
+        for name in ["docs", "files"] {
+            let old = server(Some("old"), None);
+            global.mcp_servers.insert(name.into(), old);
+        }
+        let off = server(Some("old"), Some(false));
+        local.mcp_servers.insert("docs".into(), off);
+        for name in ["files", "local"] {
+            let new = server(Some("new"), None);
+            local.mcp_servers.insert(name.into(), new);
+        }
+
         let merged = Config::merge(global, local);
+        let names: Vec<&String> = merged.mcp_servers.keys().collect();
+        assert_eq!(names, ["docs", "files", "local"]);
+        // A workspace can switch a global server off, or redefine it.
+        assert_eq!(merged.mcp_servers["docs"].enabled, Some(false));
+        assert_eq!(merged.mcp_servers["files"].command.as_deref(), Some("new"));
+        let (servers, problems) = merged.mcp_servers();
+        assert_eq!(servers.len(), 2);
+        assert!(problems.is_empty());
         assert_eq!(merged.sandbox.level.as_deref(), Some("read-only")); // local wins
         assert_eq!(
             merged.sandbox.writable,

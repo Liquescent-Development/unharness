@@ -563,6 +563,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_claude_agent_acp_mcp() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "claude_agent_acp_mcp",
+        );
+    }
+
+    #[test]
     fn fixture_codex_acp() {
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "codex_acp");
     }

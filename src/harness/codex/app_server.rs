@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::app_server_parse::CodexAppServerParser;
-use super::app_server_parse::ELICITATION_PREFIX;
+use super::app_server_parse::{ELICITATION_PREFIX, MCP_APPROVAL};
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
@@ -75,6 +75,22 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
             PermissionDecision::Answer(_) => json!({"action": "cancel"}),
         };
     }
+    if let PermissionKind::ToolUse {
+        suggestions: Some(s),
+        ..
+    } = kind
+        && s.get(MCP_APPROVAL).is_some()
+    {
+        // The request offers to remember the answer (`persist`); how to ask
+        // for that is not in the schema, so "always" allows this call only.
+        return match decision {
+            PermissionDecision::Allow { .. } | PermissionDecision::AllowAlways => {
+                json!({"action": "accept", "content": {}})
+            }
+            PermissionDecision::Deny { .. } => json!({"action": "decline"}),
+            PermissionDecision::Answer(_) => json!({"action": "cancel"}),
+        };
+    }
     match kind {
         PermissionKind::Question { .. } => match decision {
             PermissionDecision::Answer(Value::Object(map)) => {
@@ -113,6 +129,9 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         // Without this the server probes bubblewrap at startup and warns
         // that it cannot create user namespaces.
         cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    }
+    for o in super::mcp_overrides(&cfg.mcp_servers) {
+        cmd.arg("-c").arg(o);
     }
     cmd.args(&cfg.extra_args);
     for (k, v) in &cfg.env {

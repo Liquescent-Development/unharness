@@ -11,6 +11,7 @@ use crate::cli::CommonRunArgs;
 use crate::config::Config;
 use crate::core::conversations::ConversationStore;
 use crate::core::guard::{self, Watch};
+use crate::core::mcp;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
 use crate::core::{HarnessId, ModelRef, PermissionPolicy, ProviderId, resolve_policy};
@@ -169,6 +170,15 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             Some(w) => eprintln!("{} {}", "[unharness]".yellow().bold(), w),
             None => eprintln!("{} sandbox: {}", "[unharness]".dimmed(), sandbox.level()),
         }
+        let (servers, problems) = config.mcp_servers();
+        let (mcp_servers, mcp_warning) = mcp::for_harness(
+            &servers,
+            harness.capabilities().mcp,
+            harness.descriptor().short_name,
+        );
+        for w in problems.into_iter().chain(mcp_warning) {
+            eprintln!("{} {}", "[unharness]".yellow().bold(), w);
+        }
         let model_ref = model.map(|m| {
             ModelRef::new(
                 id,
@@ -187,6 +197,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             format: args.format.clone(),
             resume: print_resume,
             extra_args: config.extra_args(id.as_str()).to_vec(),
+            mcp_servers,
             sandbox,
         };
         if let Some(note) = harness.prepare()? {

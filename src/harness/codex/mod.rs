@@ -23,8 +23,9 @@ use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
 use crate::core::sandbox::{SandboxLevel, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
-    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
+    PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle,
+    SubagentSupport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -324,12 +325,48 @@ impl Harness for CodexHarness {
         if let Some(e) = &cfg.effort {
             cmd.arg("-c").arg(format!("model_reasoning_effort=\"{e}\""));
         }
+        for o in mcp_overrides(&cfg.mcp_servers) {
+            cmd.arg("-c").arg(o);
+        }
         cmd.args(&cfg.extra_args);
         if let Some(p) = &cfg.prompt {
             cmd.arg(p);
         }
         Ok(cmd)
     }
+}
+
+/// `-c` overrides that define these servers for one run, in the shape of
+/// `[mcp_servers.<name>]` in Codex's `config.toml`, which is not written.
+pub fn mcp_overrides(servers: &[McpServer]) -> Vec<String> {
+    let text = |s: &String| toml::Value::String(s.clone());
+    let table = |map: &std::collections::BTreeMap<String, String>| {
+        toml::Value::Table(map.iter().map(|(k, v)| (k.clone(), text(v))).collect())
+    };
+    let mut overrides = Vec::new();
+    for s in servers {
+        let mut set = |key: &str, value: toml::Value| {
+            overrides.push(format!("mcp_servers.{}.{key}={value}", s.name));
+        };
+        match &s.transport {
+            McpTransport::Stdio { command, args, env } => {
+                set("command", text(command));
+                if !args.is_empty() {
+                    set("args", toml::Value::Array(args.iter().map(text).collect()));
+                }
+                if !env.is_empty() {
+                    set("env", table(env));
+                }
+            }
+            McpTransport::Http { url, headers } => {
+                set("url", text(url));
+                if !headers.is_empty() {
+                    set("http_headers", table(headers));
+                }
+            }
+        }
+    }
+    overrides
 }
 
 /// `config.toml` without the trust entry of `workspace`, which Codex adds by
@@ -462,6 +499,7 @@ mod tests {
             format: None,
             resume: None,
             extra_args: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
         let h = CodexHarness::default();
@@ -527,5 +565,40 @@ mod tests {
             base
         );
         assert_eq!(config_without_own_trust(b"not [toml", ws), None);
+    }
+
+    #[test]
+    fn mcp_servers_are_config_overrides() {
+        let servers = crate::core::testing::sample_mcp_servers();
+        assert_eq!(
+            mcp_overrides(&servers),
+            [
+                r#"mcp_servers.files.command="/usr/bin/files-mcp""#,
+                r#"mcp_servers.files.args=["--root", "/my work"]"#,
+                r#"mcp_servers.files.env={ TOKEN = 't"1' }"#,
+                r#"mcp_servers.docs.url="https://example.com/mcp""#,
+                r#"mcp_servers.docs.http_headers={ Authorization = "Bearer x" }"#,
+            ]
+        );
+        // Each value is TOML, as `-c` parses it.
+        for o in mcp_overrides(&servers) {
+            let (_, value) = o.split_once('=').unwrap();
+            assert!(format!("v = {value}").parse::<toml::Table>().is_ok(), "{o}");
+        }
+
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/codex"),
+            cwd: PathBuf::from("/tmp"),
+            prompt: Some("fix it".into()),
+            print_mode: true,
+            mcp_servers: servers[..1].to_vec(),
+            ..Default::default()
+        };
+        let a = args(&CodexHarness::default().build_print_command(&cfg).unwrap());
+        assert!(
+            a.starts_with("exec --skip-git-repo-check -c mcp_servers.files.command=")
+                && a.ends_with(" fix it"),
+            "{a}"
+        );
     }
 }

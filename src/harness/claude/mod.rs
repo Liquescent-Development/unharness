@@ -307,6 +307,10 @@ impl Harness for ClaudeHarness {
         if let Some((key, value)) = self.config_env()? {
             cmd.env(key, value);
         }
+        let mcp = transport::mcp_config(&cfg.mcp_servers);
+        if let Some(config) = &mcp {
+            cmd.arg("--mcp-config").arg(config);
+        }
         if let Some(policy) = cfg.policy {
             cmd.args(transport::policy_args(policy));
         }
@@ -327,6 +331,11 @@ impl Harness for ClaudeHarness {
             cmd.arg("-p");
         }
         if let Some(p) = &cfg.prompt {
+            // `--mcp-config` takes every word up to the next flag, and in
+            // passthrough there may be none before the prompt.
+            if mcp.is_some() {
+                cmd.arg("--");
+            }
             cmd.arg(p);
         }
         Ok(cmd)
@@ -390,6 +399,7 @@ mod tests {
             format: Some("stream-json".into()),
             resume: None,
             extra_args: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
         let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
@@ -477,5 +487,20 @@ mod tests {
         let mut server = before.clone();
         server["mcpServers"] = serde_json::json!({"x": {"command": "sh"}});
         assert_ne!(config_that_matters(&before), config_that_matters(&server));
+    }
+
+    #[test]
+    fn mcp_config_does_not_swallow_the_prompt() {
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/claude"),
+            cwd: PathBuf::from("/tmp"),
+            prompt: Some("run tests".into()),
+            mcp_servers: crate::core::testing::sample_mcp_servers(),
+            ..Default::default()
+        };
+        let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
+        assert_eq!(a[0], "--mcp-config");
+        assert!(a[1].starts_with("{\"mcpServers\""));
+        assert_eq!(a[2..], ["--", "run tests"]);
     }
 }

@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use unharness::core::{
-    AgentEvent, HarnessId, ModelRef, PermissionDecision, PermissionPolicy, SessionCommand,
-    SessionConfig, SessionHandle, StopReason,
+    AgentEvent, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision, PermissionKind,
+    PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
 };
 use unharness::harness::Harness;
 
@@ -64,6 +64,7 @@ impl Fake {
             fork: false,
             extra_args: vec![],
             env,
+            mcp_servers: Vec::new(),
             sandbox: unharness::core::Sandbox::off(),
         }
     }
@@ -419,6 +420,66 @@ async fn codex_app_server_handshake_turns_and_approval() {
         next_event(&mut handle).await,
         AgentEvent::ProcessExited { .. }
     ));
+}
+
+#[tokio::test]
+async fn codex_app_server_asks_before_an_mcp_tool_call() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_mcp_server.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("call it")).await.unwrap();
+    let events = run_turn(&mut handle, |ev| match ev {
+        AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Allow {
+            updated_input: None,
+        }),
+        _ => None,
+    })
+    .await;
+    // The server that could not start is named, once.
+    let failures = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Notice(n) if n.contains("`broken` failed to start")))
+        .count();
+    assert_eq!(failures, 1);
+    // Codex asks through an elicitation; it is a tool permission to the
+    // user, attached to the call it is about.
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolCallStarted { id, name, .. } if name == "probe/magic_word" => Some(id),
+            _ => None,
+        })
+        .expect("the MCP tool call");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::PermissionRequest(r)
+            if r.tool_call_id.as_ref() == Some(call)
+                && matches!(&r.kind, PermissionKind::ToolUse { tool, .. } if tool == "probe/magic_word")
+    )));
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::ToolCallResult { output, is_error: false, .. } if output.contains("zanzibar argA"))
+    ));
+
+    let answer = fake
+        .sent_lines()
+        .into_iter()
+        .find(|v| v["id"] == 0 && v.get("result").is_some())
+        .expect("approval response");
+    assert_eq!(
+        answer["result"],
+        serde_json::json!({"action": "accept", "content": {}})
+    );
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
 #[tokio::test]
@@ -840,6 +901,23 @@ async fn acp_handshake_turns_and_permission_round_trip() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
+    cfg.mcp_servers = vec![
+        McpServer {
+            name: "files".into(),
+            transport: McpTransport::Stdio {
+                command: "/usr/bin/files-mcp".into(),
+                args: vec!["/work".into()],
+                env: Default::default(),
+            },
+        },
+        McpServer {
+            name: "docs".into(),
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: Default::default(),
+            },
+        },
+    ];
     let mut handle = acp_harness().start_session(cfg).unwrap();
 
     // Sent before the handshake finishes: the driver holds it until the
@@ -883,7 +961,14 @@ async fn acp_handshake_turns_and_permission_round_trip() {
     assert_eq!(sent[0]["method"], "initialize");
     assert_eq!(sent[0]["params"]["protocolVersion"], 1);
     assert_eq!(sent[1]["method"], "session/new");
-    assert_eq!(sent[1]["params"]["mcpServers"], serde_json::json!([]));
+    // The agent announced `mcpCapabilities.http`, so both servers go along.
+    assert_eq!(
+        sent[1]["params"]["mcpServers"],
+        serde_json::json!([
+            {"name": "files", "command": "/usr/bin/files-mcp", "args": ["/work"], "env": []},
+            {"type": "http", "name": "docs", "url": "https://example.com/mcp", "headers": []},
+        ])
+    );
     assert_eq!(sent[2]["method"], "session/prompt");
     assert_eq!(sent[2]["params"]["prompt"][0]["text"], "pong?");
     assert!(
@@ -1169,6 +1254,7 @@ impl Confined {
             fork: false,
             extra_args: vec![],
             env,
+            mcp_servers: Vec::new(),
             sandbox: self.sandbox.clone(),
         }
     }

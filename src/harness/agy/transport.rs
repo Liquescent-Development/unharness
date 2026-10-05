@@ -352,6 +352,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--add-dir".into(), "/x".into()],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         }
     }
@@ -402,6 +403,7 @@ mod tests {
             session_id: None,
             extra_args: vec![],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
             turn_index: 0,
         };

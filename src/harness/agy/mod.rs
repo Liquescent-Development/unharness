@@ -337,6 +337,7 @@ mod tests {
             format: Some("stream-json".into()),
             resume: Some("c1".into()),
             extra_args: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
         let h = AgyHarness::default();

@@ -16,6 +16,11 @@ use crate::core::{
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
 pub const ELICITATION_PREFIX: &str = "MCP ";
 
+/// Key in a tool permission's `suggestions` marking the approval of an MCP
+/// tool call, which Codex asks for as an elicitation and which is answered
+/// like one.
+pub const MCP_APPROVAL: &str = "mcpToolCallApproval";
+
 #[derive(Debug, Default)]
 pub struct CodexAppServerParser {
     turn_started: bool,
@@ -31,6 +36,11 @@ pub struct CodexAppServerParser {
     child_names: HashMap<String, String>,
     /// Sub-agent threads with a turn in progress.
     running_children: HashSet<String>,
+    /// The MCP tool call that started last: (item id, name). The request to
+    /// approve it follows and names neither.
+    mcp_call: Option<(String, String)>,
+    /// MCP servers already reported as failed; Codex retries and says so again.
+    failed_mcp_servers: HashSet<String>,
 }
 
 impl CodexAppServerParser {
@@ -319,8 +329,21 @@ impl CodexAppServerParser {
             "autoApprovalReview/strictReviewRequired" => out.push(AgentEvent::Notice(
                 "codex auto-review requires strict review".into(),
             )),
-            // thread/status/changed, mcpServer/startupStatus/updated, account/updated,
-            // remoteControl/*, serverRequest/resolved, item/updated…
+            "mcpServer/startupStatus/updated"
+                if s(p.get("status").unwrap_or(&Value::Null)) == "failed" =>
+            {
+                let name = s(p.get("name").unwrap_or(&Value::Null));
+                if self.failed_mcp_servers.insert(name.to_string()) {
+                    let error = p
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("MCP server '{name}' failed to start"));
+                    out.push(AgentEvent::Notice(error));
+                }
+            }
+            // thread/status/changed, account/updated, remoteControl/*,
+            // serverRequest/resolved, item/updated…
             _ => {}
         }
         out
@@ -342,15 +365,19 @@ impl CodexAppServerParser {
                 name: "apply_patch".into(),
                 input: json!({"changes": item.get("changes").cloned().unwrap_or(Value::Null)}),
             }),
-            "mcpToolCall" => out.push(AgentEvent::ToolCallStarted {
-                id,
-                name: format!(
+            "mcpToolCall" => {
+                let name = format!(
                     "{}/{}",
                     s(item.get("server").unwrap_or(&Value::Null)),
                     s(item.get("tool").unwrap_or(&Value::Null))
-                ),
-                input: item.get("arguments").cloned().unwrap_or(Value::Null),
-            }),
+                );
+                self.mcp_call = Some((id.clone(), name.clone()));
+                out.push(AgentEvent::ToolCallStarted {
+                    id,
+                    name,
+                    input: item.get("arguments").cloned().unwrap_or(Value::Null),
+                });
+            }
             "dynamicToolCall" => out.push(AgentEvent::ToolCallStarted {
                 id,
                 name: s(item.get("tool").unwrap_or(&Value::Null)).to_string(),
@@ -515,7 +542,7 @@ impl CodexAppServerParser {
             Value::String(s) => s.clone(),
             other => other.to_string(),
         };
-        let item_id = p.get("itemId").and_then(Value::as_str).map(str::to_string);
+        let mut item_id = p.get("itemId").and_then(Value::as_str).map(str::to_string);
         let kind = match method {
             "item/commandExecution/requestApproval" => PermissionKind::ToolUse {
                 tool: "shell".into(),
@@ -579,6 +606,33 @@ impl CodexAppServerParser {
                     })
                     .unwrap_or_default(),
             },
+            // Approval of an MCP tool call, asked as an elicitation with
+            // nothing to fill in.
+            "mcpServer/elicitation/request"
+                if p.pointer("/_meta/codex_approval_kind")
+                    .and_then(Value::as_str)
+                    == Some("mcp_tool_call") =>
+            {
+                let (call, tool) = match self.mcp_call.take() {
+                    Some((id, name)) => (Some(id), name),
+                    None => (
+                        None,
+                        s(p.get("serverName").unwrap_or(&Value::Null)).to_string(),
+                    ),
+                };
+                item_id = call;
+                PermissionKind::ToolUse {
+                    tool,
+                    input: p
+                        .pointer("/_meta/tool_params")
+                        .cloned()
+                        .unwrap_or(json!({})),
+                    suggestions: Some(json!({
+                        MCP_APPROVAL: p.pointer("/_meta/persist").cloned().unwrap_or(Value::Null),
+                    })),
+                    description: p.get("message").and_then(Value::as_str).map(str::to_string),
+                }
+            }
             "mcpServer/elicitation/request" => {
                 let server = s(p.get("serverName").unwrap_or(&Value::Null));
                 let message = p
@@ -656,6 +710,15 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             CodexAppServerParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_app_server_mcp_server() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_mcp_server",
+        );
     }
 
     #[test]

@@ -1,13 +1,15 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use colored::*;
 
 use crate::config::Config;
-use crate::core::PermissionPolicy;
 use crate::core::conversations::ConversationStore;
+use crate::core::mcp;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{SandboxLevel, SandboxSetup};
+use crate::core::{McpSupport, PermissionPolicy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -31,8 +33,13 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
 
     // 1. Harnesses
     println!("{}", "AI Harnesses:".bold());
+    // What each installed harness does with MCP servers, for section 1b.
+    let mut mcp_support = Vec::new();
     for (h, probe) in registry.probe_all(&overrides) {
         let d = h.descriptor();
+        if probe.binary.is_some() {
+            mcp_support.push((d.short_name, h.capabilities().mcp));
+        }
         match probe.binary {
             Some(path) => {
                 println!(
@@ -173,6 +180,8 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     }
     println!();
 
+    report_mcp_servers(config, &mcp_support);
+
     // 2. Skills CLI
     println!("{}", "Skills CLI:".bold());
     let skills_cli = SkillsCli::detect();
@@ -289,6 +298,75 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
         "Run 'unharness \"prompt\"' to start, or 'unharness skills add <source>' to install skills.".green()
     );
     Ok(())
+}
+
+/// How long an MCP server gets to answer the handshake.
+const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 1b. The configured MCP servers: whether each one answers, and which
+/// installed harnesses get it.
+fn report_mcp_servers(config: &Config, harnesses: &[(&str, McpSupport)]) {
+    if config.mcp_servers.is_empty() {
+        return;
+    }
+    println!("{}", "MCP Servers:".bold());
+    let (servers, problems) = config.mcp_servers();
+    for server in &servers {
+        let status = if server.is_http() {
+            Ok("remote (not contacted)".to_string())
+        } else {
+            mcp::probe_stdio(server, MCP_PROBE_TIMEOUT)
+                .map(|p| format!("{} · tools: {}", p.server, p.tools))
+        };
+        let (marker, status) = match status {
+            Ok(s) => ("[✓]".green().bold(), s.normal()),
+            Err(e) => ("[!]".yellow().bold(), e.yellow()),
+        };
+        println!(
+            "  {} {} {}",
+            marker,
+            server.name.bold(),
+            server.target().dimmed()
+        );
+        println!("      {} {}", "↳".dimmed(), status);
+        let (takes, lacks): (Vec<_>, Vec<_>) = harnesses.iter().partition(|(name, support)| {
+            !mcp::for_harness(std::slice::from_ref(server), *support, name)
+                .0
+                .is_empty()
+        });
+        let names = |list: &[&(&str, McpSupport)]| -> String {
+            let names: Vec<&str> = list.iter().map(|(name, _)| *name).collect();
+            names.join(", ")
+        };
+        let mut reach = vec![format!(
+            "passed to: {}",
+            if takes.is_empty() {
+                "no installed harness".to_string()
+            } else {
+                names(&takes)
+            }
+        )];
+        if !lacks.is_empty() {
+            reach.push(format!("not to: {}", names(&lacks)));
+        }
+        println!("      {} {}", "↳".dimmed(), reach.join(" · ").dimmed());
+    }
+    for (name, _) in config
+        .mcp_servers
+        .iter()
+        .filter(|(_, s)| s.enabled == Some(false))
+    {
+        println!(
+            "  {} {} {}",
+            "[-]".dimmed(),
+            name.dimmed(),
+            "disabled".dimmed()
+        );
+    }
+    for problem in problems {
+        println!("  {} {}", "[!]".yellow().bold(), problem);
+    }
+    println!();
 }
 
 fn report_skills(label: &str, skills: &[crate::skills::SkillInfo]) {

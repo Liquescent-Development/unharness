@@ -98,6 +98,9 @@ impl PerTurnProtocol for CodexExec {
                 .arg("-c")
                 .arg(format!("model_reasoning_effort=\"{e}\""));
         }
+        for o in super::mcp_overrides(&state.mcp_servers) {
+            command.arg("-c").arg(o);
+        }
         command.args(&state.extra_args);
         command.arg("-");
         for (k, v) in &state.env {
@@ -141,6 +144,7 @@ mod tests {
             session_id: session_id.map(str::to_string),
             extra_args: vec![],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
             turn_index: 0,
         }
@@ -216,5 +220,20 @@ mod tests {
         assert!(a.starts_with("exec resume t1 --json --skip-git-repo-check -c sandbox_mode=\"danger-full-access\" -c approval_policy=\"never\" --dangerously-bypass-approvals-and-sandbox"));
         assert!(!a.contains("-s "));
         assert!(!a.contains("--effort"));
+    }
+
+    #[test]
+    fn mcp_servers_are_passed_on_every_turn() {
+        let servers = crate::core::testing::sample_mcp_servers();
+        for session in [None, Some("t1")] {
+            let mut s = state(PermissionPolicy::Auto, session);
+            s.mcp_servers = servers.clone();
+            let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+            assert!(
+                a.contains(" -c mcp_servers.files.command=\"/usr/bin/files-mcp\" -c ")
+                    && a.contains(" -c mcp_servers.docs.url="),
+                "{a}"
+            );
+        }
     }
 }

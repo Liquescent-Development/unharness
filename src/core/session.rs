@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, PermissionDecision};
 use super::ids::{HarnessId, ModelRef};
+use super::mcp::McpServer;
 use super::sandbox::Sandbox;
 
 #[derive(Debug, Clone)]
@@ -29,6 +30,9 @@ pub struct SessionConfig {
     pub fork: bool,
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// MCP servers for this session, already limited to what the harness
+    /// declares it takes (`mcp::for_harness`).
+    pub mcp_servers: Vec<McpServer>,
     /// What confines the harness process, every time it is spawned.
     pub sandbox: Sandbox,
 }
