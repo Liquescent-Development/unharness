@@ -1,7 +1,7 @@
 SessionStarted id=50190a67-b587-4c38-b1f3-7d02ea9769d7 model=-
 TurnStarted
+Notice "agy refused a call that needs write_file permission, whic..."
 ToolCallStarted id=step-2 name=write_to_file input={"TargetFile":"/WORKSPACE/x.txt"}
 ToolCallResult id=step-2 error=false ""
 Usage in=11737 out=374 cache_read=0 cache_write=0 cost=- cumulative=false
-Notice "agy refused what it could not ask about: WriteToFile"
 TurnCompleted Done

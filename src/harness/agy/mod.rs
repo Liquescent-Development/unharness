@@ -79,8 +79,9 @@ impl Harness for AgyHarness {
         }
     }
 
-    /// agy's own interface asks for itself; `--print` is headless like a
-    /// session.
+    /// agy's own interface asks before a write and before a command (seen
+    /// on 1.2.17: nothing happened until answered); `--print` is headless
+    /// like a session.
     fn print_policies(&self, print_mode: bool) -> Vec<PolicySupport> {
         let mut policies = self.capabilities().permission_policies;
         if !print_mode {
@@ -179,7 +180,6 @@ impl Harness for AgyHarness {
         }
         cmd.args(transport::model_args(
             cfg.model.as_ref().map(|m| m.model.as_str()),
-            cfg.effort.as_deref(),
         ));
         if let Some(id) = &cfg.resume {
             cmd.arg("--conversation").arg(id);

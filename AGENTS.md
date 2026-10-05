@@ -149,11 +149,18 @@ recorded ones. For anything else:
   cut down (a write shows its path, not its content), and neither a failed
   command nor a refused call is marked. Thinking is counted, never sent.
   `result.usage` and `num_turns` are totals over the conversation, also
-  after `--conversation` in a new process (the parser sums the steps);
-  `denied_actions` repeats earlier turns of the same process. Headless agy
-  refuses what it would have asked about and ends the turn there with an
-  empty response and `SUCCESS`: a write in the default mode, a shell
-  command under `--mode accept-edits` (reads and edits run). `--model`
+  after `--conversation` in a new process (the parser sums the steps).
+  Headless agy refuses what it would have asked about and ends the turn
+  there with an empty response and `SUCCESS`: a write in the default
+  mode, a shell command under `--mode accept-edits` (reads and edits run).
+  Each refusal is one stderr line naming the permission; the result's
+  `denied_actions` is the set of kinds refused so far in the process (one
+  entry after three refused commands, `fixtures/denied_twice.jsonl`) and
+  is empty again after `--conversation` in a new process. agy's own
+  interface (`--no-tui`) asked before a write and before a command and did
+  nothing until answered (pty run, 1.2.17), which is what `ask` there
+  stands on; its "always allow" offers one that persists to
+  `settings.json`, a guarded file. `--model`
   takes the ids `agy --output-format json models` lists
   (`command.data.models[].{id,label}`), which end in their effort, and is
   refused beside `--effort` ("conflicts"); `--effort` alone picks the
@@ -162,15 +169,17 @@ recorded ones. For anything else:
   `brain/<conversation>/implementation_plan.md` under the state directory
   and acts in the same turn, so plan mode is not declared. SIGINT gives a
   `result` with `error: "interrupted"` and exit 1, and leaves the command
-  agy started running. Sign-in is the token file beside `settings.json`.
+  agy started running (so does unharness's kill). Sign-in is the token
+  file beside `settings.json`; whether `GEMINI_API_KEY` signs a headless
+  run in is unverified, so it is not looked at.
   Headless runs did not touch `settings.json`, `~/.gemini/config/
   config.json` or `mcp_config.json` (the guarded files). Not committed:
   the plan recording, whose text carried the home path split across
   deltas. Unverified: content blocks on stdin (the binary has a
   `streamInputContentBlock`), `AGY_ERROR:` on stderr (from 1.2.15's
-  strings), agy's own interface (`--no-tui`): what `ask` means there and
-  what it writes to `settings.json` (`trustedWorkspaces`), a model other
-  than the default family's, sub-agents, MCP tool steps.
+  strings), a model other than the default family's, sub-agents, MCP tool
+  steps, what agy's own interface writes to `settings.json` when a
+  workspace is trusted there (`trustedWorkspaces`).
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
   in `[harnesses.codex]` forces the fallback.
 - ACP (`src/harness/acp/`) is verified against

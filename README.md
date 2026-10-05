@@ -254,7 +254,8 @@ says what it is doing only through its tool calls.
 Policy, model and effort changes apply to the next turn on every harness
 (Claude via its control channel, Codex per `turn/start`, pi per RPC command,
 Antigravity by restarting its process on the same conversation). Antigravity has no
-effort setting of its own: the effort is the end of its model ids.
+effort setting: the effort is the end of its model ids, and `--effort` is
+never passed to it.
 
 Tool calls render as blocks: shell output wrapped in a gutter, file edits as
 syntax-coloured red/green replacements, reads highlighted by file type, and

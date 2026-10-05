@@ -10,7 +10,12 @@
 //!
 //! `result.usage` and `num_turns` are totals over the conversation, also
 //! across processes, so a turn's usage is the sum of its steps'.
-//! `denied_actions` repeats what earlier turns of the process were refused.
+//!
+//! Headless agy refuses a call it would have asked about and ends the turn
+//! there, with `SUCCESS` and an empty response. Each refusal is one stderr
+//! line (`jetski: no output produced — a tool required the "command"
+//! permission …`); `result.denied_actions` only names the kinds refused so
+//! far in the process, so it is the fallback when the line has not come.
 
 use serde_json::Value;
 
@@ -24,8 +29,8 @@ pub struct AgyParser {
     turn_usage: Option<Usage>,
     /// Indexes of the tool steps announced and not finished.
     open_tools: Vec<u64>,
-    /// How many of `denied_actions` earlier results already listed.
-    denied_seen: usize,
+    /// A refusal was reported for the open turn.
+    refusal_noted: bool,
 }
 
 impl AgyParser {
@@ -45,10 +50,22 @@ impl AgyParser {
 
     pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
-        // A refused tool is reported from the result's `denied_actions`.
-        if t.is_empty() || t.starts_with("Debugger") || t.starts_with("jetski: no output produced")
-        {
+        if t.is_empty() || t.starts_with("Debugger") {
             return vec![];
+        }
+        if let Some(rest) = t.strip_prefix("jetski: no output produced") {
+            if self.refusal_noted {
+                return vec![];
+            }
+            self.refusal_noted = true;
+            let permission = rest
+                .split_once("required the \"")
+                .and_then(|(_, r)| r.split_once('"'))
+                .map(|(p, _)| p)
+                .unwrap_or("a");
+            return vec![AgentEvent::Notice(format!(
+                "agy refused a call that needs {permission} permission, which it cannot ask for in this mode; the turn ended there"
+            ))];
         }
         if let Some(json) = t.strip_prefix("AGY_ERROR:") {
             let msg = serde_json::from_str::<Value>(json.trim())
@@ -91,23 +108,23 @@ impl AgyParser {
                 if let Some(usage) = self.turn_usage.take() {
                     out.push(AgentEvent::Usage(usage));
                 }
-                let denied = r
+                let error = str_of(r, "error");
+                let denied: Vec<&str> = r
                     .get("denied_actions")
                     .and_then(Value::as_array)
-                    .map(Vec::as_slice)
+                    .map(|d| d.iter().map(|d| str_of(d, "display_name")).collect())
                     .unwrap_or_default();
-                if denied.len() > self.denied_seen {
-                    let names: Vec<&str> = denied[self.denied_seen..]
-                        .iter()
-                        .map(|d| str_of(d, "display_name"))
-                        .collect();
+                if !self.refusal_noted
+                    && !denied.is_empty()
+                    && error.is_empty()
+                    && str_of(r, "response").is_empty()
+                {
+                    self.refusal_noted = true;
                     out.push(AgentEvent::Notice(format!(
-                        "agy refused what it could not ask about: {}",
-                        names.join(", ")
+                        "agy refused a call it cannot ask about in this mode (so far: {}); the turn ended there",
+                        denied.join(", ")
                     )));
                 }
-                self.denied_seen = denied.len();
-                let error = str_of(r, "error");
                 let stop_reason = if error == "interrupted" {
                     StopReason::Interrupted
                 } else if !error.is_empty() {
@@ -141,6 +158,7 @@ impl AgyParser {
     fn open_turn(&mut self, out: &mut Vec<AgentEvent>) {
         if !self.turn_started {
             self.turn_started = true;
+            self.refusal_noted = false;
             out.push(AgentEvent::TurnStarted);
         }
     }
@@ -221,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn fixture_auth_required_is_a_real_recording() {
+    fn fixture_auth_required() {
         assert_fixture(
             &mut AgyParser::new(None),
             &fixtures_dir(file!()),
@@ -231,7 +249,14 @@ mod tests {
 
     #[test]
     fn fixtures_from_a_signed_in_account() {
-        for case in ["turn", "bypass", "resume", "default", "bad_model"] {
+        for case in [
+            "turn",
+            "bypass",
+            "resume",
+            "default",
+            "denied_twice",
+            "bad_model",
+        ] {
             assert_fixture(&mut AgyParser::new(None), &fixtures_dir(file!()), case);
         }
     }
@@ -266,6 +291,30 @@ mod tests {
     }
 
     #[test]
+    fn a_refusal_is_reported_once_per_turn() {
+        let line = "jetski: no output produced \u{2014} a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied.";
+        let result = r#"{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"","num_turns":1,"usage":{},"denied_actions":[{"action":"command","display_name":"RunCommand"}]}}"#;
+        // The line first, then the result's fallback stays quiet.
+        let mut p = AgyParser::new(None);
+        let ev = p.feed_stderr(line);
+        assert!(matches!(&ev[0], AgentEvent::Notice(n) if n.contains("needs command permission")));
+        assert!(p.feed_stderr(line).is_empty());
+        let ev = p.feed(result);
+        assert!(!ev.iter().any(|e| matches!(e, AgentEvent::Notice(_))));
+        // The result first, then the line that arrives after it.
+        let mut p = AgyParser::new(None);
+        let ev = p.feed(result);
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("RunCommand")))
+        );
+        assert!(p.feed_stderr(line).is_empty());
+        // A new turn reports again.
+        p.feed(r#"{"event":"step_update","step_update":{"conversation_id":"c","step_index":3,"state":"DONE","step_type":"user_input"}}"#);
+        assert_eq!(p.feed_stderr(line).len(), 1);
+    }
+
+    #[test]
     fn stderr_markers() {
         let mut p = AgyParser::new(None);
         assert_eq!(
@@ -278,7 +327,6 @@ mod tests {
                 "Error: authentication required. Run 'agy' to log in, then retry.".into()
             )]
         );
-        assert!(p.feed_stderr("jetski: no output produced \u{2014} a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied.").is_empty());
         assert_eq!(
             p.feed_stderr("waiting for background tasks"),
             vec![AgentEvent::Notice(

@@ -24,13 +24,12 @@ pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
 }
 
 /// A model id ends in its effort (`gemini-3.8-flash-high`) and agy refuses
-/// `--effort` beside one ("conflicts with --effort"), so the effort is only
-/// sent for agy's default model.
-pub fn model_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
-    match (model, effort) {
-        (Some(m), _) => vec!["--model".into(), m.to_string()],
-        (None, Some(e)) => vec!["--effort".into(), e.to_string()],
-        (None, None) => vec![],
+/// `--effort` beside one ("conflicts with --effort"), so no effort is sent:
+/// the harness declares no effort levels.
+pub fn model_args(model: Option<&str>) -> Vec<String> {
+    match model {
+        Some(m) => vec!["--model".into(), m.to_string()],
+        None => vec![],
     }
 }
 
@@ -48,10 +47,7 @@ pub fn stream_args(cfg: &SessionConfig) -> Vec<String> {
     .map(|s| s.to_string())
     .collect();
     args.extend(policy_args(cfg.policy).iter().map(|s| s.to_string()));
-    args.extend(model_args(
-        cfg.model.as_ref().map(|m| m.model.as_str()),
-        cfg.effort.as_deref(),
-    ));
+    args.extend(model_args(cfg.model.as_ref().map(|m| m.model.as_str())));
     args.extend(cfg.extra_args.iter().cloned());
     if let Some(id) = &cfg.resume {
         args.push("--conversation".into());
@@ -155,10 +151,10 @@ async fn drive(
                     SessionCommand::Interrupt => {
                         // There is no interrupt event; ending the process ends
                         // the turn, and the conversation resumes by id. A
-                        // command agy started is not stopped by it (nor by
-                        // SIGINT, checked on 1.2.17).
+                        // command agy started runs on (also after SIGINT,
+                        // checked on 1.2.17).
                         let _ = events.send(AgentEvent::Notice(
-                            "agy has no interrupt: its process is stopped, the next turn resumes the conversation".into(),
+                            "agy has no interrupt: its process is stopped (a command it started runs on); the next turn resumes the conversation".into(),
                         )).await;
                         proc.kill().await;
                     }
@@ -267,7 +263,7 @@ mod tests {
         cfg.policy = PermissionPolicy::Bypass;
         assert_eq!(
             stream_args(&cfg).join(" "),
-            "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --dangerously-skip-permissions --effort high --add-dir /x"
+            "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --dangerously-skip-permissions --add-dir /x"
         );
     }
 

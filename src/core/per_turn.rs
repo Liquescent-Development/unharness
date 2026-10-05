@@ -1,7 +1,7 @@
 //! Spawn-per-turn session driver.
 //!
-//! For harnesses whose CLI has no long-lived stdin protocol (codex `exec`),
-//! every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
+//! For harnesses whose CLI has no long-lived stdin protocol (codex
+//! `exec`), every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
 //! as the long-lived transports.
 
 use std::path::PathBuf;

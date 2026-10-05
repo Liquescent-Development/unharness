@@ -2,10 +2,10 @@ SessionStarted id=7d61bda4-46b7-4d1c-9764-809ad9b86fda model=-
 TurnStarted
 ToolCallStarted id=step-2 name=view_file input={"AbsolutePath":"/WORKSPACE/notes.txt"}
 ToolCallResult id=step-2 error=false "2 lines, 17 bytes"
+Notice "agy refused a call that needs command permission, which i..."
 ToolCallStarted id=step-4 name=run_command input={"CommandLine":"echo hi"}
 ToolCallResult id=step-4 error=false ""
 Usage in=23812 out=308 cache_read=0 cache_write=0 cost=- cumulative=false
-Notice "agy refused what it could not ask about: RunCommand"
 TurnCompleted Done
 TurnStarted
 ToolCallStarted id=step-7 name=write_to_file input={"TargetFile":"/WORKSPACE/out.txt"}

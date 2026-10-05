@@ -1,0 +1,21 @@
+SessionStarted id=86036d5c-2484-4a24-aea2-b646eb6b7952 model=-
+TurnStarted
+Notice "agy refused a call that needs command permission, which i..."
+ToolCallStarted id=step-2 name=run_command input={"CommandLine":"echo one"}
+ToolCallResult id=step-2 error=false ""
+Usage in=11718 out=168 cache_read=0 cache_write=0 cost=- cumulative=false
+TurnCompleted Done
+TurnStarted
+ToolCallStarted id=step-5 name=run_command input={"CommandLine":"echo two"}
+ToolCallResult id=step-5 error=false ""
+Usage in=12048 out=117 cache_read=0 cache_write=0 cost=- cumulative=false
+Notice "agy refused a call it cannot ask about in this mode (so f..."
+TurnCompleted Done
+TurnStarted
+ToolCallStarted id=step-8 name=write_to_file input={"TargetFile":"/WORKSPACE/w.txt"}
+ToolCallResult id=step-8 error=false ""
+ToolCallStarted id=step-10 name=run_command input={"CommandLine":"echo three"}
+ToolCallResult id=step-10 error=false ""
+Notice "agy refused a call that needs command permission, which i..."
+Usage in=25017 out=302 cache_read=0 cache_write=0 cost=- cumulative=false
+TurnCompleted Done
