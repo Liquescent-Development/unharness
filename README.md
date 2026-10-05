@@ -97,8 +97,8 @@ The transcript fills the window. Everything about the current state sits
 under the prompt: a status rule (what the agent is doing and for how long),
 the prompt box (it grows with what you type, up to eight rows, then
 scrolls), then the working directory and git branch, the harness,
-provider/model, effort and policy, token usage and cost, the session id, any
-capability caveat, and the key hints.
+provider/model, effort, policy and sandbox level, token usage and cost, the
+session id, any capability caveat, and the key hints.
 
 | Key | Action |
 |---|---|
@@ -132,7 +132,7 @@ capability caveat, and the key hints.
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
-`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/paste`, `/detach`,
+`/sandbox`, `/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/paste`, `/detach`,
 `/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
@@ -255,7 +255,8 @@ Policy, model and effort changes apply to the next turn on every harness
 (Claude via its control channel, Codex per `turn/start`, pi per RPC command,
 Antigravity by restarting its process on the same conversation). Antigravity has no
 effort setting: the effort is the end of its model ids, and `--effort` is
-never passed to it.
+never passed to it. A sandbox change (`/sandbox`) is around the process, so
+the harness is restarted on its session with the next prompt.
 
 Tool calls render as blocks: shell output wrapped in a gutter, file edits as
 syntax-coloured red/green replacements, reads highlighted by file type, and
@@ -400,9 +401,13 @@ writable one, such as a file in the workspace or anything under `/tmp`,
 cannot be enforced and is refused at startup. On Linux the names inside a
 denied directory can still be listed; the contents cannot be read.
 
-Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX` or `[sandbox] level`.
-The default applies under every policy, `bypass` included. The level is on
-the status line and is fixed for a run.
+Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX`, `[sandbox] level`, or
+`/sandbox` in the TUI. It is a setting of its own: the default applies under
+every policy, `bypass` included, and no policy picks a level. The level is
+on the status line and holds for the run on every harness; a change in the
+TUI reaches the next harness process, so the session is restarted with the
+next prompt (resumed where the harness can; nothing changes during a
+turn).
 
 On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
 the process is launched through `sandbox-exec`. The macOS side has not been
