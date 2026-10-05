@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use super::gate;
+
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, PermissionKind, PermissionRequest, StopReason, Usage,
 };
@@ -225,6 +227,36 @@ impl PiParser {
             .and_then(Value::as_str)
             .unwrap_or("The agent needs your input")
             .to_string();
+        let options: Vec<String> = v
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|o| {
+                        o.as_str()
+                            .map(str::to_string)
+                            .or_else(|| o.get("label").and_then(Value::as_str).map(str::to_string))
+                            .unwrap_or_else(|| o.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The gate extension asking about a tool call.
+        if s(v, "method") == "select"
+            && let Some(call) = gate::parse_request(&title, &options)
+        {
+            out.push(AgentEvent::PermissionRequest(PermissionRequest {
+                id,
+                kind: PermissionKind::ToolUse {
+                    action: gate::tool_action(&call.tool, &call.input),
+                    tool: call.tool,
+                    input: call.input,
+                    description: None,
+                },
+                tool_call_id: Some(call.tool_call_id),
+            }));
+            return;
+        }
         let kind = match s(v, "method") {
             "confirm" => PermissionKind::Confirm {
                 title,
@@ -234,25 +266,7 @@ impl PiParser {
                     .filter(|_m| v.get("title").is_some())
                     .map(str::to_string),
             },
-            "select" => PermissionKind::Select {
-                title,
-                options: v
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .map(|o| {
-                                o.as_str()
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        o.get("label").and_then(Value::as_str).map(str::to_string)
-                                    })
-                                    .unwrap_or_else(|| o.to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
+            "select" => PermissionKind::Select { title, options },
             "input" | "editor" => PermissionKind::Input {
                 title,
                 placeholder: v
@@ -446,6 +460,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_gate() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "gate",
+        );
+    }
+
+    #[test]
     fn fixture_rewind() {
         assert_fixture(
             &mut PiParser::new(Some("local-session".into())),
@@ -488,6 +511,40 @@ mod tests {
             &fixtures_dir(file!()),
             "basic_and_bash",
         );
+    }
+
+    #[test]
+    fn only_the_gates_dialog_is_a_tool_request() {
+        let mut p = PiParser::new(None);
+        let kind = |p: &mut PiParser, line: &str| match p.feed(line).remove(0) {
+            AgentEvent::PermissionRequest(r) => (r.kind, r.tool_call_id),
+            other => panic!("{other:?}"),
+        };
+        let title = r#"unharness-gate:{\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"input\":{\"command\":\"ls\"}}"#;
+        let (k, id) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g1","method":"select","title":"{title}","options":["Allow","Deny"]}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::ToolUse { tool, .. } if tool == "bash"));
+        assert_eq!(id.as_deref(), Some("c1"));
+        // The same title on another dialog, or with other answers, is a
+        // dialog like any other: it is shown, not matched against rules.
+        let (k, id) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g2","method":"select","title":"{title}","options":["Deny","Allow"]}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::Select { .. }) && id.is_none());
+        let (k, _) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g3","method":"confirm","title":"{title}"}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::Confirm { .. }));
     }
 
     #[test]

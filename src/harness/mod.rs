@@ -15,8 +15,8 @@ use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
 use crate::core::{
-    Capabilities, HarnessId, McpServer, ModelRef, PermissionPolicy, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessId, McpServer, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
+    SessionConfig, SessionHandle,
 };
 
 /// Where a harness's provider list comes from.
@@ -134,8 +134,14 @@ pub trait Harness: Send + Sync {
         Vec::new()
     }
 
+    /// The policies of a run that is not a session: `--print` when
+    /// `print_mode`, the CLI's own interface (`--no-tui`) otherwise.
+    fn print_policies(&self, _print_mode: bool) -> Vec<PolicySupport> {
+        self.capabilities().permission_policies
+    }
+
     /// The sandbox level when the user set none.
-    fn default_sandbox(&self, _policy: PermissionPolicy) -> SandboxLevel {
+    fn default_sandbox(&self) -> SandboxLevel {
         SandboxLevel::WorkspaceWrite
     }
 

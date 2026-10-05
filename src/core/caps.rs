@@ -12,7 +12,9 @@ use super::session::Attachment;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionPolicy {
-    /// Every prompt is routed to the TUI for a decision.
+    /// Nothing that writes, executes or reaches out runs without the
+    /// user's answer or an allow rule; reads may run. A harness that cannot
+    /// hold to that does not declare this policy.
     Ask,
     /// File edits are auto-approved; other actions still prompt.
     AcceptEdits,
@@ -264,53 +266,62 @@ pub struct PolicyResolution {
     pub warning: Option<String>,
 }
 
+/// The requested policy is not supported and nothing less permissive is:
+/// the user has to choose one of `supported`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyUnavailable {
+    pub requested: PermissionPolicy,
+    /// Least permissive first.
+    pub supported: Vec<PermissionPolicy>,
+}
+
+impl fmt::Display for PolicyUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let supported: Vec<&str> = self.supported.iter().map(|p| p.as_str()).collect();
+        if supported.is_empty() {
+            write!(f, "policy '{}' is not available here", self.requested)
+        } else {
+            write!(
+                f,
+                "policy '{}' is not available here; choose one of: {}",
+                self.requested,
+                supported.join(", ")
+            )
+        }
+    }
+}
+
+impl std::error::Error for PolicyUnavailable {}
+
 /// Map a requested policy onto what the harness supports.
 ///
 /// Exact match wins. Otherwise the nearest *less* permissive supported policy
-/// is chosen (never silently escalate), and only if none exists the nearest
-/// more permissive one. A `degraded` note on the chosen policy is surfaced as
-/// the warning.
-pub fn resolve_policy(caps: &Capabilities, requested: PermissionPolicy) -> PolicyResolution {
-    if caps.permission_policies.is_empty() {
-        return PolicyResolution {
+/// is chosen. A more permissive one is never chosen here: when nothing at or
+/// below the request is supported the answer is [`PolicyUnavailable`] and the
+/// user decides. A `degraded` note on the chosen policy is surfaced as the
+/// warning.
+pub fn resolve_policy(
+    policies: &[PolicySupport],
+    requested: PermissionPolicy,
+) -> Result<PolicyResolution, PolicyUnavailable> {
+    let Some(chosen) = policies
+        .iter()
+        .filter(|p| p.policy <= requested)
+        .max_by_key(|p| p.policy)
+    else {
+        let mut supported: Vec<PermissionPolicy> = policies.iter().map(|p| p.policy).collect();
+        supported.sort();
+        return Err(PolicyUnavailable {
             requested,
-            effective: requested,
-            warning: Some("harness declares no permission policies; passing through".to_string()),
-        };
-    }
-
-    let pick = |cond: &dyn Fn(PermissionPolicy) -> bool, rev: bool| -> Option<PolicySupport> {
-        let mut candidates: Vec<PolicySupport> = caps
-            .permission_policies
-            .iter()
-            .copied()
-            .filter(|p| cond(p.policy))
-            .collect();
-        candidates.sort_by_key(|p| p.policy);
-        if rev {
-            candidates.last().copied()
-        } else {
-            candidates.first().copied()
-        }
+            supported,
+        });
     };
-
-    let chosen = caps
-        .supports_policy(requested)
-        .copied()
-        .or_else(|| pick(&|p| p < requested, true))
-        .or_else(|| pick(&|p| p > requested, false))
-        .expect("non-empty policy list");
 
     let mut warning = None;
     if chosen.policy != requested {
-        let direction = if chosen.policy < requested {
-            "less"
-        } else {
-            "MORE"
-        };
         warning = Some(format!(
-            "policy '{}' not supported; using {} permissive '{}'",
-            requested, direction, chosen.policy
+            "policy '{}' not supported; using less permissive '{}'",
+            requested, chosen.policy
         ));
     }
     if let Some(note) = chosen.degraded {
@@ -320,24 +331,17 @@ pub fn resolve_policy(caps: &Capabilities, requested: PermissionPolicy) -> Polic
         });
     }
 
-    PolicyResolution {
+    Ok(PolicyResolution {
         requested,
         effective: chosen.policy,
         warning,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use PermissionPolicy::*;
-
-    fn caps(policies: &[PolicySupport]) -> Capabilities {
-        Capabilities {
-            permission_policies: policies.to_vec(),
-            ..Default::default()
-        }
-    }
 
     #[test]
     fn parse_policy() {
@@ -350,47 +354,53 @@ mod tests {
 
     #[test]
     fn exact_match_no_warning() {
-        let c = caps(&[PolicySupport::full(Ask), PolicySupport::full(Bypass)]);
-        let r = resolve_policy(&c, Bypass);
+        let c = [PolicySupport::full(Ask), PolicySupport::full(Bypass)];
+        let r = resolve_policy(&c, Bypass).unwrap();
         assert_eq!(r.effective, Bypass);
         assert!(r.warning.is_none());
     }
 
     #[test]
-    fn falls_back_to_less_permissive_first() {
-        // Like Antigravity: Auto unsupported, AcceptEdits is.
-        let c = caps(&[
+    fn falls_back_to_the_nearest_less_permissive() {
+        let c = [
             PolicySupport::full(Ask),
             PolicySupport::full(AcceptEdits),
             PolicySupport::full(Bypass),
-        ]);
-        let r = resolve_policy(&c, Auto);
+        ];
+        let r = resolve_policy(&c, Auto).unwrap();
         assert_eq!(r.effective, AcceptEdits);
         assert!(r.warning.unwrap().contains("less permissive"));
     }
 
     #[test]
-    fn escalates_only_when_nothing_below() {
-        let c = caps(&[PolicySupport::full(Auto)]);
-        let r = resolve_policy(&c, Ask);
-        assert_eq!(r.effective, Auto);
-        assert!(r.warning.unwrap().contains("MORE permissive"));
+    fn never_escalates() {
+        // Like a harness that cannot prompt: nothing at or below `ask`.
+        let c = [
+            PolicySupport::full(Bypass),
+            PolicySupport::full(AcceptEdits),
+        ];
+        let e = resolve_policy(&c, Ask).unwrap_err();
+        assert_eq!(e.supported, vec![AcceptEdits, Bypass]);
+        assert_eq!(
+            e.to_string(),
+            "policy 'ask' is not available here; choose one of: accept-edits, bypass"
+        );
+        assert!(resolve_policy(&[], Bypass).is_err());
     }
 
     #[test]
     fn degraded_note_is_surfaced() {
-        // Like pi: Ask is supported but with a caveat.
-        let c = caps(&[
-            PolicySupport::degraded(Ask, "only extension dialogs prompt"),
-            PolicySupport::full(Bypass),
-        ]);
-        let r = resolve_policy(&c, AcceptEdits);
-        assert_eq!(r.effective, Ask);
+        let c = [
+            PolicySupport::full(Ask),
+            PolicySupport::degraded(AcceptEdits, "edits are not shown"),
+        ];
+        let r = resolve_policy(&c, Auto).unwrap();
+        assert_eq!(r.effective, AcceptEdits);
         let w = r.warning.unwrap();
-        assert!(w.contains("less permissive") && w.contains("only extension dialogs prompt"));
+        assert!(w.contains("less permissive") && w.contains("edits are not shown"));
 
-        let r2 = resolve_policy(&c, Ask);
-        assert_eq!(r2.warning.as_deref(), Some("only extension dialogs prompt"));
+        let r2 = resolve_policy(&c, AcceptEdits).unwrap();
+        assert_eq!(r2.warning.as_deref(), Some("edits are not shown"));
     }
 
     #[test]

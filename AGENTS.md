@@ -28,7 +28,17 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   harness's declared `Capabilities` plus what its live session reported via
   `CapabilitiesChanged`) to decide what to offer. A harness that cannot do something declares it;
   `resolve_policy` picks the nearest *less* permissive supported policy and
-  the warning is shown to the user.
+  the warning is shown to the user. It never picks a more permissive one:
+  when nothing at or below the request is supported the user chooses (the
+  TUI holds the session and opens the picker, `--print` and `--no-tui`
+  fail).
+- **`ask` is a guarantee, not a best effort.** Nothing that writes, executes
+  or reaches out runs without the user's answer or an allow rule; reads may
+  run. A harness, transport or run mode that cannot hold to that does not
+  declare `ask` (`Capabilities::permission_policies`, `Harness::
+  print_policies`), and there is no degraded `ask`. Declaring it needs a
+  recording or a live run that shows the asking. The policy never chooses
+  a sandbox level.
 - **Parsers are pure and fixture-tested.** `parse::feed(line) -> Vec<AgentEvent>`
   has no I/O. Every protocol change needs a recording made with the matching
   `scripts/record-*.py` and a committed `fixtures/<case>.jsonl` + `.events`.
@@ -256,6 +266,35 @@ recorded ones. For anything else:
   reports it when its `modes` list one with id `plan` (claude-agent-acp
   0.85.1 does, codex-acp 2.1.1 does not). pi plans only through an
   extension.
+- `ask` per harness. Codex 0.157.0 app-server: `approvalPolicy:
+  "untrusted"` with `sandbox: "workspace-write"` (unharness's sandbox off)
+  asked before a file change and before every command, `cat` of a file
+  included (two recordings and a TUI run; not committed as a fixture
+  because Codex read the user's skill files into them despite the prompt).
+  The Codex CLI itself rejects `untrusted`: `-a` takes only `on-request`
+  and `never`, and `-c approval_policy="untrusted"` fails with "no longer
+  supported", which is why `exec`, `--print` and `--no-tui` have no `ask`
+  on Codex; only the app-server protocol still takes it. pi 0.87.1: the
+  gate (`src/harness/pi/gate.ts`, `gate.rs`) is a `tool_call` handler that
+  asks with `ctx.ui.select`, which arrives over RPC as an
+  `extension_ui_request` whose title carries the call as JSON
+  (`fixtures/gate.jsonl`); `-e` loads it beside the user's extensions and
+  under `--no-extensions`, from the state directory, under the sandbox.
+  Checked in the TUI: a command allowed always, a write denied (pi reports
+  the tool as failed with "Denied by the user"), the same command then
+  answered by the rule; a call from one of the user's own skills was asked
+  about too. In `--print` `ctx.hasUI` is false and the gate blocks. pi
+  passes a path as the model wrote it, often relative, and a rule does not
+  match a relative path. Read in pi 0.87.1's source, not run: before using
+  a path pi turns Unicode spaces into ASCII ones, strips a leading `@`,
+  expands `~` and reads `file://` URLs, so such a path is `Opaque`
+  (`gate::path_is_literal`); every extension's `tool_call` handler runs in
+  turn and may change the input after the gate saw it, and the gate knows
+  a read by its tool name alone. Unverified: the gate's human-readable dialog in
+  pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), several
+  gate dialogs open at once (pi can run a message's tool calls in
+  parallel), tool calls made by a pi sub-agent or an extension that runs
+  tools without `tool_call`, agy's own interface under `ask`.
 - Allow rules, checked live on Claude Code 2.1.289 and Codex 0.157.0
   (app-server): a shell rule written from a Claude `Bash` request answered
   Codex's request for the same command in the same workspace, a command

@@ -1,5 +1,6 @@
 //! pi harness: a multi-provider coding agent with a JSONL RPC mode.
 
+pub mod gate;
 pub mod parse;
 pub mod transport;
 
@@ -22,7 +23,21 @@ use crate::core::{
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
-pub struct PiHarness;
+#[derive(Default)]
+pub struct PiHarness {
+    /// Where the gate extension is installed; unharness's state directory
+    /// unless a test says otherwise.
+    pub gate_dir: Option<PathBuf>,
+}
+
+impl PiHarness {
+    fn install_gate(&self) -> Result<PathBuf> {
+        match &self.gate_dir {
+            Some(dir) => gate::install(dir),
+            None => gate::install(&gate::default_dir()?),
+        }
+    }
+}
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::PI,
@@ -67,14 +82,12 @@ impl Harness for PiHarness {
             thinking: true,
             tool_events: true,
             interactive_permissions: true,
+            // pi itself never asks; the gate extension does (`gate.rs`).
             permission_policies: vec![
-                PolicySupport::degraded(
-                    PermissionPolicy::Ask,
-                    "pi only prompts when an extension asks; built-in tools run freely",
-                ),
+                PolicySupport::full(PermissionPolicy::Ask),
                 PolicySupport::degraded(
                     PermissionPolicy::Bypass,
-                    "extension confirm/select dialogs are auto-accepted",
+                    "confirm/select dialogs of your extensions are auto-accepted",
                 ),
             ],
             effort_levels: THINKING_LEVELS.iter().map(|s| s.to_string()).collect(),
@@ -179,7 +192,7 @@ impl Harness for PiHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        transport::start(cfg)
+        transport::start(cfg, &self.install_gate()?)
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
@@ -205,6 +218,11 @@ impl Harness for PiHarness {
         }
         if cfg.print_mode {
             cmd.arg("--print");
+        }
+        // Nobody answers a `--print` run, where the gate blocks what it
+        // would have asked about; in pi's own interface it asks there.
+        if cfg.policy == Some(PermissionPolicy::Ask) {
+            cmd.arg("-e").arg(self.install_gate()?);
         }
         cmd.args(&cfg.extra_args);
         if let Some(p) = &cfg.prompt {
@@ -281,20 +299,34 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
-        let cmd = PiHarness.build_print_command(&cfg).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let harness = PiHarness {
+            gate_dir: Some(dir.path().to_path_buf()),
+        };
+        let cmd = harness.build_print_command(&cfg).unwrap();
         let a: Vec<String> = cmd
             .get_args()
             .map(|s| s.to_string_lossy().to_string())
             .collect();
         assert_eq!(
             a.join(" "),
-            "--provider openai --model gpt-5.5 --thinking low --session-id s1 --mode json --print -- hi there"
+            format!(
+                "--provider openai --model gpt-5.5 --thinking low --session-id s1 --mode json --print -e {} -- hi there",
+                dir.path().join("gate.ts").display()
+            )
         );
+        // Under `bypass` nothing is gated.
+        let bypass = PrintConfig {
+            policy: Some(PermissionPolicy::Bypass),
+            ..cfg
+        };
+        let cmd = harness.build_print_command(&bypass).unwrap();
+        assert!(cmd.get_args().all(|a| a != "-e"));
     }
 
     #[test]
     fn capabilities() {
-        let c = PiHarness.capabilities();
+        let c = PiHarness::default().capabilities();
         assert!(c.multi_provider && c.live_model_list && c.interactive_permissions);
         assert!(c.supports_policy(PermissionPolicy::Auto).is_none());
         assert!(c.supports_effort("xhigh"));

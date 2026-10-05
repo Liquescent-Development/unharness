@@ -90,6 +90,16 @@ impl Harness for AgyHarness {
         }
     }
 
+    /// agy's own interface asks for itself; `--print` is headless like a
+    /// session.
+    fn print_policies(&self, print_mode: bool) -> Vec<PolicySupport> {
+        let mut policies = self.capabilities().permission_policies;
+        if !print_mode {
+            policies.insert(0, PolicySupport::full(PermissionPolicy::Ask));
+        }
+        policies
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming_input: self.transport != AgyTransport::PerTurn,
@@ -97,11 +107,9 @@ impl Harness for AgyHarness {
             thinking: true,
             tool_events: true,
             interactive_permissions: false,
+            // No `ask`: headless agy cannot prompt, and refuses by itself
+            // what it would have asked about.
             permission_policies: vec![
-                PolicySupport::degraded(
-                    PermissionPolicy::Ask,
-                    "headless agy soft-denies tools that would prompt",
-                ),
                 PolicySupport::full(PermissionPolicy::AcceptEdits),
                 PolicySupport::full(PermissionPolicy::Bypass),
             ],
@@ -361,6 +369,14 @@ mod tests {
         let c = AgyHarness::default().capabilities();
         assert!(!c.interactive_permissions && c.streaming_input && c.resume_by_id);
         assert!(c.supports_policy(PermissionPolicy::Auto).is_none());
+        assert!(c.supports_policy(PermissionPolicy::Ask).is_none());
+        let h = AgyHarness::default();
+        let asks = |print_mode| {
+            h.print_policies(print_mode)
+                .iter()
+                .any(|p| p.policy == PermissionPolicy::Ask)
+        };
+        assert!(asks(false) && !asks(true));
         assert!(
             !AgyHarness::new(AgyTransport::PerTurn)
                 .capabilities()

@@ -305,6 +305,99 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     // hang (tokio runtime shutdown would wait on nothing) is the signal.
 }
 
+/// pi with its gate extension installed in a scratch directory.
+fn pi_harness() -> unharness::harness::pi::PiHarness {
+    unharness::harness::pi::PiHarness {
+        gate_dir: Some(tempfile::tempdir().unwrap().keep()),
+    }
+}
+
+#[tokio::test]
+async fn pi_gate_asks_before_a_tool_acts() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/gate.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle
+        .send(SessionCommand::turn("read, touch, write"))
+        .await
+        .unwrap();
+    // As recorded: the command is allowed, the write is not.
+    let events = run_turn(&mut handle, |ev| match ev {
+        AgentEvent::PermissionRequest(req) => match &req.kind {
+            PermissionKind::ToolUse { tool, .. } if tool == "bash" => {
+                Some(PermissionDecision::Allow {
+                    updated_input: None,
+                })
+            }
+            _ => Some(PermissionDecision::Deny {
+                reason: "no".into(),
+            }),
+        },
+        _ => None,
+    })
+    .await;
+    let asked: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::PermissionRequest(req) => match &req.kind {
+                PermissionKind::ToolUse { tool, action, .. } if req.tool_call_id.is_some() => {
+                    Some(format!("{tool}: {}", action.summary()))
+                }
+                other => panic!("{other:?}"),
+            },
+            _ => None,
+        })
+        .collect();
+    // The read before them was not asked about.
+    assert_eq!(
+        asked,
+        ["bash: shell \"touch touched.txt\"", "write: edit made.txt"]
+    );
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["type"] == "extension_ui_response")
+        .map(|v| v["value"].clone())
+        .collect();
+    assert_eq!(answers, ["Allow", "Deny"]);
+}
+
+#[tokio::test]
+async fn pi_gate_is_answered_without_asking_under_bypass() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/gate.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Bypass, true))
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("read, touch, write"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_))),
+        "{events:?}"
+    );
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["type"] == "extension_ui_response")
+        .map(|v| v["value"].clone())
+        .collect();
+    assert_eq!(answers, ["Allow", "Allow"]);
+}
+
 #[tokio::test]
 async fn pi_rpc_session_streams_tool_and_text() {
     if !python_available() {
@@ -312,7 +405,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/basic_and_bash.jsonl");
-    let harness = unharness::harness::pi::PiHarness;
+    let harness = pi_harness();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -854,7 +947,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     let fixture = repo().join("src/harness/agy/fixtures/auth_required.jsonl");
     let harness = unharness::harness::agy::AgyHarness::default();
     let mut handle = harness
-        .start_session(fake.config(&fixture, PermissionPolicy::Ask, false))
+        .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
         .unwrap();
     handle.send(SessionCommand::turn("pong")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
@@ -890,6 +983,7 @@ fn acp_harness() -> unharness::harness::acp::AcpHarness {
         &[fake_harness().to_string_lossy().into_owned()],
     )
     .unwrap()
+    .asking_permission(true)
 }
 
 #[tokio::test]
@@ -1115,7 +1209,7 @@ async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
-    let harness = unharness::harness::pi::PiHarness;
+    let harness = pi_harness();
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();

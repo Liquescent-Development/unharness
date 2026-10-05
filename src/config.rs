@@ -96,6 +96,10 @@ pub struct HarnessSettings {
     pub command: Vec<String>,
     /// Name shown in the TUI for a config-defined harness.
     pub display_name: Option<String>,
+    /// ACP only: this agent asks permission before it writes, runs a
+    /// command or reaches out, so the `ask` policy can be offered for it.
+    /// unharness cannot check that; set it for an agent seen to do so.
+    pub asks_permission: Option<bool>,
     /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
     /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
     /// existing `~/.claude.json` is copied there once. Default: on.
@@ -294,6 +298,7 @@ impl Config {
                 global.command
             },
             display_name: local.display_name.or(global.display_name),
+            asks_permission: local.asks_permission.or(global.asks_permission),
             relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }

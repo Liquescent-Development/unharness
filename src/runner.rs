@@ -15,7 +15,9 @@ use crate::core::guard::{self, Watch};
 use crate::core::mcp;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
-use crate::core::{HarnessId, ModelRef, PermissionPolicy, ProviderId, resolve_policy};
+use crate::core::{
+    HarnessId, ModelRef, PermissionPolicy, PolicyResolution, ProviderId, resolve_policy,
+};
 use crate::harness::{Harness, PrintConfig, ProviderSource};
 use crate::sync::{find_workspace_root, sync_workspace_rules};
 use crate::tui::{self, TuiLaunch};
@@ -42,14 +44,26 @@ pub fn requested_policy(
     config: &Config,
     harness: HarnessId,
 ) -> Result<PermissionPolicy> {
+    match explicit_policy(args)? {
+        Some(p) => Ok(p),
+        None => configured_policy(config, harness),
+    }
+}
+
+/// The policy named on the command line (`--policy`, then `-y`), which
+/// holds for every harness of the run.
+pub fn explicit_policy(args: &CommonRunArgs) -> Result<Option<PermissionPolicy>> {
     if let Some(p) = &args.policy {
-        return PermissionPolicy::parse(p).ok_or_else(|| {
+        return PermissionPolicy::parse(p).map(Some).ok_or_else(|| {
             anyhow::anyhow!("unknown policy '{p}' (ask, accept-edits, auto, bypass)")
         });
     }
-    if args.auto {
-        return Ok(PermissionPolicy::Bypass);
-    }
+    Ok(args.auto.then_some(PermissionPolicy::Bypass))
+}
+
+/// The configured policy for `harness`: its own table's, the global one,
+/// Ask. A harness's own default is for that harness only.
+pub fn configured_policy(config: &Config, harness: HarnessId) -> Result<PermissionPolicy> {
     let configured = config
         .harness(harness.as_str())
         .and_then(|h| h.default_policy.as_deref())
@@ -59,6 +73,41 @@ pub fn requested_policy(
             .ok_or_else(|| anyhow::anyhow!("unknown policy '{p}' in config")),
         None => Ok(PermissionPolicy::Ask),
     }
+}
+
+/// Every policy the config names must be one: the TUI reads them again
+/// when the harness is switched, where an error could no longer end the run.
+fn check_configured_policies(config: &Config) -> Result<()> {
+    let named = config
+        .harnesses
+        .values()
+        .filter_map(|h| h.default_policy.as_deref())
+        .chain(config.default_policy.as_deref());
+    for p in named {
+        if PermissionPolicy::parse(p).is_none() {
+            bail!("unknown policy '{p}' in config (ask, accept-edits, auto, bypass)");
+        }
+    }
+    Ok(())
+}
+
+/// The policy of a run without the TUI. Nobody is there to choose another
+/// one, so a policy the harness does not have, with nothing less permissive
+/// in its place, ends the run.
+fn print_policy(
+    harness: &dyn Harness,
+    print_mode: bool,
+    requested: PermissionPolicy,
+) -> Result<PolicyResolution> {
+    resolve_policy(&harness.print_policies(print_mode), requested).map_err(|e| {
+        let supported: Vec<&str> = e.supported.iter().map(|p| p.as_str()).collect();
+        anyhow::anyhow!(
+            "policy '{}' is not available for {} without the TUI; pass --policy with one of: {}",
+            e.requested,
+            harness.descriptor().display_name,
+            supported.join(", ")
+        )
+    })
 }
 
 /// The sandbox level the user set: CLI flag, then `[sandbox].level`.
@@ -73,10 +122,9 @@ pub fn requested_sandbox(args: &CommonRunArgs, config: &Config) -> Result<Option
     })
 }
 
-/// What confines `harness` for a session under `policy` in `workspace`.
+/// What confines `harness` for a session in `workspace`.
 pub fn session_sandbox(
     harness: &dyn Harness,
-    policy: PermissionPolicy,
     setup: &SandboxSetup,
     config: &Config,
     workspace: &Path,
@@ -88,7 +136,7 @@ pub fn session_sandbox(
     sandbox::resolve(
         &SandboxRequest {
             explicit: setup.explicit,
-            default: harness.default_sandbox(policy),
+            default: harness.default_sandbox(),
             workspace,
             harness: &harness.sandbox_paths(),
             extra_writable: &extra_writable,
@@ -123,6 +171,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let id = harness.descriptor().id;
     let settings = config.harness(id.as_str());
 
+    check_configured_policies(config)?;
     let policy = requested_policy(&args, config, id)?;
     // The sandbox keeps unharness's config directory from being written,
     // but only knows of it once it exists; allow rules will be kept there.
@@ -161,13 +210,12 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let (resume, print_resume) = resolve_resume(&store, args.resume.as_deref(), id)?;
 
     if args.print || args.no_tui {
-        let res = resolve_policy(&harness.capabilities(), policy);
+        let res = print_policy(harness, args.print, policy)?;
         if let Some(w) = res.warning {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
         let sandbox = session_sandbox(
             harness,
-            res.effective,
             &sandbox_setup,
             config,
             ws_root.as_deref().unwrap_or(cwd),
@@ -256,7 +304,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         registry,
         config: config.clone(),
         harness: id,
-        policy,
+        policy: explicit_policy(&args)?,
         sandbox: sandbox_setup,
         provider,
         model,
@@ -322,6 +370,56 @@ mod tests {
         assert_eq!(vendor.as_deref(), Some("claude-9"));
         let (_, vendor) = resolve_resume(&store, Some(&c.id[..8]), HarnessId::CODEX).unwrap();
         assert!(vendor.is_none());
+    }
+
+    #[test]
+    fn a_run_without_the_tui_does_not_pick_a_policy() {
+        use crate::harness::codex::{CodexHarness, CodexTransport};
+        // `--print` on Codex is `exec`, which has no `ask`.
+        let codex = CodexHarness::new(CodexTransport::AppServer);
+        for print_mode in [true, false] {
+            let e = print_policy(&codex, print_mode, PermissionPolicy::Ask).unwrap_err();
+            assert_eq!(
+                e.to_string(),
+                "policy 'ask' is not available for Codex (codex) without the TUI; pass --policy with one of: accept-edits, auto, bypass"
+            );
+        }
+        let res = print_policy(&codex, true, PermissionPolicy::Auto).unwrap();
+        assert_eq!(res.effective, PermissionPolicy::Auto);
+        let claude = crate::harness::claude::ClaudeHarness::default();
+        let res = print_policy(&claude, true, PermissionPolicy::Ask).unwrap();
+        assert_eq!(res.effective, PermissionPolicy::Ask);
+    }
+
+    #[test]
+    fn a_harness_default_is_not_the_runs_policy() {
+        let mut cfg = Config::default();
+        cfg.harnesses.insert(
+            "agy".into(),
+            crate::config::HarnessSettings {
+                default_policy: Some("bypass".into()),
+                ..Default::default()
+            },
+        );
+        let base = CommonRunArgs::default();
+        assert_eq!(explicit_policy(&base).unwrap(), None);
+        assert_eq!(
+            configured_policy(&cfg, HarnessId::AGY).unwrap(),
+            PermissionPolicy::Bypass
+        );
+        assert_eq!(
+            configured_policy(&cfg, HarnessId::CLAUDE).unwrap(),
+            PermissionPolicy::Ask
+        );
+        let y = CommonRunArgs {
+            auto: true,
+            ..Default::default()
+        };
+        assert_eq!(explicit_policy(&y).unwrap(), Some(PermissionPolicy::Bypass));
+
+        assert!(check_configured_policies(&cfg).is_ok());
+        cfg.harnesses.get_mut("agy").unwrap().default_policy = Some("nah".into());
+        assert!(check_configured_policies(&cfg).is_err());
     }
 
     #[test]

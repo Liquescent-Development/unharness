@@ -3,6 +3,9 @@
 record-claude.py: `>>` sent lines, `!!` stderr, plain = stdout).
 
 Usage: scripts/record-pi.py OUT.jsonl [--provider P --model M] [--no-models] PROMPT [PROMPT...]
+
+With `--extension src/harness/pi/gate.ts --select Allow --select Deny` the
+gate's dialogs are answered in that order (the last answer repeats).
 """
 import argparse
 import json
@@ -40,6 +43,10 @@ def main() -> int:
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
+    ap.add_argument("--extension", action="append", default=[],
+                    help="load this extension file (repeatable); others are not discovered")
+    ap.add_argument("--select", action="append", default=[],
+                    help="the answer to the next select dialog (repeatable; default: ok)")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -50,6 +57,10 @@ def main() -> int:
         cmd += ["--model", args.model]
     if args.thinking:
         cmd += ["--thinking", args.thinking]
+    if args.extension:
+        cmd += ["--no-extensions"]
+        for e in args.extension:
+            cmd += ["-e", os.path.abspath(e)]
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -129,6 +140,9 @@ def main() -> int:
             rid = obj.get("id")
             if method == "confirm":
                 send({"type": "extension_ui_response", "id": rid, "confirmed": True})
+            elif method == "select" and args.select:
+                answer = args.select.pop(0) if len(args.select) > 1 else args.select[0]
+                send({"type": "extension_ui_response", "id": rid, "value": answer})
             elif method in ("select", "input", "editor"):
                 send({"type": "extension_ui_response", "id": rid, "value": "ok"})
         elif t == "agent_settled":

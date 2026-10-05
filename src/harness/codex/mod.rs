@@ -21,7 +21,7 @@ use super::{
 };
 use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
-use crate::core::sandbox::{SandboxLevel, SandboxPaths};
+use crate::core::sandbox::SandboxPaths;
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
     PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle,
@@ -113,6 +113,15 @@ impl CodexHarness {
     }
 }
 
+/// What `codex exec` can hold to: it cannot prompt, so there is no `ask`.
+fn exec_policies() -> Vec<PolicySupport> {
+    vec![
+        PolicySupport::full(PermissionPolicy::AcceptEdits),
+        PolicySupport::full(PermissionPolicy::Auto),
+        PolicySupport::full(PermissionPolicy::Bypass),
+    ]
+}
+
 impl Harness for CodexHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
@@ -133,15 +142,7 @@ impl Harness for CodexHarness {
                     .map(PolicySupport::full)
                     .collect()
             } else {
-                vec![
-                    PolicySupport::degraded(
-                        PermissionPolicy::Ask,
-                        "codex exec cannot prompt; running read-only",
-                    ),
-                    PolicySupport::full(PermissionPolicy::AcceptEdits),
-                    PolicySupport::full(PermissionPolicy::Auto),
-                    PolicySupport::full(PermissionPolicy::Bypass),
-                ]
+                exec_policies()
             },
             effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
             resume_by_id: true,
@@ -285,12 +286,11 @@ impl Harness for CodexHarness {
         }
     }
 
-    /// `exec` cannot prompt, so `ask` there means read-only.
-    fn default_sandbox(&self, policy: PermissionPolicy) -> SandboxLevel {
-        match (self.transport, policy) {
-            (CodexTransport::Exec, PermissionPolicy::Ask) => SandboxLevel::ReadOnly,
-            _ => SandboxLevel::WorkspaceWrite,
-        }
+    /// `--print` is `codex exec` whatever the session transport. Codex's
+    /// own interface asks when its model decides to (`on-request`); the CLI
+    /// takes no `untrusted` there, so neither holds to `ask`.
+    fn print_policies(&self, _print_mode: bool) -> Vec<PolicySupport> {
+        exec_policies()
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
@@ -315,11 +315,11 @@ impl Harness for CodexHarness {
             }
             if let Some(p) = cfg.policy {
                 if cfg.resume.is_some() {
-                    for o in exec::policy_config_overrides(p, confined) {
+                    for o in exec::policy_config_overrides(p, confined)? {
                         cmd.arg("-c").arg(o);
                     }
                 } else {
-                    cmd.args(exec::policy_args(p, confined));
+                    cmd.args(exec::policy_args(p, confined)?);
                 }
             }
         } else {
@@ -329,7 +329,7 @@ impl Harness for CodexHarness {
             if cfg.policy == Some(PermissionPolicy::Bypass) {
                 cmd.arg("--dangerously-bypass-approvals-and-sandbox");
             } else if let Some(p) = cfg.policy {
-                cmd.args(exec::policy_args(p, confined));
+                cmd.args(exec::policy_args(p, confined)?);
             }
         }
         if let Some(m) = &cfg.model {
@@ -578,6 +578,14 @@ mod tests {
             args(&h.build_print_command(&tui).unwrap()),
             "--dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\""
         );
+        for print_mode in [true, false] {
+            let ask = PrintConfig {
+                print_mode,
+                policy: Some(PermissionPolicy::Ask),
+                ..resumed.clone()
+            };
+            assert!(h.build_print_command(&ask).is_err());
+        }
     }
 
     #[test]
@@ -592,12 +600,14 @@ mod tests {
         );
         let exec = CodexHarness::new(CodexTransport::Exec).capabilities();
         assert!(!exec.interactive_permissions);
-        assert!(
-            exec.supports_policy(PermissionPolicy::Ask)
-                .unwrap()
-                .degraded
-                .is_some()
-        );
+        assert!(exec.supports_policy(PermissionPolicy::Ask).is_none());
+        // `--print` runs `exec` on either transport.
+        for transport in [CodexTransport::AppServer, CodexTransport::Exec] {
+            for print_mode in [true, false] {
+                let policies = CodexHarness::new(transport).print_policies(print_mode);
+                assert!(policies.iter().all(|p| p.policy != PermissionPolicy::Ask));
+            }
+        }
         assert_eq!(
             CodexTransport::parse("app_server"),
             Some(CodexTransport::AppServer)

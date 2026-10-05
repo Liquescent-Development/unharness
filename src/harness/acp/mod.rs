@@ -71,6 +71,9 @@ pub struct AcpHarness {
     args: Vec<String>,
     /// Came from [`PRESETS`] rather than the user's config.
     preset: bool,
+    /// The user's config says this agent asks before it acts
+    /// (`asks_permission`).
+    asks: bool,
 }
 
 impl AcpHarness {
@@ -94,7 +97,14 @@ impl AcpHarness {
             descriptor,
             args: args.to_vec(),
             preset: false,
+            asks: false,
         })
+    }
+
+    /// Whether the agent is known to ask before it writes, runs a command
+    /// or reaches out, which is what the `ask` policy stands on.
+    pub fn asking_permission(self, asks: bool) -> Self {
+        AcpHarness { asks, ..self }
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -137,15 +147,17 @@ impl Harness for AcpHarness {
             tool_events: true,
             interactive_permissions: true,
             // Enforced by unharness when the agent asks; an agent that never
-            // asks cannot be made to.
-            permission_policies: vec![
-                PolicySupport::degraded(
-                    PermissionPolicy::Ask,
-                    "the agent decides what it asks permission for",
-                ),
-                PolicySupport::full(PermissionPolicy::AcceptEdits),
-                PolicySupport::full(PermissionPolicy::Bypass),
-            ],
+            // asks cannot be made to, so `ask` is only for one known to
+            // (codex-acp 2.1.1 asked for nothing in three recordings).
+            permission_policies: self
+                .asks
+                .then_some(PolicySupport::full(PermissionPolicy::Ask))
+                .into_iter()
+                .chain([
+                    PolicySupport::full(PermissionPolicy::AcceptEdits),
+                    PolicySupport::full(PermissionPolicy::Bypass),
+                ])
+                .collect(),
             // Effort levels, image input and resume are reported by the session.
             effort_levels: Vec::new(),
             resume_by_id: true,
@@ -231,6 +243,11 @@ mod tests {
         assert!(caps.interactive_permissions && caps.plan_updates && !caps.steer);
         assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
         assert!(h.build_print_command(&PrintConfig::default()).is_err());
+
+        // `ask` only for an agent the config says asks.
+        assert!(caps.supports_policy(PermissionPolicy::Ask).is_none());
+        let caps = h.asking_permission(true).capabilities();
+        assert!(caps.supports_policy(PermissionPolicy::Ask).is_some());
     }
 
     #[test]
