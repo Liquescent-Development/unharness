@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod code;
 pub mod drop;
 pub mod editor;
+pub mod files;
 pub mod history;
 pub mod markdown;
 pub mod modal;
