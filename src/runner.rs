@@ -161,7 +161,13 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let (resume, print_resume) = resolve_resume(&store, args.resume.as_deref(), id)?;
 
     if args.print || args.no_tui {
-        let res = resolve_policy(&harness.capabilities(), policy);
+        let res = resolve_policy(&harness.print_policies(args.print), policy).map_err(|e| {
+            anyhow::anyhow!(
+                "{} with {}; pass --policy",
+                e,
+                harness.descriptor().display_name
+            )
+        })?;
         if let Some(w) = res.warning {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }

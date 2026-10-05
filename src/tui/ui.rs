@@ -23,7 +23,9 @@ use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::SandboxLevel;
 use crate::core::rules::Scope;
-use crate::core::{HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus};
+use crate::core::{
+    HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus, resolve_policy,
+};
 
 pub fn render(frame: &mut Frame, app: &mut App) {
     // The subagent in view may be gone (a rewind, /clear, another conversation).
@@ -1004,12 +1006,13 @@ fn render_bottom(
             Style::default().fg(Color::DarkGray),
         ),
     ]);
+    let wanted = app.wanted_policy();
     let effective = app.effective_policy();
     let sandbox = app.sandbox_level().0;
-    let policy_text = if effective == app.policy_requested {
-        format!("policy {effective}")
-    } else {
-        format!("policy {}→{}", app.policy_requested, effective)
+    let policy_text = match effective {
+        Some(e) if e == wanted => format!("policy {e}"),
+        Some(e) => format!("policy {wanted}→{e}"),
+        None => format!("policy {wanted} (unavailable)"),
     };
     let right1 = Line::from(vec![
         Span::styled(
@@ -1025,7 +1028,7 @@ fn render_bottom(
         ),
         Span::styled(
             format!(" · {policy_text}"),
-            Style::default().fg(policy_color(effective)),
+            Style::default().fg(effective.map_or(Color::Red, policy_color)),
         ),
         Span::styled(
             format!(" · sandbox {}", sandbox_label(sandbox)),
@@ -1361,17 +1364,21 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 centered_rect(80, 50, area),
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
                 picker_lines(p, Color::Green, |pol| {
-                    let support = match caps.supports_policy(*pol) {
-                        Some(s) => s
-                            .degraded
+                    let support = match resolve_policy(&caps.permission_policies, *pol) {
+                        Ok(res) if res.effective == *pol => caps
+                            .supports_policy(*pol)
+                            .and_then(|s| s.degraded)
                             .map(|d| format!(" (degraded: {d})"))
                             .unwrap_or_default(),
-                        None => " (not supported here; falls back)".to_string(),
+                        Ok(res) => {
+                            format!(" (not supported here; falls back to {})", res.effective)
+                        }
+                        Err(_) => " (not available here)".to_string(),
                     };
                     (
                         pol.as_str().to_string(),
                         format!("{}{}", pol.description(), support),
-                        *pol == app.policy_requested,
+                        *pol == app.wanted_policy(),
                     )
                 }),
             )

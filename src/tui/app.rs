@@ -32,8 +32,9 @@ use crate::core::rules::Scope;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
-    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, ProviderId,
-    RateLimitInfo, Rule, Rules, SessionCommand, StopReason, Usage, resolve_policy,
+    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
+    PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, Rule, Rules, SessionCommand,
+    StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
 
@@ -189,6 +190,9 @@ pub struct App {
     pub harness_options: Vec<HarnessOption>,
     /// The policy the user asked for; the effective one is per harness.
     pub policy_requested: PermissionPolicy,
+    /// What the user chose on a harness where the requested policy is not
+    /// available. It holds for that harness only.
+    pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
     /// The sandbox level asked for and the platform's backend, fixed at launch.
     pub sandbox: SandboxSetup,
     /// The active harness's own configuration files as they were when its
@@ -543,6 +547,7 @@ impl App {
             active,
             harness_options,
             policy_requested: init.policy,
+            policy_choice: HashMap::new(),
             sandbox: init.sandbox,
             guard: None,
             providers,
@@ -614,16 +619,16 @@ impl App {
             actions: VecDeque::new(),
         };
 
-        let res = resolve_policy(&app.caps(), app.policy_requested);
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /help.",
             app.display_name(),
-            res.effective,
+            app.policy_label(),
             app.sandbox_level().0
         ));
-        if let Some(w) = res.warning {
+        if let Some(w) = app.policy_warning() {
             app.transcript.push_notice(w);
         }
+        app.require_policy();
         if let Some(w) = app.sandbox_level().1 {
             app.transcript.push_notice(w);
         }
@@ -743,26 +748,68 @@ impl App {
         resolve_binary(d, self.config.binary_override(d.id.as_str()))
     }
 
-    pub fn effective_policy(&self) -> PermissionPolicy {
-        resolve_policy(&self.caps(), self.policy_requested).effective
+    /// The policy asked of the active harness: the requested one, or where
+    /// that is not available, what the user chose there instead.
+    pub fn wanted_policy(&self) -> PermissionPolicy {
+        let policies = self.caps().permission_policies;
+        match self.policy_choice.get(&self.active) {
+            Some(choice) if resolve_policy(&policies, self.policy_requested).is_err() => *choice,
+            _ => self.policy_requested,
+        }
+    }
+
+    fn policy_resolution(&self) -> Result<PolicyResolution, PolicyUnavailable> {
+        resolve_policy(&self.caps().permission_policies, self.wanted_policy())
+    }
+
+    /// `None` until the user chooses, where the requested policy is not
+    /// available: a more permissive one is never taken for them.
+    pub fn effective_policy(&self) -> Option<PermissionPolicy> {
+        self.policy_resolution().ok().map(|r| r.effective)
+    }
+
+    /// The effective policy for a message.
+    fn policy_label(&self) -> String {
+        match self.effective_policy() {
+            Some(p) => p.to_string(),
+            None => format!("{} (unavailable)", self.wanted_policy()),
+        }
     }
 
     pub fn policy_warning(&self) -> Option<String> {
-        resolve_policy(&self.caps(), self.policy_requested).warning
+        match self.policy_resolution() {
+            Ok(res) => res.warning,
+            Err(e) => Some(format!("{e} (Ctrl+P)")),
+        }
+    }
+
+    /// Ask for a policy where the requested one is not available. Returns
+    /// whether one is in effect.
+    fn require_policy(&mut self) -> bool {
+        if self.effective_policy().is_some() {
+            return true;
+        }
+        self.open_policy_picker();
+        false
     }
 
     /// The sandbox level the active harness runs at, and why it is off if
     /// that was not asked for.
     pub fn sandbox_level(&self) -> (SandboxLevel, Option<String>) {
         self.sandbox
-            .level(self.harness().default_sandbox(self.effective_policy()))
+            .level(self.harness().default_sandbox(self.sandbox_policy()))
+    }
+
+    fn sandbox_policy(&self) -> PermissionPolicy {
+        self.effective_policy()
+            .unwrap_or_else(|| self.wanted_policy())
     }
 
     /// What confines the next process of the active harness.
     pub fn session_sandbox(&self) -> anyhow::Result<Sandbox> {
         crate::runner::session_sandbox(
             self.harness(),
-            self.effective_policy(),
+            self.sandbox_policy(),
             &self.sandbox,
             &self.config,
             self.workspace_root.as_deref().unwrap_or(&self.cwd),
@@ -951,6 +998,14 @@ impl App {
         if text.is_empty() || self.is_generating {
             return;
         }
+        if !self.require_policy() {
+            // Kept until a policy is chosen.
+            self.queued.push_front(QueuedPrompt {
+                text,
+                attachments: std::mem::take(&mut self.attachments),
+            });
+            return;
+        }
         if self.first_prompt.is_none() {
             self.first_prompt = Some(text.clone());
         }
@@ -1041,7 +1096,7 @@ impl App {
 
     /// Send the oldest queued prompt, if idle. Returns whether one was sent.
     pub fn send_next_queued(&mut self) -> bool {
-        if self.is_generating {
+        if self.is_generating || self.effective_policy().is_none() {
             return false;
         }
         let Some(q) = self.queued.pop_front() else {
@@ -2045,18 +2100,33 @@ impl App {
             self.display_name(),
             self.model_label(),
             self.current_effort().unwrap_or("default"),
-            self.effective_policy(),
+            self.policy_label(),
             self.sandbox_level().0
         ));
         if let Some(w) = self.policy_warning() {
             self.transcript.push_notice(w);
         }
+        self.require_policy();
     }
 
-    pub fn set_policy(&mut self, p: PermissionPolicy) {
+    /// Returns whether `p` could be set on the active harness.
+    pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
+        let policies = self.caps().permission_policies;
+        let res = match resolve_policy(&policies, p) {
+            Ok(res) => res,
+            Err(e) => {
+                self.transcript.push_error(e.to_string());
+                return false;
+            }
+        };
         let sandbox_before = self.sandbox_level().0;
-        self.policy_requested = p;
-        let res = resolve_policy(&self.caps(), p);
+        if resolve_policy(&policies, self.policy_requested).is_err() {
+            // Chosen because the requested policy cannot be had here: the
+            // other harnesses keep the requested one.
+            self.policy_choice.insert(self.active, p);
+        } else {
+            self.policy_requested = p;
+        }
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
@@ -2073,13 +2143,15 @@ impl App {
                 ));
             } else if self.session_alive {
                 self.shutdown_session();
-                return;
+                return true;
             }
         }
         if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetPolicy(res.effective)));
         }
+        self.send_next_queued();
+        true
     }
 
     pub fn set_provider(&mut self, provider: ProviderId) {
@@ -2304,7 +2376,7 @@ impl App {
     pub fn open_policy_picker(&mut self) {
         let idx = PermissionPolicy::ALL
             .iter()
-            .position(|p| *p == self.policy_requested);
+            .position(|p| *p == self.wanted_policy());
         self.modal = Some(Modal::Policy(
             ListPicker::new(PermissionPolicy::ALL.to_vec()).with_selected(idx),
         ));
@@ -2602,8 +2674,10 @@ impl App {
                         self.set_effort(e);
                     }
                     ModalChoice::Policy(p) => {
-                        self.modal = None;
-                        self.set_policy(p);
+                        // An unavailable policy leaves the picker open.
+                        if self.set_policy(p) {
+                            self.modal = None;
+                        }
                     }
                     ModalChoice::Subagent(id) => {
                         self.modal = None;
@@ -2656,7 +2730,9 @@ impl App {
             },
             "/policy" => match arg {
                 Some(a) => match PermissionPolicy::parse(&a) {
-                    Some(p) => self.set_policy(p),
+                    Some(p) => {
+                        self.set_policy(p);
+                    }
                     None => self.transcript.push_error(format!(
                         "unknown policy '{a}' (ask, accept-edits, auto, bypass)"
                     )),
@@ -4844,9 +4920,9 @@ pub(crate) mod tests {
     fn policy_resolution_per_harness() {
         let mut app = test_app(HarnessId::AGY);
         app.set_policy(PermissionPolicy::Auto);
-        assert_eq!(app.effective_policy(), PermissionPolicy::AcceptEdits);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
         app.switch_harness(HarnessId::CLAUDE);
-        assert_eq!(app.effective_policy(), PermissionPolicy::Auto);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
         assert!(app.policy_warning().is_none());
     }
 
