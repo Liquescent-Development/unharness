@@ -139,6 +139,14 @@ pub trait Harness: Send + Sync {
         SandboxLevel::WorkspaceWrite
     }
 
+    /// How a prompt's text names a file for this CLI: `path` is relative to
+    /// the session's directory, and the result is put into the prompt as
+    /// typed text. The path alone unless the CLI was seen to read some
+    /// other form itself on the input unharness sends.
+    fn file_reference(&self, path: &str) -> String {
+        path.to_string()
+    }
+
     /// Spawn the driver task(s) for an interactive session.
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle>;
 
