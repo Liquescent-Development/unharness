@@ -23,8 +23,8 @@ use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
 use crate::core::sandbox::{SandboxLevel, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
+    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -168,6 +168,11 @@ impl Harness for CodexHarness {
                 anchors_survive_fork: true,
             },
             fork: app_server,
+            // `-c mcp_servers.<name>.…` overrides, on either transport.
+            mcp: McpSupport::via(McpChannel::CommandLine, true),
+            // `collaborationMode` on `turn/start` (0.157.0 schema); `exec`
+            // has no such mode.
+            plan_mode: app_server,
         }
     }
 

@@ -191,6 +191,9 @@ pub struct CapsUpdate {
     pub effort_levels: Option<Vec<String>>,
     pub image_input: Option<bool>,
     pub resume_by_id: Option<bool>,
+    /// The agent takes MCP servers reached over HTTP (`McpSupport::http`).
+    pub mcp_http: Option<bool>,
+    pub plan_mode: Option<bool>,
     /// Models the live session offers (harnesses that only know after a handshake).
     pub models: Option<Vec<ModelInfo>>,
 }
@@ -213,6 +216,12 @@ impl CapsUpdate {
         }
         if newer.resume_by_id.is_some() {
             self.resume_by_id = newer.resume_by_id;
+        }
+        if newer.mcp_http.is_some() {
+            self.mcp_http = newer.mcp_http;
+        }
+        if newer.plan_mode.is_some() {
+            self.plan_mode = newer.plan_mode;
         }
         if newer.models.is_some() {
             self.models = newer.models;
@@ -452,6 +461,12 @@ impl AgentEvent {
                 }
                 if let Some(r) = u.resume_by_id {
                     parts.push(format!("resume_by_id={r}"));
+                }
+                if let Some(h) = u.mcp_http {
+                    parts.push(format!("mcp_http={h}"));
+                }
+                if let Some(p) = u.plan_mode {
+                    parts.push(format!("plan_mode={p}"));
                 }
                 if let Some(m) = &u.models {
                     parts.push(format!("models={}", m.len()));

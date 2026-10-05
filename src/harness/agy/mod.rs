@@ -19,8 +19,8 @@ use super::{
 };
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
+    RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 pub use transport::AgyTransport;
 
@@ -122,6 +122,11 @@ impl Harness for AgyHarness {
             rate_limits: false,
             rewind: RewindSupport::default(),
             fork: false,
+            // Servers are only read from agy's own config (`agy mcp add`
+            // writes it); there is no flag for one session.
+            mcp: McpSupport::NONE,
+            // `--mode plan`, from `--help` on 1.2.16.
+            plan_mode: true,
         }
     }
 

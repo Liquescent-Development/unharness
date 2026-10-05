@@ -190,6 +190,14 @@ recorded ones. For anything else:
   are read from a bracketed paste; the quoting forms come from terminal
   documentation, and only the bare and single-quoted ones were sent
   through a real pty.
+- Plan mode (`Capabilities::plan_mode`) is declared, not driven: nothing in
+  unharness enters it yet. What the flag stands on: Claude Code 2.1.289
+  `--permission-mode plan`, Codex 0.157.0 `collaborationMode` on
+  `turn/start` (app-server schema; `exec` has none), agy 1.2.16 `--mode
+  plan`, all read from `--help` or the schema and none run; an ACP session
+  reports it when its `modes` list one with id `plan` (claude-agent-acp
+  0.85.1 does, codex-acp 2.1.1 does not). pi plans only through an
+  extension.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

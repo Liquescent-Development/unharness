@@ -18,8 +18,8 @@ use super::{
 use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
+    RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 pub struct PiHarness;
@@ -97,6 +97,9 @@ impl Harness for PiHarness {
                 anchors_survive_fork: true,
             },
             fork: true,
+            // pi has no MCP client, and plans only through an extension.
+            mcp: McpSupport::NONE,
+            plan_mode: false,
         }
     }
 

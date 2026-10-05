@@ -77,6 +77,13 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     if caps.resume_by_id { " · resume" } else { "" }
                 );
 
+                println!(
+                    "      {} MCP servers: {} · plan mode: {}",
+                    "↳".dimmed(),
+                    caps.mcp.describe(),
+                    if caps.plan_mode { "yes" } else { "no" }
+                );
+
                 let (level, _) = sandbox.level(h.default_sandbox(PermissionPolicy::Ask));
                 let mut own: Vec<String> = h
                     .sandbox_paths()

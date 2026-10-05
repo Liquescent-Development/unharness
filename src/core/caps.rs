@@ -142,6 +142,58 @@ pub struct Capabilities {
     pub rewind: RewindSupport,
     /// A session can be branched into a new one (`SessionConfig::fork`).
     pub fork: bool,
+    pub mcp: McpSupport,
+    /// The vendor has a mode in which the agent proposes a plan and waits
+    /// for approval before acting. (`plan_updates` only says that a todo
+    /// list is reported.)
+    pub plan_mode: bool,
+}
+
+/// Whether a harness takes MCP server definitions for one session, without
+/// its own configuration being written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct McpSupport {
+    /// How the definitions reach it. `None`: it only knows the servers in
+    /// its own configuration.
+    pub channel: Option<McpChannel>,
+    /// Servers reached over HTTP (a `url`) are taken besides the ones it
+    /// launches itself (a `command`).
+    pub http: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpChannel {
+    /// Flags or config overrides on the harness's command line.
+    CommandLine,
+    /// A field of the protocol's session request.
+    Protocol,
+}
+
+impl McpSupport {
+    pub const NONE: McpSupport = McpSupport {
+        channel: None,
+        http: false,
+    };
+
+    pub const fn via(channel: McpChannel, http: bool) -> Self {
+        McpSupport {
+            channel: Some(channel),
+            http,
+        }
+    }
+
+    /// For `doctor`: "command line (stdio, http)", "no".
+    pub fn describe(&self) -> String {
+        let channel = match self.channel {
+            None => return "no".to_string(),
+            Some(McpChannel::CommandLine) => "command line",
+            Some(McpChannel::Protocol) => "protocol",
+        };
+        format!(
+            "{channel} ({})",
+            if self.http { "stdio, http" } else { "stdio" }
+        )
+    }
 }
 
 /// What a harness tells about the subagents its agent dispatches, and what
@@ -187,6 +239,12 @@ impl Capabilities {
         }
         if let Some(r) = update.resume_by_id {
             self.resume_by_id = r;
+        }
+        if let Some(h) = update.mcp_http {
+            self.mcp.http = h;
+        }
+        if let Some(p) = update.plan_mode {
+            self.plan_mode = p;
         }
     }
 
@@ -333,5 +391,23 @@ mod tests {
 
         let r2 = resolve_policy(&c, Ask);
         assert_eq!(r2.warning.as_deref(), Some("only extension dialogs prompt"));
+    }
+
+    #[test]
+    fn a_session_refines_mcp_and_plan_mode() {
+        let mut c = Capabilities {
+            mcp: McpSupport::via(McpChannel::Protocol, false),
+            ..Default::default()
+        };
+        assert_eq!(c.mcp.describe(), "protocol (stdio)");
+        c.apply(&CapsUpdate {
+            mcp_http: Some(true),
+            plan_mode: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(c.mcp.describe(), "protocol (stdio, http)");
+        assert!(c.plan_mode);
+        assert_eq!(McpSupport::NONE.describe(), "no");
+        assert_eq!(Capabilities::default().mcp, McpSupport::NONE);
     }
 }

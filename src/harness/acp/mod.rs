@@ -20,8 +20,8 @@ use super::{
 };
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
-    Capabilities, HarnessId, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, ProviderId,
+    RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 /// Agents with a native ACP mode: (id, display name, command). Each is
@@ -164,6 +164,11 @@ impl Harness for AcpHarness {
             rate_limits: false,
             rewind: RewindSupport::default(),
             fork: false,
+            // `mcpServers` of the session request. Every agent must take
+            // stdio servers; http ones and a plan mode are reported by the
+            // session.
+            mcp: McpSupport::via(McpChannel::Protocol, false),
+            plan_mode: false,
         }
     }
 

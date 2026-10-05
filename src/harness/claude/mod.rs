@@ -16,8 +16,8 @@ use super::{
 use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
+    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Debug, Default)]
@@ -259,6 +259,10 @@ impl Harness for ClaudeHarness {
                 anchors_survive_fork: false,
             },
             fork: true,
+            // `--mcp-config`, which takes stdio and http servers.
+            mcp: McpSupport::via(McpChannel::CommandLine, true),
+            // `--permission-mode plan`.
+            plan_mode: true,
         }
     }
 
