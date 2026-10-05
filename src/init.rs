@@ -78,6 +78,10 @@ pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
                 // The in-tree file is older than the MCP table, and an agent
                 // can write it: commands to run are not taken from there.
                 let left_out = std::mem::take(&mut imported.mcp_servers);
+                // Nor is its word that an agent asks before it acts.
+                for settings in imported.harnesses.values_mut() {
+                    settings.asks_permission = None;
+                }
                 imported.save_workspace_in(store, cwd)?;
                 println!(
                     "{} Imported {} into {}",
@@ -100,8 +104,9 @@ pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
                 );
             }
             None => {
+                // No harness is named: the one that is signed in is chosen
+                // at startup, and not every harness has `ask`.
                 let cfg = Config {
-                    default_harness: Some("agy".to_string()),
                     default_policy: Some("ask".to_string()),
                     auto_sync: true,
                     ..Default::default()
@@ -196,7 +201,7 @@ mod tests {
         let store = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("unharness.toml"),
-            "default_harness = \"codex\"\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
+            "default_harness = \"codex\"\n[harnesses.quiet]\nprotocol = \"acp\"\ncommand = [\"quiet\"]\nasks_permission = true\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
         )
         .unwrap();
         init_workspace_in(dir.path(), store.path()).unwrap();
@@ -208,6 +213,8 @@ mod tests {
         assert_eq!(load().default_harness.as_deref(), Some("codex"));
         // Commands to run are not taken from a file an agent can write.
         assert!(load().mcp_servers.is_empty());
+        // Nor its word that an agent asks before it acts.
+        assert_eq!(load().harnesses["quiet"].asks_permission, None);
 
         // Later edits to the in-tree file change nothing.
         fs::write(

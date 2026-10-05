@@ -285,7 +285,12 @@ recorded ones. For anything else:
   answered by the rule; a call from one of the user's own skills was asked
   about too. In `--print` `ctx.hasUI` is false and the gate blocks. pi
   passes a path as the model wrote it, often relative, and a rule does not
-  match a relative path. Unverified: the gate's human-readable dialog in
+  match a relative path. Read in pi 0.87.1's source, not run: before using
+  a path pi turns Unicode spaces into ASCII ones, strips a leading `@`,
+  expands `~` and reads `file://` URLs, so such a path is `Opaque`
+  (`gate::path_is_literal`); every extension's `tool_call` handler runs in
+  turn and may change the input after the gate saw it, and the gate knows
+  a read by its tool name alone. Unverified: the gate's human-readable dialog in
   pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), several
   gate dialogs open at once (pi can run a message's tool calls in
   parallel), tool calls made by a pi sub-agent or an extension that runs

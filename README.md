@@ -270,7 +270,7 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
 |---|---|---|---|---|---|
 | `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available |
-| `accept-edits` | `acceptEdits` | `on-request` | workspace-write sandbox, no prompts | falls back to ask* | `--mode accept-edits` |
+| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits` |
 | `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
 | `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` |
 
@@ -286,15 +286,18 @@ A requested policy a harness does not have falls back to the nearest *less*
 permissive one it has, never to a more permissive one. When there is none
 (`ask`, the default, on a harness without it) unharness does not pick for
 you: the TUI opens the policy picker and starts no session until you
-choose, and that choice holds for that harness only; `--print` and
+choose, and that choice holds for that harness only, until you set another
+policy for the run; `--print` and
 `--no-tui` stop with an error naming the policies to pass with `--policy`.
 `--print` on Codex is always `codex exec`, and Codex's own interface
 (`--no-tui`) takes no `untrusted` approval policy, so neither has `ask`.
 
 pi has no permission prompts of its own. unharness loads a small extension
 into it (`-e`, kept in unharness's state directory, your own extensions
-still load) that asks before every tool call except `read`, `grep`, `find`
-and `ls`, tools of other extensions included. In a `--print` run under
+still load) that asks before every tool call except those named `read`,
+`grep`, `find` and `ls`, tools of other extensions included. A path pi
+would rewrite before using it (a leading `@` or `~`, a `file://` URL, a
+Unicode space) is always asked about, whatever your allow rules say. In a `--print` run under
 `ask` there is no one to ask, so those calls are blocked.
 
 The policy does not choose a sandbox. Codex's own sandbox only matters with

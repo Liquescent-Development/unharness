@@ -369,6 +369,36 @@ async fn pi_gate_asks_before_a_tool_acts() {
 }
 
 #[tokio::test]
+async fn pi_gate_is_answered_without_asking_under_bypass() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/gate.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Bypass, true))
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("read, touch, write"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_))),
+        "{events:?}"
+    );
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["type"] == "extension_ui_response")
+        .map(|v| v["value"].clone())
+        .collect();
+    assert_eq!(answers, ["Allow", "Allow"]);
+}
+
+#[tokio::test]
 async fn pi_rpc_session_streams_tool_and_text() {
     if !python_available() {
         return;
@@ -917,7 +947,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     let fixture = repo().join("src/harness/agy/fixtures/auth_required.jsonl");
     let harness = unharness::harness::agy::AgyHarness::default();
     let mut handle = harness
-        .start_session(fake.config(&fixture, PermissionPolicy::Ask, false))
+        .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
         .unwrap();
     handle.send(SessionCommand::turn("pong")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;

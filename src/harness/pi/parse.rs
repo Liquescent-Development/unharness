@@ -514,6 +514,40 @@ mod tests {
     }
 
     #[test]
+    fn only_the_gates_dialog_is_a_tool_request() {
+        let mut p = PiParser::new(None);
+        let kind = |p: &mut PiParser, line: &str| match p.feed(line).remove(0) {
+            AgentEvent::PermissionRequest(r) => (r.kind, r.tool_call_id),
+            other => panic!("{other:?}"),
+        };
+        let title = r#"unharness-gate:{\"toolCallId\":\"c1\",\"toolName\":\"bash\",\"input\":{\"command\":\"ls\"}}"#;
+        let (k, id) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g1","method":"select","title":"{title}","options":["Allow","Deny"]}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::ToolUse { tool, .. } if tool == "bash"));
+        assert_eq!(id.as_deref(), Some("c1"));
+        // The same title on another dialog, or with other answers, is a
+        // dialog like any other: it is shown, not matched against rules.
+        let (k, id) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g2","method":"select","title":"{title}","options":["Deny","Allow"]}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::Select { .. }) && id.is_none());
+        let (k, _) = kind(
+            &mut p,
+            &format!(
+                r#"{{"type":"extension_ui_request","id":"g3","method":"confirm","title":"{title}"}}"#
+            ),
+        );
+        assert!(matches!(k, PermissionKind::Confirm { .. }));
+    }
+
+    #[test]
     fn ui_requests_map_to_prompts() {
         let mut p = PiParser::new(None);
         let ev = p.feed(r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"Delete?","message":"all files"}"#);

@@ -53,7 +53,8 @@ pub struct TuiLaunch {
     pub registry: Arc<Registry>,
     pub config: Config,
     pub harness: HarnessId,
-    pub policy: PermissionPolicy,
+    /// The policy named on the command line, if one was.
+    pub policy: Option<PermissionPolicy>,
     pub sandbox: SandboxSetup,
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -462,8 +463,11 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         }
         (_, KeyCode::Enter) => {
             if app.input.trim().is_empty() {
-                // Idle with prompts held back (after an interrupt or error).
-                app.send_next_queued();
+                // Idle with prompts held back (after an interrupt or error,
+                // or for want of a policy, which is then asked for again).
+                if !app.send_next_queued() && !app.queued.is_empty() {
+                    app.require_policy();
+                }
                 return;
             }
             // A partial slash command with a highlighted suggestion completes

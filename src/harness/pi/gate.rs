@@ -19,13 +19,12 @@ pub const ALLOW: &str = "Allow";
 pub const DENY: &str = "Deny";
 
 /// Where the extension is kept: under unharness's state directory, which an
-/// agent cannot write.
-pub fn default_dir() -> PathBuf {
-    dirs::state_dir()
+/// agent cannot write. There is no fallback to a directory one could.
+pub fn default_dir() -> Result<PathBuf> {
+    let state = dirs::state_dir()
         .or_else(dirs::data_local_dir)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("unharness")
-        .join("pi")
+        .context("no state directory to keep pi's gate extension in")?;
+    Ok(state.join("unharness").join("pi"))
 }
 
 /// Put the extension in `dir`, replacing a copy that differs, and return
@@ -94,7 +93,10 @@ pub fn tool_action(tool: &str, input: &Value) -> ToolAction {
             _ => ToolAction::Opaque,
         },
         "write" | "edit" => match text("path") {
-            Some(path) if only(&["path", "content", "edits", "oldText", "newText"]) => {
+            Some(path)
+                if only(&["path", "content", "edits", "oldText", "newText"])
+                    && path_is_literal(path) =>
+            {
                 ToolAction::Edit {
                     paths: vec![path.into()],
                 }
@@ -104,6 +106,17 @@ pub fn tool_action(tool: &str, input: &Value) -> ToolAction {
         // A tool of some extension, known by its name alone.
         _ => ToolAction::Other,
     }
+}
+
+/// Whether pi uses `path` as written. Before it touches a file pi 0.87.1
+/// turns Unicode spaces into ASCII ones, strips a leading `@`, expands `~`
+/// and reads `file://` URLs: such a path names another file than the one a
+/// rule would be matched against.
+fn path_is_literal(path: &str) -> bool {
+    !(path.starts_with('@')
+        || path.starts_with('~')
+        || path.starts_with("file:")
+        || path.chars().any(|c| c.is_whitespace() && c != ' '))
 }
 
 #[cfg(test)]
@@ -196,5 +209,29 @@ mod tests {
             ToolAction::Opaque
         );
         assert_eq!(tool_action("deploy", &json!({})), ToolAction::Other);
+    }
+
+    #[test]
+    fn a_path_pi_rewrites_is_not_one_to_match_rules_on() {
+        for path in [
+            "/w/docs/a\u{a0}b/x",
+            "/w/a\u{3000}b",
+            "/w/a\tb",
+            "@/w/a.rs",
+            "~/a.rs",
+            "file:///w/a.rs",
+        ] {
+            assert_eq!(
+                tool_action("write", &json!({"path": path, "content": "x"})),
+                ToolAction::Opaque,
+                "{path:?}"
+            );
+        }
+        assert_eq!(
+            tool_action("write", &json!({"path": "/w/a b.rs", "content": "x"})),
+            ToolAction::Edit {
+                paths: vec!["/w/a b.rs".into()]
+            }
+        );
     }
 }

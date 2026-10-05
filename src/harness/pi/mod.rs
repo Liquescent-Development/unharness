@@ -32,7 +32,10 @@ pub struct PiHarness {
 
 impl PiHarness {
     fn install_gate(&self) -> Result<PathBuf> {
-        gate::install(&self.gate_dir.clone().unwrap_or_else(gate::default_dir))
+        match &self.gate_dir {
+            Some(dir) => gate::install(dir),
+            None => gate::install(&gate::default_dir()?),
+        }
     }
 }
 
