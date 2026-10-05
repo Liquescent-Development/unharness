@@ -607,7 +607,8 @@ impl App {
             selected_suggestion: 0,
             completing_file: None,
             file_index: Vec::new(),
-            file_index_requested: false,
+            // Listed once at the start, so that the first `@` has files.
+            file_index_requested: true,
             file_walk_pending: false,
             should_quit: false,
             actions: VecDeque::new(),
@@ -2840,11 +2841,19 @@ impl App {
     // ------------------------------------------------------------------ suggestions
 
     pub fn update_suggestions(&mut self) {
+        self.refresh_suggestions(true);
+    }
+
+    /// `files` is whether an `@` word may open the list of files: one that
+    /// was typed does, one that came in a paste or from the editor does not.
+    fn refresh_suggestions(&mut self, files: bool) {
         self.suggestions.clear();
         let was_completing_file = self.completing_file.take().is_some();
         if !self.input.starts_with('/') || self.input.contains('\n') {
             self.selected_suggestion = 0;
-            self.suggest_files(was_completing_file);
+            if files {
+                self.suggest_files(was_completing_file);
+            }
             return;
         }
         let query = self.input.to_lowercase();
@@ -2923,7 +2932,7 @@ impl App {
         };
         self.completing_file = Some(start);
         // Each `@` lists the files anew: agents create and delete them.
-        if !already_open && !self.file_walk_pending {
+        if !already_open {
             self.file_index_requested = true;
         }
         self.suggestions = files::rank(&query, &self.file_index, files::SHOWN)
@@ -2932,9 +2941,11 @@ impl App {
             .collect();
     }
 
-    /// The directory whose files are to be listed, when a list was asked for.
+    /// The directory whose files are to be listed, when a list was asked
+    /// for. One asked for while files are being listed waits for that to
+    /// end: its list would be older than the `@`.
     pub fn take_file_index_request(&mut self) -> Option<PathBuf> {
-        if !std::mem::take(&mut self.file_index_requested) {
+        if self.file_walk_pending || !std::mem::take(&mut self.file_index_requested) {
             return None;
         }
         self.file_walk_pending = true;
@@ -2955,6 +2966,22 @@ impl App {
         self.selected_suggestion = selected
             .and_then(|s| self.suggestions.iter().position(|o| *o == s))
             .unwrap_or(0);
+    }
+
+    /// Listing the files came to nothing: the last list stays.
+    pub fn file_walk_failed(&mut self) {
+        self.file_walk_pending = false;
+    }
+
+    /// The char range of the `@` word starting at `start`: to the end of
+    /// the word the cursor is in.
+    fn file_word(&self, start: usize) -> (usize, usize) {
+        let cursor = self.cursor.max(start);
+        let rest = self.input.chars().skip(cursor);
+        (
+            start,
+            cursor + rest.take_while(|c| !c.is_whitespace()).count(),
+        )
     }
 
     pub fn close_suggestions(&mut self) {
@@ -2999,12 +3026,8 @@ impl App {
     /// selected file's reference: completing would change nothing.
     pub fn should_accept_suggestion(&self) -> bool {
         if let Some(start) = self.completing_file {
-            let typed: String = self
-                .input
-                .chars()
-                .skip(start)
-                .take(self.cursor - start)
-                .collect();
+            let (from, to) = self.file_word(start);
+            let typed: String = self.input.chars().skip(from).take(to - from).collect();
             return self
                 .selected_file_reference()
                 .is_some_and(|reference| reference != typed);
@@ -3024,8 +3047,10 @@ impl App {
             let Some(mut text) = self.selected_file_reference() else {
                 return;
             };
-            let (from, to) = (self.byte_index(start), self.byte_index(self.cursor));
-            if !self.input[to..].starts_with(char::is_whitespace) {
+            // The whole word goes, what is after the cursor included.
+            let (from, to) = self.file_word(start);
+            let (from, to) = (self.byte_index(from), self.byte_index(to));
+            if to == self.input.len() {
                 text.push(' ');
             }
             self.input.replace_range(from..to, &text);
@@ -3095,8 +3120,7 @@ impl App {
         let idx = self.byte_index(self.cursor);
         self.input.insert_str(idx, &text);
         self.cursor += text.chars().count();
-        self.update_suggestions();
-        self.close_file_suggestions();
+        self.refresh_suggestions(false);
     }
 
     /// Show the next older sent prompt, keeping what was typed as a draft.
@@ -3203,8 +3227,7 @@ impl App {
     pub fn set_input(&mut self, text: &str) {
         self.input = prompt::clean(text);
         self.cursor = self.input.chars().count();
-        self.update_suggestions();
-        self.close_file_suggestions();
+        self.refresh_suggestions(false);
     }
 
     pub fn insert_newline(&mut self) {
@@ -3232,6 +3255,7 @@ impl App {
         };
         let col = prompt::width_between(&self.input, rows[row].start, self.cursor);
         self.cursor = prompt::index_at_column(&self.input, target, col);
+        self.close_file_suggestions();
         true
     }
 
@@ -5280,10 +5304,14 @@ pub(crate) mod tests {
 
         // Pasted text and text from the editor open no list.
         app.take_input();
+        app.take_file_index_request();
+        app.set_file_index(index(&["a.rs", "b.rs", "c.rs"]));
         app.insert_str("@a");
         assert!(app.suggestions.is_empty());
         app.set_input("look at @a");
         assert!(app.suggestions.is_empty());
+        // Nor do they have the files listed.
+        assert_eq!(app.take_file_index_request(), None);
 
         // Typing on does, and the cursor leaving the word closes it.
         app.insert_char('.');
@@ -5318,6 +5346,45 @@ pub(crate) mod tests {
         assert!(app.should_accept_suggestion());
         app.accept_suggestion();
         assert_eq!(app.input, "a.rs ");
+    }
+
+    #[test]
+    fn file_list_survives_the_cursor_and_the_walk_going_astray() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.prompt_width = 40;
+        // Up from a word no file matches moves the cursor before its `@`.
+        app.insert_str("hello\n");
+        for c in "@zzz".chars() {
+            app.insert_char(c);
+        }
+        assert!(app.move_cursor_up());
+        assert!(app.completing_file.is_none());
+        assert!(!app.should_accept_suggestion());
+
+        // The rest of a word edited in its middle goes with it.
+        app.take_input();
+        app.set_file_index(index(&["src/main.rs"]));
+        app.insert_str("see @x/tui now");
+        app.cursor = 6;
+        app.delete_backwards();
+        app.insert_char('m');
+        assert_eq!(app.input, "see @m/tui now");
+        app.accept_suggestion();
+        assert_eq!(app.input, "see src/main.rs now");
+
+        // An `@` typed while the files are being listed has them listed
+        // again afterwards; a listing that failed does not end that.
+        app.take_input();
+        app.insert_char('@');
+        assert!(app.take_file_index_request().is_some());
+        app.take_input();
+        app.insert_char('@');
+        assert_eq!(app.take_file_index_request(), None);
+        app.file_walk_failed();
+        assert!(app.take_file_index_request().is_some());
+        app.set_file_index(index(&["a.rs"]));
+        assert_eq!(app.take_file_index_request(), None);
+        assert_eq!(app.suggestions.len(), 1);
     }
 
     #[test]

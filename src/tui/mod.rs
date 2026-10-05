@@ -236,15 +236,21 @@ async fn event_loop(
                 }
             }
             Some(paths) = files_rx.recv() => {
-                app.set_file_index(paths);
+                match paths {
+                    Some(paths) => app.set_file_index(paths),
+                    None => app.file_walk_failed(),
+                }
                 needs_redraw = true;
             }
         }
 
         if let Some(root) = app.take_file_index_request() {
             let tx = files_tx.clone();
-            tokio::task::spawn_blocking(move || {
-                let _ = tx.send(files::walk(&root, files::LISTED));
+            // A thread of its own, not the runtime's: quitting does not
+            // wait for a walk to end.
+            std::thread::spawn(move || {
+                let walk = || files::walk(&root, files::LISTED);
+                let _ = tx.send(std::panic::catch_unwind(walk).ok());
             });
         }
 

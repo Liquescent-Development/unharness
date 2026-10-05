@@ -7,8 +7,8 @@ use ignore::WalkBuilder;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
-/// How many files are listed at most; a tree with more is cut off, deepest
-/// files first.
+/// How many files are listed at most; the walk of a tree with more stops
+/// there.
 pub const LISTED: usize = 50_000;
 
 /// How many matches the prompt offers.
@@ -19,7 +19,8 @@ const SKIPPED: &[&str] = &[".git", ".unharness"];
 
 /// The files under `root` that its ignore files (`.gitignore`, `.ignore`,
 /// git's excludes) leave in, as `/`-separated paths relative to `root`,
-/// shallowest first. At most `cap` of them. Hidden files are listed.
+/// shallowest first. Hidden files are listed. The walk ends at `cap` files,
+/// wherever it has got to by then.
 ///
 /// A path that is not UTF-8 or has a control character is left out: it
 /// could not be put into the prompt unchanged.
@@ -55,9 +56,11 @@ pub fn walk(root: &Path, cap: usize) -> Vec<String> {
             continue;
         }
         paths.push((parts.len(), path));
+        if paths.len() >= cap {
+            break;
+        }
     }
     paths.sort();
-    paths.truncate(cap);
     paths.into_iter().map(|(_, path)| path).collect()
 }
 
@@ -148,7 +151,7 @@ mod tests {
                 "src/tui/app.rs"
             ]
         );
-        assert_eq!(walk(root, 2), [".gitignore", "README.md"]);
+        assert_eq!(walk(root, 2).len(), 2);
     }
 
     #[test]
