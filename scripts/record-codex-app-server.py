@@ -38,6 +38,8 @@ def main() -> int:
     ap.add_argument("--approval", default="untrusted")
     ap.add_argument("--sandbox", default="read-only")
     ap.add_argument("--model")
+    ap.add_argument("-c", "--config", action="append", default=[],
+                    help="a key=value config override for the server (repeatable), e.g. an MCP server")
     ap.add_argument("--idle-timeout", type=float, default=180.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
@@ -52,7 +54,8 @@ def main() -> int:
     args = ap.parse_args()
 
     cwd = os.getcwd()
-    proc = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    overrides = [word for o in args.config for word in ("-c", o)]
+    proc = subprocess.Popen(["codex", "app-server"] + overrides, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, bufsize=1)
     out = open(args.out, "w")
     lock = threading.Lock()
@@ -157,6 +160,8 @@ def main() -> int:
                 qs = obj.get("params", {}).get("questions", [])
                 answers = {q.get("id"): {"answers": [(q.get("options") or [{}])[0].get("label", "ok")]} for q in qs}
                 respond(rid, {"answers": answers})
+            elif method == "mcpServer/elicitation/request":
+                respond(rid, {"action": "accept", "content": {}})
             else:
                 sys.stderr.write(f"[unhandled server request] {method}\n")
                 send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "unhandled"}})

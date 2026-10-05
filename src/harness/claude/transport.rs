@@ -6,6 +6,7 @@
 //! and are answered with `control_response` lines.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -16,8 +17,9 @@ use tokio::sync::mpsc;
 use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision, PermissionKind,
+    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -43,6 +45,64 @@ pub fn policy_mode_name(policy: PermissionPolicy) -> &'static str {
         PermissionPolicy::Auto => "auto",
         PermissionPolicy::Bypass => "bypassPermissions",
     }
+}
+
+/// Write the servers to a file only the user can read, under `dir`, and
+/// return its path for `--mcp-config`. A file, not the JSON itself, because
+/// `env` and `headers` hold secrets and a command line is readable by every
+/// local user. The name follows the content, so sessions with the same
+/// servers share a file and none is rewritten under a running Claude.
+pub fn mcp_config_file(servers: &[McpServer], dir: &Path) -> Result<Option<PathBuf>> {
+    let Some(config) = mcp_config(servers) else {
+        return Ok(None);
+    };
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    config.hash(&mut hasher);
+    let path = dir.join(format!("claude-{:016x}.json", hasher.finish()));
+    if std::fs::read_to_string(&path).is_ok_and(|existing| existing == config) {
+        return Ok(Some(path));
+    }
+    let partial = dir.join(format!("claude-{}.partial", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)?;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)?;
+    std::io::Write::write_all(&mut options.open(&partial)?, config.as_bytes())?;
+    std::fs::rename(&partial, &path)?;
+    Ok(Some(path))
+}
+
+/// The servers in Claude's own JSON shape (`--mcp-config`). They are added
+/// to the servers Claude already has from its configuration.
+pub fn mcp_config(servers: &[McpServer]) -> Option<String> {
+    if servers.is_empty() {
+        return None;
+    }
+    let servers: serde_json::Map<String, Value> = servers
+        .iter()
+        .map(|s| {
+            let definition = match &s.transport {
+                McpTransport::Stdio { command, args, env } => {
+                    json!({"type": "stdio", "command": command, "args": args, "env": env})
+                }
+                McpTransport::Http { url, headers } => {
+                    json!({"type": "http", "url": url, "headers": headers})
+                }
+            };
+            (s.name.clone(), definition)
+        })
+        .collect();
+    Some(json!({"mcpServers": servers}).to_string())
 }
 
 /// The exact argv (after the binary) for an interactive session.
@@ -200,9 +260,14 @@ pub fn control_response(request_id: &str, response: Value) -> String {
     .to_string()
 }
 
-pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
+/// `mcp_config` is the file written by [`mcp_config_file`], if any.
+pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(session_args(&cfg)).current_dir(&cfg.cwd);
+    // Last: the flag takes every word up to the next flag.
+    if let Some(path) = mcp_config {
+        cmd.arg("--mcp-config").arg(path);
+    }
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
@@ -403,6 +468,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--bare".into()],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         }
     }
@@ -558,5 +624,48 @@ mod tests {
             v,
             json!({"type":"user","message":{"role":"user","content":"hi"}})
         );
+    }
+
+    #[test]
+    fn mcp_servers_go_in_a_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path().join("mcp");
+        assert_eq!(mcp_config_file(&[], &dir).unwrap(), None);
+        assert!(!dir.exists());
+
+        let servers = crate::core::testing::sample_mcp_servers();
+        let path = mcp_config_file(&servers, &dir).unwrap().unwrap();
+        let config: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            config,
+            json!({"mcpServers": {
+                "files": {
+                    "type": "stdio",
+                    "command": "/usr/bin/files-mcp",
+                    "args": ["--root", "/my work"],
+                    "env": {"TOKEN": "t\"1"},
+                },
+                "docs": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer x"},
+                },
+            }})
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |p: &Path| p.metadata().unwrap().permissions().mode() & 0o777;
+            assert_eq!((mode(&path), mode(&dir)), (0o600, 0o700));
+        }
+
+        // The same servers share the file; other servers get another.
+        assert_eq!(mcp_config_file(&servers, &dir).unwrap().unwrap(), path);
+        assert_ne!(mcp_config_file(&servers[..1], &dir).unwrap().unwrap(), path);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        // Nothing of it is on the command line.
+        let mut c = cfg(PermissionPolicy::Ask);
+        c.mcp_servers = servers;
+        assert!(!session_args(&c).join(" ").contains("mcp"));
     }
 }

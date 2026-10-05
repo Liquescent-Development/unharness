@@ -1,6 +1,6 @@
-CapabilitiesChanged image_input=true resume_by_id=true
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=01a103cf-bf45-7c50-a675-307a4ff71589 model=gpt-6.1-sol
-CapabilitiesChanged efforts=low,medium,high,xhigh,max,ultra models=8
+CapabilitiesChanged efforts=low,medium,high,xhigh,max,ultra plan_mode=false models=8
 TextDelta "pong"
 Context used=16727 window=258400
 Usage in=4434 out=5 cache_read=12288 cache_write=0 cost=- cumulative=false

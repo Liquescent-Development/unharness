@@ -15,7 +15,8 @@ use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, ProviderId, SessionConfig, SessionHandle,
+    Capabilities, HarnessId, McpServer, ModelRef, PermissionPolicy, ProviderId, SessionConfig,
+    SessionHandle,
 };
 
 /// Where a harness's provider list comes from.
@@ -65,6 +66,8 @@ pub struct PrintConfig {
     pub format: Option<String>,
     pub resume: Option<String>,
     pub extra_args: Vec<String>,
+    /// MCP servers for this run, already limited to what the harness takes.
+    pub mcp_servers: Vec<McpServer>,
     /// Applied by the caller to the command `build_print_command` returns.
     pub sandbox: Sandbox,
 }
@@ -121,6 +124,13 @@ pub trait Harness: Send + Sync {
     /// `workspace` is where the session runs, for what the CLI records about
     /// it on its own.
     fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        Vec::new()
+    }
+
+    /// The MCP servers this CLI has in its own configuration, when one of
+    /// the same name handed over for a session would be mixed with it
+    /// instead of replacing it. Those are left to the CLI.
+    fn own_mcp_servers(&self) -> Vec<String> {
         Vec::new()
     }
 

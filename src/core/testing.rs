@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use super::event::AgentEvent;
+use super::mcp::{McpServer, McpTransport};
 
 /// Anything that turns one raw stdout line into zero or more events.
 pub trait LineParser {
@@ -99,6 +100,28 @@ pub fn fixtures_dir(module_file: &str) -> std::path::PathBuf {
     let module = Path::new(module_file);
     let parent = module.parent().unwrap_or(Path::new(""));
     manifest.join(parent).join("fixtures")
+}
+
+/// A command server and an http one, for projection tests.
+pub fn sample_mcp_servers() -> Vec<McpServer> {
+    let map = |k: &str, v: &str| [(k.to_string(), v.to_string())].into_iter().collect();
+    vec![
+        McpServer {
+            name: "files".into(),
+            transport: McpTransport::Stdio {
+                command: "/usr/bin/files-mcp".into(),
+                args: vec!["--root".into(), "/my work".into()],
+                env: map("TOKEN", "t\"1"),
+            },
+        },
+        McpServer {
+            name: "docs".into(),
+            transport: McpTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: map("Authorization", "Bearer x"),
+            },
+        },
+    ]
 }
 
 #[cfg(test)]

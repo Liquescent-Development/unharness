@@ -46,6 +46,8 @@ def main() -> int:
     ap.add_argument("--file", help="attach this file to the first prompt (a resource_link)")
     ap.add_argument("--resume", help="reattach to this session id (session/resume) instead of creating one")
     ap.add_argument("--model", help="select this model through the session's model config option")
+    ap.add_argument("--mcp-servers", default="[]",
+                    help="the session's mcpServers, as a JSON array")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
     args = ap.parse_args(argv[:split])
     if not agent_cmd:
@@ -53,6 +55,7 @@ def main() -> int:
         return 2
 
     cwd = os.getcwd()
+    mcp_servers = json.loads(args.mcp_servers)
     # An agent started from inside another agent's session may behave differently.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     proc = subprocess.Popen(agent_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -164,9 +167,9 @@ def main() -> int:
             if rid == init_id:
                 if args.resume:
                     session_id = args.resume
-                    new_id = request("session/resume", {"sessionId": session_id, "cwd": cwd, "mcpServers": []})
+                    new_id = request("session/resume", {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers})
                 else:
-                    new_id = request("session/new", {"cwd": cwd, "mcpServers": []})
+                    new_id = request("session/new", {"cwd": cwd, "mcpServers": mcp_servers})
                 status = "session"
             elif rid == new_id:
                 result = obj.get("result") or {}

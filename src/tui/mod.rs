@@ -39,7 +39,9 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use crate::config::Config;
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
-use crate::core::{HarnessId, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle};
+use crate::core::{
+    HarnessId, McpServer, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle,
+};
 use crate::harness::resolve_binary;
 use app::{Action, App, AppInit};
 
@@ -479,7 +481,8 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
                 if let Ok(Some(note)) = &prepared {
                     app.transcript.push_notice(note.clone());
                 }
-                match prepared.and_then(|_| start_session(app, resume)) {
+                let mcp_servers = app.session_mcp_servers();
+                match prepared.and_then(|_| start_session(app, resume, mcp_servers)) {
                     Ok(handle) => {
                         *session = Some(handle);
                         app.session_alive = true;
@@ -524,7 +527,11 @@ async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
     }
 }
 
-fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
+fn start_session(
+    app: &App,
+    resume: Option<String>,
+    mcp_servers: Vec<McpServer>,
+) -> Result<SessionHandle> {
     let harness = app.harness();
     let desc = harness.descriptor();
     let binary = resolve_binary(desc, app.config.binary_override(desc.id.as_str()))
@@ -543,6 +550,7 @@ fn start_session(app: &App, resume: Option<String>) -> Result<SessionHandle> {
         },
         extra_args: app.config.extra_args(desc.id.as_str()).to_vec(),
         env: Vec::new(),
+        mcp_servers,
         sandbox: app.session_sandbox()?,
     };
     harness.start_session(cfg)

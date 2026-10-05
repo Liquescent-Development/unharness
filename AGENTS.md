@@ -47,7 +47,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
 - **Nothing an agent can write decides how it is run.** Workspace settings
   are read from `<config dir>/unharness/workspaces/`, never from the
   workspace; an in-tree `unharness.toml` is only imported by `unharness
-  init`. The config and state directories are never writable in the sandbox.
+  init`, and never its MCP servers (commands to run). The config and state
+  directories are never writable in the sandbox. A config file that does
+  not parse is an error, never a silent fall back to defaults.
 - **A change to a harness's own configuration is never silent.** The files
   that decide a CLI's next run are declared in `src/harness/<name>/`
   (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
@@ -64,7 +66,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   bare `tokio::process::Command::spawn` in a transport.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
-  (`--version`, auth, model lists) and unharness's own `git` stay outside.
+  (`--version`, auth, model lists) and unharness's own `git` stay outside;
+  `doctor`'s MCP handshake does not, since what a server command runs may
+  be a file in the workspace.
   The paths a vendor CLI writes are declared in `src/harness/<name>/`
   (`sandbox_paths`), found by tracing the CLI (`strace -f -e trace=file -e
   status=failed` shows what a confined run was denied), not guessed. Where
@@ -190,6 +194,43 @@ recorded ones. For anything else:
   are read from a bracketed paste; the quoting forms come from terminal
   documentation, and only the bare and single-quoted ones were sent
   through a real pty.
+- MCP servers (`core/mcp.rs`, `[mcp_servers.<name>]`), each run with a stdio
+  and an http server defined only in unharness's config, which the model
+  then called: Claude Code 2.1.289 `--mcp-config <file>` (added to its own
+  servers; the JSON is in a 0600 file under unharness's state directory
+  because it holds `env` and `headers`; the flag takes every word up to
+  the next flag, hence its position and the `--` before a print prompt),
+  Codex 0.157.0 `-c mcp_servers.<name>.command|args|env|url` on
+  `app-server` and `exec`, with header values in its environment and
+  named by `env_http_headers` (a stdio server's `env` stays on the command
+  line: `env_vars` only forwards a variable under its own name, and
+  setting it on Codex would hand it to everything Codex starts),
+  claude-agent-acp 0.85.1 `mcpServers` on `session/new` (stdio only).
+  Codex merges an override key by key into a server of the same name in
+  its `config.toml`, even when the override is a whole table (`codex mcp
+  get` with a scratch `CODEX_HOME`): a `command` over a `url` stops it
+  from starting, which is why such names are left to Codex
+  (`own_mcp_servers`). Codex asks to approve an MCP tool call with
+  `mcpServer/elicitation/request` carrying `_meta.codex_approval_kind:
+  "mcp_tool_call"` and a thread id but no item id (the parser ties it to
+  the `mcpToolCall` item in progress on that thread); under `never` with a
+  read-only sandbox it refuses the call instead, under `never` with full
+  access it runs it. Failed servers: Claude's `init` lists `status:
+  "failed"`, Codex sends `mcpServer/startupStatus/updated` (twice, it
+  retries). Neither CLI stops what an MCP launcher (`sh -c`, `npx`)
+  started when it exits. Unverified: http servers over ACP,
+  `session/resume` and `session/load` with servers, codex-acp, a same-name
+  server in Claude's own config, how to answer the elicitation's `persist`
+  offer (so "always allow" is not offered), agy (`agy mcp add` writes its
+  own config; no session flag on 1.2.16) and pi (no MCP client).
+- Plan mode (`Capabilities::plan_mode`) is declared, not driven: nothing in
+  unharness enters it yet. What the flag stands on: Claude Code 2.1.289
+  `--permission-mode plan`, Codex 0.157.0 `collaborationMode` on
+  `turn/start` (app-server schema; `exec` has none), agy 1.2.16 `--mode
+  plan`, all read from `--help` or the schema and none run; an ACP session
+  reports it when its `modes` list one with id `plan` (claude-agent-acp
+  0.85.1 does, codex-acp 2.1.1 does not). pi plans only through an
+  extension.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

@@ -15,7 +15,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = env::current_dir()?;
     let ws_root = find_workspace_root(&cwd);
-    let config = Config::load_effective(ws_root.as_deref());
+    let config = Config::load_effective(ws_root.as_deref())?;
     if let Some(warning) = ws_root.as_deref().and_then(Config::legacy_warning) {
         eprintln!("{} {}", "[unharness]".yellow().bold(), warning);
     }

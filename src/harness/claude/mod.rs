@@ -16,8 +16,8 @@ use super::{
 use crate::core::guard::Guarded;
 use crate::core::sandbox::SandboxPaths;
 use crate::core::{
-    Capabilities, HarnessId, ModelRef, PermissionPolicy, PolicySupport, ProviderId, RewindSupport,
-    SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
+    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Debug, Default)]
@@ -29,6 +29,9 @@ pub struct ClaudeHarness {
     /// of it. On unless `[harnesses.claude] relocate_config = false`; off in
     /// `default()`, which tests use.
     pub relocate_config: bool,
+    /// Where `--mcp-config` files are written instead of
+    /// `<state dir>/unharness/mcp`; tests set it.
+    pub mcp_config_dir: Option<PathBuf>,
 }
 
 /// Claude's state directory when `CLAUDE_CONFIG_DIR` does not name another.
@@ -102,6 +105,18 @@ impl ClaudeHarness {
         let home = dirs::home_dir()?;
         let dir = home.join(STATE_DIR);
         Some((home, dir))
+    }
+
+    /// The directory for `--mcp-config` files: unharness's own state, which
+    /// the sandbox lets a harness read and not write.
+    fn mcp_dir(&self) -> PathBuf {
+        self.mcp_config_dir.clone().unwrap_or_else(|| {
+            dirs::state_dir()
+                .or_else(dirs::data_local_dir)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("unharness")
+                .join("mcp")
+        })
     }
 
     /// The environment that relocates the config, seeding it if `prepare`
@@ -259,6 +274,10 @@ impl Harness for ClaudeHarness {
                 anchors_survive_fork: false,
             },
             fork: true,
+            // `--mcp-config`, which takes stdio and http servers.
+            mcp: McpSupport::via(McpChannel::CommandLine, true),
+            // `--permission-mode plan`.
+            plan_mode: true,
         }
     }
 
@@ -294,7 +313,8 @@ impl Harness for ClaudeHarness {
 
     fn start_session(&self, mut cfg: SessionConfig) -> Result<SessionHandle> {
         cfg.env.extend(self.config_env()?);
-        transport::start(cfg)
+        let mcp = transport::mcp_config_file(&cfg.mcp_servers, &self.mcp_dir())?;
+        transport::start(cfg, mcp)
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
@@ -302,6 +322,10 @@ impl Harness for ClaudeHarness {
         cmd.current_dir(&cfg.cwd);
         if let Some((key, value)) = self.config_env()? {
             cmd.env(key, value);
+        }
+        let mcp = transport::mcp_config_file(&cfg.mcp_servers, &self.mcp_dir())?;
+        if let Some(path) = &mcp {
+            cmd.arg("--mcp-config").arg(path);
         }
         if let Some(policy) = cfg.policy {
             cmd.args(transport::policy_args(policy));
@@ -323,6 +347,11 @@ impl Harness for ClaudeHarness {
             cmd.arg("-p");
         }
         if let Some(p) = &cfg.prompt {
+            // `--mcp-config` takes every word up to the next flag, and in
+            // passthrough there may be none before the prompt.
+            if mcp.is_some() {
+                cmd.arg("--");
+            }
             cmd.arg(p);
         }
         Ok(cmd)
@@ -386,6 +415,7 @@ mod tests {
             format: Some("stream-json".into()),
             resume: None,
             extra_args: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
         let a = args(&ClaudeHarness::default().build_print_command(&cfg).unwrap());
@@ -473,5 +503,26 @@ mod tests {
         let mut server = before.clone();
         server["mcpServers"] = serde_json::json!({"x": {"command": "sh"}});
         assert_ne!(config_that_matters(&before), config_that_matters(&server));
+    }
+
+    #[test]
+    fn mcp_config_does_not_swallow_the_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let harness = ClaudeHarness {
+            mcp_config_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/claude"),
+            cwd: PathBuf::from("/tmp"),
+            prompt: Some("run tests".into()),
+            mcp_servers: crate::core::testing::sample_mcp_servers(),
+            ..Default::default()
+        };
+        let a = args(&harness.build_print_command(&cfg).unwrap());
+        assert_eq!(a[0], "--mcp-config");
+        // A file: the servers' secrets stay off the command line.
+        assert!(Path::new(&a[1]).starts_with(dir.path()) && Path::new(&a[1]).is_file());
+        assert_eq!(a[2..], ["--", "run tests"]);
     }
 }

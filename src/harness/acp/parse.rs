@@ -191,6 +191,7 @@ impl AcpParser {
                         .unwrap_or(false),
                 ),
                 resume_by_id: Some(can_resume(caps) || can_load(caps)),
+                mcp_http: Some(mcp_http(caps)),
                 ..Default::default()
             }));
         } else if let Some(session_id) = result.get("sessionId").and_then(Value::as_str) {
@@ -199,9 +200,11 @@ impl AcpParser {
                 session_id: session_id.to_string(),
                 model: options.as_ref().and_then(|o| o.current_model.clone()),
             });
-            if let Some(o) = options {
-                out.push(AgentEvent::CapabilitiesChanged(o.caps_update(self.harness)));
-            }
+            let mut update = options
+                .map(|o| o.caps_update(self.harness))
+                .unwrap_or_default();
+            update.plan_mode = plan_mode(result);
+            out.push(AgentEvent::CapabilitiesChanged(update));
         } else if let Some(reason) = result.get("stopReason").and_then(Value::as_str) {
             let usage = result.get("usage").unwrap_or(&Value::Null);
             let cost = std::mem::take(&mut self.turn_cost);
@@ -228,8 +231,11 @@ impl AcpParser {
             out.push(AgentEvent::TurnCompleted { stop_reason });
         } else if let Some(o) = SessionOptions::from_config_options(result.get("configOptions")) {
             // `session/set_config_option` answers with the whole option list:
-            // a model switch can change which effort levels exist.
-            out.push(AgentEvent::CapabilitiesChanged(o.caps_update(self.harness)));
+            // a model switch can change which effort levels exist. A
+            // reattached session answers with its options and modes too.
+            let mut update = o.caps_update(self.harness);
+            update.plan_mode = plan_mode(result);
+            out.push(AgentEvent::CapabilitiesChanged(update));
         }
         out
     }
@@ -377,6 +383,20 @@ pub fn can_load(caps: &Value) -> bool {
     caps.get("loadSession")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// `agentCapabilities` allows MCP servers reached over HTTP.
+pub fn mcp_http(caps: &Value) -> bool {
+    caps.pointer("/mcpCapabilities/http")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Whether a session result's `modes` offer one called `plan`; `None` when
+/// the result lists no modes.
+fn plan_mode(result: &Value) -> Option<bool> {
+    let modes = result.pointer("/modes/availableModes")?.as_array()?;
+    Some(modes.iter().any(|m| s(m, "id") == "plan"))
 }
 
 pub fn error_text(error: &Value) -> String {
@@ -539,6 +559,15 @@ mod tests {
             &mut parser(),
             &fixtures_dir(file!()),
             "claude_agent_acp_resume",
+        );
+    }
+
+    #[test]
+    fn fixture_claude_agent_acp_mcp() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "claude_agent_acp_mcp",
         );
     }
 

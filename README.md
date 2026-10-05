@@ -54,12 +54,13 @@ What each harness supports beyond a plain turn:
 | Rate-limit windows | yes | yes | no | no | no |
 | Native rewind | yes | yes | yes | no (fresh session) | no (fresh session) |
 | Native fork | yes | yes | yes | no (fresh session) | no (fresh session) |
+| MCP servers from unharness's config | yes | yes | no | yes (http ones per agent) | exec only |
 
 ## Install
 
 ```bash
 cargo install --path .
-unharness doctor          # harnesses, auth, capabilities, sandbox, skills CLI, rules
+unharness doctor          # harnesses, auth, capabilities, sandbox, MCP servers, skills CLI, rules
 ```
 
 Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
@@ -363,7 +364,9 @@ overrides merged over it. The overrides are kept outside the workspace, in
 prints the path, `unharness init` creates it), because a file inside the
 workspace could be edited by the agent it is meant to configure. An
 `unharness.toml` left in a workspace from an earlier version is not read;
-`unharness init` imports it once.
+`unharness init` imports it once. A config file that does not parse stops
+unharness with the file and the line, rather than running on defaults
+without your sandbox and policy settings.
 
 ```toml
 default_harness  = "claude"      # agy | claude | codex | pi
@@ -397,7 +400,57 @@ transport = "stream"             # stream | stream-prompt | per-turn (see AGENTS
 [harnesses.pi]
 default_provider = "openai-codex"
 default_model    = "gpt-5.5"
+
+[mcp_servers.files]              # an MCP server the harness launches (see MCP servers)
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env     = { LOG_LEVEL = "warn" }
+
+[mcp_servers.docs]               # or one reached over HTTP
+url     = "https://example.com/mcp"
+headers = { Authorization = "Bearer …" }
+# enabled = false                # keep the definition, pass it to no harness
 ```
+
+### MCP servers
+
+A server defined under `[mcp_servers.<name>]` is handed to every harness
+that can take one for the session: Claude Code through `--mcp-config`, Codex
+through `-c mcp_servers.…` overrides, ACP agents in the session request
+(http servers only when the agent announces it takes them). Nothing is
+written to `~/.claude`, `~/.codex` or any other vendor configuration, and
+the servers a harness already has there stay available. pi and Antigravity
+have no way to take a server for one session; unharness says so when a
+session starts and passes none. A workspace's table of the same name
+replaces the global one, so `enabled = false` there switches a server off
+for that workspace.
+
+`unharness doctor` lists the servers, starts each `command` one to check
+that it answers (name, version, number of tools), and shows which installed
+harnesses get it. The server is started the way a session starts it, in the
+workspace and inside the sandbox, so a server that cannot run there fails
+here too. A `url` server is listed, not contacted.
+
+Worth knowing:
+
+- The server is started by the harness, inside the sandbox: a server that
+  writes outside the workspace needs its directory in `[sandbox] writable`.
+- `env` and `headers` often hold tokens. For Claude Code the definitions go
+  in a file only you can read (under unharness's state directory), for ACP
+  agents over the protocol, and for Codex `headers` go through its
+  environment. A Codex command server's `env` is the exception: it is on
+  Codex's command line, where other local users can read it.
+- If Codex has a server of the same name in its own `config.toml`, that one
+  is used and unharness says so: Codex would mix the two definitions.
+- Each harness still applies its own permission rules to MCP tools. Under
+  `ask`, Claude Code and Codex prompt for each call (Codex has no "always
+  allow" for these yet); `codex exec` cannot prompt, so under `ask` it
+  refuses the call (under `bypass` it runs it).
+- A server that fails to start is reported in the transcript by Claude Code
+  and Codex; an ACP agent does not say.
+- `unharness init` does not import MCP servers from an `unharness.toml` in
+  the workspace, where an agent could have written them; it names the ones
+  it left out.
 
 ### Conversations
 

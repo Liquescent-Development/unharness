@@ -27,6 +27,8 @@ enum BlockAcc {
 #[derive(Debug, Default)]
 pub struct ClaudeParser {
     session_id: Option<String>,
+    /// MCP servers already reported as failed.
+    failed_mcp_servers: HashSet<String>,
     /// Open content blocks of the message currently streaming, by index.
     blocks: HashMap<u64, BlockAcc>,
     /// Tool-use ids already announced via `ToolCallStarted`.
@@ -171,6 +173,22 @@ impl ClaudeParser {
                         session_id: sid,
                         model: opt_str(val, "model"),
                     });
+                }
+                // Every turn starts with an `init`; say it once per server.
+                for server in val
+                    .get("mcp_servers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    let name = str_at(server, "name");
+                    if str_at(server, "status") == "failed"
+                        && self.failed_mcp_servers.insert(name.to_string())
+                    {
+                        out.push(AgentEvent::Notice(format!(
+                            "MCP server '{name}' failed to start"
+                        )));
+                    }
                 }
             }
             "api_retry" => {
@@ -683,6 +701,11 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_mcp_server() {
+        fixture("mcp_server");
     }
 
     #[test]

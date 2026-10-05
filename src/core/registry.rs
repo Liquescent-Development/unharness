@@ -40,6 +40,7 @@ impl Registry {
                     .harness("claude")
                     .and_then(|h| h.relocate_config)
                     .unwrap_or(true),
+                mcp_config_dir: None,
             }),
             Box::new(CodexHarness::new(codex_transport)),
             Box::new(crate::harness::pi::PiHarness),

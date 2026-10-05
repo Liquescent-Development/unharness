@@ -1,0 +1,23 @@
+SessionStarted id=3894ae7d-3c9d-4dea-91f9-90bab0d716a9 model=claude-haiku-4-5-20251001
+Notice "MCP server 'broken' failed to start"
+TurnStarted
+Context used=25989 window=-
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "{\"query\": \"select"
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch ":"
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "mcp__probe"
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "__magic_word"
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "\", \"max_results\": 1"
+ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "}"
+ToolCallStarted id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch input={"max_results":1,"query":"select:mcp__probe__magic_word"}
+ToolCallResult id=toolu_016SChCrgcugneGNhV1eoigh error=false "[tool_reference]"
+RateLimit status=allowed five_hour=18% seven_day=39%
+Context used=26294 window=-
+ToolCallStarted id=toolu_01NmbVvr95iibs7emosMArLA name=mcp__probe__magic_word input={}
+PermissionRequest id=a427695e-c0f0-4955-a681-16a55a6e407e ToolUse mcp__probe__magic_word
+ToolCallResult id=toolu_01NmbVvr95iibs7emosMArLA error=false "zanzibar argA"
+Context used=26411 window=-
+TextDelta "zan"
+TextDelta "zibar argA"
+Usage in=28 out=300 cache_read=67081 cache_write=11585 cost=0.0314 cumulative=false
+Context used=- window=200000
+TurnCompleted Done

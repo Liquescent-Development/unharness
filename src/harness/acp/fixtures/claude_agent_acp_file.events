@@ -1,6 +1,6 @@
-CapabilitiesChanged image_input=true resume_by_id=true
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=c31444b8-f081-4f6b-9346-13fc9d1211fa model=claude-fable-5-1[1m]
-CapabilitiesChanged efforts=default,low,medium,high,xhigh,max models=12
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
 CapabilitiesChanged efforts= models=12
 Context used=23154 window=200000
 ToolCallStarted id=toolu_01HLcLtmEEhMMxuoJgk6pd29 name=Read input={"file_path":"/WORKSPACE/memo.pdf"}

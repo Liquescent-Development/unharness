@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, StopReason};
 use super::ids::{HarnessId, ModelRef};
+use super::mcp::McpServer;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
 use super::session::{
@@ -33,6 +34,7 @@ pub struct TurnState {
     pub session_id: Option<String>,
     pub extra_args: Vec<String>,
     pub env: Vec<(String, String)>,
+    pub mcp_servers: Vec<McpServer>,
     pub sandbox: Sandbox,
     pub turn_index: usize,
 }
@@ -73,6 +75,7 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         session_id: cfg.resume,
         extra_args: cfg.extra_args,
         env: cfg.env,
+        mcp_servers: cfg.mcp_servers,
         sandbox: cfg.sandbox,
         turn_index: 0,
     };
@@ -290,6 +293,7 @@ mod tests {
             fork: false,
             extra_args: vec![],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: Sandbox::off(),
         }
     }

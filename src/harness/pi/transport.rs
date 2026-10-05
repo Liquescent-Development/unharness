@@ -339,6 +339,7 @@ mod tests {
             fork: false,
             extra_args: vec!["--no-extensions".into()],
             env: vec![],
+            mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
         let (args, sid) = session_args(&cfg);
