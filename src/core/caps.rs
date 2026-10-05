@@ -6,6 +6,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use super::event::CapsUpdate;
+use super::session::Attachment;
 
 /// How tool permissions are handled, ordered least → most permissive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -125,6 +126,8 @@ pub struct Capabilities {
     pub usage_reporting: bool,
     /// Turns can carry image attachments.
     pub image_input: bool,
+    /// Turns can carry document attachments (PDF and text files).
+    pub file_input: bool,
     /// The agent's plan / todo list arrives as `PlanUpdated`.
     pub plan_updates: bool,
     pub subagents: SubagentSupport,
@@ -166,6 +169,14 @@ pub struct RewindSupport {
 }
 
 impl Capabilities {
+    /// Whether a turn can carry this attachment.
+    pub fn accepts(&self, attachment: &Attachment) -> bool {
+        match attachment {
+            Attachment::Image { .. } => self.image_input,
+            Attachment::File { .. } => self.file_input,
+        }
+    }
+
     /// Overlay what a live session reported on the static declaration.
     pub fn apply(&mut self, update: &CapsUpdate) {
         if let Some(e) = &update.effort_levels {

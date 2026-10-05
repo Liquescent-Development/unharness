@@ -43,6 +43,7 @@ What each harness supports beyond a plain turn:
 | | Claude Code | Codex (app-server) | pi | ACP agents | Codex exec, Antigravity |
 |---|---|---|---|---|---|
 | Image attachments | yes | yes | per model | per agent | exec only |
+| PDF and text file attachments | yes | no | no | yes (as a link the agent reads) | no |
 | Plan / todo list | yes | yes | no | yes | exec only |
 | Subagents: start, end, tool calls, report | yes | yes | no | no | no |
 | Subagents: task description and progress in words | yes | no (a name and its tool calls) | no | no | no |
@@ -128,7 +129,7 @@ capability caveat, and the key hints.
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
-`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <image>`, `/detach`,
+`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/detach`,
 `/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
@@ -163,7 +164,7 @@ which every current terminal has). A paste while a dialog is open goes into
 the dialog's text field if it has one and is otherwise ignored.
 
 Above the prompt, when there is something to show: the agent's plan as a
-checklist (`/plan` hides it), prompts waiting in the queue, and images
+checklist (`/plan` hides it), prompts waiting in the queue, and files
 attached to the next prompt. The usage line shows how full the model's
 context is (`ctx 34%`); `/usage` adds the account's rate-limit windows, and a
 notice appears when one passes 80%.

@@ -6,7 +6,7 @@ Performs initialize → session/new → session/prompt for each prompt, answers
 session/request_permission (allow once, or reject with --deny), and refuses
 every other agent → client request, as the unharness driver does.
 
-Usage: scripts/record-acp.py OUT.jsonl [--deny] [--image F] [--resume ID] [--model M] PROMPT [PROMPT...] -- AGENT [ARGS...]
+Usage: scripts/record-acp.py OUT.jsonl [--deny] [--image F] [--file F] [--resume ID] [--model M] PROMPT [PROMPT...] -- AGENT [ARGS...]
   e.g. scripts/record-acp.py out.jsonl "say hi" -- gemini --acp
 
 Run it from a scratch directory; the agent will act in the cwd.
@@ -43,6 +43,7 @@ def main() -> int:
     ap.add_argument("prompts", nargs="+")
     ap.add_argument("--deny", action="store_true", help="reject permission requests instead of allowing")
     ap.add_argument("--image", help="attach this image to the first prompt")
+    ap.add_argument("--file", help="attach this file to the first prompt (a resource_link)")
     ap.add_argument("--resume", help="reattach to this session id (session/resume) instead of creating one")
     ap.add_argument("--model", help="select this model through the session's model config option")
     ap.add_argument("--idle-timeout", type=float, default=120.0)
@@ -106,6 +107,15 @@ def main() -> int:
                 data = base64.b64encode(f.read()).decode()
             blocks.append({"type": "image", "data": data,
                            "mimeType": mimetypes.guess_type(args.image)[0] or "image/png"})
+        if first and args.file:
+            import mimetypes
+            import pathlib
+            path = pathlib.Path(args.file).resolve()
+            link = {"type": "resource_link", "uri": path.as_uri(), "name": path.name}
+            mime = mimetypes.guess_type(path.name)[0]
+            if mime:
+                link["mimeType"] = mime
+            blocks.append(link)
         first = False
         prompt_id = request("session/prompt", {"sessionId": session_id, "prompt": blocks})
 

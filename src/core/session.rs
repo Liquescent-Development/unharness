@@ -36,7 +36,15 @@ pub struct SessionConfig {
 /// Something sent along with a turn's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attachment {
-    Image { path: PathBuf, mime: String },
+    Image {
+        path: PathBuf,
+        mime: String,
+    },
+    /// A document: a PDF (`application/pdf`) or a text file (`text/plain`).
+    File {
+        path: PathBuf,
+        mime: String,
+    },
 }
 
 impl Attachment {
@@ -56,15 +64,44 @@ impl Attachment {
         })
     }
 
+    /// A document attachment: a PDF by extension, or any file whose content
+    /// is text. Reads the file to tell.
+    pub fn file(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        let pdf = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+        let mime = if pdf {
+            "application/pdf"
+        } else {
+            std::str::from_utf8(&std::fs::read(&path).ok()?).ok()?;
+            "text/plain"
+        };
+        Some(Attachment::File {
+            path,
+            mime: mime.to_string(),
+        })
+    }
+
+    /// An image by its extension, a document otherwise.
+    pub fn from_path(path: impl Into<PathBuf>) -> Option<Self> {
+        let path = path.into();
+        Self::image(&path).or_else(|| Self::file(path))
+    }
+
+    pub fn is_image(&self) -> bool {
+        matches!(self, Attachment::Image { .. })
+    }
+
     pub fn path(&self) -> &std::path::Path {
         match self {
-            Attachment::Image { path, .. } => path,
+            Attachment::Image { path, .. } | Attachment::File { path, .. } => path,
         }
     }
 
     pub fn mime(&self) -> &str {
         match self {
-            Attachment::Image { mime, .. } => mime,
+            Attachment::Image { mime, .. } | Attachment::File { mime, .. } => mime,
         }
     }
 
@@ -76,7 +113,19 @@ impl Attachment {
             .unwrap_or_else(|| self.path().display().to_string())
     }
 
-    /// The file's bytes, base64-encoded, for protocols that inline images.
+    /// How the transcript marks it under the prompt.
+    pub fn marker(&self) -> String {
+        let kind = if self.is_image() { "image" } else { "file" };
+        format!("[{kind}: {}]", self.label())
+    }
+
+    /// The file's content, for protocols that inline text documents.
+    pub fn read_text(&self) -> Result<String> {
+        std::fs::read_to_string(self.path())
+            .map_err(|e| anyhow!("could not read {}: {e}", self.path().display()))
+    }
+
+    /// The file's bytes, base64-encoded, for protocols that inline them.
     pub fn read_base64(&self) -> Result<String> {
         use base64::Engine;
         let bytes = std::fs::read(self.path())
@@ -213,5 +262,31 @@ mod tests {
         );
         assert_eq!(Attachment::image("/x/notes.txt"), None);
         assert_eq!(Attachment::image("/x/noext"), None);
+    }
+
+    #[test]
+    fn file_attachment_is_a_pdf_or_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |name: &str, bytes: &[u8]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let pdf = write("memo.PDF", b"%PDF-1.4");
+        let text = write("Makefile", b"all:\n");
+        let binary = write("a.out", &[0x7f, b'E', b'L', b'F', 0xff, 0xfe]);
+        let image = write("shot.png", b"png");
+
+        let a = Attachment::from_path(&pdf).unwrap();
+        assert_eq!(
+            (a.mime(), a.marker().as_str()),
+            ("application/pdf", "[file: memo.PDF]")
+        );
+        assert_eq!(Attachment::from_path(&text).unwrap().mime(), "text/plain");
+        assert_eq!(Attachment::from_path(&binary), None);
+        assert_eq!(Attachment::from_path(dir.path().join("gone.txt")), None);
+        let a = Attachment::from_path(&image).unwrap();
+        assert!(a.is_image());
+        assert_eq!(a.marker(), "[image: shot.png]");
     }
 }

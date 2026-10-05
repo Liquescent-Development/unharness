@@ -155,6 +155,7 @@ impl Harness for AcpHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: false,
+            file_input: true,
             plan_updates: true,
             subagents: SubagentSupport::default(),
             steer: false,

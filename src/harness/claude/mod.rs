@@ -241,6 +241,7 @@ impl Harness for ClaudeHarness {
             interrupt: true,
             usage_reporting: true,
             image_input: true,
+            file_input: true,
             plan_updates: true,
             // Tasks are described and their progress worded; an interrupt
             // between turns stops them.

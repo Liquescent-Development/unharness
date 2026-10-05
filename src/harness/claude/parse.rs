@@ -741,6 +741,16 @@ mod tests {
     }
 
     #[test]
+    fn fixture_pdf_turn() {
+        fixture("pdf_turn");
+    }
+
+    #[test]
+    fn fixture_text_file_turn() {
+        fixture("text_file_turn");
+    }
+
+    #[test]
     fn fixture_task_list() {
         fixture("task_list");
     }
