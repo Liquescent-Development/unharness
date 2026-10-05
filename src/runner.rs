@@ -161,10 +161,12 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
 
     if args.print || args.no_tui {
         let res = resolve_policy(&harness.print_policies(args.print), policy).map_err(|e| {
+            let supported: Vec<&str> = e.supported.iter().map(|p| p.as_str()).collect();
             anyhow::anyhow!(
-                "{} with {}; pass --policy",
-                e,
-                harness.descriptor().display_name
+                "policy '{}' is not available for {} without the TUI; pass --policy with one of: {}",
+                e.requested,
+                harness.descriptor().display_name,
+                supported.join(", ")
             )
         })?;
         if let Some(w) = res.warning {

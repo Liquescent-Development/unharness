@@ -43,7 +43,7 @@ impl Registry {
                 mcp_config_dir: None,
             }),
             Box::new(CodexHarness::new(codex_transport)),
-            Box::new(crate::harness::pi::PiHarness),
+            Box::new(crate::harness::pi::PiHarness::default()),
         ];
 
         // ACP agents: the ones defined in config (by name, for a stable

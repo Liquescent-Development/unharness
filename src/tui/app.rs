@@ -3688,7 +3688,7 @@ pub(crate) mod tests {
                 .with(Box::new(crate::harness::codex::CodexHarness::new(
                     crate::harness::codex::CodexTransport::AppServer,
                 )))
-                .with(Box::new(crate::harness::pi::PiHarness)),
+                .with(Box::new(crate::harness::pi::PiHarness::default())),
         )
     }
 

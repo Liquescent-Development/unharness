@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
+use super::gate;
+
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, PermissionKind, PermissionRequest, StopReason, Usage,
 };
@@ -225,6 +227,36 @@ impl PiParser {
             .and_then(Value::as_str)
             .unwrap_or("The agent needs your input")
             .to_string();
+        let options: Vec<String> = v
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|o| {
+                        o.as_str()
+                            .map(str::to_string)
+                            .or_else(|| o.get("label").and_then(Value::as_str).map(str::to_string))
+                            .unwrap_or_else(|| o.to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The gate extension asking about a tool call.
+        if s(v, "method") == "select"
+            && let Some(call) = gate::parse_request(&title, &options)
+        {
+            out.push(AgentEvent::PermissionRequest(PermissionRequest {
+                id,
+                kind: PermissionKind::ToolUse {
+                    action: gate::tool_action(&call.tool, &call.input),
+                    tool: call.tool,
+                    input: call.input,
+                    description: None,
+                },
+                tool_call_id: Some(call.tool_call_id),
+            }));
+            return;
+        }
         let kind = match s(v, "method") {
             "confirm" => PermissionKind::Confirm {
                 title,
@@ -234,25 +266,7 @@ impl PiParser {
                     .filter(|_m| v.get("title").is_some())
                     .map(str::to_string),
             },
-            "select" => PermissionKind::Select {
-                title,
-                options: v
-                    .get("options")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .map(|o| {
-                                o.as_str()
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        o.get("label").and_then(Value::as_str).map(str::to_string)
-                                    })
-                                    .unwrap_or_else(|| o.to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
+            "select" => PermissionKind::Select { title, options },
             "input" | "editor" => PermissionKind::Input {
                 title,
                 placeholder: v
@@ -443,6 +457,15 @@ mod tests {
         fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
             PiParser::feed_stderr(self, line)
         }
+    }
+
+    #[test]
+    fn fixture_gate() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "gate",
+        );
     }
 
     #[test]

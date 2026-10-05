@@ -1,12 +1,14 @@
 //! Long-lived pi session over `--mode rpc`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::gate;
 use super::parse::PiParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
@@ -15,7 +17,10 @@ use crate::core::{
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
-pub fn session_args(cfg: &SessionConfig) -> (Vec<String>, String) {
+///
+/// `gate` is the installed gate extension. It is loaded under every policy,
+/// since the policy can change while pi runs; who answers it is decided here.
+pub fn session_args(cfg: &SessionConfig, gate: &Path) -> (Vec<String>, String) {
     let session_id = cfg
         .resume
         .clone()
@@ -44,6 +49,8 @@ pub fn session_args(cfg: &SessionConfig) -> (Vec<String>, String) {
         args.push("--thinking".into());
         args.push(e.clone());
     }
+    args.push("-e".into());
+    args.push(gate.to_string_lossy().into_owned());
     args.extend(cfg.extra_args.iter().cloned());
     (args, session_id)
 }
@@ -53,6 +60,8 @@ pub enum PendingKind {
     Confirm,
     Select,
     Input,
+    /// The gate extension asking about a tool call.
+    Gate,
 }
 
 /// Whether `line` is pi's response to `command`.
@@ -85,6 +94,9 @@ pub fn encode_message(
 pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDecision) -> String {
     let mut v = json!({"type":"extension_ui_response","id":id});
     match (kind, decision) {
+        (PendingKind::Gate, PermissionDecision::Allow { .. }) => v["value"] = json!(gate::ALLOW),
+        // Anything but an allow keeps the tool from running.
+        (PendingKind::Gate, _) => v["value"] = json!(gate::DENY),
         (PendingKind::Confirm, PermissionDecision::Allow { .. }) => v["confirmed"] = json!(true),
         (PendingKind::Confirm, PermissionDecision::Answer(Value::Bool(b))) => {
             v["confirmed"] = json!(b)
@@ -98,8 +110,8 @@ pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDeci
     v.to_string()
 }
 
-pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
-    let (args, session_id) = session_args(&cfg);
+pub fn start(cfg: SessionConfig, gate: &Path) -> Result<SessionHandle> {
+    let (args, session_id) = session_args(&cfg, gate);
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(args).current_dir(&cfg.cwd);
     for (k, v) in &cfg.env {
@@ -245,10 +257,16 @@ async fn drive(
                         for ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let kind = match &req.kind {
+                                    PermissionKind::ToolUse { .. } => PendingKind::Gate,
                                     PermissionKind::Confirm { .. } => PendingKind::Confirm,
                                     PermissionKind::Select { .. } => PendingKind::Select,
                                     _ => PendingKind::Input,
                                 };
+                                if policy == PermissionPolicy::Bypass && kind == PendingKind::Gate {
+                                    let allow = PermissionDecision::Allow { updated_input: None };
+                                    let _ = proc.write_line(&encode_ui_response(&req.id, kind, &allow)).await;
+                                    continue;
+                                }
                                 // Under Bypass, confirm dialogs are auto-accepted and
                                 // selects take the first option; text input still asks.
                                 if policy == PermissionPolicy::Bypass && kind != PendingKind::Input {
@@ -341,12 +359,14 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox: crate::core::Sandbox::off(),
         };
-        let (args, sid) = session_args(&cfg);
+        let gate = Path::new("/state/gate.ts");
+        let (args, sid) = session_args(&cfg, gate);
         let s = args.join(" ");
         assert!(s.starts_with(&format!("--mode rpc --session-id {sid}")));
         assert!(s.contains("--provider anthropic --model claude-sonnet-4-5"));
         assert!(s.contains("--thinking high"));
-        assert!(s.ends_with("--no-extensions"));
+        // The gate is loaded whatever the user's own arguments say.
+        assert!(s.ends_with("-e /state/gate.ts --no-extensions"));
 
         // Checked live: `--fork` branches the session into a new one whose
         // id pi reports in get_state; entry ids are kept.
@@ -356,7 +376,7 @@ mod tests {
             ..cfg.clone()
         };
         assert!(
-            session_args(&fork)
+            session_args(&fork, gate)
                 .0
                 .join(" ")
                 .starts_with("--mode rpc --fork abc")
@@ -364,9 +384,32 @@ mod tests {
 
         let mut r = cfg.clone();
         r.resume = Some("abc".into());
-        let (args, sid) = session_args(&r);
+        let (args, sid) = session_args(&r, gate);
         assert_eq!(sid, "abc");
         assert!(args.join(" ").contains("--session-id abc"));
+    }
+
+    #[test]
+    fn gate_answers() {
+        let value = |decision: PermissionDecision| {
+            let line = encode_ui_response("g1", PendingKind::Gate, &decision);
+            serde_json::from_str::<Value>(&line).unwrap()["value"].clone()
+        };
+        assert_eq!(
+            value(PermissionDecision::Allow {
+                updated_input: None
+            }),
+            "Allow"
+        );
+        // Whatever is not an allow keeps the tool from running.
+        assert_eq!(
+            value(PermissionDecision::Deny {
+                reason: "no".into()
+            }),
+            "Deny"
+        );
+        assert_eq!(value(PermissionDecision::Answer(json!("Allow"))), "Deny");
+        assert_eq!(value(PermissionDecision::Answer(Value::Null)), "Deny");
     }
 
     #[test]
