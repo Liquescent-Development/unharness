@@ -248,8 +248,8 @@ unified diffs in red/green. Fenced code in answers is syntax highlighted and
 wrapped, never cut off.
 
 When a harness asks for permission, a modal opens: `y` allow once, `a` allow
-always (when the harness offers a rule), `n` deny with a reason, `i` show the
-full tool input. Agent questions (Claude's AskUserQuestion, Codex's
+always (see Allow rules), `n` deny with a reason, `i` show the full tool
+input. Agent questions (Claude's AskUserQuestion, Codex's
 requestUserInput, pi's extension dialogs) open the matching modal.
 
 ### Permission policy
@@ -263,6 +263,53 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 
 `*` shown as a warning in the header. A requested policy a harness cannot
 honour falls back to the nearest *less* permissive one it supports.
+
+### Allow rules
+
+`a` in the permission modal shows what would be allowed from now on, and
+`Enter` keeps it: a rule that belongs to unharness, so it holds after
+`/harness` and in the next session, whichever harness asks. `Tab` switches
+between this workspace and every workspace, and a rule's pattern can be
+edited before it is kept (it has to still cover the request in front of you).
+The harness itself is only told "allow": nothing is written to its settings.
+
+Rules are kept in `~/.config/unharness/allow.toml` and, per workspace, in
+`~/.config/unharness/workspaces/<name>-<hash>.allow.toml`. `/allow` and
+`unharness doctor` list them; to change or remove one, edit the file.
+
+```toml
+[[allow]]
+tool    = "shell"
+command = "cargo test"       # the words the command starts with
+
+[[allow]]
+tool = "edit"                # or "read"
+path = "src/**"              # *, ? and **; relative to the workspace, or /… or ~/…
+
+[[allow]]
+tool = "mcp"
+name = "docs/search"         # server/tool, or docs/* for every tool of a server
+
+[[allow]]
+tool = "WebFetch"            # any other tool, by the harness's own name for it
+```
+
+- `shell`, `edit`, `read` and `mcp` mean the same on Claude Code, Codex
+  (app-server) and ACP agents: Claude's `Bash`, Codex's `shell` and its
+  `/bin/zsh -lc '…'` wrapper, and an ACP `execute` call are one thing to a
+  rule. Any other tool is matched by name, and names differ between
+  harnesses.
+- A command line of several commands (`&&`, `;`, `|`) is allowed only when
+  every one of them is covered. One that uses command substitution,
+  redirection, a subshell or a comment is always asked about.
+- A path is compared after following symbolic links, so a link inside an
+  allowed directory does not extend the rule to where it points.
+- Rules only allow. They apply under every policy, to every request that
+  reaches unharness; what a harness decides without asking (see the table
+  above) never gets here, and neither does anything in `--print` and
+  `--no-tui` runs.
+- Every request a rule answers is noted in the transcript.
+- A rules file that does not parse stops unharness, like a config file.
 
 ### Sandbox
 
@@ -521,7 +568,8 @@ them instead.
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess,
                per-turn driver, JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints, the sandbox (sandbox/: levels, profile,
+               file checkpoints, allow rules (rules.rs), the sandbox
+               (sandbox/: levels, profile,
                Landlock and Seatbelt backends) and the watch on vendor
                config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,
