@@ -30,22 +30,24 @@ pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
 ///
 /// `confined` says unharness's sandbox is around the process. Codex's own
 /// (bubblewrap) cannot start inside it, so Codex is told the sandbox is
-/// someone else's.
+/// someone else's. Otherwise Codex's own is the workspace one whatever the
+/// policy: what is asked about is `approvalPolicy` alone.
 pub fn sandbox_policy(policy: PermissionPolicy, confined: bool) -> Value {
     if confined {
         return json!({"type": "externalSandbox", "networkAccess": "enabled"});
     }
     match policy {
-        PermissionPolicy::Ask => json!({"type": "readOnly"}),
-        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => json!({"type": "workspaceWrite"}),
         PermissionPolicy::Bypass => json!({"type": "dangerFullAccess"}),
+        _ => json!({"type": "workspaceWrite"}),
     }
 }
 
 /// `thread/start` parameters for a policy.
 pub fn policy_params(policy: PermissionPolicy, confined: bool) -> (&'static str, &'static str) {
     let (approval, sandbox) = match policy {
-        PermissionPolicy::Ask => ("untrusted", "read-only"),
+        // Checked on 0.157.0: with `workspace-write`, `untrusted` asks before
+        // every command and file change.
+        PermissionPolicy::Ask => ("untrusted", "workspace-write"),
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => ("on-request", "workspace-write"),
         PermissionPolicy::Bypass => ("never", "danger-full-access"),
     };
@@ -572,10 +574,19 @@ mod tests {
 
     #[test]
     fn own_sandbox_is_off_inside_ours() {
-        assert_eq!(
-            sandbox_policy(PermissionPolicy::Ask, false),
-            json!({"type": "readOnly"})
-        );
+        // Codex's own sandbox does not follow the policy.
+        for policy in [
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Auto,
+        ] {
+            assert_eq!(
+                sandbox_policy(policy, false),
+                json!({"type": "workspaceWrite"})
+            );
+            assert_eq!(policy_params(policy, false).1, "workspace-write");
+        }
+        assert_eq!(policy_params(PermissionPolicy::Ask, false).0, "untrusted");
         // Approvals are untouched; only the sandbox is handed over.
         for policy in PermissionPolicy::ALL {
             assert_eq!(

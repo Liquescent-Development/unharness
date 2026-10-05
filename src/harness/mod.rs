@@ -141,7 +141,7 @@ pub trait Harness: Send + Sync {
     }
 
     /// The sandbox level when the user set none.
-    fn default_sandbox(&self, _policy: PermissionPolicy) -> SandboxLevel {
+    fn default_sandbox(&self) -> SandboxLevel {
         SandboxLevel::WorkspaceWrite
     }
 

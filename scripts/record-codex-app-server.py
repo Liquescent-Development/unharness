@@ -7,7 +7,7 @@ writes both directions to OUT.jsonl (`>>` = sent, `!!` = stderr). Sub-agent
 threads report on the same stream and can outlive the turn that spawned
 them; the recording goes on until they have all finished.
 
-Usage: scripts/record-codex-app-server.py OUT.jsonl [--approval untrusted] [--sandbox read-only] PROMPT [PROMPT...]
+Usage: scripts/record-codex-app-server.py OUT.jsonl [--approval untrusted] [--sandbox workspace-write] PROMPT [PROMPT...]
 """
 import argparse
 import json
@@ -36,7 +36,7 @@ def main() -> int:
     ap.add_argument("out")
     ap.add_argument("prompts", nargs="+")
     ap.add_argument("--approval", default="untrusted")
-    ap.add_argument("--sandbox", default="read-only")
+    ap.add_argument("--sandbox", default="workspace-write")
     ap.add_argument("--model")
     ap.add_argument("-c", "--config", action="append", default=[],
                     help="a key=value config override for the server (repeatable), e.g. an MCP server")

@@ -73,10 +73,9 @@ pub fn requested_sandbox(args: &CommonRunArgs, config: &Config) -> Result<Option
     })
 }
 
-/// What confines `harness` for a session under `policy` in `workspace`.
+/// What confines `harness` for a session in `workspace`.
 pub fn session_sandbox(
     harness: &dyn Harness,
-    policy: PermissionPolicy,
     setup: &SandboxSetup,
     config: &Config,
     workspace: &Path,
@@ -88,7 +87,7 @@ pub fn session_sandbox(
     sandbox::resolve(
         &SandboxRequest {
             explicit: setup.explicit,
-            default: harness.default_sandbox(policy),
+            default: harness.default_sandbox(),
             workspace,
             harness: &harness.sandbox_paths(),
             extra_writable: &extra_writable,
@@ -173,7 +172,6 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         }
         let sandbox = session_sandbox(
             harness,
-            res.effective,
             &sandbox_setup,
             config,
             ws_root.as_deref().unwrap_or(cwd),

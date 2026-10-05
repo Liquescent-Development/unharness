@@ -796,20 +796,13 @@ impl App {
     /// The sandbox level the active harness runs at, and why it is off if
     /// that was not asked for.
     pub fn sandbox_level(&self) -> (SandboxLevel, Option<String>) {
-        self.sandbox
-            .level(self.harness().default_sandbox(self.sandbox_policy()))
-    }
-
-    fn sandbox_policy(&self) -> PermissionPolicy {
-        self.effective_policy()
-            .unwrap_or_else(|| self.wanted_policy())
+        self.sandbox.level(self.harness().default_sandbox())
     }
 
     /// What confines the next process of the active harness.
     pub fn session_sandbox(&self) -> anyhow::Result<Sandbox> {
         crate::runner::session_sandbox(
             self.harness(),
-            self.sandbox_policy(),
             &self.sandbox,
             &self.config,
             self.workspace_root.as_deref().unwrap_or(&self.cwd),
@@ -2119,7 +2112,6 @@ impl App {
                 return false;
             }
         };
-        let sandbox_before = self.sandbox_level().0;
         if resolve_policy(&policies, self.policy_requested).is_err() {
             // Chosen because the requested policy cannot be had here: the
             // other harnesses keep the requested one.
@@ -2131,20 +2123,6 @@ impl App {
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
             self.transcript.push_notice(w);
-        }
-        let sandbox = self.sandbox_level().0;
-        if sandbox != sandbox_before {
-            // A process cannot leave its sandbox: the next prompt starts a
-            // new one and resumes the session.
-            self.transcript.push_system(format!("Sandbox: {sandbox}"));
-            if self.is_generating {
-                self.transcript.push_notice(format!(
-                    "the running session stays at sandbox {sandbox_before} until it restarts"
-                ));
-            } else if self.session_alive {
-                self.shutdown_session();
-                return true;
-            }
         }
         if self.session_alive {
             self.actions
@@ -3708,7 +3686,7 @@ pub(crate) mod tests {
                 .with(Box::new(AgyHarness::default()))
                 .with(Box::new(ClaudeHarness::default()))
                 .with(Box::new(crate::harness::codex::CodexHarness::new(
-                    crate::harness::codex::CodexTransport::Exec,
+                    crate::harness::codex::CodexTransport::AppServer,
                 )))
                 .with(Box::new(crate::harness::pi::PiHarness)),
         )
