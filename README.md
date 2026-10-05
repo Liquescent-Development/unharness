@@ -108,6 +108,7 @@ capability caveat, and the key hints.
 | `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
 | `Ctrl+U` | Clear the prompt |
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
+| `Ctrl+V`, `/paste` | Attach the image on the clipboard (a screenshot, say) to the next prompt |
 | `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
 | Mouse wheel | Scroll the transcript |
 | Scrollbar (right edge of the transcript) | Drag the thumb, or click the track, to move through the transcript |
@@ -129,7 +130,7 @@ capability caveat, and the key hints.
 | `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
 
 Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
-`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/detach`,
+`/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/paste`, `/detach`,
 `/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
 `/fork`, `/skills`,
 `/clear`, `/help`, `/quit`.
@@ -168,6 +169,16 @@ that is nothing but the paths of existing files (absolute or `~/`, bare,
 quoted or backslash-escaped as terminals write them, or `file://` URIs) is
 read as a drop. A file the active harness cannot take stays a path in the
 prompt, with a notice saying why.
+
+A terminal's own paste carries text only, so an image on the clipboard is
+attached with `Ctrl+V` or `/paste`: it is read with `wl-paste` (Wayland),
+`xclip` (X11) or `osascript` (macOS), saved under
+`<state dir>/unharness/pasted/` (cleared of images older than a week) and
+attached like any other image. Files copied in a file manager are attached
+the same way. Over ssh those tools would read the remote machine's
+clipboard, so nothing is read and unharness says so; copy the file over and
+`/attach` it. Where the terminal itself takes `Ctrl+V` to paste, use
+`/paste`.
 
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it), prompts waiting in the queue, and files

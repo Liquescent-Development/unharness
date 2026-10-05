@@ -181,6 +181,15 @@ recorded ones. For anything else:
   files are not embedded. Codex's `UserInput` (0.157.0 schema: text, image,
   localImage, audio, localAudio, skill, mention), `codex exec` and pi's
   `prompt` (`images` only) have no document input.
+- Clipboard images (`tui/clipboard.rs`, `Ctrl+V` and `/paste`): the reader
+  logic is tested against a stand-in tool only. No Wayland or X11 display
+  and no Mac were available, so the real `wl-paste --list-types` /
+  `--no-newline --type`, `xclip -selection clipboard -o -t TARGETS` and
+  `osascript -e 'the clipboard as «class PNGf»'` calls are unverified, as
+  is which terminals pass `Ctrl+V` through. Dropped files (`tui/drop.rs`)
+  are read from a bracketed paste; the quoting forms come from terminal
+  documentation, and only the bare and single-quoted ones were sent
+  through a real pty.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.
