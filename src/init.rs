@@ -69,56 +69,22 @@ pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
     }
 
     // 3. Workspace settings, kept outside the workspace so an agent working
-    // in it cannot change them. An older in-tree unharness.toml is imported.
+    // in it cannot change them.
     let config_path = Config::workspace_path_in(store, cwd);
     if !config_path.exists() {
-        match Config::legacy_workspace_file(cwd) {
-            Some(legacy) => {
-                let mut imported = Config::load_legacy(cwd)?;
-                // The in-tree file is older than the MCP table, and an agent
-                // can write it: commands to run are not taken from there.
-                let left_out = std::mem::take(&mut imported.mcp_servers);
-                // Nor is its word that an agent asks before it acts.
-                for settings in imported.harnesses.values_mut() {
-                    settings.asks_permission = None;
-                }
-                imported.save_workspace_in(store, cwd)?;
-                println!(
-                    "{} Imported {} into {}",
-                    "[✓]".green().bold(),
-                    legacy.display(),
-                    config_path.display().to_string().bold()
-                );
-                if !left_out.is_empty() {
-                    let names: Vec<&str> = left_out.keys().map(String::as_str).collect();
-                    println!(
-                        "    {} its MCP servers were not imported ({}); add the ones you want to {}",
-                        "[!]".yellow().bold(),
-                        names.join(", "),
-                        config_path.display()
-                    );
-                }
-                println!(
-                    "    {} is no longer read and can be deleted",
-                    legacy.display()
-                );
-            }
-            None => {
-                // No harness is named: the one that is signed in is chosen
-                // at startup, and not every harness has `ask`.
-                let cfg = Config {
-                    default_policy: Some("ask".to_string()),
-                    auto_sync: true,
-                    ..Default::default()
-                };
-                cfg.save_workspace_in(store, cwd)?;
-                println!(
-                    "{} Created workspace configuration: {}",
-                    "[✓]".green().bold(),
-                    config_path.display().to_string().bold()
-                );
-            }
-        }
+        // No harness is named: the one that is signed in is chosen at
+        // startup, and not every harness has `ask`.
+        let cfg = Config {
+            default_policy: Some("ask".to_string()),
+            auto_sync: true,
+            ..Default::default()
+        };
+        cfg.save_workspace_in(store, cwd)?;
+        println!(
+            "{} Created workspace configuration: {}",
+            "[✓]".green().bold(),
+            config_path.display().to_string().bold()
+        );
     }
 
     // 4. Ignore unharness session state
@@ -196,33 +162,20 @@ mod tests {
     }
 
     #[test]
-    fn init_imports_an_in_tree_config_once() {
+    fn init_ignores_a_config_in_the_workspace() {
         let dir = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("unharness.toml"),
-            "default_harness = \"codex\"\n[harnesses.quiet]\nprotocol = \"acp\"\ncommand = [\"quiet\"]\nasks_permission = true\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
+            "default_harness = \"codex\"\ndefault_policy = \"bypass\"\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
         )
         .unwrap();
         init_workspace_in(dir.path(), store.path()).unwrap();
-        let load = || {
-            Config::load_workspace_in(store.path(), dir.path())
-                .unwrap()
-                .unwrap()
-        };
-        assert_eq!(load().default_harness.as_deref(), Some("codex"));
-        // Commands to run are not taken from a file an agent can write.
-        assert!(load().mcp_servers.is_empty());
-        // Nor its word that an agent asks before it acts.
-        assert_eq!(load().harnesses["quiet"].asks_permission, None);
-
-        // Later edits to the in-tree file change nothing.
-        fs::write(
-            dir.path().join("unharness.toml"),
-            "default_harness = \"pi\"\n",
-        )
-        .unwrap();
-        init_workspace_in(dir.path(), store.path()).unwrap();
-        assert_eq!(load().default_harness.as_deref(), Some("codex"));
+        let cfg = Config::load_workspace_in(store.path(), dir.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(cfg.default_harness, None);
+        assert_eq!(cfg.default_policy.as_deref(), Some("ask"));
+        assert!(cfg.mcp_servers.is_empty());
     }
 }

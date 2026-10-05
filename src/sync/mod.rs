@@ -15,8 +15,6 @@ pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
     loop {
         if current.join(".git").exists()
             || current.join(".agents").exists()
-            || current.join("unharness.toml").exists()
-            || current.join(".unharness.toml").exists()
             || current.join("AGENTS.md").exists()
         {
             return Some(current);

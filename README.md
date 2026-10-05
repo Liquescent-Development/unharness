@@ -463,9 +463,7 @@ Settings come from `~/.config/unharness/config.toml`, with the workspace's
 overrides merged over it. The overrides are kept outside the workspace, in
 `~/.config/unharness/workspaces/<name>-<hash>.toml` (`unharness doctor`
 prints the path, `unharness init` creates it), because a file inside the
-workspace could be edited by the agent it is meant to configure. An
-`unharness.toml` left in a workspace from an earlier version is not read;
-`unharness init` imports it once. A config file that does not parse stops
+workspace could be edited by the agent it is meant to configure. A config file that does not parse stops
 unharness with the file and the line, rather than running on defaults
 without your sandbox and policy settings.
 
@@ -548,9 +546,6 @@ Worth knowing:
   allow" for these yet); `codex exec` cannot prompt and has no `ask`.
 - A server that fails to start is reported in the transcript by Claude Code
   and Codex; an ACP agent does not say.
-- `unharness init` does not import MCP servers from an `unharness.toml` in
-  the workspace, where an agent could have written them; it names the ones
-  it left out.
 
 ### Conversations
 

@@ -56,8 +56,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   undone. Tests pass their own store directory, never the real one.
 - **Nothing an agent can write decides how it is run.** Workspace settings
   are read from `<config dir>/unharness/workspaces/`, never from the
-  workspace; an in-tree `unharness.toml` is only imported by `unharness
-  init`, and never its MCP servers (commands to run). The config and state
+  workspace: an in-tree `unharness.toml` is not read by anything. The config and state
   directories are never writable in the sandbox. A config file that does
   not parse is an error, never a silent fall back to defaults.
 - **"Allow always" is an unharness rule.** A harness is only ever told
