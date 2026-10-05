@@ -3699,7 +3699,7 @@ pub(crate) mod tests {
     fn test_registry() -> Arc<Registry> {
         Arc::new(
             Registry::empty()
-                .with(Box::new(AgyHarness::default()))
+                .with(Box::new(AgyHarness))
                 .with(Box::new(ClaudeHarness::default()))
                 .with(Box::new(crate::harness::codex::CodexHarness::new(
                     crate::harness::codex::CodexTransport::AppServer,

@@ -1,0 +1,7 @@
+SessionStarted id=d531d997-9650-40f2-a63f-296519ddc718 model=-
+TurnStarted
+TextDelta "The first shell command"
+TextDelta " you asked me to run was `echo hi; false`."
+TextDelta "\\n"
+Usage in=13900 out=316 cache_read=0 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

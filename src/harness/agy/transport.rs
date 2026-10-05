@@ -1,13 +1,7 @@
-//! Antigravity transports.
-//!
-//! `stream`: one `agy --print= --input-format stream-json --output-format
-//! stream-json` process for the session; each turn is one NDJSON line on
-//! stdin ("runs one turn per message in a single conversation", agy
-//! changelog). The stdin message shape is undocumented; the Claude-compatible
-//! shape is the default and `{"prompt": …}` is selectable.
-//!
-//! `per-turn`: one `agy --print=<text>` child per turn, resumed with
-//! `--conversation <id>` once the id is known (else `--continue`).
+//! Antigravity transport: one `agy --print= --input-format stream-json
+//! --output-format stream-json` process for the session, one NDJSON line on
+//! stdin per turn (agy 1.2.17 names the `event` field when it is missing and
+//! ignores every event but `user`).
 
 use anyhow::Result;
 use serde_json::json;
@@ -15,34 +9,11 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::parse::AgyParser;
-use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, PermissionPolicy, ProcessModel, SessionCommand,
-    SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
+    SessionHandle, SessionInfo, StopReason,
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgyTransport {
-    /// Long-lived stream-json session, Claude-shaped stdin messages.
-    #[default]
-    Stream,
-    /// Long-lived stream-json session, `{"prompt": …}` stdin messages.
-    StreamPrompt,
-    /// One child per turn.
-    PerTurn,
-}
-
-impl AgyTransport {
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().replace('_', "-").as_str() {
-            "stream" | "stream-json" | "auto" => Some(AgyTransport::Stream),
-            "stream-prompt" => Some(AgyTransport::StreamPrompt),
-            "per-turn" | "perturn" | "exec" => Some(AgyTransport::PerTurn),
-            _ => None,
-        }
-    }
-}
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
     match policy {
@@ -52,44 +23,36 @@ pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
     }
 }
 
-/// Common flags shared by both transports.
-fn common_args(
-    model: Option<&str>,
-    effort: Option<&str>,
-    policy: PermissionPolicy,
-    extra: &[String],
-) -> Vec<String> {
-    let mut args = vec![
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--print-timeout".to_string(),
-        "0".to_string(),
-    ];
-    args.extend(policy_args(policy).iter().map(|s| s.to_string()));
-    if let Some(m) = model {
-        args.push("--model".into());
-        args.push(m.to_string());
+/// A model id ends in its effort (`gemini-3.8-flash-high`) and agy refuses
+/// `--effort` beside one ("conflicts with --effort"), so the effort is only
+/// sent for agy's default model.
+pub fn model_args(model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+    match (model, effort) {
+        (Some(m), _) => vec!["--model".into(), m.to_string()],
+        (None, Some(e)) => vec!["--effort".into(), e.to_string()],
+        (None, None) => vec![],
     }
-    if let Some(e) = effort {
-        args.push("--effort".into());
-        args.push(e.to_string());
-    }
-    args.extend(extra.iter().cloned());
-    args
 }
 
 pub fn stream_args(cfg: &SessionConfig) -> Vec<String> {
-    let mut args = vec![
-        "--print=".to_string(),
-        "--input-format".to_string(),
-        "stream-json".to_string(),
-    ];
-    args.extend(common_args(
+    let mut args: Vec<String> = [
+        "--print=",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--print-timeout",
+        "0",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(policy_args(cfg.policy).iter().map(|s| s.to_string()));
+    args.extend(model_args(
         cfg.model.as_ref().map(|m| m.model.as_str()),
         cfg.effort.as_deref(),
-        cfg.policy,
-        &cfg.extra_args,
     ));
+    args.extend(cfg.extra_args.iter().cloned());
     if let Some(id) = &cfg.resume {
         args.push("--conversation".into());
         args.push(id.clone());
@@ -97,25 +60,17 @@ pub fn stream_args(cfg: &SessionConfig) -> Vec<String> {
     args
 }
 
-pub fn encode_turn(transport: AgyTransport, text: &str) -> String {
-    match transport {
-        AgyTransport::StreamPrompt => json!({"prompt": text}).to_string(),
-        _ => json!({"type":"user","message":{"role":"user","content":text}}).to_string(),
-    }
+pub fn encode_turn(text: &str) -> String {
+    json!({"event": "user", "message": {"content": text}}).to_string()
 }
 
-pub fn start_stream(cfg: SessionConfig, transport: AgyTransport) -> Result<SessionHandle> {
-    let mut cmd = Command::new(&cfg.binary);
-    cmd.args(stream_args(&cfg)).current_dir(&cfg.cwd);
-    for (k, v) in &cfg.env {
-        cmd.env(k, v);
-    }
-    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
+pub fn start_stream(cfg: SessionConfig) -> Result<SessionHandle> {
+    let proc = spawn_stream(&cfg)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness: HarnessId::AGY,
         process_model: ProcessModel::LongLived,
     });
-    tokio::spawn(drive(proc, cfg, transport, events_tx, cmd_rx));
+    tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));
     Ok(handle)
 }
 
@@ -131,7 +86,6 @@ fn spawn_stream(cfg: &SessionConfig) -> Result<LineProcess> {
 async fn drive(
     mut proc: LineProcess,
     mut cfg: SessionConfig,
-    transport: AgyTransport,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
@@ -191,7 +145,7 @@ async fn drive(
                             }
                         }
                         turn_open = true;
-                        if let Err(e) = proc.write_line(&encode_turn(transport, &text)).await {
+                        if let Err(e) = proc.write_line(&encode_turn(&text)).await {
                             turn_open = false;
                             let _ = events.send(AgentEvent::TurnCompleted {
                                 stop_reason: StopReason::Error(format!("agy: {e}")),
@@ -199,10 +153,12 @@ async fn drive(
                         }
                     }
                     SessionCommand::Interrupt => {
-                        // No interrupt message exists in the protocol; ending the
-                        // process ends the turn. The session can be resumed by id.
+                        // There is no interrupt event; ending the process ends
+                        // the turn, and the conversation resumes by id. A
+                        // command agy started is not stopped by it (nor by
+                        // SIGINT, checked on 1.2.17).
                         let _ = events.send(AgentEvent::Notice(
-                            "agy has no interrupt; stopping the process (resume with --conversation)".into(),
+                            "agy has no interrupt: its process is stopped, the next turn resumes the conversation".into(),
                         )).await;
                         proc.kill().await;
                     }
@@ -273,64 +229,6 @@ async fn drive(
     }
 }
 
-// ---------------------------------------------------------------------------
-
-pub struct AgyPerTurn;
-
-impl PerTurnProtocol for AgyPerTurn {
-    fn harness(&self) -> HarnessId {
-        HarnessId::AGY
-    }
-
-    fn build_turn(
-        &self,
-        state: &TurnState,
-        text: &str,
-        _attachments: &[Attachment],
-    ) -> Result<TurnSpec> {
-        let mut command = Command::new(&state.binary);
-        command.current_dir(&state.cwd);
-        command.arg(format!("--print={text}"));
-        command.args(common_args(
-            state.model.as_ref().map(|m| m.model.as_str()),
-            state.effort.as_deref(),
-            state.policy,
-            &state.extra_args,
-        ));
-        match &state.session_id {
-            Some(id) => {
-                command.arg("--conversation").arg(id);
-            }
-            None if state.turn_index > 0 => {
-                command.arg("--continue");
-            }
-            None => {}
-        }
-        for (k, v) in &state.env {
-            command.env(k, v);
-        }
-        Ok(TurnSpec {
-            command,
-            stdin: None,
-        })
-    }
-
-    fn new_parser(&self) -> Box<dyn TurnParser> {
-        Box::new(PerTurnParser(AgyParser::new(None)))
-    }
-}
-
-struct PerTurnParser(AgyParser);
-
-impl TurnParser for PerTurnParser {
-    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        self.0.feed(line)
-    }
-    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-        self.0.feed_stderr(line)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,61 +257,25 @@ mod tests {
 
     #[test]
     fn stream_args_shape() {
-        let a = stream_args(&cfg()).join(" ");
+        let mut cfg = cfg();
         assert_eq!(
-            a,
-            "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --mode accept-edits --model gemini-3.8-flash-high --effort high --add-dir /x --conversation conv-1"
+            stream_args(&cfg).join(" "),
+            "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --mode accept-edits --model gemini-3.8-flash-high --add-dir /x --conversation conv-1"
+        );
+        cfg.model = None;
+        cfg.resume = None;
+        cfg.policy = PermissionPolicy::Bypass;
+        assert_eq!(
+            stream_args(&cfg).join(" "),
+            "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --dangerously-skip-permissions --effort high --add-dir /x"
         );
     }
 
     #[test]
-    fn turn_encodings() {
+    fn turn_encoding() {
         assert_eq!(
-            encode_turn(AgyTransport::Stream, "hi"),
-            r#"{"message":{"content":"hi","role":"user"},"type":"user"}"#
+            encode_turn("hi"),
+            r#"{"event":"user","message":{"content":"hi"}}"#
         );
-        assert_eq!(
-            encode_turn(AgyTransport::StreamPrompt, "hi"),
-            r#"{"prompt":"hi"}"#
-        );
-        assert_eq!(AgyTransport::parse("per_turn"), Some(AgyTransport::PerTurn));
-        assert_eq!(
-            AgyTransport::parse("stream-prompt"),
-            Some(AgyTransport::StreamPrompt)
-        );
-    }
-
-    #[test]
-    fn per_turn_args() {
-        let argv = |state: &TurnState| -> String {
-            let spec = AgyPerTurn.build_turn(state, "do it", &[]).unwrap();
-            spec.command
-                .as_std()
-                .get_args()
-                .map(|a| a.to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let mut state = TurnState {
-            binary: PathBuf::from("agy"),
-            cwd: PathBuf::from("/tmp"),
-            model: None,
-            effort: None,
-            policy: PermissionPolicy::Bypass,
-            session_id: None,
-            extra_args: vec![],
-            env: vec![],
-            mcp_servers: Vec::new(),
-            sandbox: crate::core::Sandbox::off(),
-            turn_index: 0,
-        };
-        assert_eq!(
-            argv(&state),
-            "--print=do it --output-format stream-json --print-timeout 0 --dangerously-skip-permissions"
-        );
-        state.turn_index = 1;
-        assert!(argv(&state).ends_with("--continue"));
-        state.session_id = Some("c9".into());
-        assert!(argv(&state).ends_with("--conversation c9"));
     }
 }
