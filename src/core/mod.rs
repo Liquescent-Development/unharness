@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod per_turn;
 pub mod process;
 pub mod registry;
+pub mod rules;
 pub mod sandbox;
 pub mod session;
 pub mod testing;
