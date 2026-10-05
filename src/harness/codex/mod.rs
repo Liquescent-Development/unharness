@@ -21,12 +21,42 @@ use super::{
 };
 use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
-use crate::core::sandbox::SandboxPaths;
+use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
     PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle,
     SubagentSupport,
 };
+
+/// What Codex's own sandbox holds to. The permission policy has no say in
+/// it: that decides only what is asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnSandbox {
+    /// unharness's sandbox is around the process. Codex's own (bubblewrap)
+    /// cannot start inside it, so it is switched off and ours holds.
+    External,
+    /// Codex's own sandbox at the level the user set.
+    Level(SandboxLevel),
+}
+
+impl OwnSandbox {
+    pub fn for_session(sandbox: &Sandbox) -> Self {
+        if sandbox.is_active() {
+            OwnSandbox::External
+        } else {
+            OwnSandbox::Level(sandbox.wanted())
+        }
+    }
+
+    /// Codex's name for it: `-s`, `sandbox_mode`, `thread/start`'s `sandbox`.
+    pub fn mode(self) -> &'static str {
+        match self {
+            OwnSandbox::External | OwnSandbox::Level(SandboxLevel::Off) => "danger-full-access",
+            OwnSandbox::Level(SandboxLevel::ReadOnly) => "read-only",
+            OwnSandbox::Level(SandboxLevel::WorkspaceWrite) => "workspace-write",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CodexTransport {
@@ -303,7 +333,7 @@ impl Harness for CodexHarness {
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
         let mut cmd = Command::new(&cfg.binary);
         cmd.current_dir(&cfg.cwd);
-        let confined = cfg.sandbox.is_active();
+        let own = OwnSandbox::for_session(&cfg.sandbox);
         if cfg.print_mode {
             cmd.arg("exec");
             if let Some(id) = &cfg.resume {
@@ -315,21 +345,19 @@ impl Harness for CodexHarness {
             }
             if let Some(p) = cfg.policy {
                 if cfg.resume.is_some() {
-                    for o in exec::policy_config_overrides(p, confined)? {
+                    for o in exec::policy_config_overrides(p, own)? {
                         cmd.arg("-c").arg(o);
                     }
                 } else {
-                    cmd.args(exec::policy_args(p, confined)?);
+                    cmd.args(exec::policy_args(p, own)?);
                 }
             }
         } else {
             if let Some(id) = &cfg.resume {
                 cmd.arg("resume").arg(id);
             }
-            if cfg.policy == Some(PermissionPolicy::Bypass) {
-                cmd.arg("--dangerously-bypass-approvals-and-sandbox");
-            } else if let Some(p) = cfg.policy {
-                cmd.args(exec::policy_args(p, confined)?);
+            if let Some(p) = cfg.policy {
+                cmd.args(exec::policy_args(p, own)?);
             }
         }
         if let Some(m) = &cfg.model {
@@ -554,12 +582,24 @@ mod tests {
             resume: None,
             extra_args: vec![],
             mcp_servers: Vec::new(),
-            sandbox: crate::core::Sandbox::off(),
+            // Wanted at workspace-write, and no backend to provide it.
+            sandbox: Sandbox::Off {
+                unavailable: Some("no kernel".into()),
+                wanted: SandboxLevel::WorkspaceWrite,
+            },
         };
         let h = CodexHarness::default();
         assert_eq!(
             args(&h.build_print_command(&base).unwrap()),
             "exec --skip-git-repo-check -s workspace-write -m gpt-5.5 -c model_reasoning_effort=\"low\" fix it"
+        );
+        let off = PrintConfig {
+            sandbox: Sandbox::off(),
+            ..base.clone()
+        };
+        assert_eq!(
+            args(&h.build_print_command(&off).unwrap()),
+            "exec --skip-git-repo-check -s danger-full-access -m gpt-5.5 -c model_reasoning_effort=\"low\" fix it"
         );
         let resumed = PrintConfig {
             resume: Some("t1".into()),
@@ -572,11 +612,21 @@ mod tests {
             print_mode: false,
             prompt: None,
             policy: Some(PermissionPolicy::Bypass),
-            ..base
+            sandbox: Sandbox::off(),
+            ..base.clone()
         };
         assert_eq!(
             args(&h.build_print_command(&tui).unwrap()),
             "--dangerously-bypass-approvals-and-sandbox -m gpt-5.5 -c model_reasoning_effort=\"low\""
+        );
+        // `bypass` keeps the level Codex's own sandbox holds to.
+        let tui_sandboxed = PrintConfig {
+            sandbox: base.sandbox.clone(),
+            ..tui
+        };
+        assert_eq!(
+            args(&h.build_print_command(&tui_sandboxed).unwrap()),
+            "-s workspace-write -c approval_policy=\"never\" -m gpt-5.5 -c model_reasoning_effort=\"low\""
         );
         for print_mode in [true, false] {
             let ask = PrintConfig {

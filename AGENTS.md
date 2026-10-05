@@ -363,7 +363,18 @@ recorded ones. For anything else:
   inside a Landlock domain ("setting up uid map: Permission denied"), hence
   `externalSandbox` on `turn/start`, `danger-full-access` for exec, and
   `-c sandbox_mode="danger-full-access"` on the app-server command line
-  (without it the server warns at startup). Claude Code writes
+  (without it the server warns at startup). Where ours does not run
+  (`--sandbox off`, or no backend) Codex's own sandbox holds to the level
+  the user wanted (`codex::OwnSandbox`, `Sandbox::wanted`), under every
+  policy: `bypass` is `--dangerously-bypass-approvals-and-sandbox` only
+  at `off`, otherwise `-s <level>` with `approval_policy="never"`.
+  Checked with `--print` on Codex 0.157.0 under a seccomp filter denying
+  the Landlock syscalls (`systemd-run -p SystemCallFilter=~landlock_*`):
+  with the default level and `bypass`, a write to the home directory was
+  refused ("read-only file system") and one in the workspace succeeded.
+  `auto` on `exec` is `--approve-for-me` only at workspace-write (the CLI
+  refuses it beside `-s`); at another level it runs as `-s <level>` with
+  Codex's default approvals, i.e. as `accept-edits`. Claude Code writes
   `~/.claude.json` through a lock directory and a temp file created in the
   home directory, both denied: it carries on without updating the file.
   With `CLAUDE_CONFIG_DIR` set, the file, its lock and its temp files are

@@ -302,9 +302,9 @@ would rewrite before using it (a leading `@` or `~`, a `file://` URL, a
 Unicode space) is always asked about, whatever your allow rules say. In a `--print` run under
 `ask` there is no one to ask, so those calls are blocked.
 
-The policy does not choose a sandbox. Codex's own sandbox only matters with
-`--sandbox off`, and is then `workspace-write` under every policy but
-`bypass`.
+The policy does not choose a sandbox. Codex's own sandbox only matters
+where unharness's does not run, and then holds to the level you set under
+every policy, `bypass` included.
 
 ### Allow rules
 
@@ -414,8 +414,11 @@ Things to know:
 
 - The vendors' own sandboxes cannot start inside this one, so while it is
   active Codex is told the sandbox is external (its approvals are
-  unchanged). With `--sandbox off` Codex's own sandbox is `workspace-write`
-  under every policy but `bypass`.
+  unchanged). Where this one does not run (`--sandbox off`, or no backend)
+  Codex's own sandbox holds to the level you set, under every policy:
+  `bypass` switches it off only at `off`. One Codex quirk: on the `exec`
+  transport `auto` has its automatic review only at `workspace-write`, and
+  runs as `accept-edits` at another level.
 - `~/.ssh` stays readable, since git over ssh and commit signing need it;
   keep keys in an agent or protect them with a passphrase if that matters.
 - An MCP server or extension that keeps data elsewhere needs its directory

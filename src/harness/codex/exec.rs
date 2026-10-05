@@ -3,58 +3,59 @@
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
+use super::OwnSandbox;
 use super::exec_parse::CodexExecParser;
 use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
+use crate::core::sandbox::SandboxLevel;
 use crate::core::{AgentEvent, Attachment, HarnessId, PermissionPolicy};
 
 pub struct CodexExec;
 
 /// Flags for a fresh `codex exec` (not accepted by `exec resume`).
 ///
-/// `confined` says unharness's sandbox is around the process. Codex's own
-/// (bubblewrap) cannot start inside it, so it is switched off and ours is
-/// the one that holds.
+/// `own` is what Codex's own sandbox holds to; the policy decides only the
+/// approvals. `bypass` switches Codex's sandbox off only where there is
+/// none to hold to. `auto`'s automatic review (`--approve-for-me`) exists
+/// only with Codex's workspace-write sandbox: the CLI refuses it beside
+/// `-s` (0.157.0), so at another level `auto` runs with that level and
+/// Codex's default approvals, which is `accept-edits` there.
 ///
 /// There is nothing for `ask`: `exec` cannot prompt, and the CLI takes no
 /// `untrusted` approval policy (0.157.0), so it is not declared and never
 /// resolved to.
-pub fn policy_args(policy: PermissionPolicy, confined: bool) -> Result<Vec<&'static str>> {
+pub fn policy_args(policy: PermissionPolicy, own: OwnSandbox) -> Result<Vec<&'static str>> {
     if policy == PermissionPolicy::Ask {
         bail!("codex exec cannot ask before acting");
     }
-    if confined && policy != PermissionPolicy::Bypass {
-        return Ok(vec!["-s", "danger-full-access"]);
-    }
-    Ok(match policy {
-        PermissionPolicy::Ask => unreachable!("refused above"),
-        PermissionPolicy::AcceptEdits => vec!["-s", "workspace-write"],
-        PermissionPolicy::Auto => vec!["--approve-for-me"],
-        PermissionPolicy::Bypass => vec!["--dangerously-bypass-approvals-and-sandbox"],
+    Ok(match (policy, own) {
+        _ if bypasses_sandbox(policy, own) => vec!["--dangerously-bypass-approvals-and-sandbox"],
+        (PermissionPolicy::Auto, OwnSandbox::Level(SandboxLevel::WorkspaceWrite)) => {
+            vec!["--approve-for-me"]
+        }
+        (PermissionPolicy::Bypass, _) => vec!["-s", own.mode(), "-c", "approval_policy=\"never\""],
+        _ => vec!["-s", own.mode()],
     })
 }
 
 /// Equivalent `-c key=value` overrides, usable on `exec resume`.
-pub fn policy_config_overrides(policy: PermissionPolicy, confined: bool) -> Result<Vec<String>> {
+pub fn policy_config_overrides(policy: PermissionPolicy, own: OwnSandbox) -> Result<Vec<String>> {
     if policy == PermissionPolicy::Ask {
         bail!("codex exec cannot ask before acting");
     }
-    if confined {
-        return Ok(vec![
-            "sandbox_mode=\"danger-full-access\"".into(),
-            "approval_policy=\"never\"".into(),
-        ]);
-    }
-    Ok(match policy {
-        PermissionPolicy::Ask => unreachable!("refused above"),
-        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => vec![
-            "sandbox_mode=\"workspace-write\"".into(),
-            "approval_policy=\"never\"".into(),
-        ],
-        PermissionPolicy::Bypass => vec![
-            "sandbox_mode=\"danger-full-access\"".into(),
-            "approval_policy=\"never\"".into(),
-        ],
-    })
+    Ok(vec![
+        format!("sandbox_mode=\"{}\"", own.mode()),
+        "approval_policy=\"never\"".into(),
+    ])
+}
+
+/// Whether `--dangerously-bypass-approvals-and-sandbox` is the form: the
+/// policy is `bypass` and Codex's own sandbox has nothing to hold to.
+pub fn bypasses_sandbox(policy: PermissionPolicy, own: OwnSandbox) -> bool {
+    policy == PermissionPolicy::Bypass
+        && matches!(
+            own,
+            OwnSandbox::External | OwnSandbox::Level(SandboxLevel::Off)
+        )
 }
 
 /// `-i <FILE>...` accepts several values, so callers must put a flag after it.
@@ -83,10 +84,11 @@ impl PerTurnProtocol for CodexExec {
                 command.arg("resume").arg(id);
                 image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
-                for o in policy_config_overrides(state.policy, state.sandbox.is_active())? {
+                let own = OwnSandbox::for_session(&state.sandbox);
+                for o in policy_config_overrides(state.policy, own)? {
                     command.arg("-c").arg(o);
                 }
-                if state.policy == PermissionPolicy::Bypass {
+                if bypasses_sandbox(state.policy, own) {
                     command.arg("--dangerously-bypass-approvals-and-sandbox");
                 }
             }
@@ -94,7 +96,10 @@ impl PerTurnProtocol for CodexExec {
                 image_args(&mut command, attachments);
                 command.arg("--json").arg("--skip-git-repo-check");
                 command.arg("-C").arg(&state.cwd);
-                command.args(policy_args(state.policy, state.sandbox.is_active())?);
+                command.args(policy_args(
+                    state.policy,
+                    OwnSandbox::for_session(&state.sandbox),
+                )?);
             }
         }
         if let Some(m) = &state.model {
@@ -185,11 +190,19 @@ mod tests {
         assert!(args[i + 2].starts_with("--"));
     }
 
+    /// The sandbox was wanted at `level` and no backend could provide it.
+    fn unconfined(level: SandboxLevel) -> crate::core::Sandbox {
+        crate::core::Sandbox::Off {
+            unavailable: Some("no kernel".into()),
+            wanted: level,
+        }
+    }
+
     #[test]
     fn first_turn_uses_sandbox_flags() {
-        let spec = CodexExec
-            .build_turn(&state(PermissionPolicy::Auto, None), "p", &[])
-            .unwrap();
+        let mut s = state(PermissionPolicy::Auto, None);
+        s.sandbox = unconfined(SandboxLevel::WorkspaceWrite);
+        let spec = CodexExec.build_turn(&s, "p", &[]).unwrap();
         assert_eq!(
             argv(&spec),
             "exec --json --skip-git-repo-check -C /work --approve-for-me -m gpt-5.5 -c model_reasoning_effort=\"high\" -"
@@ -201,25 +214,87 @@ mod tests {
     fn own_sandbox_is_off_inside_ours() {
         for policy in [PermissionPolicy::AcceptEdits, PermissionPolicy::Auto] {
             assert_eq!(
-                policy_args(policy, true).unwrap(),
+                policy_args(policy, OwnSandbox::External).unwrap(),
                 ["-s", "danger-full-access"]
             );
             assert_eq!(
-                policy_config_overrides(policy, true).unwrap()[0],
+                policy_config_overrides(policy, OwnSandbox::External).unwrap()[0],
                 "sandbox_mode=\"danger-full-access\""
             );
         }
         assert_eq!(
-            policy_args(PermissionPolicy::Bypass, true).unwrap(),
-            policy_args(PermissionPolicy::Bypass, false).unwrap()
+            policy_args(PermissionPolicy::Bypass, OwnSandbox::External).unwrap(),
+            policy_args(
+                PermissionPolicy::Bypass,
+                OwnSandbox::Level(SandboxLevel::Off)
+            )
+            .unwrap()
+        );
+    }
+
+    /// Where ours does not run, Codex's own sandbox holds to the level the
+    /// user set, whatever the policy.
+    #[test]
+    fn own_sandbox_takes_the_level_not_the_policy() {
+        use OwnSandbox::Level;
+        use SandboxLevel::*;
+        for policy in [PermissionPolicy::AcceptEdits, PermissionPolicy::Auto] {
+            assert_eq!(
+                policy_args(policy, Level(ReadOnly)).unwrap(),
+                ["-s", "read-only"]
+            );
+            assert_eq!(
+                policy_args(policy, Level(Off)).unwrap(),
+                ["-s", "danger-full-access"]
+            );
+            assert_eq!(
+                policy_config_overrides(policy, Level(ReadOnly)).unwrap(),
+                ["sandbox_mode=\"read-only\"", "approval_policy=\"never\""]
+            );
+        }
+        // Codex's automatic review comes only with its workspace-write sandbox.
+        assert_eq!(
+            policy_args(PermissionPolicy::AcceptEdits, Level(WorkspaceWrite)).unwrap(),
+            ["-s", "workspace-write"]
+        );
+        assert_eq!(
+            policy_args(PermissionPolicy::Auto, Level(WorkspaceWrite)).unwrap(),
+            ["--approve-for-me"]
+        );
+        // `bypass` does not widen the sandbox.
+        assert_eq!(
+            policy_args(PermissionPolicy::Bypass, Level(ReadOnly)).unwrap(),
+            ["-s", "read-only", "-c", "approval_policy=\"never\""]
+        );
+        assert!(!bypasses_sandbox(
+            PermissionPolicy::Bypass,
+            Level(WorkspaceWrite)
+        ));
+        assert!(bypasses_sandbox(PermissionPolicy::Bypass, Level(Off)));
+        assert!(bypasses_sandbox(
+            PermissionPolicy::Bypass,
+            OwnSandbox::External
+        ));
+        assert!(!bypasses_sandbox(PermissionPolicy::Auto, Level(Off)));
+
+        let mut s = state(PermissionPolicy::Bypass, Some("t1"));
+        s.sandbox = unconfined(ReadOnly);
+        let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+        assert!(
+            a.contains("-c sandbox_mode=\"read-only\" -c approval_policy=\"never\"")
+                && !a.contains("--dangerously-bypass"),
+            "{a}"
         );
     }
 
     #[test]
     fn ask_is_refused() {
-        for confined in [false, true] {
-            assert!(policy_args(PermissionPolicy::Ask, confined).is_err());
-            assert!(policy_config_overrides(PermissionPolicy::Ask, confined).is_err());
+        for own in [
+            OwnSandbox::External,
+            OwnSandbox::Level(SandboxLevel::WorkspaceWrite),
+        ] {
+            assert!(policy_args(PermissionPolicy::Ask, own).is_err());
+            assert!(policy_config_overrides(PermissionPolicy::Ask, own).is_err());
         }
         for session in [None, Some("t1")] {
             assert!(
