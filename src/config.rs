@@ -31,6 +31,10 @@ pub struct Config {
     /// terminal. Default: on.
     pub mouse: Option<bool>,
 
+    /// Report the session's state to herdr when running in one of its
+    /// panes (`HERDR_ENV=1`). Default: on.
+    pub herdr: Option<bool>,
+
     /// The OS-level sandbox around every harness process.
     #[serde(default, skip_serializing_if = "SandboxSettings::is_empty")]
     pub sandbox: SandboxSettings,
@@ -234,6 +238,7 @@ impl Config {
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
             mouse: local.mouse.or(global.mouse),
+            herdr: local.herdr.or(global.herdr),
             sandbox: SandboxSettings {
                 level: local.sandbox.level.or(global.sandbox.level),
                 writable: [global.sandbox.writable, local.sandbox.writable].concat(),
