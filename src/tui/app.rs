@@ -4719,6 +4719,43 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_subagents_own_subagent_outlives_it() {
+        use crate::core::SubagentStatus;
+        let mut app = test_app(HarnessId::CLAUDE);
+        spawn(&mut app, "outer", "delegate", None);
+        app.on_event(sub(
+            "outer",
+            AgentEvent::ToolCallStarted {
+                id: "inner".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({ "description": "look" }),
+            },
+        ));
+        app.on_event(AgentEvent::SubagentStarted {
+            id: "inner".into(),
+            description: "look".into(),
+            kind: None,
+        });
+        let ended = |app: &mut App, id: &str| {
+            app.on_event(AgentEvent::SubagentEnded {
+                id: id.into(),
+                status: SubagentStatus::Completed,
+                result: None,
+            })
+        };
+        ended(&mut app, "outer");
+        let inner = spawn_block(&app, "inner");
+        assert_eq!((inner.status, inner.duration), (None, None));
+        assert_eq!(app.subagents.len(), 1);
+        std::thread::sleep(Duration::from_millis(20));
+        ended(&mut app, "inner");
+        let inner = spawn_block(&app, "inner");
+        assert_eq!(inner.status, Some(SubagentStatus::Completed));
+        assert!(inner.duration.unwrap() >= Duration::from_millis(20));
+        assert!(app.subagents.is_empty());
+    }
+
+    #[test]
     fn a_subagents_transcript_is_opened_read_and_left() {
         let mut app = test_app(HarnessId::CLAUDE);
         // Nothing to open.
@@ -4964,6 +5001,7 @@ pub(crate) mod tests {
         assert!(app.subagents.is_empty() && !app.is_generating);
         let runs = app.transcript.agents();
         assert_eq!(runs.len(), 2);
+        assert!(runs.iter().all(|(_, run, _)| run.duration.is_some()));
         assert_eq!((runs[0].1.status, runs[0].1.report()), (done, "waiting"));
         // The inner one is in the outer one's transcript.
         assert_eq!(runs[1].2, 1);

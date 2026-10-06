@@ -219,7 +219,8 @@ recorded ones. For anything else:
   on 2.1.292, which also adds a `run_id` to each. A subagent's own subagent
   (2.1.292, `fixtures/subagent_nested.jsonl`) is spawned by a call in its
   parent's messages, has `spawn_depth: 2` and `parent_task_id`, and
-  outlives the parent's end, reported on its own. A task
+  outlives the parent's end, reported on its own (so a run's end does not
+  end the announced runs inside it). A task
   resumed with `SendMessage` starts again under the same `task_id` with the
   new call's `tool_use_id`, while its messages keep the original call as
   `parent_tool_use_id`; the parser keys on the original. A notification
@@ -227,10 +228,11 @@ recorded ones. For anything else:
   with `num_turns: 0`, and results of self-started turns can arrive in a
   batch after the last one. `stop_task` with the task id stops one (what
   `StopSubagent` sends) and Claude then reports it in a turn of its own;
-  `interrupt` between turns stops all background tasks and starts no turn. Never seen: a `failed` task (an agent
-  cut off by `maxTurns` reports `completed`), subagent `stream_event`s.
-  Without `--forward-subagent-text` a blocking subagent's text was not sent (its tool calls were); a background one's final message
-  arrived either way.
+  `interrupt` between turns stops all background tasks and starts no
+  turn. Never seen: a `failed` task (an agent cut off by `maxTurns`
+  reports `completed`), subagent `stream_event`s. Without
+  `--forward-subagent-text` a blocking subagent's text was not sent (its
+  tool calls were); a background one's final message arrived either way.
 - Rewind and fork, all checked live: Claude `rewind_conversation` (targets
   the uuid we put on each user message; refuses the session's first message
   and uuids from the session a fork came from with "stale target", reported

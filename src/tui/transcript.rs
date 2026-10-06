@@ -55,7 +55,19 @@ impl AgentRun {
         self.status = Some(status);
         self.duration = Some(elapsed);
         self.log.finish_turn(elapsed);
-        self.log.end_running_agents();
+        // What it started unannounced ends with it. An announced one ends
+        // on its own (a Claude subagent's subagent outlives it), or with
+        // the session.
+        for b in &mut self.log.blocks {
+            if let Block::Tool {
+                agent: Some(run), ..
+            } = b
+                && run.implicit
+                && run.status.is_none()
+            {
+                run.end(SubagentStatus::Cancelled);
+            }
+        }
     }
 }
 
@@ -574,9 +586,8 @@ impl Transcript {
             {
                 if run.status.is_none() {
                     run.end(SubagentStatus::Cancelled);
-                } else {
-                    run.log.end_running_agents();
                 }
+                run.log.end_running_agents();
             }
         }
     }
