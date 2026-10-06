@@ -27,10 +27,11 @@ attached to the next prompt.
 | `Ctrl+U` | Clear the prompt |
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`. What the editor saves comes back into the prompt, unsent |
 | `@` | Pick a file to reference ([below](#file-references)) |
+| `!command` | Run a shell command yourself ([below](#shell-commands)). `\!` at the start sends a prompt that begins with `!` |
 | `Ctrl+V`, `/paste` | Attach the image on the clipboard |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
-| `Esc` | Close the autocomplete list, else interrupt the running turn, else clear the prompt. Never quits |
-| `Ctrl+D`, `/quit` | Quit. `Ctrl+C` also quits when idle |
+| `Esc` | Close the autocomplete list, else interrupt the running turn, else stop the running `!` command, else clear the prompt. Never quits |
+| `Ctrl+D`, `/quit` | Quit. `Ctrl+C` also quits when idle (and stops a `!` command first) |
 
 ### Pickers
 
@@ -121,6 +122,45 @@ harness reads:
 `Esc` closes the list and leaves the word as typed. After that the path is
 ordinary text: it is not rewritten if the prompt is later sent to another
 harness.
+
+## Shell commands
+
+A prompt that starts with `!` is not sent to the agent: unharness runs
+the rest as a shell command and shows its output in the transcript, the
+way Claude Code's `!` does.
+
+```
+! cargo test -p parser
+```
+
+- It runs with `$SHELL -c` (`/bin/sh` when `SHELL` is unset), so
+  only what your shell reads for a non-interactive command applies: for
+  zsh that is `.zshenv`, not `.zshrc` and its aliases.
+- It runs in the session's working directory, under the sandbox the
+  active harness's process gets ([Sandbox](sandbox.md)): a command you
+  type cannot write where the agent could not.
+- It has no input and no terminal: stdin is empty, so a command that asks
+  for a password or opens an editor fails instead of waiting.
+- Output (stdout and stderr, as they arrive) streams into the transcript
+  with the exit status. The last 64 KiB are kept; earlier lines are
+  counted, not kept.
+- `Esc` or `Ctrl+C` stops it, along with anything it started. When it
+  ends, what it left running in the background (`cmd &`) is stopped too.
+- It asks nothing and adds no [allow rule](permissions.md#allow-rules):
+  you typed it.
+- One runs at a time, and not during a turn: a `!` typed then is handed
+  back in the prompt box. A prompt sent while a command runs waits for it
+  to end.
+
+The agent sees the command too. The command, the tail of its output (up
+to 8,000 characters) and how it ended go in front of your next prompt,
+whichever harness that goes to, once. After a harness switch, the
+commands are part of the conversation bridged to the next harness. The
+block is saved with the conversation and comes back with `/resume`.
+
+To send the agent a prompt that starts with `!`, type `\!`. `!` is a
+TUI feature: in `--print` and `--no-tui` a prompt starting with `!` is
+the agent's, as is an initial prompt given on the command line.
 
 ## Prompt history
 
