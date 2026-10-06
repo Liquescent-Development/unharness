@@ -816,11 +816,14 @@ pub fn waits_on_user(name: &str) -> bool {
 fn known_summary(name: &str, input: &Value) -> Option<String> {
     let pick = |keys: &[&str]| -> Option<String> {
         keys.iter()
-            .find_map(|k| input.get(*k).and_then(Value::as_str))
+            .find_map(|k| input.get(*k).and_then(Value::as_str).filter(|s| !blank(s)))
             .map(first_line)
     };
     match name {
-        "Bash" | "bash" | "shell" | "command_execution" => pick(&["command", "cmd"]),
+        // `exec_command` is codex-acp's, `execute` the ACP kind.
+        "Bash" | "bash" | "shell" | "command_execution" | "exec_command" | "execute" => {
+            pick(&["command", "cmd"])
+        }
         "Read" | "Write" | "Edit" | "MultiEdit" | "read" | "write" | "edit" => {
             pick(&["file_path", "path", "filename"])
         }
@@ -832,6 +835,16 @@ fn known_summary(name: &str, input: &Value) -> Option<String> {
             .or_else(|| pick(&["path"])),
         "WebFetch" | "WebSearch" | "web_search" => pick(&["url", "query"]),
         "Agent" | "Task" => pick(&["description", "prompt"]),
+        // Claude Code's task list: {"subject", "description"} and
+        // {"taskId", "status"}, as its session logs record them.
+        "TaskCreate" => pick(&["subject", "description"]),
+        "TaskUpdate" => {
+            let id = input.get("taskId").and_then(Value::as_str)?;
+            Some(match input.get("status").and_then(Value::as_str) {
+                Some(status) => format!("#{id} {status}"),
+                None => format!("#{id}"),
+            })
+        }
         // Claude Code: {"questions": [{"question", "header", "options",
         // "multiSelect"}]} (fixtures/ask_previews.jsonl). The answer
         // follows as the tool's result.
@@ -882,12 +895,8 @@ fn generic_summary(input: &Value) -> String {
             "prompt",
         ]
         .iter()
-        .find_map(|k| m.get(*k).and_then(Value::as_str))
-        .or_else(|| {
-            m.values()
-                .filter_map(Value::as_str)
-                .find(|s| !s.trim().is_empty())
-        })
+        .find_map(|k| m.get(*k).and_then(Value::as_str).filter(|s| !blank(s)))
+        .or_else(|| m.values().filter_map(Value::as_str).find(|s| !blank(s)))
         .map(first_line)
         .unwrap_or_else(|| match m.len() {
             0 => String::new(),
@@ -898,8 +907,13 @@ fn generic_summary(input: &Value) -> String {
     }
 }
 
+/// The first line with something on it.
 fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").to_string()
+    s.lines().find(|l| !blank(l)).unwrap_or("").to_string()
+}
+
+fn blank(s: &str) -> bool {
+    s.trim().is_empty()
 }
 
 pub fn truncate_chars(s: &str, max: usize) -> String {
@@ -1182,5 +1196,36 @@ mod tests {
             "/w"
         );
         assert!(input_beyond_summary("Bash", &json!({"timeout": 5})));
+        // A blank field or a blank first line is passed over.
+        assert_eq!(
+            tool_summary_full("Weird", &json!({"command": " ", "path": "/x"})),
+            "/x"
+        );
+        assert_eq!(
+            tool_summary_full("Weird", &json!({"note": "\n real"})),
+            " real"
+        );
+    }
+
+    #[test]
+    fn calls_that_have_a_case_of_their_own() {
+        // codex-acp's command tool and the ACP kind.
+        let cmd = json!({"command": "cat a.txt", "cwd": "/w"});
+        for name in ["exec_command", "execute"] {
+            assert_eq!(tool_summary_full(name, &cmd), "cat a.txt");
+            assert!(!input_beyond_summary(name, &cmd));
+        }
+        // Claude Code's task list, in the shapes of its session logs.
+        assert_eq!(
+            tool_summary_full(
+                "TaskCreate",
+                &json!({"subject": "Fix tables", "description": "Long"})
+            ),
+            "Fix tables"
+        );
+        assert_eq!(
+            tool_summary_full("TaskUpdate", &json!({"taskId": "1", "status": "completed"})),
+            "#1 completed"
+        );
     }
 }

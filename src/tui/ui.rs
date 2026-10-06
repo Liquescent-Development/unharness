@@ -383,7 +383,7 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                 None if *is_error => Span::styled(" ✗", Style::default().fg(Color::Red)),
                 // The time a question took is the user's, not the tool's.
                 None if waits_on_user(name) => {
-                    Span::styled(" ✓ answered", Style::default().fg(Color::Green))
+                    Span::styled(" ✓", Style::default().fg(Color::Green))
                 }
                 None => Span::styled(
                     format!(" ✓{}", done_in(duration)),
@@ -446,15 +446,30 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     }
                 }
                 None => {
-                    let limit = if *collapsed { 4 } else { usize::MAX };
                     let body = tool_body_lines(name, input, output, *is_error, body_width);
-                    let total = body.len();
-                    lines.extend(body.into_iter().take(limit));
-                    if *collapsed && total > limit {
+                    // What the summary line left out of the input, after the
+                    // output on an expanded call; a collapsed one counts it.
+                    let left_out = if input_beyond_summary(name, input)
+                        && let Ok(json) = serde_json::to_string_pretty(input)
+                    {
+                        code_lines(&json, "json", body_width)
+                    } else {
+                        Vec::new()
+                    };
+                    let hidden = if *collapsed {
+                        body.len().saturating_sub(4) + left_out.len()
+                    } else {
+                        0
+                    };
+                    let shown = if *collapsed { 4 } else { usize::MAX };
+                    lines.extend(body.into_iter().take(shown));
+                    if !*collapsed {
+                        lines.extend(left_out);
+                    }
+                    if hidden > 0 {
                         lines.push(Line::from(Span::styled(
                             format!(
-                                "  │ … {} more lines (click the call, or Ctrl+T, to expand)",
-                                total - limit
+                                "  │ … {hidden} more lines (click the call, or Ctrl+T, to expand)"
                             ),
                             Style::default().fg(Color::DarkGray),
                         )));
@@ -839,13 +854,6 @@ fn tool_body_lines(
         } else {
             lines.extend(plain_lines(output, width, style));
         }
-    }
-    // What the summary line left out, after the output so that a collapsed
-    // call still shows that first.
-    if input_beyond_summary(name, input)
-        && let Ok(json) = serde_json::to_string_pretty(input)
-    {
-        lines.extend(code_lines(&json, "json", width));
     }
     lines
 }
@@ -2530,7 +2538,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_shows_what_its_summary_left_out_and_a_question_its_answer() {
+    fn a_call_shows_what_its_summary_left_out_and_a_question_no_time() {
         let tool = |name: &str, input: serde_json::Value, output: &str, collapsed: bool| {
             let block = TBlock::Tool {
                 id: "t".into(),
@@ -2553,12 +2561,10 @@ mod tests {
         let collapsed = tool("mcp__forge__search", input.clone(), "3 found", true);
         assert!(collapsed[0].contains("open issues"), "{collapsed:?}");
         assert!(!collapsed[0].contains('{'), "{collapsed:?}");
-        // The output first, then the input as far as the fold goes.
+        // Collapsed, the output and a count of what expanding shows.
+        assert_eq!(collapsed.len(), 3, "{collapsed:?}");
         assert!(collapsed[1].contains("3 found"), "{collapsed:?}");
-        assert!(
-            collapsed.last().unwrap().contains("more lines"),
-            "{collapsed:?}"
-        );
+        assert!(collapsed[2].contains("5 more lines"), "{collapsed:?}");
         let expanded = tool("mcp__forge__search", input, "3 found", false).join("\n");
         assert!(expanded.contains(r#""repo": "unharness""#), "{expanded}");
 
@@ -2570,7 +2576,7 @@ mod tests {
             "multiSelect": false, "options": [{"label": "Yes", "description": "d"}]}]});
         let asked = tool("AskUserQuestion", question, "User has answered", false);
         assert!(
-            asked[0].contains("Verify?") && asked[0].contains("✓ answered"),
+            asked[0].contains("Verify?") && asked[0].ends_with('✓'),
             "{asked:?}"
         );
         assert!(!asked[0].contains("274"), "{asked:?}");
