@@ -20,7 +20,10 @@ use super::code::{
 use super::markdown::render_markdown_to_lines;
 use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
 use super::prompt;
-use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
+use super::transcript::{
+    Block as TBlock, input_beyond_summary, tool_summary, tool_summary_full, truncate_chars,
+    waits_on_user,
+};
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
@@ -378,6 +381,10 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                 }
                 None if !*done => running,
                 None if *is_error => Span::styled(" ✗", Style::default().fg(Color::Red)),
+                // The time a question took is the user's, not the tool's.
+                None if waits_on_user(name) => {
+                    Span::styled(" ✓ answered", Style::default().fg(Color::Green))
+                }
                 None => Span::styled(
                     format!(" ✓{}", done_in(duration)),
                     Style::default().fg(Color::Green),
@@ -832,6 +839,13 @@ fn tool_body_lines(
         } else {
             lines.extend(plain_lines(output, width, style));
         }
+    }
+    // What the summary line left out, after the output so that a collapsed
+    // call still shows that first.
+    if input_beyond_summary(name, input)
+        && let Ok(json) = serde_json::to_string_pretty(input)
+    {
+        lines.extend(code_lines(&json, "json", width));
     }
     lines
 }
@@ -2513,6 +2527,53 @@ mod tests {
         app.flash("Copied 4 lines");
         let (rows, _) = screen(&mut app, 80, 24);
         assert!(rows.iter().any(|r| r.starts_with("── Copied 4 lines ─")));
+    }
+
+    #[test]
+    fn a_call_shows_what_its_summary_left_out_and_a_question_its_answer() {
+        let tool = |name: &str, input: serde_json::Value, output: &str, collapsed: bool| {
+            let block = TBlock::Tool {
+                id: "t".into(),
+                name: name.into(),
+                input,
+                output: output.into(),
+                is_error: false,
+                done: true,
+                collapsed,
+                started: std::time::Instant::now(),
+                duration: Some(std::time::Duration::from_secs(274)),
+                agent: None,
+            };
+            block_lines(&block, 80, false, 0.0)
+                .iter()
+                .map(crate::tui::code::line_text)
+                .collect::<Vec<_>>()
+        };
+        let input = serde_json::json!({"limit": 5, "query": "open issues", "repo": "unharness"});
+        let collapsed = tool("mcp__forge__search", input.clone(), "3 found", true);
+        assert!(collapsed[0].contains("open issues"), "{collapsed:?}");
+        assert!(!collapsed[0].contains('{'), "{collapsed:?}");
+        // The output first, then the input as far as the fold goes.
+        assert!(collapsed[1].contains("3 found"), "{collapsed:?}");
+        assert!(
+            collapsed.last().unwrap().contains("more lines"),
+            "{collapsed:?}"
+        );
+        let expanded = tool("mcp__forge__search", input, "3 found", false).join("\n");
+        assert!(expanded.contains(r#""repo": "unharness""#), "{expanded}");
+
+        // A known call shows no input of its own.
+        let bash = tool("Bash", serde_json::json!({"command": "ls"}), "a", false);
+        assert_eq!(bash.len(), 2, "{bash:?}");
+
+        let question = serde_json::json!({"questions": [{"question": "Verify?", "header": "H",
+            "multiSelect": false, "options": [{"label": "Yes", "description": "d"}]}]});
+        let asked = tool("AskUserQuestion", question, "User has answered", false);
+        assert!(
+            asked[0].contains("Verify?") && asked[0].contains("✓ answered"),
+            "{asked:?}"
+        );
+        assert!(!asked[0].contains("274"), "{asked:?}");
     }
 
     #[test]

@@ -784,12 +784,42 @@ pub fn tool_summary(name: &str, input: &Value) -> String {
 
 /// Untruncated single-line description of a tool call.
 pub fn tool_summary_full(name: &str, input: &Value) -> String {
+    let s = known_summary(name, input).unwrap_or_else(|| generic_summary(input));
+    sanitize(&s).replace('\n', " ⏎ ")
+}
+
+/// Whether the summary line leaves part of a call's input out, so that the
+/// expanded call shows the input: a call [`known_summary`] has no case for,
+/// whose input is more than one line of text.
+pub fn input_beyond_summary(name: &str, input: &Value) -> bool {
+    known_summary(name, input).is_none()
+        && match input {
+            Value::Null => false,
+            Value::String(s) => s.contains('\n'),
+            Value::Object(m) => {
+                m.len() > 1
+                    || m.values()
+                        .any(|v| v.as_str().is_none_or(|s| s.contains('\n')))
+            }
+            _ => true,
+        }
+}
+
+/// Whether a call waits on the user's answer, so that how long it took is
+/// how long they took and not the tool.
+pub fn waits_on_user(name: &str) -> bool {
+    name == "AskUserQuestion"
+}
+
+/// The summary of a tool whose input this knows, or `None` when the name
+/// or the input is not one of them.
+fn known_summary(name: &str, input: &Value) -> Option<String> {
     let pick = |keys: &[&str]| -> Option<String> {
         keys.iter()
             .find_map(|k| input.get(*k).and_then(Value::as_str))
-            .map(|s| s.lines().next().unwrap_or("").to_string())
+            .map(first_line)
     };
-    let s = match name {
+    match name {
         "Bash" | "bash" | "shell" | "command_execution" => pick(&["command", "cmd"]),
         "Read" | "Write" | "Edit" | "MultiEdit" | "read" | "write" | "edit" => {
             pick(&["file_path", "path", "filename"])
@@ -802,20 +832,74 @@ pub fn tool_summary_full(name: &str, input: &Value) -> String {
             .or_else(|| pick(&["path"])),
         "WebFetch" | "WebSearch" | "web_search" => pick(&["url", "query"]),
         "Agent" | "Task" => pick(&["description", "prompt"]),
-        _ => pick(&[
+        // Claude Code: {"questions": [{"question", "header", "options",
+        // "multiSelect"}]} (fixtures/ask_previews.jsonl). The answer
+        // follows as the tool's result.
+        "AskUserQuestion" => {
+            let questions = input.get("questions").and_then(Value::as_array)?;
+            let first = questions
+                .first()
+                .and_then(|q| q.get("question"))
+                .and_then(Value::as_str)
+                .map(first_line)?;
+            Some(match questions.len() {
+                1 => first,
+                n => format!("{first} (+{} more)", n - 1),
+            })
+        }
+        // Claude Code: {"skill", "args"?}, as its session logs record it.
+        "Skill" => {
+            let skill = input.get("skill").and_then(Value::as_str)?;
+            Some(
+                match input
+                    .get("args")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                {
+                    Some(args) => format!("{skill} {}", first_line(args)),
+                    None => skill.to_string(),
+                },
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Something short for a call nothing above describes, never the input as
+/// JSON: a field that usually says what the call does, else the first text
+/// field, else the field names. The expanded call shows the whole input.
+fn generic_summary(input: &Value) -> String {
+    match input {
+        Value::Null => String::new(),
+        Value::String(s) => first_line(s),
+        Value::Object(m) => [
             "command",
             "file_path",
             "path",
             "query",
             "description",
             "prompt",
-        ]),
-    };
-    let s = s.unwrap_or_else(|| match input {
-        Value::Null => String::new(),
+        ]
+        .iter()
+        .find_map(|k| m.get(*k).and_then(Value::as_str))
+        .or_else(|| {
+            m.values()
+                .filter_map(Value::as_str)
+                .find(|s| !s.trim().is_empty())
+        })
+        .map(first_line)
+        .unwrap_or_else(|| match m.len() {
+            0 => String::new(),
+            _ => format!("{{{}}}", m.keys().cloned().collect::<Vec<_>>().join(", ")),
+        }),
+        Value::Array(a) => format!("{} item(s)", a.len()),
         v => v.to_string(),
-    });
-    sanitize(&s).replace('\n', " ⏎ ")
+    }
+}
+
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").to_string()
 }
 
 pub fn truncate_chars(s: &str, max: usize) -> String {
@@ -1019,8 +1103,84 @@ mod tests {
             tool_summary("apply_patch", &json!({"changes":[1,2]})),
             "2 file(s)"
         );
-        assert_eq!(tool_summary("Weird", &json!({"zzz":1})), "{\"zzz\":1}");
         assert_eq!(tool_summary("Weird", &Value::Null), "");
+        assert!(!input_beyond_summary("Weird", &Value::Null));
+        assert!(!input_beyond_summary("Bash", &json!({"command":"ls"})));
         assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn a_question_is_summarised_by_its_text() {
+        // As Claude Code sends it (fixtures/ask_previews.jsonl).
+        let question = |text: &str| {
+            json!({"question": text, "header": "Falsify", "multiSelect": false,
+                   "options": [{"label": "Verify all", "description": "All 9 findings"}]})
+        };
+        let one = json!({"questions": [question("Run the falsification pass?")]});
+        assert_eq!(
+            tool_summary_full("AskUserQuestion", &one),
+            "Run the falsification pass?"
+        );
+        assert!(!input_beyond_summary("AskUserQuestion", &one));
+        let three =
+            json!({"questions": [question("First?"), question("Second?"), question("Third?")]});
+        assert_eq!(
+            tool_summary_full("AskUserQuestion", &three),
+            "First? (+2 more)"
+        );
+        // The call as it starts streaming, before its input arrived.
+        assert_eq!(tool_summary_full("AskUserQuestion", &json!({})), "");
+        assert!(waits_on_user("AskUserQuestion") && !waits_on_user("Bash"));
+    }
+
+    #[test]
+    fn a_skill_is_summarised_by_its_name_and_args() {
+        // The shapes of Claude Code's Skill calls in its session logs.
+        assert_eq!(
+            tool_summary_full("Skill", &json!({"skill": "reviewing-merge-requests"})),
+            "reviewing-merge-requests"
+        );
+        assert_eq!(
+            tool_summary_full(
+                "Skill",
+                &json!({"skill": "code-review", "args": "low --no-comment"})
+            ),
+            "code-review low --no-comment"
+        );
+        assert_eq!(
+            tool_summary_full("Skill", &json!({"skill": "code-review", "args": " "})),
+            "code-review"
+        );
+        assert!(!input_beyond_summary(
+            "Skill",
+            &json!({"skill": "x", "args": "y"})
+        ));
+    }
+
+    #[test]
+    fn an_unknown_call_is_never_summarised_as_json() {
+        // A field that says what the call does comes first.
+        let mcp = json!({"limit": 5, "query": "open issues", "repo": "unharness"});
+        assert_eq!(tool_summary_full("mcp__forge__search", &mcp), "open issues");
+        assert!(input_beyond_summary("mcp__forge__search", &mcp));
+        // Else the first text field (fields are in name order).
+        let other = json!({"count": 2, "name": "nightly", "title": "Build"});
+        assert_eq!(tool_summary_full("Weird", &other), "nightly");
+        // Else the field names.
+        let numbers = json!({"zzz": 1, "aaa": [1, 2]});
+        assert_eq!(tool_summary_full("Weird", &numbers), "{aaa, zzz}");
+        assert!(input_beyond_summary("Weird", &numbers));
+        assert_eq!(tool_summary_full("Weird", &json!({})), "");
+        assert!(!input_beyond_summary("Weird", &json!({})));
+        // One line of text says it all; more lines do not.
+        assert!(!input_beyond_summary("Weird", &json!({"note": "hi"})));
+        assert!(input_beyond_summary("Weird", &json!({"note": "a\nb"})));
+        assert_eq!(tool_summary_full("Weird", &json!([1, 2])), "2 item(s)");
+        // A known tool missing its field falls back the same way.
+        assert_eq!(
+            tool_summary_full("Bash", &json!({"timeout": 5, "workdir": "/w"})),
+            "/w"
+        );
+        assert!(input_beyond_summary("Bash", &json!({"timeout": 5})));
     }
 }
