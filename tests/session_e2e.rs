@@ -558,6 +558,40 @@ async fn codex_app_server_handshake_turns_and_approval() {
     ));
 }
 
+/// A thread says which provider it runs on; a chosen one goes on the
+/// command line, and a thread on another says so.
+#[tokio::test]
+async fn codex_app_server_reports_its_provider() {
+    if !python_available() {
+        return;
+    }
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_two_turns.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    for (chosen, error) in [
+        (Some("llama"), true),
+        (Some("openai"), false),
+        (None, false),
+    ] {
+        let fake = Fake::new();
+        let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+        cfg.provider = chosen.map(Into::into);
+        let mut handle = harness.start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("pong?")).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::CapabilitiesChanged(u) if u.provider == Some("openai".into())
+        )));
+        let reported = events.iter().any(
+            |e| matches!(e, AgentEvent::Error(m) if m.starts_with("Codex runs on openai, not llama")),
+        );
+        assert_eq!(reported, error, "{chosen:?}: {events:?}");
+        handle.send(SessionCommand::Shutdown).await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn codex_app_server_asks_before_an_mcp_tool_call() {
     if !python_available() {

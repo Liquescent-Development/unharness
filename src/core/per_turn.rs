@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 
 use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, StopReason};
-use super::ids::{HarnessId, ModelRef};
+use super::ids::{HarnessId, ModelRef, ProviderId};
 use super::mcp::McpServer;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
@@ -27,6 +27,8 @@ pub struct TurnState {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub model: Option<ModelRef>,
+    /// As `SessionConfig::provider`.
+    pub provider: Option<ProviderId>,
     pub effort: Option<String>,
     pub policy: PermissionPolicy,
     /// Session/thread id to resume, once known.
@@ -69,6 +71,7 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         binary: cfg.binary,
         cwd: cfg.cwd,
         model: cfg.model,
+        provider: cfg.provider,
         effort: cfg.effort,
         policy: cfg.policy,
         session_id: cfg.resume,

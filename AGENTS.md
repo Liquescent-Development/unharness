@@ -502,6 +502,22 @@ recorded ones. For anything else:
   Unverified: a turn on any of them with credentials, `_MANTLE` beside
   `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
   `CLAUDE_CODE_USE_GATEWAY` (left alone).
+- Codex providers (0.157.0): the built-in `openai`, `ollama`, `lmstudio`
+  and `amazon-bedrock` cannot be redefined ("reserved built-in provider
+  IDs"; Bedrock takes only a few fields), an unknown `model_provider`
+  stops Codex at startup, and `config/read` lists the configured
+  `model_providers` (with `name`) and the `model_provider` in effect.
+  `-c model_provider="<id>"` chooses one on app-server and exec;
+  `thread/start` and `thread/resume` answer with `modelProvider`, which
+  the driver reports and checks against the choice. `model/list` gave
+  OpenAI's catalog under every provider tried, so only `openai` lists
+  models; with no model chosen Codex took `gpt-6-astra` on `ollama` too.
+  Checked live: a turn through a custom `[model_providers]` entry
+  (`wire_api = "responses"`, a llama.cpp server) on app-server and exec.
+  Codex retried an unreachable Ollama without end. Unverified: what a
+  resumed thread does with a `modelProvider` other than its own,
+  `amazon-bedrock`, `lmstudio`, a provider defined only in a project's
+  `.codex/config.toml` (`config/read` is asked without a `cwd`).
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

@@ -95,8 +95,44 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     display_name: "Codex (codex)",
     short_name: "Codex",
     binary_names: &["codex"],
-    providers: ProviderSource::Static(&[("openai", "OpenAI")]),
+    providers: ProviderSource::Static(BUILT_IN_PROVIDERS),
 };
+
+/// The providers Codex has without configuration, which a
+/// `[model_providers.<id>]` of the same name may not replace (0.157.0,
+/// "reserved built-in provider IDs"). Others come from its config.
+const BUILT_IN_PROVIDERS: &[(&str, &str)] = &[
+    ("openai", "OpenAI"),
+    ("ollama", "Ollama"),
+    ("lmstudio", "LM Studio"),
+    ("amazon-bedrock", "Amazon Bedrock"),
+];
+
+/// The `-c` value that has Codex use `provider`.
+pub fn provider_override(provider: &ProviderId) -> String {
+    format!("model_provider={}", json!(provider.as_str()))
+}
+
+/// Why the provider Codex reports (`modelProvider` in the answer to
+/// `thread/start` or `thread/resume`) is not the one chosen, if it is not.
+pub fn provider_mismatch(chosen: Option<&ProviderId>, reported: &str) -> Option<String> {
+    let chosen = chosen?;
+    (reported != chosen.as_str())
+        .then(|| format!("Codex runs on {reported}, not {chosen}, in this thread"))
+}
+
+/// `model_provider` in a Codex `config.toml`, or in the profile it selects.
+fn configured_provider(config: &str) -> Option<String> {
+    let table = config.parse::<toml::Table>().ok()?;
+    let in_profile = table
+        .get("profile")
+        .and_then(|p| p.as_str())
+        .and_then(|p| table.get("profiles")?.get(p)?.get("model_provider"));
+    in_profile
+        .or_else(|| table.get("model_provider"))
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+}
 
 pub const EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
@@ -177,8 +213,9 @@ impl Harness for CodexHarness {
             effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
             resume_by_id: true,
             live_model_list: app_server,
-            multi_provider: false,
-            provider_per_process: false,
+            // `-c model_provider=…` when the process starts.
+            multi_provider: true,
+            provider_per_process: true,
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
@@ -226,6 +263,44 @@ impl Harness for CodexHarness {
         Some(auth_status(binary).authenticated)
     }
 
+    /// The built-in providers and the ones Codex's configuration adds
+    /// (`config/read`), else the built-in ones alone.
+    fn list_providers(&self, binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+        let mut providers: Vec<(ProviderId, String)> = BUILT_IN_PROVIDERS
+            .iter()
+            .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
+            .collect();
+        let configured = query(binary, "config/read", json!({}))
+            .ok()
+            .and_then(|r| r.pointer("/config/model_providers")?.as_object().cloned())
+            .unwrap_or_default();
+        for (id, provider) in configured {
+            let name = provider
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_string();
+            providers.push((ProviderId::new(id), name));
+        }
+        Ok(providers)
+    }
+
+    /// `model_provider` in Codex's `config.toml` (its profile's first),
+    /// else OpenAI. A thread reports the one it runs on.
+    fn default_provider(&self) -> Option<ProviderId> {
+        let home = dirs::home_dir().unwrap_or_default();
+        let dir = codex_home();
+        let dir = dir.strip_prefix("~").map(|p| home.join(p)).unwrap_or(dir);
+        let configured = std::fs::read_to_string(dir.join("config.toml"))
+            .ok()
+            .and_then(|text| configured_provider(&text));
+        Some(ProviderId::new(
+            configured.unwrap_or_else(|| "openai".into()),
+        ))
+    }
+
+    /// `model/list` is OpenAI's catalog whichever provider is configured
+    /// (0.157.0), so other providers list nothing.
     fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "openai" {
             return Ok(Vec::new());
@@ -366,6 +441,9 @@ impl Harness for CodexHarness {
         if let Some(m) = &cfg.model {
             cmd.arg("-m").arg(&m.model);
         }
+        if let Some(p) = &cfg.provider {
+            cmd.arg("-c").arg(provider_override(p));
+        }
         if let Some(e) = &cfg.effort {
             cmd.arg("-c").arg(format!("model_reasoning_effort=\"{e}\""));
         }
@@ -499,6 +577,16 @@ fn auth_status(binary: &Path) -> AuthInfo {
 
 /// Ask a throwaway `codex app-server` for `model/list`.
 pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
+    let result = query(binary, "model/list", json!({}))?;
+    Ok(result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The result of one request to a throwaway `codex app-server`.
+fn query(binary: &Path, method: &str, params: Value) -> Result<Value> {
     let mut child = Command::new(binary)
         .arg("app-server")
         .stdin(Stdio::piped())
@@ -508,55 +596,60 @@ pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
         .context("spawn codex app-server")?;
     let mut stdin = child.stdin.take().context("stdin")?;
     let stdout = child.stdout.take().context("stdout")?;
-    writeln!(
-        stdin,
-        "{}",
-        jsonrpc::request(
-            1,
-            "initialize",
-            json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}})
-        )
-    )?;
-    stdin.flush()?;
-
-    let deadline = Instant::now() + QUERY_TIMEOUT;
-    let mut models = Vec::new();
-    let mut found = false;
-    for line in BufReader::new(stdout).lines() {
-        if Instant::now() > deadline {
-            break;
-        }
-        let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        match v.get("id").and_then(Value::as_u64) {
-            Some(1) if v.get("result").is_some() => {
-                writeln!(
-                    stdin,
-                    "{}",
-                    jsonrpc::notification("initialized", Value::Null)
-                )?;
-                writeln!(stdin, "{}", jsonrpc::request(2, "model/list", json!({})))?;
-                stdin.flush()?;
-            }
-            Some(2) => {
-                if let Some(list) = v.pointer("/result/data").and_then(Value::as_array) {
-                    models = list.clone();
-                }
-                found = true;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
                 break;
             }
-            _ => {}
         }
-    }
-    drop(stdin);
+    });
+    let mut ask = || -> Result<Value> {
+        writeln!(
+            stdin,
+            "{}",
+            jsonrpc::request(
+                1,
+                "initialize",
+                json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}})
+            )
+        )?;
+        stdin.flush()?;
+        let deadline = Instant::now() + QUERY_TIMEOUT;
+        loop {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .context("codex app-server did not answer")?;
+            let line = rx
+                .recv_timeout(left)
+                .map_err(|_| anyhow::anyhow!("codex app-server did not answer {method}"))?;
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            match v.get("id").and_then(Value::as_u64) {
+                Some(1) if v.get("result").is_some() => {
+                    writeln!(
+                        stdin,
+                        "{}",
+                        jsonrpc::notification("initialized", Value::Null)
+                    )?;
+                    writeln!(stdin, "{}", jsonrpc::request(2, method, params.clone()))?;
+                    stdin.flush()?;
+                }
+                Some(2) => {
+                    if let Some(err) = v.get("error") {
+                        anyhow::bail!("codex app-server: {method}: {err}");
+                    }
+                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
+                }
+                _ => {}
+            }
+        }
+    };
+    let result = ask();
     let _ = child.kill();
     let _ = child.wait();
-    if !found {
-        anyhow::bail!("codex app-server did not answer model/list");
-    }
-    Ok(models)
+    result
 }
 
 #[cfg(test)]
@@ -569,6 +662,55 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn the_configured_provider_is_the_profiles_first() {
+        assert_eq!(configured_provider(""), None);
+        assert_eq!(
+            configured_provider("model_provider = \"ollama\"").as_deref(),
+            Some("ollama")
+        );
+        let profiled = r#"
+model_provider = "ollama"
+profile = "work"
+
+[profiles.work]
+model_provider = "azure"
+
+[profiles.home]
+model_provider = "lmstudio"
+"#;
+        assert_eq!(configured_provider(profiled).as_deref(), Some("azure"));
+        let without = profiled.replace("profile = \"work\"", "profile = \"none\"");
+        assert_eq!(configured_provider(&without).as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn a_chosen_provider_is_a_config_override() {
+        assert_eq!(
+            provider_override(&ProviderId::from("amazon-bedrock")),
+            "model_provider=\"amazon-bedrock\""
+        );
+        // Quoted as a TOML string, whatever the id holds.
+        assert_eq!(
+            provider_override(&ProviderId::from("a\"b")),
+            "model_provider=\"a\\\"b\""
+        );
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/codex"),
+            cwd: PathBuf::from("/tmp"),
+            print_mode: true,
+            provider: Some(ProviderId::from("ollama")),
+            ..Default::default()
+        };
+        let a = args(&CodexHarness::default().build_print_command(&cfg).unwrap());
+        assert!(a.contains("-c model_provider=\"ollama\""), "{a}");
+        assert_eq!(
+            provider_mismatch(Some(&ProviderId::from("ollama")), "openai").as_deref(),
+            Some("Codex runs on openai, not ollama, in this thread")
+        );
+        assert_eq!(provider_mismatch(None, "openai"), None);
     }
 
     #[test]

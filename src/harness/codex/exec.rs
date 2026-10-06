@@ -105,6 +105,9 @@ impl PerTurnProtocol for CodexExec {
         if let Some(m) = &state.model {
             command.arg("-m").arg(&m.model);
         }
+        if let Some(p) = &state.provider {
+            command.arg("-c").arg(super::provider_override(p));
+        }
         if let Some(e) = &state.effort {
             command
                 .arg("-c")
@@ -153,6 +156,7 @@ mod tests {
             binary: PathBuf::from("/bin/codex"),
             cwd: PathBuf::from("/work"),
             model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
+            provider: None,
             effort: Some("high".into()),
             policy,
             session_id: session_id.map(str::to_string),
@@ -188,6 +192,14 @@ mod tests {
         let i = args.iter().position(|a| a == "-i").unwrap();
         assert_eq!(args[i + 1], "/w/a.png");
         assert!(args[i + 2].starts_with("--"));
+    }
+
+    #[test]
+    fn a_chosen_provider_goes_on_every_turn() {
+        let mut s = state(PermissionPolicy::Auto, Some("t1"));
+        s.provider = Some("ollama".into());
+        let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+        assert!(a.contains("-m gpt-5.5 -c model_provider=\"ollama\""), "{a}");
     }
 
     /// The sandbox was wanted at `level` and no backend could provide it.
