@@ -80,12 +80,17 @@ headers = { Authorization = "Bearer …" }
 
 A harness uses the provider its own configuration chooses unless one is
 chosen with `--provider`, `default_provider` or `/provider`. Only a chosen
-one is passed on; the TUI shows the provider each session reports.
+one is passed on, and it overrides the harness's own choice: a
+`default_provider = "anthropic"` for Claude takes any `CLAUDE_CODE_USE_*`
+out of its environment, so a shell that exports one for Bedrock no longer
+decides. Without a choice the TUI shows the provider each session
+reports; when a session runs on another one than the choice, the status
+line says so until it is changed.
 
 | Harness | Providers | How unharness passes one |
 |---|---|---|
 | Claude Code | `anthropic`, `bedrock` (Amazon Bedrock), `vertex` (Google Vertex AI), `foundry` (Microsoft Foundry) | Sets `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY` and removes the others from Claude's environment |
-| Codex | `openai`, `ollama`, `lmstudio`, `amazon-bedrock`, and each `[model_providers.<id>]` of Codex's own `config.toml` | `-c model_provider="<id>"`, and `modelProvider` when a thread is resumed |
+| Codex | `openai`, `ollama`, `lmstudio`, `amazon-bedrock`, and each `[model_providers.<id>]` of Codex's own `config.toml` | `-c model_provider="<id>"`, and `modelProvider` when a thread is resumed or forked |
 | pi | whatever `pi --list-models` reports | `--provider` |
 
 Credentials, region and project stay Claude Code's own (`AWS_REGION`,
@@ -97,12 +102,16 @@ Claude's settings. Two things to know:
   that decides: Claude ignores the choice (it falls back to Anthropic's
   API when two are set), and unharness reports the provider the session
   runs on as an error.
-- The provider is fixed when Claude starts, so changing it in the TUI
-  restarts the session (resumed) with the next prompt.
+- The provider is fixed when Claude or Codex starts, so changing it in
+  the TUI restarts the session (resumed) with the next prompt. It is
+  refused while a turn or a subagent is at work.
 
-The model list is Claude's own for that provider. Bedrock without
+The model list is Claude's own for that provider, asked of a short-lived
+Claude in the sandbox a session would get (its settings can name
+commands it runs at startup, such as `apiKeyHelper`). Bedrock without
 credentials took a minute to answer; after 15 s unharness gives up and
-`/model <name>` still sets one.
+`/model <name>` still sets one. The TUI asks in the background and opens
+the picker when the list arrives.
 
 Codex lists models for `openai` only: its `model/list` is OpenAI's
 catalog whichever provider is in use. On another provider choose the

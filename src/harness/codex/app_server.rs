@@ -369,16 +369,17 @@ async fn drive(
                                         let r = match &cfg.resume {
                                             // A fork answers like a start: with the new thread.
                                             Some(id) => {
-                                                // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                // A thread keeps the provider it was started on
+                                                // unless told otherwise, and so does a fork of it.
+                                                let mut params = json!({"threadId": id});
+                                                if let Some(p) = &cfg.provider {
+                                                    params["modelProvider"] = json!(p.as_str());
+                                                }
                                                 if cfg.fork {
-                                                    d.request("thread/fork", json!({"threadId": id, "excludeTurns": true}), Outstanding::ThreadStart).await
+                                                    // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                    params["excludeTurns"] = json!(true);
+                                                    d.request("thread/fork", params, Outstanding::ThreadStart).await
                                                 } else {
-                                                    // A thread keeps the provider it was started on
-                                                    // unless told otherwise.
-                                                    let mut params = json!({"threadId": id});
-                                                    if let Some(p) = &cfg.provider {
-                                                        params["modelProvider"] = json!(p.as_str());
-                                                    }
                                                     d.request("thread/resume", params, Outstanding::ThreadStart).await
                                                 }
                                             }

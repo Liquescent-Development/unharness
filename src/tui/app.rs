@@ -278,6 +278,8 @@ pub struct App {
     pub providers: HashMap<HarnessId, ProviderId>,
     /// Harnesses whose provider the user chose; only those are told it.
     pub chosen_providers: HashSet<HarnessId>,
+    /// The provider a session runs on when it is not the chosen one.
+    running_providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
@@ -425,6 +427,9 @@ pub struct AppInit {
     pub checkpoint_store: Option<PathBuf>,
     /// The user's allow rules, and where "allow always" adds to them.
     pub rules: Rules,
+    /// Each harness's guess at its own provider (`Harness::default_provider`),
+    /// which reads the user's vendor configuration; tests pass their own.
+    pub default_providers: HashMap<HarnessId, ProviderId>,
 }
 
 /// Transcript lines scrolled per wheel notch.
@@ -549,7 +554,7 @@ impl App {
             if chosen.is_some() {
                 chosen_providers.insert(id);
             }
-            let provider = chosen.or_else(|| h.default_provider().map(|p| p.0));
+            let provider = chosen.or_else(|| init.default_providers.get(&id).map(|p| p.0.clone()));
             if let Some(p) = provider.clone() {
                 providers.insert(id, ProviderId::new(p));
             }
@@ -645,6 +650,7 @@ impl App {
             guard: None,
             providers,
             chosen_providers,
+            running_providers: HashMap::new(),
             models,
             efforts,
             model_cache: HashMap::new(),
@@ -955,10 +961,19 @@ impl App {
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
         let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
-        match (sandbox, self.policy_warning()) {
-            (Some(s), Some(p)) => Some(format!("{s}; {p}")),
-            (s, p) => s.or(p),
-        }
+        let provider = self.running_providers.get(&self.active).map(|runs_on| {
+            format!(
+                "runs on {runs_on}, not the chosen {} (/provider)",
+                self.current_provider()
+                    .map(|p| p.as_str())
+                    .unwrap_or("provider")
+            )
+        });
+        let parts: Vec<String> = [sandbox, self.policy_warning(), provider]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
     }
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
@@ -2159,20 +2174,26 @@ impl App {
                     self.transcript
                         .push_notice(format!("effort levels now: {}", levels.join(", ")));
                 }
-                // The harness knows best. A chosen provider it does not run
-                // on was already reported as an error by its driver.
-                if let Some(reported) = &update.provider
-                    && self.current_provider() != Some(reported)
-                {
-                    if !self.chosen_providers.contains(&self.active) {
+                // A guess at the harness's own default gives way to what
+                // it reports. A choice stays the user's, and is what the
+                // next session is told; the driver reported the mismatch
+                // and the status line keeps showing it.
+                if let Some(reported) = &update.provider {
+                    if self.chosen_providers.contains(&self.active) {
+                        if self.current_provider() == Some(reported) {
+                            self.running_providers.remove(&self.active);
+                        } else {
+                            self.running_providers.insert(self.active, reported.clone());
+                        }
+                    } else if self.current_provider() != Some(reported) {
                         self.transcript.push_notice(format!(
                             "{} runs on {reported}, chosen by its own configuration",
                             self.short_name()
                         ));
-                    }
-                    self.providers.insert(self.active, reported.clone());
-                    if let Some(m) = self.models.get_mut(&self.active) {
-                        m.provider = reported.clone();
+                        self.providers.insert(self.active, reported.clone());
+                        if let Some(m) = self.models.get_mut(&self.active) {
+                            m.provider = reported.clone();
+                        }
                     }
                 }
                 if let Some(models) = &update.models {
@@ -2453,6 +2474,15 @@ impl App {
                 .push_error("finish or interrupt the current turn before changing the provider");
             return;
         }
+        // They would end with the process.
+        if restart && !self.subagents.is_empty() {
+            self.transcript.push_error(format!(
+                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the provider",
+                self.subagents.len()
+            ));
+            return;
+        }
+        self.running_providers.remove(&self.active);
         if changed {
             self.models.remove(&self.active);
         }
@@ -4222,6 +4252,12 @@ pub(crate) mod tests {
             effort: None,
             resume,
             harness_explicit,
+            default_providers: [
+                (HarnessId::CLAUDE, "anthropic".into()),
+                (HarnessId::CODEX, "openai".into()),
+                (HarnessId::AGY, "google".into()),
+            ]
+            .into(),
         })
     }
 
@@ -5698,6 +5734,43 @@ pub(crate) mod tests {
         assert!(
             matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
+    }
+
+    #[test]
+    fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        app.sandbox = SandboxSetup::null(None);
+        app.set_provider("bedrock".into());
+        app.session_alive = true;
+        // Claude's settings chose otherwise.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        }));
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert!(
+            app.status_warning()
+                .unwrap()
+                .contains("runs on anthropic, not the chosen bedrock")
+        );
+        // Once it runs where it was told, the warning goes.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("bedrock".into()),
+            ..Default::default()
+        }));
+        assert!(app.status_warning().is_none());
+
+        // Not while a subagent is at work: it would end with the process.
+        app.on_event(AgentEvent::SubagentStarted {
+            id: "t1".into(),
+            description: "look around".into(),
+            kind: None,
+        });
+        assert!(!app.subagents.is_empty());
+        app.set_provider("vertex".into());
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert!(app.take_actions().is_empty());
     }
 
     #[test]

@@ -514,7 +514,9 @@ recorded ones. For anything else:
   IDs"; Bedrock takes only a few fields), an unknown `model_provider`
   stops Codex at startup, and `config/read` lists the configured
   `model_providers` (with `name`) and the `model_provider` in effect.
-  `-c model_provider="<id>"` chooses one on app-server and exec;
+  `-c model_provider="<id>"` chooses one on app-server and exec, and
+  `modelProvider` goes on `thread/resume` and `thread/fork` (schema; a
+  thread keeps its own provider otherwise);
   `thread/start` and `thread/resume` answer with `modelProvider`, which
   the driver reports and checks against the choice. `model/list` gave
   OpenAI's catalog under every provider tried, so only `openai` lists

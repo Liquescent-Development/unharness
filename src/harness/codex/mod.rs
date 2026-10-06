@@ -121,6 +121,29 @@ pub fn provider_mismatch(chosen: Option<&ProviderId>, reported: &str) -> Option<
         .then(|| format!("Codex runs on {reported}, not {chosen}, in this thread"))
 }
 
+/// The built-in providers, then the ones `model_providers` (as
+/// `config/read` gives it) adds. A built-in one appears there too when its
+/// few settable fields are set, with an empty name.
+fn with_configured(configured: &serde_json::Map<String, Value>) -> Vec<(ProviderId, String)> {
+    let mut providers: Vec<(ProviderId, String)> = BUILT_IN_PROVIDERS
+        .iter()
+        .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
+        .collect();
+    for (id, provider) in configured {
+        if providers.iter().any(|(known, _)| known.as_str() == id) {
+            continue;
+        }
+        let name = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(id)
+            .to_string();
+        providers.push((ProviderId::new(id.clone()), name));
+    }
+    providers
+}
+
 /// `model_provider` in a Codex `config.toml`, or in the profile it selects.
 fn configured_provider(config: &str) -> Option<String> {
     let table = config.parse::<toml::Table>().ok()?;
@@ -270,23 +293,11 @@ impl Harness for CodexHarness {
         binary: &Path,
         sandbox: &Sandbox,
     ) -> Result<Vec<(ProviderId, String)>> {
-        let mut providers: Vec<(ProviderId, String)> = BUILT_IN_PROVIDERS
-            .iter()
-            .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
-            .collect();
         let configured = query(binary, sandbox, "config/read", json!({}))
             .ok()
             .and_then(|r| r.pointer("/config/model_providers")?.as_object().cloned())
             .unwrap_or_default();
-        for (id, provider) in configured {
-            let name = provider
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(&id)
-                .to_string();
-            providers.push((ProviderId::new(id), name));
-        }
-        Ok(providers)
+        Ok(with_configured(&configured))
     }
 
     /// `model_provider` in Codex's `config.toml` (its profile's first),
@@ -666,6 +677,31 @@ model_provider = "lmstudio"
         assert_eq!(configured_provider(profiled).as_deref(), Some("azure"));
         let without = profiled.replace("profile = \"work\"", "profile = \"none\"");
         assert_eq!(configured_provider(&without).as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn configured_providers_follow_the_built_in_ones_once() {
+        let configured = json!({
+            "amazon-bedrock": {"name": "", "aws": {"region": "us-east-1"}},
+            "llama": {"name": "llama-swap", "base_url": "http://x/v1"},
+            "bare": {"name": " ", "base_url": "http://y/v1"},
+        });
+        let providers = with_configured(configured.as_object().unwrap());
+        let names: Vec<String> = providers
+            .iter()
+            .map(|(id, name)| format!("{id}={name}"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "openai=OpenAI",
+                "ollama=Ollama",
+                "lmstudio=LM Studio",
+                "amazon-bedrock=Amazon Bedrock",
+                "bare=bare",
+                "llama=llama-swap"
+            ]
+        );
     }
 
     #[test]

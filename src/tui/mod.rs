@@ -156,6 +156,11 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
+    let default_providers = launch
+        .registry
+        .all()
+        .filter_map(|h| Some((h.descriptor().id, h.default_provider()?)))
+        .collect();
     let mut app = App::new(AppInit {
         cwd: launch.cwd,
         workspace_root: launch.workspace_root,
@@ -171,6 +176,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         harness_explicit: launch.harness_explicit,
         checkpoint_store: None,
         rules: launch.rules,
+        default_providers,
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;

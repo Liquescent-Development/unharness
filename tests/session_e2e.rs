@@ -1364,6 +1364,8 @@ async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.resume = Some("01a103e9-859f-7680-ac4c-56b3e6512414".into());
     cfg.fork = true;
+    // A chosen provider goes with the branch, as with a resumed thread.
+    cfg.provider = Some("openai".into());
     let mut handle = harness.start_session(cfg).unwrap();
 
     handle.send(SessionCommand::turn("which?")).await.unwrap();
@@ -1378,6 +1380,8 @@ async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
         sent[2]["params"]["threadId"],
         "01a103e9-859f-7680-ac4c-56b3e6512414"
     );
+    assert_eq!(sent[2]["params"]["modelProvider"], "openai");
+    assert_eq!(sent[2]["params"]["excludeTurns"], true);
     let turn = sent.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
         turn["params"]["threadId"]
