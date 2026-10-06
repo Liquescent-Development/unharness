@@ -374,6 +374,33 @@ recorded ones. For anything else:
   around appending to a rules file (two unharness saving at once can lose
   one rule), re-reading rules while running, closing the modal when Claude
   cancels a request.
+- herdr (`tui/herdr.rs`), checked on herdr 0.8.2 (socket protocol 20)
+  in a named test session with Claude Code 2.1.289 and agy 1.2.17: the
+  TUI sends `pane.report_agent` (`source` and `agent` both `unharness`,
+  `seq` in microseconds since the epoch) over `HERDR_SOCKET_PATH`, one
+  JSON line answered by one line, on a task of its own that sends only
+  the newest state; `pane.release_agent` on quit. `herdr agent get`
+  showed `working` on a prompt, `blocked` at a Claude permission modal
+  and at the policy picker held for agy under `ask`, `idle` after the
+  turn and `done` when the turn ended with another tab focused (herdr
+  derives `done`; a report is only `idle`, `working`, `blocked` or
+  `unknown`), and no agent once unharness quit. herdr's own detection
+  took the pane for `claude` (the child process) until the first report
+  arrived, about 1.5 s after launch, and the report wins after that.
+  Unverified: where herdr shows the `message` of a blocked report (no
+  API view returns it), whether the release or the exit cleared the
+  pane, a vendor integration (`herdr integration install claude`)
+  reporting for the same pane from inside unharness (it would, with
+  its own `source`; none was installed). pi's herdr extension reports
+  only when `ctx.mode` is `tui`, so it is silent in unharness's `rpc`
+  sessions; pi's A2A extension (`herdr-a2a`) fails with "client session
+  readiness timed out" because its broker answers `POST /v1/register`
+  with 403 `verification_failed` ("Herdr could not verify this pane")
+  until its 5 s deadline. The same 403 came back for `herdr-a2a
+  client-session` run unsandboxed from a pane herdr knows as `claude`,
+  so it is not the sandbox; that the broker wants herdr to know the pane
+  as the `pi` of that session is inferred from the binary's strings, not
+  read in its source.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.
