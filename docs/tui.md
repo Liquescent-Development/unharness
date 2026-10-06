@@ -76,7 +76,27 @@ When a harness asks for permission, a dialog opens:
 | `i` | Show the full tool input |
 
 Agent questions (Claude's AskUserQuestion, Codex's requestUserInput, pi's
-extension dialogs) open the matching dialog.
+extension dialogs) open the matching dialog. When there are several
+questions, or a multi-select one, they are shown as a strip across the top
+(`✓` marks the answered ones) and the dialog ends on a Submit page that
+lists the answers; nothing is sent until you press `Enter` there. A single
+single-select question is sent as soon as you choose. When an option comes
+with a preview (the draft or snippet being chosen between), it is shown
+beside the options, or below them on a narrow terminal.
+
+| Key | Action |
+|---|---|
+| `↑`/`↓` | Highlight an option |
+| `Enter` | Choose it and go to the next question. On a multi-select question, go on with what is ticked (the highlighted option, if nothing is). On the Submit page, send, or open the first unanswered question |
+| `Space` | Choose, or tick/untick on a multi-select question |
+| `←`/`→`, `Tab`/`Shift+Tab` | Move between the questions and the Submit page; the cursor lands on your answer |
+| `PageUp`/`PageDown` | Scroll the preview |
+| `Esc` | Dismiss the questions unanswered |
+
+The `[other]` row takes a typed answer instead of the options (on a
+multi-select question it replaces the ticks); a question with no options
+has an `[answer]` row. `Enter` on the row starts typing, `Enter` again
+keeps the answer and moves on, and `Esc` puts the text back as it was.
 
 ## Slash commands
 

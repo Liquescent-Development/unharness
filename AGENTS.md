@@ -432,6 +432,20 @@ recorded ones. For anything else:
   `.crates2.json` beside its `bin` is cargo's, unless the receipt is
   newer. Both are told what to run. It runs before the config is read
   and never on its own. Unverified: macOS, a real Homebrew install.
+- Questions (`PermissionKind::Question`, `tui/modal.rs` `QuestionModal`):
+  Claude Code 2.1.291 AskUserQuestion options carry `label`,
+  `description` and an optional `preview` (markdown), with and without a
+  preview in the same question (`fixtures/ask_previews.jsonl`). In
+  `-p` stream-json mode the tool is only offered with
+  `--permission-prompt-tool stdio`; without it the model finds no such
+  tool (`write_denied.jsonl` on 2.1.288, and a run on 2.1.291), which is
+  why the recorder passes it. A
+  multi-select answer sent as a JSON array was read back by the model as
+  the labels joined with commas (pty run, 2.1.291). Codex 0.157.0's
+  `ToolRequestUserInputOption` (app-server schema) has only `label` and
+  `description`.
+  The modal sends only from its Submit page, and only once every question
+  has an answer; a lone single-select question is sent on `Enter`.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

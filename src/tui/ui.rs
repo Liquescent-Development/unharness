@@ -18,7 +18,7 @@ use super::code::{
     wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{AlwaysDraft, ListPicker, Modal};
+use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::SandboxLevel;
@@ -70,8 +70,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, prompt_row);
     }
-    if app.modal.is_some() {
-        render_modal(frame, app, frame.area());
+    let area = frame.area();
+    match &mut app.modal {
+        // Drawing it settles how far its preview can scroll.
+        Some(Modal::Question(m)) => render_question(frame, m, area),
+        Some(_) => render_modal(frame, app, area),
+        None => {}
     }
 }
 
@@ -1315,6 +1319,24 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
 }
 
 /// `text` cut at the front to `width` columns, an ellipsis for what went.
+/// The start of `text` that fits in `width` columns, `…` marking a cut.
+fn keep_start(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    let mut used = 1;
+    for c in text.chars() {
+        used += c.width().unwrap_or(0);
+        if used > width {
+            break;
+        }
+        kept.push(c);
+    }
+    kept.push('…');
+    kept
+}
+
 fn keep_end(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -1621,90 +1643,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 lines,
             )
         }
-        Modal::Question(m) => {
-            let popup = centered_rect(80, 60, area);
-            let width = (popup.width.saturating_sub(6)).max(20) as usize;
-            let q = m.current();
-            let mut lines = vec![
-                Line::default(),
-                Line::from(Span::styled(
-                    format!("  {} ({}/{})", q.header, m.idx + 1, m.questions.len()),
-                    Style::default().fg(Color::Gray),
-                )),
-            ];
-            lines.extend(wrap_prefixed_text(
-                "  ",
-                &q.text,
-                width,
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            lines.push(Line::default());
-            for (i, (label, desc)) in q.options.iter().enumerate() {
-                let selected = i == m.cursor;
-                let chosen = m.chosen[m.idx][i];
-                let mark = if q.multi {
-                    if chosen { "[x]" } else { "[ ]" }
-                } else if chosen {
-                    "(•)"
-                } else {
-                    "( )"
-                };
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} {mark} {label:<24}", if selected { " ❯" } else { "  " }),
-                        style,
-                    ),
-                    Span::styled(format!("  {desc}"), Style::default().fg(Color::Gray)),
-                ]));
-            }
-            if q.allow_other {
-                let selected = m.is_other_row();
-                let style = if selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                let text = &m.other[m.idx];
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("{} [other] ", if selected { " ❯" } else { "  " }),
-                        style,
-                    ),
-                    Span::raw(text.clone()),
-                    Span::styled(
-                        if m.editing_other { "▏" } else { "" },
-                        Style::default().fg(Color::Cyan),
-                    ),
-                ]));
-            }
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled(
-                if m.editing_other {
-                    "  type your answer · Enter done".to_string()
-                } else if q.multi {
-                    "  Space toggle · Enter next/submit · ←/→ page · Esc dismiss".to_string()
-                } else {
-                    "  Enter choose · ←/→ page · Esc dismiss".to_string()
-                },
-                Style::default().fg(Color::Gray),
-            )));
-            (
-                popup,
-                modal_block(" The agent has a question ".into(), Color::Cyan),
-                lines,
-            )
-        }
+        Modal::Question(_) => return, // `render_question`
         Modal::Confirm(m) => {
             let popup = centered_rect(60, 30, area);
             let width = (popup.width.saturating_sub(6)).max(20) as usize;
@@ -1767,6 +1706,382 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// The question modal: a strip naming every question and the review page,
+/// the question, its options, and the highlighted option's preview beside
+/// them (below them when the terminal is narrow).
+fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
+    let popup = if m.has_previews() {
+        centered_rect(90, 80, area)
+    } else {
+        centered_rect(80, 60, area)
+    };
+    let block = modal_block(" The agent has a question ".into(), Color::Cyan);
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    let width = inner.width as usize;
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let mut head = Vec::new();
+    if m.page_count() > 1 {
+        head.push(question_tabs(m, width));
+        head.push(Line::default());
+    }
+    match m.current() {
+        Some(q) => head.extend(wrap_prefixed_text("", &q.text, width, bold)),
+        None => head.push(Line::from(Span::styled("Review your answers", bold))),
+    }
+    let previewing = m
+        .current()
+        .is_some_and(|q| q.options.iter().any(|o| o.preview.is_some()));
+    let hint = wrap_prefixed_text(
+        "",
+        &question_hint(m, previewing),
+        width,
+        Style::default().fg(Color::Gray),
+    );
+    let hint_rows = (hint.len() as u16).min(2);
+    // Leave the options at least a few rows on a short terminal.
+    let head_rows = (head.len() as u16).min(inner.height.saturating_sub(6).max(1));
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(head_rows),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(hint_rows),
+    ])
+    .split(inner);
+    frame.render_widget(Paragraph::new(head), rows[1]);
+    frame.render_widget(Paragraph::new(hint), rows[5]);
+    let body = rows[3];
+
+    match m.current() {
+        None => frame.render_widget(Paragraph::new(review_lines(m, width)), body),
+        Some(_) if previewing => {
+            let (options, preview) = if body.width >= 80 {
+                let left = (body.width * 2 / 5).max(28);
+                let cols = Layout::horizontal([
+                    Constraint::Length(left),
+                    Constraint::Length(1),
+                    Constraint::Min(20),
+                ])
+                .split(body);
+                (cols[0], cols[2])
+            } else {
+                let (lines, _) = question_option_lines(m, body.width as usize);
+                let top = (lines.len() as u16).min(body.height / 2).max(3);
+                let parts =
+                    Layout::vertical([Constraint::Length(top), Constraint::Min(3)]).split(body);
+                (parts[0], parts[1])
+            };
+            render_question_options(frame, m, options);
+            render_question_preview(frame, m, preview);
+        }
+        Some(_) => {
+            m.preview_max = 0;
+            m.preview_scroll = 0;
+            render_question_options(frame, m, body);
+        }
+    }
+}
+
+/// The keys that work on the current page.
+fn question_hint(m: &QuestionModal, previewing: bool) -> String {
+    if m.editing_other {
+        return "type your answer · Enter done · Esc cancel".into();
+    }
+    if m.on_review() {
+        let back = "←/Shift+Tab back · Esc dismiss";
+        return if m.unanswered().is_empty() {
+            format!("Enter submit · {back}")
+        } else {
+            format!("Enter go to the first unanswered · {back}")
+        };
+    }
+    let mut parts = Vec::new();
+    if m.row_count() > 1 {
+        parts.push("↑/↓ select");
+    }
+    if m.is_other_row() {
+        parts.push("Enter type your answer");
+    } else if m.current().is_some_and(|q| q.multi) {
+        parts.push("Space toggle · Enter next");
+    } else {
+        parts.push("Enter choose");
+    }
+    if m.page_count() > 1 {
+        parts.push("←/→ question");
+    }
+    if previewing {
+        parts.push("PgUp/PgDn preview");
+    }
+    parts.push("Esc dismiss");
+    parts.join(" · ")
+}
+
+/// `Color ✓ · Size · Submit`, the current page highlighted. Long names are
+/// shortened, and with too many pages the strip shows the ones around the
+/// current page.
+fn question_tabs(m: &QuestionModal, width: usize) -> Line<'static> {
+    let mut names: Vec<String> = m
+        .questions
+        .iter()
+        .map(super::herdr::question_label)
+        .collect();
+    if m.has_review() {
+        names.push("Submit".into());
+    }
+    let n = names.len();
+    let cur = m.idx;
+    if cur >= n {
+        return Line::default();
+    }
+    let answered: Vec<bool> = (0..n)
+        .map(|i| i < m.questions.len() && m.has_answer(i))
+        .collect();
+    const SEP: &str = " · ";
+    let sep = SEP.width();
+    let tab_width = |name: &str, done: bool| name.width() + 2 + if done { 2 } else { 0 };
+    let widths = |shown: &[String]| -> Vec<usize> {
+        shown
+            .iter()
+            .zip(&answered)
+            .map(|(name, done)| tab_width(name, *done))
+            .collect()
+    };
+    // Shorten the longest names, down to ten columns, until the strip fits.
+    let mut cap = names.iter().map(|name| name.width()).max().unwrap_or(0);
+    let mut shown = names.clone();
+    while widths(&shown).iter().sum::<usize>() + sep * (n - 1) > width && cap > 10 {
+        cap -= 1;
+        shown = names.iter().map(|name| keep_start(name, cap)).collect();
+    }
+    let mut w = widths(&shown);
+    // Columns from tab `first` through the current one, with a `…` on
+    // either side where tabs are left out.
+    let span = |w: &[usize], first: usize| {
+        usize::from(first > 0)
+            + w[first..=cur].iter().sum::<usize>()
+            + sep * (cur - first)
+            + usize::from(cur + 1 < n)
+    };
+    let mut first = 0;
+    while first < cur && span(&w, first) > width {
+        first += 1;
+    }
+    let overflow = span(&w, first).saturating_sub(width);
+    if overflow > 0 {
+        // Too wide even on its own: the current tab's name gives way.
+        let room = shown[cur].width().saturating_sub(overflow).max(1);
+        shown[cur] = keep_start(&names[cur], room);
+        w = widths(&shown);
+    }
+
+    let gray = Style::default().fg(Color::Gray);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    if first > 0 {
+        spans.push(Span::styled("…", gray));
+        used += 1;
+    }
+    for (i, name) in shown.iter().enumerate().skip(first) {
+        let gap = if i > first { sep } else { 0 };
+        if i > cur && used + gap + w[i] + usize::from(i + 1 < n) > width {
+            spans.push(Span::styled("…", gray));
+            break;
+        }
+        if gap > 0 {
+            spans.push(Span::styled(SEP, Style::default().fg(Color::DarkGray)));
+        }
+        let style = if i == cur {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if answered[i] || i == m.questions.len() {
+            Style::default()
+        } else {
+            gray
+        };
+        spans.push(Span::styled(format!(" {name}"), style));
+        if answered[i] {
+            let check = if i == cur {
+                style
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            spans.push(Span::styled(" ✓", check));
+        }
+        spans.push(Span::styled(" ", style));
+        used += gap + w[i];
+    }
+    Line::from(spans)
+}
+
+/// The options of the current question, each label with its description
+/// under it, and the line range each row takes.
+fn question_option_lines(
+    m: &QuestionModal,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    let mut lines = Vec::new();
+    let mut ranges = Vec::new();
+    let Some(q) = m.current() else {
+        return (lines, ranges);
+    };
+    let highlight = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    for (i, opt) in q.options.iter().enumerate() {
+        let start = lines.len();
+        let selected = i == m.cursor;
+        let chosen = m.chosen[m.idx][i];
+        let mark = match (q.multi, chosen) {
+            (true, true) => "[x]",
+            (true, false) => "[ ]",
+            (false, true) => "(•)",
+            (false, false) => "( )",
+        };
+        let label = truncate_chars(&opt.label, width.saturating_sub(7).max(4));
+        lines.push(Line::from(Span::styled(
+            format!("{} {mark} {label} ", if selected { "❯" } else { " " }),
+            if selected {
+                highlight
+            } else {
+                Style::default()
+            },
+        )));
+        if !opt.description.is_empty() {
+            lines.extend(wrap_prefixed_text(
+                "      ",
+                &opt.description,
+                width,
+                Style::default().fg(Color::Gray),
+            ));
+        }
+        ranges.push((start, lines.len()));
+    }
+    if takes_text(q) {
+        let start = lines.len();
+        let selected = m.is_other_row();
+        let text = &m.other[m.idx];
+        let label = if q.options.is_empty() {
+            "[answer]"
+        } else {
+            "[other]"
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} {label} ", if selected { "❯" } else { " " }),
+                if selected {
+                    highlight
+                } else {
+                    Style::default()
+                },
+            ),
+            Span::raw(keep_end(text, width.saturating_sub(12))),
+            Span::styled(
+                if m.editing_other { "▏" } else { "" },
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+        ranges.push((start, lines.len()));
+    }
+    (lines, ranges)
+}
+
+/// The option list, scrolled so the highlighted row is in view.
+fn render_question_options(frame: &mut Frame, m: &QuestionModal, area: Rect) {
+    let (lines, ranges) = question_option_lines(m, area.width as usize);
+    let height = area.height as usize;
+    let offset = ranges
+        .get(m.cursor)
+        .map_or(0, |&(start, end)| end.saturating_sub(height).min(start));
+    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+}
+
+/// The highlighted option's preview, as markdown, in a pane of its own.
+fn render_question_preview(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
+    let pane = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Preview ");
+    let inner = pane.inner(area);
+    let lines = match m.preview() {
+        Some(text) => render_markdown_to_lines(text, inner.width as usize),
+        None => vec![Line::from(Span::styled(
+            "No preview for this option.",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::ITALIC),
+        ))],
+    };
+    let max = lines.len().saturating_sub(inner.height as usize) as u16;
+    m.preview_max = max;
+    m.preview_scroll = m.preview_scroll.min(max);
+    let scroll = m.preview_scroll;
+    let pane = if max > 0 {
+        let more = if scroll < max { "↓" } else { "↑" };
+        pane.title(
+            Line::from(format!(" {more} {}/{} ", scroll + 1, max + 1)).alignment(Alignment::Right),
+        )
+    } else {
+        pane
+    };
+    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).block(pane), area);
+}
+
+/// What is still unanswered (first, so a long list cannot hide it), then
+/// every question with its answer.
+fn review_lines(m: &QuestionModal, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let missing: Vec<String> = m
+        .unanswered()
+        .into_iter()
+        .map(|i| super::herdr::question_label(&m.questions[i]))
+        .collect();
+    if !missing.is_empty() {
+        lines.extend(wrap_prefixed_text(
+            "",
+            &format!("Not answered yet: {}", missing.join(", ")),
+            width,
+            Style::default().fg(Color::Yellow),
+        ));
+        lines.push(Line::default());
+    }
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    for (i, q) in m.questions.iter().enumerate() {
+        let label = super::herdr::question_label(q);
+        match m.answer_text(i) {
+            Some(answer) => {
+                lines.push(Line::from(vec![
+                    Span::styled("✓ ", Style::default().fg(Color::Green)),
+                    Span::styled(label, bold),
+                ]));
+                lines.extend(wrap_prefixed_text("  → ", &answer, width, Style::default()));
+            }
+            None => {
+                lines.push(Line::from(vec![
+                    Span::styled("✗ ", Style::default().fg(Color::Red)),
+                    Span::styled(label, bold),
+                ]));
+                lines.push(Line::from(Span::styled(
+                    "  (unanswered)",
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
+    }
+    lines
+}
+
 pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let v = Layout::default()
         .direction(Direction::Vertical)
@@ -1790,6 +2105,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::tui::app::tests::test_app;
+    use crossterm::event::KeyEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -1823,6 +2139,263 @@ mod tests {
             })
             .collect();
         (rows, (cursor.x, cursor.y))
+    }
+
+    fn question_app(questions: Vec<crate::core::Question>) -> App {
+        use crate::core::{AgentEvent, PermissionRequest};
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "q".into(),
+            kind: PermissionKind::Question { questions },
+            tool_call_id: None,
+        }));
+        app
+    }
+
+    fn greeting_and_tone() -> Vec<crate::core::Question> {
+        use crate::core::{Question, QuestionOption};
+        let previewed = |label: &str, preview: &str| QuestionOption {
+            preview: Some(preview.into()),
+            ..QuestionOption::new(label, format!("{label} wording"))
+        };
+        vec![
+            Question {
+                id: "Which greeting?".into(),
+                header: "Greeting".into(),
+                text: "Which greeting?".into(),
+                options: vec![
+                    previewed("Friendly", "# Welcome!\n\nUse `your-feature` today."),
+                    QuestionOption::new("Plain", "No heading"),
+                ],
+                allow_other: true,
+                multi: false,
+            },
+            Question {
+                id: "Which tone?".into(),
+                header: "Tone".into(),
+                text: "Which tone?".into(),
+                options: vec![
+                    QuestionOption::new("Casual", ""),
+                    QuestionOption::new("Formal", ""),
+                ],
+                allow_other: true,
+                multi: false,
+            },
+        ]
+    }
+
+    fn find(rows: &[String], needle: &str) -> (usize, usize) {
+        rows.iter()
+            .enumerate()
+            .find_map(|(y, r)| r.find(needle).map(|x| (y, r[..x].chars().count())))
+            .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")))
+    }
+
+    #[test]
+    fn question_preview_sits_beside_the_options_or_below_them() {
+        let mut app = question_app(greeting_and_tone());
+        let (rows, _) = screen(&mut app, 140, 40);
+        let (label_y, label_x) = find(&rows, "❯ ( ) Friendly");
+        find(&rows, "Friendly wording");
+        let (pane_y, pane_x) = find(&rows, "Preview");
+        let (heading_y, heading_x) = find(&rows, "Welcome!");
+        assert!(pane_x > label_x + 30 && heading_x > label_x + 30);
+        assert!(pane_y <= label_y && heading_y < label_y + 4);
+        // Inline code keeps its text; the markers are rendering, not content.
+        find(&rows, "your-feature");
+
+        // Narrow: the pane goes under the options.
+        let (rows, _) = screen(&mut app, 70, 40);
+        let (other_y, _) = find(&rows, "[other]");
+        let (pane_y, _) = find(&rows, "Preview");
+        assert!(pane_y > other_y);
+        find(&rows, "Welcome!");
+
+        // An option without one says so; a question without any has no pane.
+        if let Some(Modal::Question(m)) = &mut app.modal {
+            m.down();
+        }
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "No preview for this option.");
+        if let Some(Modal::Question(m)) = &mut app.modal {
+            m.next_page();
+        }
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "Which tone?");
+        assert!(!rows.iter().any(|r| r.contains("Preview")));
+    }
+
+    #[test]
+    fn a_question_without_options_shows_what_is_typed() {
+        use crate::core::Question;
+        use crossterm::event::KeyCode;
+        let mut app = question_app(vec![Question {
+            id: "name".into(),
+            header: "Name".into(),
+            text: "What should it be called?".into(),
+            options: vec![],
+            allow_other: false,
+            multi: false,
+        }]);
+        let (rows, _) = screen(&mut app, 100, 30);
+        find(&rows, "❯ [answer]");
+        find(&rows, "Enter type your answer");
+        assert!(!rows.iter().any(|r| r.contains("↑/↓ select")));
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        for c in "zebra".chars() {
+            app.handle_modal_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let (rows, _) = screen(&mut app, 100, 30);
+        find(&rows, "[answer] zebra");
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn long_preview_scrolls() {
+        let mut questions = greeting_and_tone();
+        let long: Vec<String> = (1..=60).map(|i| format!("line {i}")).collect();
+        questions[0].options[0].preview = Some(long.join("\n\n"));
+        let mut app = question_app(questions);
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 1");
+        find(&rows, "↓ 1/");
+        assert!(!rows.iter().any(|r| r.contains("line 60")));
+        for _ in 0..40 {
+            app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::PageDown));
+        }
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 60");
+        find(&rows, "↑ ");
+    }
+
+    #[test]
+    fn preview_scroll_follows_the_size_it_was_drawn_at() {
+        use crossterm::event::KeyCode;
+        let mut questions = greeting_and_tone();
+        let long: Vec<String> = (1..=60).map(|i| format!("line {i}")).collect();
+        questions[0].options[0].preview = Some(long.join("\n\n"));
+        let mut app = question_app(questions);
+        let scroll = |app: &App| match &app.modal {
+            Some(Modal::Question(m)) => (m.preview_scroll, m.preview_max),
+            _ => unreachable!(),
+        };
+        screen(&mut app, 140, 40);
+        for _ in 0..40 {
+            app.handle_modal_key(KeyEvent::from(KeyCode::PageDown));
+        }
+        screen(&mut app, 140, 40);
+        let (bottom, _) = scroll(&app);
+        // Taller: the end comes sooner, and PageUp moves from there.
+        screen(&mut app, 140, 60);
+        let (at, max) = scroll(&app);
+        assert!(at == max && max < bottom);
+        app.handle_modal_key(KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(scroll(&app).0, max - 5);
+
+        // A page without a preview has nothing to scroll.
+        app.handle_modal_key(KeyEvent::from(KeyCode::Tab));
+        screen(&mut app, 140, 40);
+        app.handle_modal_key(KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(scroll(&app), (0, 0));
+    }
+
+    #[test]
+    fn question_tabs_and_review_page() {
+        use crossterm::event::KeyCode;
+        let mut app = question_app(greeting_and_tone());
+        let (rows, _) = screen(&mut app, 140, 40);
+        let (tabs_y, _) = find(&rows, "Greeting");
+        assert!(rows[tabs_y].contains("Tone") && rows[tabs_y].contains("Submit"));
+        assert!(!rows[tabs_y].contains("✓"));
+
+        // Answer the first, skip the second, look at the review page.
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        app.handle_modal_key(KeyEvent::from(KeyCode::Tab));
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "Greeting ✓");
+        find(&rows, "Review your answers");
+        find(&rows, "✓ Greeting");
+        find(&rows, "→ Friendly");
+        find(&rows, "✗ Tone");
+        find(&rows, "(unanswered)");
+        find(&rows, "Not answered yet: Tone");
+        find(&rows, "Enter go to the first unanswered");
+
+        // Enter there opens the unanswered question instead of sending.
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.take_actions().is_empty());
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "Which tone?");
+    }
+
+    #[test]
+    fn question_tabs_fit_and_keep_the_current_page_by_columns() {
+        use crate::core::{Question, QuestionOption};
+        let headers = ["A rather long header number", "設定の確認と変更について"];
+        for header in headers {
+            for n in 1..=15 {
+                let questions: Vec<Question> = (0..n)
+                    .map(|i| Question {
+                        id: format!("q{i}"),
+                        header: format!("{header} {i}"),
+                        text: format!("Question {i}?"),
+                        options: vec![QuestionOption::new("Yes", "")],
+                        allow_other: false,
+                        multi: false,
+                    })
+                    .collect();
+                let mut m = QuestionModal::new("r".into(), questions);
+                m.chosen[0][0] = true;
+                for page in 0..m.page_count() {
+                    m.go_to(page);
+                    for width in 16..=140 {
+                        let line = question_tabs(&m, width);
+                        assert!(line.width() <= width, "{n} {page} {width}: {line}");
+                        let current: String = line
+                            .spans
+                            .iter()
+                            .filter(|s| s.style.bg == Some(Color::Cyan))
+                            .map(|s| s.content.as_ref())
+                            .collect();
+                        assert!(
+                            current.trim().chars().any(|c| c != '…' && c != '✓'),
+                            "{n} {page} {width}: {line}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn question_tabs_shorten_and_follow_the_current_page() {
+        use crate::core::{Question, QuestionOption};
+        let questions: Vec<Question> = (1..=12)
+            .map(|i| Question {
+                id: format!("q{i}"),
+                header: format!("A rather long header number {i}"),
+                text: format!("Question {i}?"),
+                options: vec![QuestionOption::new("Yes", "")],
+                allow_other: false,
+                multi: false,
+            })
+            .collect();
+        let mut app = question_app(questions);
+        if let Some(Modal::Question(m)) = &mut app.modal {
+            m.go_to(10);
+        }
+        let (rows, _) = screen(&mut app, 100, 40);
+        let (tabs_y, _) = find(&rows, "A rather");
+        let strip = rows[tabs_y].trim_matches(|c| c == '│' || c == ' ');
+        // Shortened, and starting after the first pages so the current one
+        // (highlighted) is in view.
+        assert!(
+            strip.starts_with("… ") && !strip.contains("number"),
+            "{strip}"
+        );
+        assert!(rows.iter().any(|r| r.contains("Question 11?")));
     }
 
     #[test]

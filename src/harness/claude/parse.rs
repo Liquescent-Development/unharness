@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// What one of Claude Code's tools does, for allow rules. Also used for
@@ -627,11 +627,11 @@ pub fn parse_questions(input: &Value) -> Vec<Question> {
                             .and_then(Value::as_array)
                             .map(|os| {
                                 os.iter()
-                                    .map(|o| {
-                                        (
-                                            str_at(o, "label").to_string(),
-                                            str_at(o, "description").to_string(),
-                                        )
+                                    .map(|o| QuestionOption {
+                                        label: str_at(o, "label").to_string(),
+                                        description: str_at(o, "description").to_string(),
+                                        preview: opt_str(o, "preview")
+                                            .filter(|p| !p.trim().is_empty()),
                                     })
                                     .collect()
                             })
@@ -748,6 +748,11 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    #[test]
+    fn fixture_ask_previews() {
+        fixture("ask_previews");
     }
 
     #[test]
@@ -980,7 +985,7 @@ mod tests {
                 PermissionKind::Question { questions } => {
                     assert_eq!(questions.len(), 1);
                     assert_eq!(questions[0].id, "Color?");
-                    assert_eq!(questions[0].options[1].0, "Blue");
+                    assert_eq!(questions[0].options[1].label, "Blue");
                 }
                 other => panic!("{other:?}"),
             },
