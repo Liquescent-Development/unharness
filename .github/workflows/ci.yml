@@ -1,9 +1,9 @@
 name: CI
 
+# Every branch: pull requests live on Gitea, whose branches the mirror pushes here.
 on:
   push:
-    branches: [main]
-  pull_request:
+    branches: ["**"]
 
 env:
   CARGO_TERM_COLOR: always
