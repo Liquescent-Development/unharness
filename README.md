@@ -18,9 +18,8 @@
 
 ---
 
-<!-- Demo: record with `vhs assets/demo.tape`, then uncomment.
-<p align="center"><img alt="unharness demo" src="assets/demo.gif" width="900"></p>
--->
+<!-- Recorded with `vhs assets/demo.tape`. -->
+<p align="center"><img alt="Claude Code fixes a bug behind a permission prompt, then Codex picks up the same conversation" src="assets/demo.gif" width="900"></p>
 
 unharness runs Claude Code, Codex, pi, Antigravity and any
 [Agent Client Protocol](https://agentclientprotocol.com) agent behind one
