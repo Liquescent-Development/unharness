@@ -5,6 +5,12 @@ edition = "2024"
 authors = ["Richard Kiene <richard@liquescent.dev>"]
 description = "A vendor-neutral TUI and CLI runner for AI coding agents"
 license = "AGPL-3.0-or-later"
+rust-version = "1.89"
+repository = "https://github.com/Liquescent-Development/unharness"
+homepage = "https://github.com/Liquescent-Development/unharness"
+readme = "README.md"
+keywords = ["ai", "agents", "tui", "claude", "codex"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -34,3 +40,8 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
