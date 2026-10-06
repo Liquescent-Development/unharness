@@ -18,7 +18,7 @@ use super::code::{
     wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal};
+use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::SandboxLevel;
@@ -1771,7 +1771,7 @@ fn render_question(frame: &mut Frame, m: &QuestionModal, area: Rect) {
 /// The keys that work on the current page.
 fn question_hint(m: &QuestionModal, previewing: bool) -> String {
     if m.editing_other {
-        return "type your answer · Enter done · Esc stop typing".into();
+        return "type your answer · Enter done · Esc cancel".into();
     }
     if m.on_review() {
         let back = "←/Shift+Tab back · Esc dismiss";
@@ -1781,8 +1781,13 @@ fn question_hint(m: &QuestionModal, previewing: bool) -> String {
             format!("Enter go to the first unanswered · {back}")
         };
     }
-    let mut parts = vec!["↑/↓ select"];
-    if m.current().is_some_and(|q| q.multi) {
+    let mut parts = Vec::new();
+    if m.row_count() > 1 {
+        parts.push("↑/↓ select");
+    }
+    if m.is_other_row() {
+        parts.push("Enter type your answer");
+    } else if m.current().is_some_and(|q| q.multi) {
         parts.push("Space toggle · Enter next");
     } else {
         parts.push("Enter choose");
@@ -1921,13 +1926,18 @@ fn question_option_lines(
         }
         ranges.push((start, lines.len()));
     }
-    if q.allow_other {
+    if takes_text(q) {
         let start = lines.len();
         let selected = m.is_other_row();
         let text = &m.other[m.idx];
+        let label = if q.options.is_empty() {
+            "[answer]"
+        } else {
+            "[other]"
+        };
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{} [other] ", if selected { "❯" } else { " " }),
+                format!("{} {label} ", if selected { "❯" } else { " " }),
                 if selected {
                     highlight
                 } else {
@@ -2171,6 +2181,32 @@ mod tests {
         let (rows, _) = screen(&mut app, 140, 40);
         find(&rows, "Which tone?");
         assert!(!rows.iter().any(|r| r.contains("Preview")));
+    }
+
+    #[test]
+    fn a_question_without_options_shows_what_is_typed() {
+        use crate::core::Question;
+        use crossterm::event::KeyCode;
+        let mut app = question_app(vec![Question {
+            id: "name".into(),
+            header: "Name".into(),
+            text: "What should it be called?".into(),
+            options: vec![],
+            allow_other: false,
+            multi: false,
+        }]);
+        let (rows, _) = screen(&mut app, 100, 30);
+        find(&rows, "❯ [answer]");
+        find(&rows, "Enter type your answer");
+        assert!(!rows.iter().any(|r| r.contains("↑/↓ select")));
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        for c in "zebra".chars() {
+            app.handle_modal_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        let (rows, _) = screen(&mut app, 100, 30);
+        find(&rows, "[answer] zebra");
+        app.handle_modal_key(KeyEvent::from(KeyCode::Enter));
+        assert!(app.modal.is_none());
     }
 
     #[test]

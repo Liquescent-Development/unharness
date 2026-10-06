@@ -163,6 +163,12 @@ pub struct QuestionModal {
     pub preview_max: Cell<u16>,
 }
 
+/// The question has a row for a typed answer: it allows one, or it has
+/// no options to choose from.
+pub fn takes_text(q: &Question) -> bool {
+    q.allow_other || q.options.is_empty()
+}
+
 /// What a key on the question modal leads to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionStep {
@@ -213,12 +219,12 @@ impl QuestionModal {
 
     pub fn row_count(&self) -> usize {
         self.current()
-            .map_or(0, |q| q.options.len() + usize::from(q.allow_other))
+            .map_or(0, |q| q.options.len() + usize::from(takes_text(q)))
     }
 
     pub fn is_other_row(&self) -> bool {
         self.current()
-            .is_some_and(|q| self.cursor >= q.options.len())
+            .is_some_and(|q| takes_text(q) && self.cursor >= q.options.len())
     }
 
     /// Any question has an option with a preview.
@@ -743,6 +749,26 @@ mod tests {
         assert_eq!(m.answers(), json!({"many": "neither"}));
         m.go_to(0);
         assert!(m.is_other_row());
+    }
+
+    #[test]
+    fn a_text_row_only_where_one_is_allowed_or_needed() {
+        let mut closed = q("closed", false);
+        closed.allow_other = false;
+        let mut open = q("open", false);
+        open.options.clear();
+        open.allow_other = false;
+        let mut m = QuestionModal::new("r".into(), vec![closed, open]);
+        assert_eq!(m.row_count(), 2);
+        m.down();
+        m.down();
+        assert_eq!(m.cursor, 0);
+        assert!(!m.is_other_row());
+        m.next_page();
+        assert_eq!(m.row_count(), 1);
+        assert!(m.is_other_row());
+        assert_eq!(m.enter(), QuestionStep::Stay);
+        assert!(m.editing_other);
     }
 
     #[test]
