@@ -8,7 +8,7 @@
 //! rule covers is allowed, every other one is denied, and a question is
 //! dismissed.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::core::{
     AgentEvent, CapsUpdate, PermissionDecision, PermissionKind, PermissionRequest, Rule, Rules,
-    SessionCommand, SessionHandle, StopReason, ToolAction, Usage,
+    SessionCommand, SessionHandle, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
@@ -78,11 +78,19 @@ pub struct Headless<O: Write, E: Write> {
     paragraph: bool,
     turn_running: bool,
     turns: u32,
+    /// Turn ends still to come before the answer is complete: the
+    /// prompt's, and one for each subagent the harness reports in a turn
+    /// of its own (`report_turn`).
+    owed: u32,
     /// Subagents that have started and not ended, at any depth.
     running: HashSet<String>,
-    /// A subagent ended between turns and the harness will report it in a
-    /// turn of its own, which is part of the answer.
-    report_due: bool,
+    /// The tool call that spawned a subagent's subagent → the subagent
+    /// that made it.
+    spawned_by: HashMap<String, String>,
+    /// Subagents whose end was counted in `owed` and whose spawning call
+    /// has not returned: one that returns now was waited for (a blocking
+    /// subagent), and its report is the call's result.
+    owing: HashSet<String>,
     /// The session's work is over; what still comes in is written out
     /// but changes nothing.
     settled: bool,
@@ -122,8 +130,10 @@ impl<O: Write, E: Write> Headless<O, E> {
             paragraph: false,
             turn_running: false,
             turns: 0,
+            owed: 0,
             running: HashSet::new(),
-            report_due: false,
+            spawned_by: HashMap::new(),
+            owing: HashSet::new(),
             settled: false,
             usage: None,
             denied: Vec::new(),
@@ -138,6 +148,7 @@ impl<O: Write, E: Write> Headless<O, E> {
     pub fn begin(&mut self, info: &RunInfo) {
         self.harness = info.harness.clone();
         self.turn_running = true;
+        self.owed = 1;
         self.line(&json!({
             "type": "start",
             "schema": SCHEMA_VERSION,
@@ -150,14 +161,12 @@ impl<O: Write, E: Write> Headless<O, E> {
     }
 
     /// Whether the answer is complete: the turn is over, and so is every
-    /// subagent and the turn that reports one. An error or an interrupt
+    /// subagent and every turn that reports one. An error or an interrupt
     /// ends the run at once.
     pub fn is_done(&self) -> bool {
         match &self.stop {
             None => false,
-            Some(StopReason::Done) => {
-                !self.turn_running && self.running.is_empty() && !self.report_due
-            }
+            Some(StopReason::Done) => self.owed == 0 && self.running.is_empty(),
             Some(_) => true,
         }
     }
@@ -217,26 +226,53 @@ impl<O: Write, E: Write> Headless<O, E> {
         }
         let mut commands = Vec::new();
         if !self.settled {
-            self.track(&ev, 0, &mut commands);
+            self.track(&ev, None, &mut commands);
         }
         commands
     }
 
-    fn track(&mut self, ev: &AgentEvent, depth: usize, commands: &mut Vec<SessionCommand>) {
-        let main = depth == 0;
+    /// `parent` is the subagent an event comes from, `None` for the main
+    /// agent.
+    fn track(&mut self, ev: &AgentEvent, parent: Option<&str>, commands: &mut Vec<SessionCommand>) {
+        let main = parent.is_none();
         match ev {
-            AgentEvent::Sub { event, .. } => self.track(event, depth + 1, commands),
+            AgentEvent::Sub { parent, event } => self.track(event, Some(parent), commands),
             AgentEvent::PermissionRequest(req) => commands.push(self.answer(req)),
             AgentEvent::SubagentStarted { id, .. } => {
                 self.running.insert(id.clone());
             }
-            AgentEvent::SubagentEnded { id, .. } => {
+            AgentEvent::SubagentEnded { id, status, .. } => {
                 // Its report may come in a second end of the same id; only
-                // the first one is news.
-                if self.running.remove(id) && main && self.report_turn && !self.turn_running {
-                    self.report_due = true;
+                // the first one is news. Claude reports each end of a
+                // background subagent in a turn of its own, wherever the
+                // end falls (`fixtures/subagent_parallel.jsonl`), but not
+                // one the agent stopped itself (`subagent_stopped.jsonl`).
+                // A subagent's subagent was seen reported once its parent
+                // had ended (`subagent_nested.jsonl`); while the parent
+                // runs, it is taken to report to the parent.
+                let parent_running = self
+                    .spawned_by
+                    .get(id)
+                    .is_some_and(|p| self.running.contains(p));
+                if self.running.remove(id)
+                    && self.report_turn
+                    && *status != SubagentStatus::Cancelled
+                    && !parent_running
+                {
+                    self.owed += 1;
+                    self.owing.insert(id.clone());
                 }
             }
+            AgentEvent::ToolCallStarted { id, .. } if !main => {
+                if let Some(p) = parent {
+                    self.spawned_by.insert(id.clone(), p.to_string());
+                }
+            }
+            AgentEvent::ToolCallResult { id, .. } if self.owing.remove(id) => {
+                // A blocking subagent: its report came back as the result.
+                self.owed = self.owed.saturating_sub(1);
+            }
+            AgentEvent::ToolCallResult { .. } => {}
             _ if !main => {}
             AgentEvent::SessionStarted { session_id, model } => {
                 self.session_id = Some(session_id.clone());
@@ -246,7 +282,6 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
-                self.report_due = false;
                 self.paragraph = true;
             }
             AgentEvent::TextDelta(t) => self.text_delta(t),
@@ -258,6 +293,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             AgentEvent::TurnCompleted { stop_reason } => {
                 self.turn_running = false;
                 self.turns += 1;
+                self.owed = self.owed.saturating_sub(1);
                 // However the harness words the end of an interrupted turn:
                 // Claude as an error (`error_during_execution`), pi as done.
                 self.record(if self.interrupted {
@@ -265,12 +301,13 @@ impl<O: Write, E: Write> Headless<O, E> {
                 } else {
                     stop_reason.clone()
                 });
-                if *stop_reason == StopReason::Done
-                    && !self.running.is_empty()
-                    && self.format != Format::StreamJson
-                {
+                if !self.is_done() && self.format != Format::StreamJson {
                     let n = self.running.len();
-                    self.note(&format!("waiting for {n} subagent(s)"));
+                    self.note(&if n > 0 {
+                        format!("waiting for {n} subagent(s)")
+                    } else {
+                        format!("waiting for {} to report its subagents", self.name)
+                    });
                 }
             }
             AgentEvent::Notice(n) if self.format != Format::StreamJson => {
@@ -1023,7 +1060,8 @@ mod tests {
             "Launched.\n\nIt says alpha.\n"
         );
 
-        // One that ends during the turn is reported in it.
+        // One that ends during the turn is reported in a turn of its own
+        // too (`fixtures/subagent_parallel.jsonl`).
         let (_dir, mut run) = headless(Format::Text, true);
         feed(
             &mut run,
@@ -1034,6 +1072,41 @@ mod tests {
                 done(),
             ],
         );
+        assert!(!run.is_done());
+        feed(&mut run, vec![done()]);
+        assert!(run.is_done());
+
+        // One the spawning call waited for reports as the call's result
+        // (`fixtures/subagent_blocking.jsonl`).
+        let (_dir, mut run) = headless(Format::Text, true);
+        let returned = AgentEvent::ToolCallResult {
+            id: "t1".into(),
+            output: "alpha".into(),
+            is_error: false,
+        };
+        feed(
+            &mut run,
+            vec![
+                AgentEvent::TurnStarted,
+                started.clone(),
+                ended(Some("alpha")),
+                returned,
+                done(),
+            ],
+        );
+        assert!(run.is_done());
+
+        // One the agent stopped is not reported (`subagent_stopped.jsonl`).
+        let (_dir, mut run) = headless(Format::Text, true);
+        let stopped = AgentEvent::SubagentEnded {
+            id: "t1".into(),
+            status: SubagentStatus::Cancelled,
+            result: None,
+        };
+        feed(
+            &mut run,
+            vec![AgentEvent::TurnStarted, started.clone(), stopped, done()],
+        );
         assert!(run.is_done());
 
         // Codex: nothing follows the end.
@@ -1042,6 +1115,66 @@ mod tests {
         assert!(!run.is_done());
         feed(&mut run, vec![ended(Some("alpha"))]);
         assert!(run.is_done());
+    }
+
+    /// Every Claude recording of one prompt, through the parser: the run is
+    /// done at the last turn end and not before.
+    #[test]
+    fn claude_recordings_end_with_their_last_turn() {
+        use crate::core::testing::{fixtures_dir, replay};
+        use crate::harness::claude::parse::ClaudeParser;
+        let dir = fixtures_dir("src/harness/claude/mod.rs");
+        let mut checked = Vec::new();
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            let fixture = std::fs::read_to_string(&path).unwrap();
+            let sent: Vec<Value> = fixture
+                .lines()
+                .filter_map(|l| l.strip_prefix(">>"))
+                .map(|l| serde_json::from_str(l.trim()).unwrap())
+                .collect();
+            let prompts = sent.iter().filter(|v| v["type"] == "user").count();
+            // Control requests a headless run never sends (`interrupt`,
+            // `stop_task`, `rewind_conversation`).
+            let other = sent
+                .iter()
+                .any(|v| v["type"] == "control_request" && v["request"]["subtype"] != "initialize");
+            if prompts != 1 || other {
+                continue;
+            }
+            let events = replay(&mut ClaudeParser::new(), &fixture);
+            let last = events
+                .iter()
+                .rposition(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+                .unwrap();
+            let (_dir, mut run) = headless(Format::Text, true);
+            for (i, ev) in events.into_iter().enumerate() {
+                run.on_event(ev);
+                let name = path.file_name().unwrap().to_string_lossy();
+                assert_eq!(
+                    run.is_done(),
+                    i >= last,
+                    "{name}: event {i}, last turn end {last}"
+                );
+            }
+            checked.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+        }
+        checked.sort();
+        for case in [
+            "subagent",
+            "subagent_blocking",
+            "subagent_nested",
+            "subagent_parallel",
+            "subagent_resumed",
+        ] {
+            assert!(
+                checked.iter().any(|c| c == case),
+                "{case} not checked: {checked:?}"
+            );
+        }
     }
 
     #[test]

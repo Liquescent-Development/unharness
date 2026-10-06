@@ -467,10 +467,15 @@ recorded ones. For anything else:
   giving exit 130: Claude ends that turn with `error_during_execution`)
   and agy 1.2.17 (`accept-edits`). Codex, pi and ACP agents run only
   against `fake-harness.py` (`tests/session_e2e.rs`). It waits for
-  subagents and, where `SubagentSupport::report_turn` is declared, for the
-  turn that reports one that ended between turns; a subagent whose end
-  never comes holds the run until `Ctrl+C`. Not persisted as a
-  conversation.
+  subagents and, where `SubagentSupport::report_turn` is declared, counts
+  one more turn end per background run of a subagent that completed or
+  failed, wherever its end falls: in every single-prompt Claude recording
+  each such end is followed by one `result` (empty ones with `num_turns:
+  0` included), a blocking one's report is its call's result instead,
+  and one the model stopped (`TaskStop`) brought no turn. A subagent's
+  subagent counts only when it ends after its parent (the only case
+  recorded). A subagent whose end never comes holds the run until
+  `Ctrl+C`. Not persisted as a conversation.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

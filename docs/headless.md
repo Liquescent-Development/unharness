@@ -13,10 +13,11 @@ start: the same harness, policy, sandbox, MCP servers and allow rules.
 The output is the same on every harness, ACP agents included. When no
 prompt is given as arguments, it is read from stdin.
 
-The run ends when the answer is complete: the turn is over, every
-subagent the agent started has ended, and so has the turn in which the
-agent reports one that ended after the turn (Claude Code takes one). While
-it waits for subagents, unharness says so on stderr.
+The run ends when the answer is complete: the turn is over, and every
+subagent the agent started has ended. Claude Code reports each
+background subagent that finishes in a turn of its own, after the turn
+it was started in; the run waits for those turns too. While it waits,
+unharness says so on stderr.
 
 ## Permissions
 
