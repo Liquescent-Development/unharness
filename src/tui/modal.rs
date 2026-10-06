@@ -1,5 +1,7 @@
 //! Modal state: list pickers and the permission/question/dialog prompts.
 
+use std::cell::Cell;
+
 use serde_json::{Value, json};
 
 use crate::core::conversations::ConversationSummary;
@@ -145,7 +147,7 @@ pub struct PermissionModal {
 pub struct QuestionModal {
     pub request_id: String,
     pub questions: Vec<Question>,
-    /// Current question page.
+    /// Current page: a question, or `questions.len()` for the review page.
     pub idx: usize,
     /// Highlighted option (or `options.len()` = the free-text "Other" row).
     pub cursor: usize,
@@ -153,6 +155,18 @@ pub struct QuestionModal {
     pub chosen: Vec<Vec<bool>>,
     pub other: Vec<String>,
     pub editing_other: bool,
+    /// Lines the preview pane is scrolled down.
+    pub preview_scroll: u16,
+    /// The furthest the preview can scroll, as last drawn.
+    pub preview_max: Cell<u16>,
+}
+
+/// What a key on the question modal leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuestionStep {
+    Stay,
+    Submit,
+    Dismiss,
 }
 
 impl QuestionModal {
@@ -170,20 +184,50 @@ impl QuestionModal {
             chosen,
             other,
             editing_other: false,
+            preview_scroll: 0,
+            preview_max: Cell::new(0),
         }
     }
 
-    pub fn current(&self) -> &Question {
-        &self.questions[self.idx]
+    /// One single-select question is answered by choosing; anything more
+    /// ends on a page that shows the answers and sends them.
+    pub fn has_review(&self) -> bool {
+        self.questions.len() > 1 || self.questions.iter().any(|q| q.multi)
+    }
+
+    pub fn page_count(&self) -> usize {
+        self.questions.len() + usize::from(self.has_review())
+    }
+
+    pub fn on_review(&self) -> bool {
+        self.idx >= self.questions.len()
+    }
+
+    /// The question on this page; none on the review page.
+    pub fn current(&self) -> Option<&Question> {
+        self.questions.get(self.idx)
     }
 
     pub fn row_count(&self) -> usize {
-        let q = self.current();
-        q.options.len() + usize::from(q.allow_other)
+        self.current()
+            .map_or(0, |q| q.options.len() + usize::from(q.allow_other))
     }
 
     pub fn is_other_row(&self) -> bool {
-        self.cursor >= self.current().options.len()
+        self.current()
+            .is_some_and(|q| self.cursor >= q.options.len())
+    }
+
+    /// Any question has an option with a preview.
+    pub fn has_previews(&self) -> bool {
+        self.questions
+            .iter()
+            .any(|q| q.options.iter().any(|o| o.preview.is_some()))
+    }
+
+    /// The highlighted option's preview.
+    pub fn preview(&self) -> Option<&str> {
+        self.current()?.options.get(self.cursor)?.preview.as_deref()
     }
 
     pub fn up(&mut self) {
@@ -194,6 +238,7 @@ impl QuestionModal {
             } else {
                 self.cursor - 1
             };
+            self.preview_scroll = 0;
         }
     }
 
@@ -201,25 +246,82 @@ impl QuestionModal {
         let n = self.row_count();
         if n > 0 {
             self.cursor = (self.cursor + 1) % n;
+            self.preview_scroll = 0;
         }
     }
 
-    /// Space / Enter on an option row. Returns true when the page is complete.
-    pub fn choose(&mut self) -> bool {
+    pub fn scroll_preview(&mut self, lines: i32) {
+        let max = i32::from(self.preview_max.get());
+        self.preview_scroll = (i32::from(self.preview_scroll) + lines).clamp(0, max) as u16;
+    }
+
+    /// Space: pick a single-select option, toggle a multi-select one, or
+    /// start typing on the "Other" row.
+    pub fn choose(&mut self) {
+        let Some(multi) = self.current().map(|q| q.multi) else {
+            return;
+        };
         if self.is_other_row() {
             self.editing_other = true;
-            return false;
+            return;
         }
-        let multi = self.current().multi;
         let row = &mut self.chosen[self.idx];
         if multi {
             row[self.cursor] = !row[self.cursor];
-            false
         } else {
             for (i, c) in row.iter_mut().enumerate() {
                 *c = i == self.cursor;
             }
-            true
+            self.other[self.idx].clear();
+        }
+    }
+
+    /// Enter: answer this page and move on; on the review page, send.
+    pub fn enter(&mut self) -> QuestionStep {
+        let Some(multi) = self.current().map(|q| q.multi) else {
+            return self.submit_or_show_missing();
+        };
+        if self.is_other_row() {
+            self.editing_other = true;
+            return QuestionStep::Stay;
+        }
+        if !multi || !self.has_answer(self.idx) {
+            self.choose();
+        }
+        self.advance()
+    }
+
+    /// Enter while typing on the "Other" row: free text answers the
+    /// question, and replaces a single-select choice.
+    pub fn finish_other(&mut self) -> QuestionStep {
+        self.editing_other = false;
+        if self.other[self.idx].trim().is_empty() {
+            return QuestionStep::Stay;
+        }
+        if self.current().is_some_and(|q| !q.multi) {
+            self.chosen[self.idx].fill(false);
+        }
+        self.advance()
+    }
+
+    fn advance(&mut self) -> QuestionStep {
+        if self.idx + 1 < self.page_count() {
+            self.go_to(self.idx + 1);
+            QuestionStep::Stay
+        } else {
+            self.submit_or_show_missing()
+        }
+    }
+
+    /// Send when every question has an answer, else go to the first one
+    /// without.
+    fn submit_or_show_missing(&mut self) -> QuestionStep {
+        match self.unanswered().first() {
+            None => QuestionStep::Submit,
+            Some(&q) => {
+                self.go_to(q);
+                QuestionStep::Stay
+            }
         }
     }
 
@@ -227,10 +329,36 @@ impl QuestionModal {
         self.chosen[q].iter().any(|c| *c) || !self.other[q].trim().is_empty()
     }
 
+    pub fn unanswered(&self) -> Vec<usize> {
+        (0..self.questions.len())
+            .filter(|q| !self.has_answer(*q))
+            .collect()
+    }
+
+    /// Open a page with the cursor on its answer.
+    pub fn go_to(&mut self, page: usize) {
+        if page >= self.page_count() {
+            return;
+        }
+        self.idx = page;
+        self.editing_other = false;
+        self.preview_scroll = 0;
+        self.cursor = match self.questions.get(page) {
+            Some(q) => self.chosen[page]
+                .iter()
+                .position(|c| *c)
+                .or_else(|| {
+                    (q.allow_other && !self.other[page].trim().is_empty())
+                        .then_some(q.options.len())
+                })
+                .unwrap_or(0),
+            None => 0,
+        };
+    }
+
     pub fn next_page(&mut self) -> bool {
-        if self.idx + 1 < self.questions.len() {
-            self.idx += 1;
-            self.cursor = 0;
+        if self.idx + 1 < self.page_count() {
+            self.go_to(self.idx + 1);
             true
         } else {
             false
@@ -239,9 +367,28 @@ impl QuestionModal {
 
     pub fn prev_page(&mut self) {
         if self.idx > 0 {
-            self.idx -= 1;
-            self.cursor = 0;
+            self.go_to(self.idx - 1);
         }
+    }
+
+    /// A question's answer as the review page shows it.
+    pub fn answer_text(&self, q: usize) -> Option<String> {
+        let other = self.other[q].trim();
+        if !other.is_empty() {
+            return Some(other.to_string());
+        }
+        let labels = self.chosen_labels(q);
+        (!labels.is_empty()).then(|| labels.join(", "))
+    }
+
+    fn chosen_labels(&self, q: usize) -> Vec<String> {
+        self.questions[q]
+            .options
+            .iter()
+            .zip(&self.chosen[q])
+            .filter(|(_, c)| **c)
+            .map(|(o, _)| o.label.clone())
+            .collect()
     }
 
     /// `{question_id: label | [labels]}`; free text wins over options.
@@ -249,13 +396,7 @@ impl QuestionModal {
         let mut map = serde_json::Map::new();
         for (qi, q) in self.questions.iter().enumerate() {
             let other = self.other[qi].trim();
-            let labels: Vec<String> = q
-                .options
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| self.chosen[qi][*i])
-                .map(|(_, o)| o.label.clone())
-                .collect();
+            let labels = self.chosen_labels(qi);
             let v = if !other.is_empty() {
                 Value::String(other.to_string())
             } else if q.multi {
@@ -387,7 +528,10 @@ impl Modal {
     pub fn waiting_on(&self) -> Option<String> {
         match self {
             Modal::Permission(m) => Some(super::herdr::request_message(&m.request.kind)),
-            Modal::Question(m) => m.questions.get(m.idx).map(super::herdr::question_label),
+            Modal::Question(m) => Some(
+                m.current()
+                    .map_or_else(|| "submit answers".into(), super::herdr::question_label),
+            ),
             Modal::Confirm(m) => Some(m.title.clone()),
             Modal::Select(m) => Some(m.title.clone()),
             Modal::Input(m) => Some(m.title.clone()),
@@ -455,26 +599,120 @@ mod tests {
     fn question_single_multi_and_other() {
         let mut m = QuestionModal::new("r".into(), vec![q("one", false), q("two", true)]);
         assert_eq!(m.row_count(), 3);
+        assert_eq!(m.page_count(), 3); // two questions and the review page
         m.down();
-        assert!(m.choose()); // single-select completes the page
+        // Enter on a single-select answers it and moves to the next question.
+        assert_eq!(m.enter(), QuestionStep::Stay);
         assert!(m.has_answer(0));
-        assert!(m.next_page());
+        assert_eq!(m.idx, 1);
+        assert_eq!(m.cursor, 0);
         m.choose();
         m.down();
-        m.choose(); // multi: toggles, page not auto-complete
+        m.choose(); // multi: Space toggles and stays
+        assert_eq!(m.idx, 1);
         m.down();
         assert!(m.is_other_row());
-        m.choose();
+        assert_eq!(m.enter(), QuestionStep::Stay);
         assert!(m.editing_other);
         m.other[1] = "custom".into();
-        assert!(!m.next_page());
+        // Enter in the text field answers and moves to the review page.
+        assert_eq!(m.finish_other(), QuestionStep::Stay);
+        assert!(m.on_review() && m.current().is_none());
+        assert_eq!(m.answer_text(1).as_deref(), Some("custom"));
         let a = m.answers();
         assert_eq!(a["one"], "B");
         assert_eq!(a["two"], "custom"); // free text wins
         m.other[1].clear();
         assert_eq!(m.answers()["two"], json!(["A", "B"]));
+        assert_eq!(m.answer_text(1).as_deref(), Some("A, B"));
+        // Only the review page sends.
+        assert_eq!(m.enter(), QuestionStep::Submit);
+        assert!(!m.next_page());
+    }
+
+    #[test]
+    fn question_pages_move_freely_and_land_on_the_answer() {
+        let qs = vec![q("one", false), q("two", false), q("three", false)];
+        let mut m = QuestionModal::new("r".into(), qs);
+        // Skip ahead without answering.
+        assert!(m.next_page());
+        m.down();
+        assert_eq!(m.enter(), QuestionStep::Stay); // "two" = B, now on "three"
+        assert_eq!(m.idx, 2);
+        m.prev_page();
+        assert_eq!((m.idx, m.cursor), (1, 1)); // back on the chosen option
+        m.prev_page();
+        assert_eq!((m.idx, m.cursor), (0, 0));
         m.prev_page();
         assert_eq!(m.idx, 0);
+        // The review page names what is missing and Enter goes there first.
+        m.go_to(3);
+        assert!(m.on_review());
+        assert_eq!(m.unanswered(), vec![0, 2]);
+        assert_eq!(m.enter(), QuestionStep::Stay);
+        assert_eq!(m.idx, 0);
+        m.enter(); // "one" = A; Enter moves on page by page
+        assert_eq!((m.idx, m.cursor), (1, 1));
+        m.enter();
+        m.enter();
+        assert!(m.on_review());
+        assert!(m.unanswered().is_empty());
+        assert_eq!(m.enter(), QuestionStep::Submit);
+        assert_eq!(m.answers(), json!({"one": "A", "two": "B", "three": "A"}));
+        // Free text replaces a single-select choice, and the cursor lands on it.
+        m.go_to(1);
+        m.cursor = 2;
+        m.choose();
+        m.other[1] = "mine".into();
+        m.finish_other();
+        assert_eq!(m.answers()["two"], "mine");
+        m.go_to(1);
+        assert_eq!(m.cursor, 2);
+        // Picking an option again drops the text.
+        m.cursor = 0;
+        m.choose();
+        assert_eq!(m.answers()["two"], "A");
+    }
+
+    #[test]
+    fn one_single_select_question_sends_on_enter() {
+        let mut m = QuestionModal::new("r".into(), vec![q("one", false)]);
+        assert!(!m.has_review());
+        assert_eq!(m.page_count(), 1);
+        m.down();
+        assert_eq!(m.enter(), QuestionStep::Submit);
+        assert_eq!(m.answers(), json!({"one": "B"}));
+        // A lone multi-select one still ends on the review page.
+        let mut m = QuestionModal::new("r".into(), vec![q("many", true)]);
+        assert!(m.has_review());
+        assert_eq!(m.enter(), QuestionStep::Stay);
+        assert!(m.on_review());
+        assert_eq!(m.answers(), json!({"many": ["A"]}));
+        // Enter on a multi-select page with something chosen does not toggle.
+        m.go_to(0);
+        assert_eq!(m.enter(), QuestionStep::Stay);
+        assert_eq!(m.answers(), json!({"many": ["A"]}));
+    }
+
+    #[test]
+    fn question_preview_follows_the_cursor() {
+        let mut one = q("one", false);
+        one.options[0].preview = Some("# Draft".into());
+        let mut m = QuestionModal::new("r".into(), vec![one, q("two", false)]);
+        assert!(m.has_previews());
+        assert_eq!(m.preview(), Some("# Draft"));
+        m.preview_max.set(5);
+        m.scroll_preview(3);
+        m.scroll_preview(10);
+        assert_eq!(m.preview_scroll, 5);
+        m.scroll_preview(-2);
+        assert_eq!(m.preview_scroll, 3);
+        m.down();
+        assert_eq!((m.preview(), m.preview_scroll), (None, 0));
+        m.down();
+        assert_eq!(m.preview(), None); // the "Other" row
+        m.go_to(2);
+        assert_eq!(m.preview(), None); // the review page
     }
 
     #[test]

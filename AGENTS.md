@@ -444,6 +444,8 @@ recorded ones. For anything else:
   the labels joined with commas (pty run, 2.1.291). Codex 0.157.0's
   `ToolRequestUserInputOption` (app-server schema) has only `label` and
   `description`.
+  The modal sends only from its Submit page, and only once every question
+  has an answer; a lone single-select question is sent on `Enter`.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

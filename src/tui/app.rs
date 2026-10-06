@@ -15,7 +15,9 @@ use super::clipboard::{self, Pasted};
 use super::drop;
 use super::files;
 use super::history::PromptHistory;
-use super::modal::{AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, RewindOption};
+use super::modal::{
+    AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, QuestionStep, RewindOption,
+};
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
@@ -366,6 +368,9 @@ pub struct AppInit {
 
 /// Transcript lines scrolled per wheel notch.
 const WHEEL_LINES: u16 = 3;
+
+/// Lines a question's preview scrolls on PageUp/PageDown.
+const PREVIEW_PAGE: i32 = 5;
 
 /// Presses this close together on one cell count as a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(500);
@@ -2747,54 +2752,64 @@ impl App {
                 }
             }
             Modal::Question(m) => {
-                if m.editing_other {
+                let step = if m.editing_other {
                     match key.code {
-                        KeyCode::Enter | KeyCode::Esc => m.editing_other = false,
+                        KeyCode::Enter => m.finish_other(),
+                        KeyCode::Esc => {
+                            m.editing_other = false;
+                            QuestionStep::Stay
+                        }
                         KeyCode::Backspace => {
                             m.other[m.idx].pop();
+                            QuestionStep::Stay
                         }
-                        KeyCode::Char(c) => m.other[m.idx].push(c),
-                        _ => {}
+                        KeyCode::Char(c) => {
+                            m.other[m.idx].push(c);
+                            QuestionStep::Stay
+                        }
+                        _ => QuestionStep::Stay,
                     }
-                    None
                 } else {
                     match key.code {
+                        KeyCode::Enter => m.enter(),
+                        KeyCode::Esc => QuestionStep::Dismiss,
                         KeyCode::Up | KeyCode::Char('k') => {
                             m.up();
-                            None
+                            QuestionStep::Stay
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
                             m.down();
-                            None
+                            QuestionStep::Stay
                         }
                         KeyCode::Char(' ') => {
                             m.choose();
-                            None
+                            QuestionStep::Stay
                         }
-                        KeyCode::Left => {
+                        KeyCode::Left | KeyCode::BackTab => {
                             m.prev_page();
-                            None
+                            QuestionStep::Stay
                         }
                         KeyCode::Right | KeyCode::Tab => {
                             m.next_page();
-                            None
+                            QuestionStep::Stay
                         }
-                        KeyCode::Enter => {
-                            let page_done = m.choose() || m.has_answer(m.idx);
-                            if page_done
-                                && !m.next_page()
-                                && (0..m.questions.len()).all(|q| m.has_answer(q))
-                            {
-                                Some(Some(ModalChoice::Decision(PermissionDecision::Answer(
-                                    m.answers(),
-                                ))))
-                            } else {
-                                None
-                            }
+                        KeyCode::PageDown => {
+                            m.scroll_preview(PREVIEW_PAGE);
+                            QuestionStep::Stay
                         }
-                        KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
-                        _ => None,
+                        KeyCode::PageUp => {
+                            m.scroll_preview(-PREVIEW_PAGE);
+                            QuestionStep::Stay
+                        }
+                        _ => QuestionStep::Stay,
                     }
+                };
+                match step {
+                    QuestionStep::Stay => None,
+                    QuestionStep::Submit => Some(Some(ModalChoice::Decision(
+                        PermissionDecision::Answer(m.answers()),
+                    ))),
+                    QuestionStep::Dismiss => Some(Some(ModalChoice::Dismiss)),
                 }
             }
             Modal::Confirm(_) => match key.code {
@@ -5860,6 +5875,52 @@ pub(crate) mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn several_questions_send_only_from_the_submit_page() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        let question = |id: &str| Question {
+            id: id.into(),
+            header: id.into(),
+            text: id.into(),
+            options: vec![
+                QuestionOption::new("Yes", ""),
+                QuestionOption::new("No", ""),
+            ],
+            allow_other: true,
+            multi: false,
+        };
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "q".into(),
+            kind: PermissionKind::Question {
+                questions: vec![question("One"), question("Two")],
+            },
+            tool_call_id: None,
+        }));
+        app.handle_modal_key(key(KeyCode::Enter)); // One = Yes
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter)); // Two = No, now on Submit
+        assert!(app.take_actions().is_empty());
+        app.handle_modal_key(key(KeyCode::BackTab));
+        match &app.modal {
+            Some(Modal::Question(m)) => assert_eq!((m.idx, m.cursor), (1, 1)),
+            other => panic!("{other:?}"),
+        }
+        assert!(app.take_actions().is_empty());
+        app.handle_modal_key(key(KeyCode::Tab));
+        app.handle_modal_key(key(KeyCode::Enter));
+        match app.take_actions().pop() {
+            Some(Action::Command(SessionCommand::RespondPermission { decision, .. })) => {
+                assert_eq!(
+                    decision,
+                    PermissionDecision::Answer(serde_json::json!({"One": "Yes", "Two": "No"}))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(app.modal.is_none());
     }
 
     #[test]
