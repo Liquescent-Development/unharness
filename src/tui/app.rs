@@ -22,7 +22,7 @@ use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
 use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
+    CheckpointRecord, Conversation, ConversationStore, ShellStatus, TurnAnchorRecord, now_rfc3339,
     truncate_title,
 };
 use crate::core::guard::{self, Watch};
@@ -52,6 +52,21 @@ pub enum Action {
     Command(SessionCommand),
     /// Shut the active session down (harness switch, resume, quit).
     Shutdown,
+    /// Run a command the user typed after `!`.
+    RunShell {
+        command: String,
+    },
+    /// Kill the running `!` command.
+    StopShell,
+}
+
+/// The `!` command at work; its output goes to the last running
+/// `Block::Shell`.
+#[derive(Debug, Clone)]
+pub struct ShellRun {
+    pub started: Instant,
+    /// The user asked for it to be stopped.
+    pub stopping: bool,
 }
 
 /// A subagent that is at work.
@@ -298,6 +313,8 @@ pub struct App {
     anchor_pending: VecDeque<usize>,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
+    /// The `!` command running now.
+    pub shell: Option<ShellRun>,
     compacting: bool,
     /// What live sessions reported on top of the declared capabilities.
     live_caps: HashMap<HarnessId, CapsUpdate>,
@@ -611,6 +628,7 @@ impl App {
             restore_seq: 0,
             anchor_pending: VecDeque::new(),
             queued: VecDeque::new(),
+            shell: None,
             compacting: false,
             live_caps: HashMap::new(),
             mcp_warned: HashSet::new(),
@@ -944,9 +962,10 @@ impl App {
         "Working".to_string()
     }
 
-    /// A turn is running, or subagents are still at work after one.
+    /// A turn is running, subagents are still at work after one, or a `!`
+    /// command runs.
     pub fn is_busy(&self) -> bool {
-        self.is_generating || !self.subagents.is_empty()
+        self.is_generating || !self.subagents.is_empty() || self.shell.is_some()
     }
 
     /// What herdr is told about this session: blocked while a harness
@@ -1026,8 +1045,8 @@ impl App {
         if text.is_empty() || self.is_generating {
             return;
         }
-        if !self.require_policy() {
-            // Kept until a policy is chosen.
+        if self.shell.is_some() || !self.require_policy() {
+            // Kept until the `!` command has ended, or a policy is chosen.
             self.queued.push_back(QueuedPrompt {
                 text,
                 attachments: std::mem::take(&mut self.attachments),
@@ -1056,6 +1075,29 @@ impl App {
             self.transcript.bridge_text(from, self.bridge_max_chars)
         };
         self.last_active_index.remove(&self.active);
+        // `!` commands no agent has been told about yet (the bridge has
+        // only those one has).
+        let mut shells = Vec::new();
+        for b in self.transcript.blocks.iter_mut() {
+            if let super::transcript::Block::Shell {
+                command,
+                output,
+                dropped,
+                status,
+                sent: sent @ false,
+                ..
+            } = b
+            {
+                shells.push(super::shell::context_entry(
+                    command,
+                    output,
+                    *dropped,
+                    status,
+                    super::shell::CONTEXT_MAX_CHARS,
+                ));
+                *sent = true;
+            }
+        }
 
         let mut shown = text.clone();
         let attachments = self.take_attachments(&mut shown);
@@ -1067,12 +1109,23 @@ impl App {
         self.checkpoint_files(block);
         self.start_generation();
 
-        let outgoing = match bridge {
-            Some(ctx) => format!(
-                "[Context: earlier conversation in this unharness session, possibly with other agents]\n{ctx}\n\n[Current task for {}]:\n{text}",
+        let context: Vec<String> = bridge
+            .map(|ctx| {
+                format!(
+                    "[Context: earlier conversation in this unharness session, possibly with other agents]\n{ctx}"
+                )
+            })
+            .into_iter()
+            .chain(super::shell::context(&shells))
+            .collect();
+        let outgoing = if context.is_empty() {
+            text
+        } else {
+            format!(
+                "{}\n\n[Current task for {}]:\n{text}",
+                context.join("\n\n"),
                 self.short_name()
-            ),
-            None => text,
+            )
         };
 
         if !self.session_alive {
@@ -1112,7 +1165,7 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if !self.is_generating {
+        if !self.is_generating && self.shell.is_none() {
             self.submit_prompt(text);
             return;
         }
@@ -1124,7 +1177,7 @@ impl App {
 
     /// Send the oldest queued prompt, if idle. Returns whether one was sent.
     pub fn send_next_queued(&mut self) -> bool {
-        if self.is_generating || self.effective_policy().is_none() {
+        if self.is_generating || self.shell.is_some() || self.effective_policy().is_none() {
             return false;
         }
         let Some(q) = self.queued.pop_front() else {
@@ -1565,6 +1618,83 @@ impl App {
                 .push_back(Action::Command(SessionCommand::Interrupt));
             self.transcript.push_system("Interrupting…");
         }
+    }
+
+    // ------------------------------------------------------------- `!` commands
+
+    /// Run `command`, typed after `!`, in the session's directory under its
+    /// sandbox. Not during a turn, and one at a time.
+    pub fn run_shell(&mut self, command: &str) {
+        let typed = format!("!{command}");
+        if command.is_empty() {
+            self.transcript
+                .push_notice("nothing to run after `!` (`\\!` sends a prompt that starts with !)");
+            return;
+        }
+        if self.is_generating || self.shell.is_some() {
+            self.transcript.push_notice(if self.is_generating {
+                "a `!` command cannot run during a turn; it is back in the prompt"
+            } else {
+                "a `!` command is already running (Esc stops it); this one is back in the prompt"
+            });
+            if self.input.is_empty() {
+                self.set_input(&typed);
+            }
+            return;
+        }
+        self.transcript.shell_started(command);
+        self.shell = Some(ShellRun {
+            started: Instant::now(),
+            stopping: false,
+        });
+        self.auto_scroll = true;
+        self.actions.push_back(Action::RunShell {
+            command: command.to_string(),
+        });
+    }
+
+    /// Kill the running `!` command (Esc, Ctrl+C).
+    pub fn stop_shell(&mut self) {
+        if let Some(run) = self.shell.as_mut()
+            && !run.stopping
+        {
+            run.stopping = true;
+            self.actions.push_back(Action::StopShell);
+        }
+    }
+
+    pub fn shell_output(&mut self, line: &str) {
+        if self.shell.is_some() {
+            self.transcript.shell_output(line);
+        }
+    }
+
+    /// The `!` command ended with `code`, `None` when a signal ended it.
+    pub fn shell_exited(&mut self, code: Option<i32>) {
+        let Some(run) = self.shell.take() else {
+            return;
+        };
+        self.transcript.shell_ended(match code {
+            Some(code) => ShellStatus::Exited { code },
+            None if run.stopping => ShellStatus::Killed,
+            None => ShellStatus::Signalled,
+        });
+        self.after_shell();
+    }
+
+    /// The `!` command could not be started.
+    pub fn shell_failed(&mut self, error: String) {
+        if self.shell.take().is_none() {
+            return;
+        }
+        self.transcript.shell_ended(ShellStatus::Failed { error });
+        self.after_shell();
+    }
+
+    fn after_shell(&mut self) {
+        self.persist();
+        // Prompts sent while it ran waited for its output.
+        self.send_next_queued();
     }
 
     /// The list under the prompt: the subagents at work, then those that
@@ -2110,8 +2240,15 @@ impl App {
         if self.session_alive {
             self.shutdown_session();
         }
-        self.last_active_index
-            .insert(self.active, self.transcript.blocks.len());
+        // What this harness saw: everything but the `!` commands run since
+        // its last prompt, which it is told about when it comes back.
+        let seen = self
+            .transcript
+            .blocks
+            .iter()
+            .position(|b| matches!(b, super::transcript::Block::Shell { sent: false, .. }))
+            .unwrap_or(self.transcript.blocks.len());
+        self.last_active_index.insert(self.active, seen);
         self.sync_conversation();
         self.active = next;
         self.session_usage = self
@@ -2317,6 +2454,10 @@ impl App {
     pub fn quit(&mut self) {
         if self.session_alive {
             self.shutdown_session();
+        }
+        // The event loop kills it on the way out.
+        if self.shell.take().is_some() {
+            self.transcript.shell_ended(ShellStatus::Killed);
         }
         self.persist();
         self.should_quit = true;
@@ -2983,7 +3124,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -4352,6 +4493,7 @@ pub(crate) mod tests {
                 Block::System(_) => "system".to_string(),
                 Block::Notice(_) => "notice".to_string(),
                 Block::Error(_) => "error".to_string(),
+                Block::Shell { command, .. } => format!("shell:{command}"),
             })
             .collect()
     }

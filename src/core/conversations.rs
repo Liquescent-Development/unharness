@@ -57,6 +57,56 @@ pub enum BlockRecord {
     Error {
         text: String,
     },
+    /// A command the user ran from the prompt with `!`.
+    Shell {
+        command: String,
+        /// Its output (stdout and stderr), the tail when it was long.
+        output: String,
+        /// Lines dropped from the front of `output` to keep it short.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        dropped: usize,
+        status: ShellStatus,
+        /// It already went in front of a prompt to an agent.
+        #[serde(default)]
+        sent: bool,
+        #[serde(default)]
+        secs: Option<f32>,
+    },
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// How a `!` command ended.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ShellStatus {
+    Running,
+    Exited {
+        code: i32,
+    },
+    /// Ended by a signal it was not sent by the user.
+    Signalled,
+    /// Stopped by the user, or by unharness quitting.
+    Killed,
+    /// It could not be started.
+    Failed {
+        error: String,
+    },
+}
+
+impl ShellStatus {
+    /// "exit 0", "killed", …
+    pub fn label(&self) -> String {
+        match self {
+            ShellStatus::Running => "running".into(),
+            ShellStatus::Exited { code } => format!("exit {code}"),
+            ShellStatus::Signalled => "ended by a signal".into(),
+            ShellStatus::Killed => "stopped by the user".into(),
+            ShellStatus::Failed { error } => format!("could not start: {error}"),
+        }
+    }
 }
 
 /// A subagent's work, as kept on the tool call that spawned it.
@@ -388,6 +438,14 @@ mod tests {
             sender: "Claude".into(),
             secs: Some(1.5),
         });
+        c.blocks.push(BlockRecord::Shell {
+            command: "ls".into(),
+            output: "a\nb\n".into(),
+            dropped: 3,
+            status: ShellStatus::Exited { code: 1 },
+            sent: true,
+            secs: Some(0.5),
+        });
         c.usage.insert(
             HarnessId::CLAUDE,
             Usage {
@@ -458,6 +516,37 @@ mod tests {
         );
         std::fs::remove_file(store.index_path()).unwrap();
         assert_eq!(store.list().len(), MAX_CONVERSATIONS);
+    }
+
+    #[test]
+    fn a_shell_record_is_tagged_and_its_extras_are_optional() {
+        let r = BlockRecord::Shell {
+            command: "make".into(),
+            output: String::new(),
+            dropped: 0,
+            status: ShellStatus::Failed { error: "x".into() },
+            sent: false,
+            secs: None,
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["kind"], "shell");
+        assert_eq!(json["status"]["state"], "failed");
+        assert!(json.get("dropped").is_none());
+        let minimal = serde_json::json!({
+            "kind": "shell", "command": "ls", "output": "x\n",
+            "status": {"state": "exited", "code": 0}
+        });
+        assert_eq!(
+            serde_json::from_value::<BlockRecord>(minimal).unwrap(),
+            BlockRecord::Shell {
+                command: "ls".into(),
+                output: "x\n".into(),
+                dropped: 0,
+                status: ShellStatus::Exited { code: 0 },
+                sent: false,
+                secs: None,
+            }
+        );
     }
 
     #[test]

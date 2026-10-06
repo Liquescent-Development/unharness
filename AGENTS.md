@@ -251,6 +251,20 @@ recorded ones. For anything else:
   with a `"` in it. The list is of the session's `cwd`, not the workspace
   root, and is walked again at each `@`; never tried on a tree past the
   50,000 file cap.
+- `!command` at the prompt (`tui/shell.rs`, `Block::Shell`,
+  `BlockRecord::Shell`): `$SHELL -c` in the session's `cwd` through
+  `LineProcess::spawn_group` under `App::session_sandbox()` (stdin
+  `/dev/null`, `setsid`, the process group killed on Esc, on quit and
+  when the shell exits). No permission prompt, no rule. Refused during a
+  turn; a prompt sent while it runs is queued. Its command, output tail
+  and status go once in front of the next prompt (unsent blocks, any
+  harness); a sent one is part of the bridge, and a harness switch
+  bookmarks before the first unsent one so the harness left behind still
+  gets it. Checked live (pty, Claude Code 2.1.290, Landlock): output and
+  exit status shown, Esc stops `sleep`, the next turn answered from the
+  output, `\!` sent as `!`, a write to the home directory denied, a
+  background job reaped on quit. Not handled in `--print`, `--no-tui` or
+  an initial prompt. Unverified: macOS.
 - Clipboard images (`tui/clipboard.rs`, `Ctrl+V` and `/paste`): the reader
   logic is tested against a stand-in tool only. No Wayland or X11 display
   and no Mac were available, so the real `wl-paste --list-types` /

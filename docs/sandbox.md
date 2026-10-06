@@ -3,7 +3,9 @@
 unharness confines every harness process itself, whichever agent runs and
 whatever the agent chooses to ask about. The confinement covers the
 process and everything it starts, including shell commands and MCP
-servers.
+servers. A command you run yourself with `!` at the prompt
+([Shell commands](tui.md#shell-commands)) gets the same confinement as
+the active harness.
 
 Codex sandboxes the commands its model runs, Claude Code's sandbox is
 opt-in, and pi, Antigravity and ACP agents have none. Under `bypass`,
