@@ -50,6 +50,7 @@ Usage in=18 out=309 cache_read=39451 cache_write=5310 cost=0.0176 cumulative=fal
 Context used=- window=200000
 TurnCompleted Done
 Sub parent=toolu_01FJSFhWmNjB7mn6zNRv7jLZ TextDelta "The single word contained in /WORKSPACE/a.txt is **alpha**."
+SubagentEnded id=toolu_01FJSFhWmNjB7mn6zNRv7jLZ completed -
 SubagentEnded id=toolu_01FJSFhWmNjB7mn6zNRv7jLZ completed "The single word contained in /WORKSPACE/a.txt is **alpha**."
 TurnStarted
 Context used=23605 window=-

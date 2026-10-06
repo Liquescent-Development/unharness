@@ -4692,6 +4692,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_report_after_the_end_is_added_once() {
+        use crate::core::SubagentStatus;
+        let mut app = test_app(HarnessId::CLAUDE);
+        spawn(&mut app, "spawn", "review", Some("reviewer"));
+        app.on_event(sub("spawn", AgentEvent::TextDelta("Reviewing.".into())));
+        let ended = |app: &mut App, result: Option<&str>| {
+            app.on_event(AgentEvent::SubagentEnded {
+                id: "spawn".into(),
+                status: SubagentStatus::Completed,
+                result: result.map(str::to_string),
+            })
+        };
+        ended(&mut app, None);
+        assert!(app.subagents.is_empty());
+        let took = spawn_block(&app, "spawn").duration;
+        assert!(took.is_some());
+        ended(&mut app, Some("All good."));
+        ended(&mut app, Some("All good."));
+        let run = spawn_block(&app, "spawn");
+        assert_eq!(run.duration, took);
+        assert_eq!(
+            kinds(&run.log.blocks),
+            ["text:Reviewing.", "text:All good."]
+        );
+    }
+
+    #[test]
     fn a_subagents_transcript_is_opened_read_and_left() {
         let mut app = test_app(HarnessId::CLAUDE);
         // Nothing to open.
@@ -4925,6 +4952,43 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 1);
         assert!(app.subagents.is_empty());
         assert!(got[0].0 == done && got[0].1.ends_with("**alpha**"));
+
+        // Claude: a subagent that starts one of its own and ends first.
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent_nested.jsonl",
+            |l| p.feed(l),
+        );
+        assert!(app.subagents.is_empty() && !app.is_generating);
+        let runs = app.transcript.agents();
+        assert_eq!(runs.len(), 2);
+        assert_eq!((runs[0].1.status, runs[0].1.report()), (done, "waiting"));
+        // The inner one is in the outer one's transcript.
+        assert_eq!(runs[1].2, 1);
+        assert_eq!(runs[1].1.status, done);
+        assert!(runs[1].1.report().contains("a.txt"));
+
+        // Claude: with no `task_notification` at all, a task's end still
+        // ends its row (#58).
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut p = ClaudeParser::new();
+        replay_fixture(
+            &mut app,
+            "src/harness/claude/fixtures/subagent.jsonl",
+            |l| {
+                if l.contains(r#""subtype":"task_notification""#) {
+                    Vec::new()
+                } else {
+                    p.feed(l)
+                }
+            },
+        );
+        assert!(app.subagents.is_empty());
+        let got = reports(&app);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, done);
 
         // Codex: the sub-agent outlives two turns, and nothing follows its
         // end on the main thread, so its report is only here.

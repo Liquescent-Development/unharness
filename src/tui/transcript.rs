@@ -50,7 +50,8 @@ impl AgentRun {
     }
 
     fn end(&mut self, status: SubagentStatus) {
-        let elapsed = self.started.elapsed();
+        // Ended already, and now its report has come: it took no longer.
+        let elapsed = self.duration.unwrap_or_else(|| self.started.elapsed());
         self.status = Some(status);
         self.duration = Some(elapsed);
         self.log.finish_turn(elapsed);
