@@ -33,6 +33,7 @@ Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallStarted id=toolu_01Wa52PEMF5zN
 SubagentProgress id=toolu_0166sF8rxDHi8Y2LSdkGyyyi "Reading a.txt"
 RateLimit status=allowed five_hour=37% seven_day=28%
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallResult id=toolu_01Wa52PEMF5zN9rjYbBUQyuU error=false "1\talpha\\n2\t"
+SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed -
 SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed "NOTE: this agent stopped at its 1-turn limit before finis..."
 TextDelta "The"
 TextDelta " fl"
@@ -93,6 +94,7 @@ TextDelta " task."
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallStarted id=toolu_01Hq3zK2E9DVTypFAoZErAH5 name=Read input={"file_path":"/WORKSPACE/a.txt"}
 SubagentProgress id=toolu_0166sF8rxDHi8Y2LSdkGyyyi "Reading a.txt"
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallResult id=toolu_01Hq3zK2E9DVTypFAoZErAH5 error=false "1\talpha\\n2\t"
+SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed -
 SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed "NOTE: this agent stopped at its 1-turn limit before finis..."
 Context used=24482 window=-
 ToolCallDelta id=toolu_01MgT8eiuEnhHNkFATD5tuwf name=SendMessage "{\"to\": "
@@ -119,6 +121,7 @@ TextDelta " report"
 TextDelta " its"
 TextDelta " findings."
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi TextDelta "**alpha**"
+SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed -
 SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed "**alpha**"
 Context used=25153 window=-
 TextDelta "The"

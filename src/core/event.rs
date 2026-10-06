@@ -64,7 +64,8 @@ pub enum AgentEvent {
     SubagentEnded {
         id: String,
         status: SubagentStatus,
-        /// Its final report, when the harness hands one over.
+        /// Its final report, when the harness hands one over. One that
+        /// comes after the end is sent in a second `SubagentEnded`.
         result: Option<String>,
     },
     Context(ContextUsage),

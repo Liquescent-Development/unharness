@@ -66,6 +66,7 @@ Sub parent=toolu_011y6Dip65t8XBj1dmGwC4b2 ToolCallStarted id=toolu_01KAKQ2PW3vvS
 SubagentProgress id=toolu_011y6Dip65t8XBj1dmGwC4b2 "Reading a.txt"
 Sub parent=toolu_011y6Dip65t8XBj1dmGwC4b2 ToolCallResult id=toolu_01KAKQ2PW3vvS3Bq8xteJk4q error=false "1\talpha\\n2\t"
 Sub parent=toolu_011y6Dip65t8XBj1dmGwC4b2 TextDelta "The single word contained in the file is: **alpha**"
+SubagentEnded id=toolu_011y6Dip65t8XBj1dmGwC4b2 completed -
 SubagentEnded id=toolu_011y6Dip65t8XBj1dmGwC4b2 completed "The single word contained in the file is: **alpha**"
 TurnStarted
 Context used=23735 window=-

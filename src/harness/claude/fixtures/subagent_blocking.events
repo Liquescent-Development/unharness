@@ -24,6 +24,7 @@ Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L ToolCallStarted id=toolu_012WrkCw9UgHd
 Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L ToolCallResult id=toolu_012WrkCw9UgHdS1ESGW7DcBc error=false "1\talpha\\n2\t"
 RateLimit status=allowed five_hour=37% seven_day=28%
 Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L TextDelta "alpha"
+SubagentEnded id=toolu_015kPfBpiyWzySgur2GqQe3L completed -
 SubagentEnded id=toolu_015kPfBpiyWzySgur2GqQe3L completed "alpha"
 ToolCallResult id=toolu_015kPfBpiyWzySgur2GqQe3L error=false "[Subagent hand-back] The text below is the final report o..."
 Context used=23070 window=-

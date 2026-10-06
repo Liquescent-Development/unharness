@@ -60,6 +60,7 @@ Sub parent=toolu_01KCWj1751WUKmd8pafeHeyE ToolCallStarted id=toolu_01WEw55YQavab
 SubagentProgress id=toolu_01KCWj1751WUKmd8pafeHeyE "Reading b.txt"
 Sub parent=toolu_01KCWj1751WUKmd8pafeHeyE ToolCallResult id=toolu_01WEw55YQavaboULDKxVrHTt error=false "1\tbravo\\n2\t"
 Sub parent=toolu_01QY9Vc91ArRcFox5LhXUL6q TextDelta "The single word in the file is **alpha**."
+SubagentEnded id=toolu_01QY9Vc91ArRcFox5LhXUL6q completed -
 SubagentEnded id=toolu_01QY9Vc91ArRcFox5LhXUL6q completed "The single word in the file is **alpha**."
 Sub parent=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 ToolCallStarted id=toolu_01RyvTVfkCUsLrmjeRjZuGpF name=Read input={"file_path":"/WORKSPACE/c.txt"}
 SubagentProgress id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 "Reading c.txt"
@@ -83,11 +84,13 @@ TextDelta " the"
 TextDelta " single"
 Sub parent=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 TextDelta "The single word contained in c.txt is: **charlie**"
 TextDelta " word"
+SubagentEnded id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 completed -
 SubagentEnded id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 completed "The single word contained in c.txt is: **charlie**"
 TextDelta " they find"
 TextDelta "."
 Sub parent=toolu_01KCWj1751WUKmd8pafeHeyE TextDelta "The file b.txt contains the single word: **bravo**"
 TextDelta " I"
+SubagentEnded id=toolu_01KCWj1751WUKmd8pafeHeyE completed -
 SubagentEnded id=toolu_01KCWj1751WUKmd8pafeHeyE completed "The file b.txt contains the single word: **bravo**"
 TextDelta "'ll notify you with"
 TextDelta " the three"

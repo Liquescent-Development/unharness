@@ -94,6 +94,9 @@ pub struct ClaudeParser {
     agent_tasks: HashMap<String, String>,
     /// Subagent tasks that started and have not reported an end.
     running_agents: HashSet<String>,
+    /// Subagent tasks that ended without their report, which the
+    /// `task_notification` normally brings right after.
+    unreported_agents: HashSet<String>,
 }
 
 impl ClaudeParser {
@@ -263,6 +266,7 @@ impl ClaudeParser {
                     .entry(task.clone())
                     .or_insert_with(|| str_at(val, "tool_use_id").to_string())
                     .clone();
+                self.unreported_agents.remove(&task);
                 self.running_agents.insert(task);
                 out.push(AgentEvent::SubagentStarted {
                     id,
@@ -281,24 +285,51 @@ impl ClaudeParser {
                     });
                 }
             }
-            // The end of a task. `task_updated` says so first, without the
-            // report; `background_tasks_changed` lists what is left.
-            "task_notification" => {
+            // The end of a task: `task_updated` says so first, without the
+            // report, and `task_notification` follows with it. Claude sends
+            // the notification once per task id until the task starts
+            // again, the update on every change of status, so either one
+            // ends it; a notification after the update only hands over
+            // the report.
+            "task_updated" => {
                 let task = str_at(val, "task_id");
+                let status = match val.pointer("/patch/status").and_then(Value::as_str) {
+                    Some("completed") => SubagentStatus::Completed,
+                    Some("failed") => SubagentStatus::Failed,
+                    Some("killed" | "stopped") => SubagentStatus::Cancelled,
+                    // Not an end, or not one seen yet.
+                    _ => return,
+                };
                 if self.running_agents.remove(task)
                     && let Some(id) = self.agent_tasks.get(task)
                 {
-                    let status = match str_at(val, "status") {
-                        "completed" => SubagentStatus::Completed,
-                        "stopped" | "killed" => SubagentStatus::Cancelled,
-                        _ => SubagentStatus::Failed,
-                    };
+                    self.unreported_agents.insert(task.to_string());
                     out.push(AgentEvent::SubagentEnded {
                         id: id.clone(),
                         status,
-                        // A stopped task's summary is only its description.
-                        result: opt_str(val, "summary")
-                            .filter(|s| status != SubagentStatus::Cancelled && !s.is_empty()),
+                        result: None,
+                    });
+                }
+            }
+            "task_notification" => {
+                let task = str_at(val, "task_id");
+                let running = self.running_agents.remove(task);
+                let unreported = self.unreported_agents.remove(task);
+                let status = match str_at(val, "status") {
+                    "completed" => SubagentStatus::Completed,
+                    "stopped" | "killed" => SubagentStatus::Cancelled,
+                    _ => SubagentStatus::Failed,
+                };
+                // A stopped task's summary is only its description.
+                let result = opt_str(val, "summary")
+                    .filter(|s| status != SubagentStatus::Cancelled && !s.is_empty());
+                if (running || (unreported && result.is_some()))
+                    && let Some(id) = self.agent_tasks.get(task)
+                {
+                    out.push(AgentEvent::SubagentEnded {
+                        id: id.clone(),
+                        status,
+                        result,
                     });
                 }
             }
@@ -803,6 +834,75 @@ mod tests {
     #[test]
     fn fixture_subagent_interrupted() {
         fixture("subagent_interrupted");
+    }
+
+    #[test]
+    fn fixture_subagent_nested() {
+        fixture("subagent_nested");
+    }
+
+    #[test]
+    fn a_subagent_ends_without_its_notification() {
+        // Claude sends one `task_notification` per task id; `task_updated`
+        // still says when a task ends.
+        let mut p = ClaudeParser::new();
+        p.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"t1","description":"Review","subagent_type":"reviewer","task_type":"local_agent"}"#,
+        );
+        let evs = p.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"a1","patch":{"status":"completed","end_time":1}}"#,
+        );
+        assert_eq!(
+            evs,
+            vec![AgentEvent::SubagentEnded {
+                id: "t1".into(),
+                status: SubagentStatus::Completed,
+                result: None,
+            }]
+        );
+        assert_eq!(p.task_of("t1"), None);
+        // A notification that comes after all hands over the report.
+        let evs = p.feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"t1","status":"completed","summary":"Looks good."}"#,
+        );
+        assert_eq!(
+            evs,
+            vec![AgentEvent::SubagentEnded {
+                id: "t1".into(),
+                status: SubagentStatus::Completed,
+                result: Some("Looks good.".into()),
+            }]
+        );
+        // And only once.
+        assert!(p.feed(
+            r#"{"type":"system","subtype":"task_notification","task_id":"a1","tool_use_id":"t1","status":"completed","summary":"Looks good."}"#,
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn a_task_update_that_is_not_an_end_ends_nothing() {
+        let mut p = ClaudeParser::new();
+        p.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"a1","tool_use_id":"t1","description":"Review","task_type":"local_agent"}"#,
+        );
+        assert!(p.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"a1","patch":{"is_backgrounded":true}}"#,
+        )
+        .is_empty());
+        assert!(p.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"a1","patch":{"status":"running"}}"#,
+        )
+        .is_empty());
+        assert_eq!(p.task_of("t1"), Some("a1"));
+        // Nor does a shell task's end.
+        p.feed(
+            r#"{"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"t2","description":"sleep","task_type":"local_bash"}"#,
+        );
+        assert!(p.feed(
+            r#"{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"completed"}}"#,
+        )
+        .is_empty());
     }
 
     #[test]
