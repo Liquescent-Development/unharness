@@ -13,6 +13,7 @@ pub mod markdown;
 pub mod modal;
 pub mod prompt;
 pub mod selection;
+pub mod shell;
 pub mod transcript;
 pub mod ui;
 
@@ -40,6 +41,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
 use crate::core::Rules;
+use crate::core::process::{LineProcess, RawLine};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
 use crate::core::{
@@ -194,13 +196,15 @@ async fn event_loop(
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
     let mut session: Option<SessionHandle> = None;
+    // The `!` command at work.
+    let mut shell: Option<LineProcess> = None;
     let mut needs_redraw = true;
     // File lists for `@` completion, walked off this task.
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
-        run_actions(app, &mut session).await;
+        run_actions(app, &mut session, &mut shell).await;
     }
 
     while !app.should_quit {
@@ -240,6 +244,15 @@ async fn event_loop(
                         session = None;
                     }
                 }
+                needs_redraw = true;
+            }
+            line = async {
+                match shell.as_mut() {
+                    Some(p) => p.lines.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                take_shell_lines(app, &mut shell, line);
                 needs_redraw = true;
             }
             Some(Ok(event)) = input.next() => {
@@ -296,13 +309,54 @@ async fn event_loop(
             needs_redraw = true;
         }
 
-        run_actions(app, &mut session).await;
+        run_actions(app, &mut session, &mut shell).await;
     }
 
     if let Some(s) = session.take() {
         let _ = s.send(SessionCommand::Shutdown).await;
     }
+    if let Some(mut p) = shell.take() {
+        // Killed, and reaped before the runtime goes.
+        p.kill().await;
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(line) = p.lines.recv().await {
+                if matches!(line, RawLine::Exited(_)) {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
     Ok(())
+}
+
+/// Lines of a `!` command's output taken in before the screen is drawn.
+const SHELL_BURST: usize = 4096;
+
+/// Hand the `!` command's `first` line to the app, and whatever else it
+/// has already printed: a command that prints fast is drawn once per burst.
+fn take_shell_lines(app: &mut App, shell: &mut Option<LineProcess>, first: Option<RawLine>) {
+    let mut next = first;
+    for _ in 0..SHELL_BURST {
+        match next {
+            Some(RawLine::Stdout(l) | RawLine::Stderr(l)) => app.shell_output(&l),
+            Some(RawLine::Exited(code)) => {
+                app.shell_exited(code);
+                *shell = None;
+                return;
+            }
+            // Its reader is gone without saying how it ended.
+            None => {
+                app.shell_exited(None);
+                *shell = None;
+                return;
+            }
+        }
+        match shell.as_mut().map(|p| p.lines.try_recv()) {
+            Some(Ok(l)) => next = Some(l),
+            _ => return,
+        }
+    }
 }
 
 fn handle_event(app: &mut App, event: Event) {
@@ -415,6 +469,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('c')) => {
             if app.is_generating {
                 app.interrupt();
+            } else if app.shell.is_some() {
+                app.stop_shell();
             } else {
                 app.quit();
             }
@@ -472,6 +528,8 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
                 app.close_suggestions();
             } else if app.is_generating {
                 app.interrupt();
+            } else if app.shell.is_some() {
+                app.stop_shell();
             } else if !app.input.is_empty() {
                 app.take_input();
             }
@@ -495,11 +553,13 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             app.history.push(&text);
             if text.starts_with('/') {
                 app.handle_slash_command(&text);
-            } else if alt {
-                app.steer(text);
-            } else {
+                return;
+            }
+            match shell::classify(&text) {
+                shell::Typed::Shell(command) => app.run_shell(command),
+                shell::Typed::Prompt(text) if alt => app.steer(text.to_string()),
                 // Sent now when idle, after the running turn otherwise.
-                app.queue_prompt(text);
+                shell::Typed::Prompt(text) => app.queue_prompt(text.to_string()),
             }
         }
         (false, KeyCode::Char(c)) => app.insert_char(c),
@@ -511,9 +571,29 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     }
 }
 
-async fn run_actions(app: &mut App, session: &mut Option<SessionHandle>) {
+async fn run_actions(
+    app: &mut App,
+    session: &mut Option<SessionHandle>,
+    shell: &mut Option<LineProcess>,
+) {
     for action in app.take_actions() {
         match action {
+            Action::RunShell { command } => {
+                // The sandbox the active harness's next process gets: a
+                // command typed here is confined no less than the agent.
+                let started = app
+                    .session_sandbox()
+                    .and_then(|sandbox| self::shell::spawn(&command, &app.cwd, &sandbox));
+                match started {
+                    Ok(p) => *shell = Some(p),
+                    Err(e) => app.shell_failed(format!("{e:#}")),
+                }
+            }
+            Action::StopShell => {
+                if let Some(p) = shell.as_mut() {
+                    p.kill().await;
+                }
+            }
             Action::StartSession { resume } => {
                 if session.is_some() {
                     continue;
@@ -991,6 +1071,253 @@ mod tests {
         assert!(app.viewing.is_none() && app.take_actions().is_empty());
         assert_eq!(app.subagents.len(), 2);
         assert_eq!(app.input, "draft");
+    }
+
+    /// Run the actions the app queued, and the `!` command among them to
+    /// its end, as the event loop would.
+    async fn run_to_end(app: &mut App) {
+        let mut session = None;
+        let mut shell = None;
+        run_actions(app, &mut session, &mut shell).await;
+        while shell.is_some() {
+            let line = shell.as_mut().unwrap().lines.recv().await;
+            take_shell_lines(app, &mut shell, line);
+            run_actions(app, &mut session, &mut shell).await;
+        }
+    }
+
+    fn sent_turns(app: &mut App) -> Vec<String> {
+        app.take_actions()
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::SendTurn { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn shell_block(app: &App) -> (String, crate::core::conversations::ShellStatus) {
+        app.transcript
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|b| match b {
+                transcript::Block::Shell { output, status, .. } => {
+                    Some((output.clone(), status.clone()))
+                }
+                _ => None,
+            })
+            .expect("a shell block")
+    }
+
+    #[tokio::test]
+    async fn a_bang_runs_in_the_workspace_and_its_output_goes_with_the_next_prompt() {
+        use crate::core::conversations::ShellStatus;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        std::fs::write(dir.join("marker.txt"), "").unwrap();
+        let mut app =
+            crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
+        type_text(&mut app, "! echo hi; test -f marker.txt && echo here");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.shell.is_some() && app.is_busy() && !app.is_generating);
+        run_to_end(&mut app).await;
+        assert!(app.shell.is_none());
+        assert_eq!(
+            shell_block(&app),
+            ("hi\nhere\n".into(), ShellStatus::Exited { code: 0 })
+        );
+        // Nothing went to the agent, no session was started for it.
+        assert!(!app.session_alive);
+
+        type_text(&mut app, "what did it print?");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        let sent = sent_turns(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("[Context: shell commands the user ran"));
+        assert!(
+            sent[0].contains(
+                "$ echo hi; test -f marker.txt && echo here\nhi\nhere\n[exit 0]\n\n[Current task for Claude]:\nwhat did it print?"
+            ),
+            "{}",
+            sent[0]
+        );
+        // The transcript shows the prompt as typed.
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, transcript::Block::User { text } if text == "what did it print?")
+        ));
+
+        // Once: the next prompt goes alone.
+        app.session_alive = true;
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        type_text(&mut app, "and now?");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(sent_turns(&mut app), vec!["and now?".to_string()]);
+
+        // Saved with the conversation and back on resume, already sent.
+        let id = app.conversation.id.clone();
+        app.persist();
+        let back = crate::tui::app::tests::test_app_in(dir, HarnessId::CLAUDE, Some(id), false);
+        assert_eq!(
+            shell_block(&back),
+            ("hi\nhere\n".into(), ShellStatus::Exited { code: 0 })
+        );
+        assert!(
+            back.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, transcript::Block::Shell { sent: true, .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn esc_stops_a_bang_and_a_prompt_meanwhile_waits_for_it() {
+        use crate::core::conversations::ShellStatus;
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "!echo started; sleep 30");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        let mut session = None;
+        let mut shell = None;
+        run_actions(&mut app, &mut session, &mut shell).await;
+        let line = shell.as_mut().unwrap().lines.recv().await;
+        take_shell_lines(&mut app, &mut shell, line);
+        assert_eq!(shell_block(&app).0, "started\n");
+
+        // A prompt is held for the output; another `!` is refused and kept.
+        type_text(&mut app, "explain");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.queued.len(), 1);
+        type_text(&mut app, "!ls");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.input, "!ls");
+        app.take_input();
+        assert!(sent_turns(&mut app).is_empty());
+
+        handle_key(&mut app, NONE, KeyCode::Esc);
+        assert!(!app.should_quit);
+        let started = std::time::Instant::now();
+        while shell.is_some() {
+            run_actions(&mut app, &mut session, &mut shell).await;
+            let line = shell.as_mut().unwrap().lines.recv().await;
+            take_shell_lines(&mut app, &mut shell, line);
+        }
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(shell_block(&app).1, ShellStatus::Killed);
+        // The held prompt goes now, with what the command printed.
+        let sent = sent_turns(&mut app);
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].contains("$ echo started; sleep 30\nstarted\n[stopped by the user]"));
+        assert!(sent[0].ends_with("explain"));
+    }
+
+    #[tokio::test]
+    async fn a_bang_is_confined_by_the_sessions_sandbox() {
+        use crate::core::conversations::ShellStatus;
+        use crate::core::sandbox::{SandboxLevel, SandboxSetup};
+        let setup = SandboxSetup::detect(Some(SandboxLevel::ReadOnly));
+        if let Err(why) = &setup.backend {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        // Not under the temp directory, which the sandbox leaves writable.
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let tmp = tempfile::tempdir_in(&target).unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        let mut app =
+            crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
+        app.sandbox = setup;
+        type_text(&mut app, "!echo x > made.txt");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        run_to_end(&mut app).await;
+        assert!(matches!(shell_block(&app).1, ShellStatus::Exited { code } if code != 0));
+        assert!(!dir.join("made.txt").exists());
+
+        // The same command at the level that lets the agent write there.
+        app.sandbox = SandboxSetup::detect(Some(SandboxLevel::WorkspaceWrite));
+        type_text(&mut app, "!echo x > made.txt");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        run_to_end(&mut app).await;
+        assert_eq!(shell_block(&app).1, ShellStatus::Exited { code: 0 });
+        assert!(dir.join("made.txt").exists());
+    }
+
+    #[test]
+    fn a_bang_waits_for_the_turn_and_an_escaped_one_is_a_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "\\!important");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(sent_turns(&mut app), vec!["!important".to_string()]);
+        assert!(app.is_generating);
+
+        // During a turn a `!` neither runs nor is queued: it is handed back.
+        type_text(&mut app, "!make");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.shell.is_none() && app.queued.is_empty());
+        assert_eq!(app.input, "!make");
+        assert!(app.take_actions().is_empty());
+        // Recalled like any prompt.
+        app.take_input();
+        handle_key(&mut app, NONE, KeyCode::Up);
+        assert_eq!(app.input, "!make");
+        app.take_input();
+
+        // A bare `!` runs nothing.
+        finish_turn(&mut app);
+        type_text(&mut app, "!  ");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert!(app.shell.is_none() && app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn a_bang_left_unsent_reaches_every_harness_once() {
+        use crate::core::conversations::ShellStatus;
+        let mut app = test_app(HarnessId::CLAUDE);
+        type_text(&mut app, "hello");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(crate::core::AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        finish_turn(&mut app);
+
+        // Run on Claude, then a switch before any prompt.
+        app.run_shell("git status");
+        app.take_actions();
+        app.shell_output("clean");
+        app.shell_exited(Some(0));
+        assert_eq!(shell_block(&app).1, ShellStatus::Exited { code: 0 });
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        app.session_alive = false;
+
+        // Codex has it from the bridge, and only once.
+        type_text(&mut app, "on codex");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        let sent = sent_turns(&mut app);
+        assert_eq!(sent[0].matches("$ git status").count(), 1, "{}", sent[0]);
+        assert!(sent[0].contains("[Context: shell commands the user ran from the unharness prompt, with their output]\n$ git status\nclean\n[exit 0]"));
+        app.session_alive = true;
+        app.on_event(crate::core::AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        finish_turn(&mut app);
+
+        // Claude never saw it: it is in the bridge back.
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.session_alive = false;
+        type_text(&mut app, "back");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        let sent = sent_turns(&mut app);
+        assert_eq!(sent[0].matches("$ git status").count(), 1, "{}", sent[0]);
+        assert!(sent[0].contains("User ran a shell command:\n$ git status\nclean\n[exit 0]"));
+        assert!(sent[0].contains("User: on codex"));
     }
 
     #[test]

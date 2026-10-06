@@ -22,6 +22,7 @@ use super::modal::{AlwaysDraft, ListPicker, Modal};
 use super::prompt;
 use super::transcript::{Block as TBlock, tool_summary, tool_summary_full, truncate_chars};
 use crate::core::SandboxLevel;
+use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
 use crate::core::{
     HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus, resolve_policy,
@@ -478,7 +479,82 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             ));
             lines.push(Line::default());
         }
+        TBlock::Shell {
+            command,
+            output,
+            dropped,
+            status,
+            duration,
+            ..
+        } => {
+            lines.extend(shell_lines(
+                command, output, *dropped, status, *duration, width,
+            ));
+        }
     }
+    lines
+}
+
+/// A `!` command: what was run, by whom, how it ended, and its output.
+fn shell_lines(
+    command: &str,
+    output: &str,
+    dropped: usize,
+    status: &ShellStatus,
+    duration: Option<std::time::Duration>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "❯ You ran ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            match status {
+                ShellStatus::Running => "⠿ running".to_string(),
+                ShellStatus::Exited { code: 0 } => format!(
+                    "✓ exit 0{}",
+                    duration
+                        .map(|d| format!(" {:.1}s", d.as_secs_f32()))
+                        .unwrap_or_default()
+                ),
+                other => format!("✗ {}", other.label()),
+            },
+            Style::default().fg(match status {
+                ShellStatus::Running => Color::Yellow,
+                ShellStatus::Exited { code: 0 } => Color::Green,
+                ShellStatus::Killed => Color::DarkGray,
+                _ => Color::Red,
+            }),
+        ),
+    ])];
+    let mut first = true;
+    for raw in command.lines() {
+        lines.extend(wrap_prefixed_text(
+            if first { "  $ " } else { "    " },
+            raw,
+            width,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        first = false;
+    }
+    let body_width = width.saturating_sub(2);
+    if dropped > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  │ … {dropped} earlier lines not kept"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    lines.extend(plain_lines(
+        output,
+        body_width,
+        Style::default().fg(Color::Gray),
+    ));
+    lines.push(Line::default());
     lines
 }
 
@@ -535,6 +611,17 @@ fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
             value(input, &mut h);
         }
         TBlock::System(t) | TBlock::Notice(t) | TBlock::Error(t) => t.hash(&mut h),
+        TBlock::Shell {
+            command,
+            output,
+            dropped,
+            status,
+            duration,
+            ..
+        } => {
+            (command, output, dropped, duration).hash(&mut h);
+            status.label().hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -882,6 +969,17 @@ fn render_bottom(
                 app.spinner(),
                 app.status_label(),
                 app.elapsed_secs()
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if let Some(run) = &app.shell {
+        Span::styled(
+            format!(
+                " {} Running your command · {:.0}s · Esc stops it ",
+                app.spinner(),
+                run.started.elapsed().as_secs_f32()
             ),
             Style::default()
                 .fg(Color::Yellow)

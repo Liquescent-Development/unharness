@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use super::code::sanitize;
 use crate::core::SubagentStatus;
-use crate::core::conversations::{AgentRecord, BlockRecord};
+use crate::core::conversations::{AgentRecord, BlockRecord, ShellStatus};
 
 /// A subagent's work, kept on the tool call that spawned it. The call
 /// itself may be long done (a background launch returns at once). What the
@@ -88,6 +88,19 @@ pub enum Block {
     System(String),
     Notice(String),
     Error(String),
+    /// A command the user ran from the prompt with `!`.
+    Shell {
+        command: String,
+        /// Stdout and stderr as they came, the tail when long.
+        output: String,
+        /// Lines dropped from the front of `output`.
+        dropped: usize,
+        status: ShellStatus,
+        /// It already went in front of a prompt to an agent.
+        sent: bool,
+        started: Instant,
+        duration: Option<Duration>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -165,6 +178,22 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
             Block::System(t) => BlockRecord::System { text: t.clone() },
             Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
             Block::Error(t) => BlockRecord::Error { text: t.clone() },
+            Block::Shell {
+                command,
+                output,
+                dropped,
+                status,
+                sent,
+                duration,
+                ..
+            } => BlockRecord::Shell {
+                command: command.clone(),
+                output: output.clone(),
+                dropped: *dropped,
+                status: status.clone(),
+                sent: *sent,
+                secs: duration.map(|d| d.as_secs_f32()),
+            },
         })
         .collect()
 }
@@ -186,6 +215,59 @@ impl Transcript {
 
     pub fn push_error(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::Error(sanitize(&text.into())));
+    }
+
+    /// A `!` command starts.
+    pub fn shell_started(&mut self, command: &str) {
+        self.close_thought();
+        self.blocks.push(Block::Shell {
+            command: sanitize(command),
+            output: String::new(),
+            dropped: 0,
+            status: ShellStatus::Running,
+            sent: false,
+            started: Instant::now(),
+            duration: None,
+        });
+    }
+
+    fn running_shell(&mut self) -> Option<&mut Block> {
+        self.blocks.iter_mut().rev().find(|b| {
+            matches!(
+                b,
+                Block::Shell {
+                    status: ShellStatus::Running,
+                    ..
+                }
+            )
+        })
+    }
+
+    /// A line of the running `!` command's output.
+    pub fn shell_output(&mut self, line: &str) {
+        if let Some(Block::Shell {
+            output, dropped, ..
+        }) = self.running_shell()
+        {
+            super::shell::push_line(output, dropped, &sanitize(line));
+        }
+    }
+
+    /// The running `!` command ended. One that could not start has nothing
+    /// to tell an agent.
+    pub fn shell_ended(&mut self, end: ShellStatus) {
+        if let Some(Block::Shell {
+            status,
+            sent,
+            started,
+            duration,
+            ..
+        }) = self.running_shell()
+        {
+            *sent |= matches!(end, ShellStatus::Failed { .. });
+            *status = end;
+            *duration = Some(started.elapsed());
+        }
     }
 
     pub fn clear(&mut self) {
@@ -253,6 +335,26 @@ impl Transcript {
                 BlockRecord::System { text } => Block::System(text.clone()),
                 BlockRecord::Notice { text } => Block::Notice(text.clone()),
                 BlockRecord::Error { text } => Block::Error(text.clone()),
+                BlockRecord::Shell {
+                    command,
+                    output,
+                    dropped,
+                    status,
+                    sent,
+                    secs,
+                } => Block::Shell {
+                    command: command.clone(),
+                    output: output.clone(),
+                    dropped: *dropped,
+                    // One still running went with the unharness that ran it.
+                    status: match status {
+                        ShellStatus::Running => ShellStatus::Killed,
+                        s => s.clone(),
+                    },
+                    sent: *sent,
+                    started: Instant::now(),
+                    duration: Some(Duration::from_secs_f32(secs.unwrap_or(0.0))),
+                },
             };
             // Older files kept a subagent's calls in the main list, each
             // pointing at the call that spawned it.
@@ -619,6 +721,27 @@ impl Transcript {
                         out
                     ));
                 }
+                // Once an agent has been told about it: until then it goes
+                // in front of the next prompt, whichever agent that is for.
+                Block::Shell {
+                    command,
+                    output,
+                    dropped,
+                    status,
+                    sent: true,
+                    ..
+                } if !matches!(status, ShellStatus::Running | ShellStatus::Failed { .. }) => {
+                    chunks.push(format!(
+                        "User ran a shell command:\n{}",
+                        super::shell::context_entry(
+                            command,
+                            output,
+                            *dropped,
+                            status,
+                            super::shell::CONTEXT_MAX_CHARS,
+                        )
+                    ));
+                }
                 _ => {}
             }
         }
@@ -826,6 +949,60 @@ mod tests {
         );
         assert_eq!(back.to_records(), records);
         assert!(!back.is_thinking());
+    }
+
+    #[test]
+    fn a_shell_block_streams_ends_and_comes_back_from_disk() {
+        let mut t = Transcript::default();
+        t.shell_started("make test");
+        t.shell_output("\x1b[32mok\x1b[0m");
+        t.shell_output("done");
+        // Still running when saved: it comes back stopped.
+        let back = Transcript::from_records(&t.to_records());
+        assert!(matches!(
+            &back.blocks[0],
+            Block::Shell { status: ShellStatus::Killed, output, duration: Some(_), .. }
+                if output == "ok\ndone\n"
+        ));
+        assert!(t.bridge_text(0, 1000).is_none());
+
+        t.shell_ended(ShellStatus::Exited { code: 2 });
+        // Output after the end belongs to nothing.
+        t.shell_output("late");
+        t.shell_started("missing");
+        t.shell_ended(ShellStatus::Failed {
+            error: "no such shell".into(),
+        });
+        let records = t.to_records();
+        assert!(matches!(
+            &records[0],
+            BlockRecord::Shell { command, output, status: ShellStatus::Exited { code: 2 }, sent: false, secs: Some(_), .. }
+                if command == "make test" && output == "ok\ndone\n"
+        ));
+        // A command that never ran has nothing to send.
+        assert!(matches!(&records[1], BlockRecord::Shell { sent: true, .. }));
+        let back = Transcript::from_records(&records);
+        assert_eq!(back.to_records().len(), 2);
+        assert!(matches!(
+            &back.to_records()[0],
+            BlockRecord::Shell {
+                status: ShellStatus::Exited { code: 2 },
+                sent: false,
+                ..
+            }
+        ));
+
+        // Bridged to another harness like the rest of the conversation,
+        // once an agent was told about it (until then it goes in front of
+        // the next prompt instead).
+        assert!(t.bridge_text(0, 1000).is_none());
+        if let Block::Shell { sent, .. } = &mut t.blocks[0] {
+            *sent = true;
+        }
+        assert_eq!(
+            t.bridge_text(0, 1000).unwrap(),
+            "User ran a shell command:\n$ make test\nok\ndone\n[exit 2]"
+        );
     }
 
     #[test]
