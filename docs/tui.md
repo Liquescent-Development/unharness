@@ -138,7 +138,8 @@ way Claude Code's `!` does.
   zsh that is `.zshenv`, not `.zshrc` and its aliases.
 - It runs in the session's working directory, under the sandbox the
   active harness's process gets ([Sandbox](sandbox.md)): a command you
-  type cannot write where the agent could not.
+  type cannot write where the agent could not. Like the agent, it does
+  not get herdr's `HERDR_*` variables ([herdr](#herdr)).
 - It has no input and no terminal: stdin is empty, so a command that asks
   for a password or opens an editor fails instead of waiting.
 - Output (stdout and stderr, as they arrive) streams into the transcript
