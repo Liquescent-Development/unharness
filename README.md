@@ -18,6 +18,10 @@
 
 ---
 
+<!-- Demo: record with `vhs assets/demo.tape`, then uncomment.
+<p align="center"><img alt="unharness demo" src="assets/demo.gif" width="900"></p>
+-->
+
 unharness runs Claude Code, Codex, pi, Antigravity and any
 [Agent Client Protocol](https://agentclientprotocol.com) agent behind one
 interface. The transcript, keys, permission prompts, model pickers and
