@@ -1,4 +1,5 @@
 use std::env;
+use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
@@ -13,7 +14,7 @@ use unharness::{
 };
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<ExitCode> {
     let cli = Cli::parse();
     // Before the config is read: a config that does not parse must not stand
     // between the user and the release that may fix it.
@@ -23,7 +24,8 @@ async fn main() -> Result<()> {
         prerelease,
     }) = cli.command
     {
-        return update::run(version, check, prerelease).await;
+        update::run(version, check, prerelease).await?;
+        return Ok(ExitCode::SUCCESS);
     }
     let cwd = env::current_dir()?;
     let ws_root = find_workspace_root(&cwd);
@@ -48,11 +50,11 @@ async fn main() -> Result<()> {
             switch::switch_default_harness(&cwd, &harness, global)?
         }
         Some(Commands::Update { .. }) => unreachable!("handled above"),
-        Some(Commands::Run(run_args)) => runner::run(run_args, &config, &cwd).await?,
-        None => runner::run(cli.run_args, &config, &cwd).await?,
+        Some(Commands::Run(run_args)) => return runner::run(run_args, &config, &cwd).await,
+        None => return runner::run(cli.run_args, &config, &cwd).await,
     }
 
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 fn handle_sync(cwd: &std::path::Path) -> Result<()> {

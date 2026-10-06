@@ -410,7 +410,7 @@ impl<O: Write, E: Write> Headless<O, E> {
 
     /// Write what comes last and return the exit code: 0 when the run
     /// completed, 130 when it was interrupted, 1 otherwise.
-    pub fn finish(&mut self) -> i32 {
+    pub fn finish(&mut self) -> u8 {
         let result = self.result();
         match self.format {
             Format::Text => {

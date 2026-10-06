@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -150,7 +151,10 @@ pub fn session_sandbox(
     )
 }
 
-pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()> {
+/// The exit status is returned rather than exited with, so that the
+/// runtime is dropped first and with it every child still running
+/// (`kill_on_drop`).
+pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<ExitCode> {
     let ws_root = find_workspace_root(cwd);
 
     if !args.no_sync
@@ -276,11 +280,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         for change in watch.changes(&guard::default_keep_dir()) {
             run.warn(change.describe(harness.descriptor().display_name));
         }
-        let code = run.finish();
-        if code != 0 {
-            std::process::exit(code);
-        }
-        return Ok(());
+        return Ok(ExitCode::from(run.finish()));
     }
 
     if args.print || args.no_tui {
@@ -320,7 +320,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         #[cfg(unix)]
         {
@@ -358,7 +358,8 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         harness_explicit: args.harness.is_some(),
         initial_prompt: prompt,
     })
-    .await
+    .await?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// What a run without the TUI is confined by and given, and what the user
