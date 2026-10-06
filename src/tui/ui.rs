@@ -1319,6 +1319,24 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
 }
 
 /// `text` cut at the front to `width` columns, an ellipsis for what went.
+/// The start of `text` that fits in `width` columns, `…` marking a cut.
+fn keep_start(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut kept = String::new();
+    let mut used = 1;
+    for c in text.chars() {
+        used += c.width().unwrap_or(0);
+        if used > width {
+            break;
+        }
+        kept.push(c);
+    }
+    kept.push('…');
+    kept
+}
+
 fn keep_end(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -1819,50 +1837,69 @@ fn question_tabs(m: &QuestionModal, width: usize) -> Line<'static> {
     if m.has_review() {
         names.push("Submit".into());
     }
-    let answered: Vec<bool> = (0..names.len())
+    let n = names.len();
+    let cur = m.idx;
+    if cur >= n {
+        return Line::default();
+    }
+    let answered: Vec<bool> = (0..n)
         .map(|i| i < m.questions.len() && m.has_answer(i))
         .collect();
     const SEP: &str = " · ";
+    let sep = SEP.width();
     let tab_width = |name: &str, done: bool| name.width() + 2 + if done { 2 } else { 0 };
-    let total = |names: &[String]| {
-        names
+    let widths = |shown: &[String]| -> Vec<usize> {
+        shown
             .iter()
             .zip(&answered)
-            .map(|(n, a)| tab_width(n, *a))
-            .sum::<usize>()
-            + SEP.width() * names.len().saturating_sub(1)
+            .map(|(name, done)| tab_width(name, *done))
+            .collect()
     };
-    let mut cap = names.iter().map(|n| n.chars().count()).max().unwrap_or(0);
+    // Shorten the longest names, down to ten columns, until the strip fits.
+    let mut cap = names.iter().map(|name| name.width()).max().unwrap_or(0);
     let mut shown = names.clone();
-    while total(&shown) > width && cap > 10 {
+    while widths(&shown).iter().sum::<usize>() + sep * (n - 1) > width && cap > 10 {
         cap -= 1;
-        shown = names.iter().map(|n| truncate_chars(n, cap)).collect();
+        shown = names.iter().map(|name| keep_start(name, cap)).collect();
     }
-    let widths: Vec<usize> = shown
-        .iter()
-        .zip(&answered)
-        .map(|(n, a)| tab_width(n, *a) + SEP.width())
-        .collect();
-    // The first tab to show: as far left as still lets the current one fit.
+    let mut w = widths(&shown);
+    // Columns from tab `first` through the current one, with a `…` on
+    // either side where tabs are left out.
+    let span = |w: &[usize], first: usize| {
+        usize::from(first > 0)
+            + w[first..=cur].iter().sum::<usize>()
+            + sep * (cur - first)
+            + usize::from(cur + 1 < n)
+    };
     let mut first = 0;
-    while first < m.idx && widths[first..=m.idx].iter().sum::<usize>() + 2 > width {
+    while first < cur && span(&w, first) > width {
         first += 1;
     }
+    let overflow = span(&w, first).saturating_sub(width);
+    if overflow > 0 {
+        // Too wide even on its own: the current tab's name gives way.
+        let room = shown[cur].width().saturating_sub(overflow).max(1);
+        shown[cur] = keep_start(&names[cur], room);
+        w = widths(&shown);
+    }
+
+    let gray = Style::default().fg(Color::Gray);
     let mut spans = Vec::new();
     let mut used = 0;
     if first > 0 {
-        spans.push(Span::styled("… ", Style::default().fg(Color::Gray)));
-        used += 2;
+        spans.push(Span::styled("…", gray));
+        used += 1;
     }
     for (i, name) in shown.iter().enumerate().skip(first) {
-        if i > m.idx && used + widths[i] > width {
-            spans.push(Span::styled("…", Style::default().fg(Color::Gray)));
+        let gap = if i > first { sep } else { 0 };
+        if i > cur && used + gap + w[i] + usize::from(i + 1 < n) > width {
+            spans.push(Span::styled("…", gray));
             break;
         }
-        if i > first {
+        if gap > 0 {
             spans.push(Span::styled(SEP, Style::default().fg(Color::DarkGray)));
         }
-        let style = if i == m.idx {
+        let style = if i == cur {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -1870,11 +1907,11 @@ fn question_tabs(m: &QuestionModal, width: usize) -> Line<'static> {
         } else if answered[i] || i == m.questions.len() {
             Style::default()
         } else {
-            Style::default().fg(Color::Gray)
+            gray
         };
         spans.push(Span::styled(format!(" {name}"), style));
         if answered[i] {
-            let check = if i == m.idx {
+            let check = if i == cur {
                 style
             } else {
                 Style::default().fg(Color::Green)
@@ -1882,7 +1919,7 @@ fn question_tabs(m: &QuestionModal, width: usize) -> Line<'static> {
             spans.push(Span::styled(" ✓", check));
         }
         spans.push(Span::styled(" ", style));
-        used += widths[i];
+        used += gap + w[i];
     }
     Line::from(spans)
 }
@@ -2291,6 +2328,45 @@ mod tests {
         assert!(app.take_actions().is_empty());
         let (rows, _) = screen(&mut app, 140, 40);
         find(&rows, "Which tone?");
+    }
+
+    #[test]
+    fn question_tabs_fit_and_keep_the_current_page_by_columns() {
+        use crate::core::{Question, QuestionOption};
+        let headers = ["A rather long header number", "設定の確認と変更について"];
+        for header in headers {
+            for n in 1..=15 {
+                let questions: Vec<Question> = (0..n)
+                    .map(|i| Question {
+                        id: format!("q{i}"),
+                        header: format!("{header} {i}"),
+                        text: format!("Question {i}?"),
+                        options: vec![QuestionOption::new("Yes", "")],
+                        allow_other: false,
+                        multi: false,
+                    })
+                    .collect();
+                let mut m = QuestionModal::new("r".into(), questions);
+                m.chosen[0][0] = true;
+                for page in 0..m.page_count() {
+                    m.go_to(page);
+                    for width in 16..=140 {
+                        let line = question_tabs(&m, width);
+                        assert!(line.width() <= width, "{n} {page} {width}: {line}");
+                        let current: String = line
+                            .spans
+                            .iter()
+                            .filter(|s| s.style.bg == Some(Color::Cyan))
+                            .map(|s| s.content.as_ref())
+                            .collect();
+                        assert!(
+                            current.trim().chars().any(|c| c != '…' && c != '✓'),
+                            "{n} {page} {width}: {line}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
