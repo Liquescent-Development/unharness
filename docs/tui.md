@@ -140,7 +140,10 @@ bottom edge scrolls.
 - The copy goes through `wl-copy`, `xclip`, `xsel` or `pbcopy` when one is
   installed. Otherwise, and over ssh, it goes through the terminal (OSC 52),
   which some terminals ignore and tmux passes on only with
-  `set-clipboard on`.
+  `set-clipboard on`. In a [herdr](https://herdr.dev) pane it always goes
+  through the terminal: herdr hands it to the client you are attached
+  with, which knows better than the pane whether you are at the desktop or
+  over ssh.
 - The rows are copied as drawn, so a wrapped paragraph keeps its line
   breaks and indent.
 - Holding `Shift` while dragging gives you the terminal's own selection in
@@ -170,6 +173,8 @@ attached the same way.
 > Over ssh those tools would read the remote machine's clipboard, so
 > unharness reads nothing and says so; copy the file over and `/attach`
 > it. Where the terminal takes `Ctrl+V` for its own paste, use `/paste`.
+> In a herdr pane, unharness sees the display and ssh session the herdr
+> server was started from, not the one you are attached from now.
 
 ## Context and rate limits
 

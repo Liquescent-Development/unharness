@@ -32,6 +32,12 @@ pub struct Desktop {
     pub x11: bool,
     /// Over ssh the local tools would fill the remote machine's clipboard.
     pub remote: bool,
+    /// In a herdr pane. A pane has the environment of the herdr server,
+    /// fixed when it started, not of the client now attached, so the
+    /// variables above may describe a session the user has left. herdr
+    /// passes an OSC 52 copy to the attached client, which uses a clipboard
+    /// tool or OSC 52 as its own environment says.
+    pub herdr: bool,
 }
 
 impl Desktop {
@@ -42,6 +48,7 @@ impl Desktop {
             wayland: set("WAYLAND_DISPLAY"),
             x11: set("DISPLAY"),
             remote: set("SSH_CONNECTION") || set("SSH_TTY"),
+            herdr: std::env::var_os("HERDR_ENV").is_some_and(|v| v == "1"),
         }
     }
 }
@@ -49,7 +56,7 @@ impl Desktop {
 /// The clipboard tools worth trying, best first.
 pub fn tools(desktop: Desktop) -> Vec<(&'static str, &'static [&'static str])> {
     let mut out: Vec<(&'static str, &'static [&'static str])> = Vec::new();
-    if desktop.remote {
+    if desktop.remote || desktop.herdr {
         return out;
     }
     if desktop.macos {
@@ -445,6 +452,21 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn herdr_gets_the_copy_as_osc52_whatever_its_panes_were_started_with() {
+        let herdr = Desktop {
+            macos: true,
+            wayland: true,
+            x11: true,
+            herdr: true,
+            ..Default::default()
+        };
+        assert!(tools(herdr).is_empty());
+        let mut out = Vec::new();
+        assert_eq!(copy("pong", herdr, &mut out).unwrap(), Copied::Terminal);
+        assert_eq!(out, b"\x1b]52;c;cG9uZw==\x07");
     }
 
     #[test]
