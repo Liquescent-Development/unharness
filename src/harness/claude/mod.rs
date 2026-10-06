@@ -3,9 +3,8 @@
 pub mod parse;
 pub mod transport;
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
@@ -17,7 +16,8 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
-use crate::core::sandbox::SandboxPaths;
+use crate::core::process::ProbeProcess;
+use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
     ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
@@ -122,6 +122,18 @@ impl ClaudeHarness {
         })
     }
 
+    /// The relocated config for a probe, once `prepare` has seeded it: a
+    /// probe seeds nothing, or `prepare`'s notice would never be shown.
+    fn probe_config_env(&self) -> Option<(String, String)> {
+        let (_, dir) = self.relocation()?;
+        dir.join(CONFIG_FILE).exists().then(|| {
+            (
+                "CLAUDE_CONFIG_DIR".to_string(),
+                dir.to_string_lossy().into_owned(),
+            )
+        })
+    }
+
     /// The environment that relocates the config, seeding it if `prepare`
     /// has not.
     fn config_env(&self) -> Result<Option<(String, String)>> {
@@ -186,6 +198,7 @@ fn provider_from(var: impl Fn(&str) -> Option<String>) -> ProviderId {
 
 /// The environment in which Claude calls `provider`: its switch on and
 /// every other one taken away (one set to `0` would still count as set).
+/// Nothing for a provider of Claude's that unharness does not offer.
 pub fn provider_env(provider: &ProviderId) -> Result<Vec<(&'static str, Option<&'static str>)>> {
     let own = match provider.as_str() {
         "anthropic" => None,
@@ -193,6 +206,11 @@ pub fn provider_env(provider: &ProviderId) -> Result<Vec<(&'static str, Option<&
             .iter()
             .find(|(_, name)| *name == provider.as_str())
             .map(|(var, _)| *var),
+        // Claude's names for APIs unharness does not offer, which
+        // `default_provider` can report: the environment as it is.
+        other if PROVIDER_SWITCHES.iter().any(|(_, name)| *name == other) => {
+            return Ok(Vec::new());
+        }
         other => {
             bail!("Claude Code has no provider '{other}' (anthropic, bedrock, vertex or foundry)")
         }
@@ -397,9 +415,14 @@ impl Harness for ClaudeHarness {
 
     /// What Claude answers to `initialize` on that provider. The table
     /// only when Anthropic's API cannot be asked.
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         let env = provider_env(provider)?;
-        let answer = initialize_answer(binary, self.config_env()?, &env);
+        let answer = initialize_answer(binary, self.probe_config_env(), &env, sandbox);
         if let Ok(answer) = &answer {
             if let Some(why) = provider_mismatch(Some(provider), answer) {
                 bail!(why);
@@ -514,19 +537,21 @@ fn no_answer() -> anyhow::Error {
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Start Claude, send `initialize` and return its answer, which lists the
-/// models (Claude has no command that prints them). It runs outside the
-/// sandbox like the other probes, so it runs nothing of the user's or the
-/// workspace's: `--safe-mode` turns off hooks, plugins and MCP servers but
-/// keeps the settings' `env`, which chooses the provider; it starts in an
-/// empty directory and reads only the user's settings.
+/// models (Claude has no command that prints them). `--safe-mode` turns
+/// off hooks, plugins and MCP servers and keeps the settings' `env`, which
+/// chooses the provider; it starts in an empty directory and reads only
+/// the user's settings. Those still name commands Claude runs at startup
+/// (`apiKeyHelper` ran, checked on 2.1.292), and a sandboxed session can
+/// write them, hence `sandbox`.
 fn initialize_answer(
     binary: &Path,
     config: Option<(String, String)>,
     provider: &[(&str, Option<&str>)],
+    sandbox: &Sandbox,
 ) -> Result<Value> {
     let dir = std::env::temp_dir().join(format!("unharness-claude-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir)?;
-    let answer = ask_initialize(binary, config, provider, &dir);
+    let answer = ask_initialize(binary, config, provider, sandbox, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     answer
 }
@@ -535,6 +560,7 @@ fn ask_initialize(
     binary: &Path,
     config: Option<(String, String)>,
     provider: &[(&str, Option<&str>)],
+    sandbox: &Sandbox,
     dir: &Path,
 ) -> Result<Value> {
     let mut cmd = Command::new(binary);
@@ -550,39 +576,22 @@ fn ask_initialize(
         "--setting-sources",
         "user",
     ])
-    .current_dir(dir)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
+    .current_dir(dir);
     cmd.envs(config);
     apply_env(&mut cmd, provider);
     for var in transport::PARENT_SESSION_VARS {
         cmd.env_remove(var);
     }
-    let mut child = cmd.spawn().context("spawn claude")?;
+    let mut probe = ProbeProcess::spawn(cmd, sandbox).context("start claude")?;
     let (id, line) = transport::control_request("initialize", serde_json::json!({}));
-    let mut stdin = child.stdin.take().context("stdin")?;
-    writeln!(stdin, "{line}")?;
-    stdin.flush()?;
-    let stdout = child.stdout.take().context("stdout")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    probe.write_line(&line)?;
     let deadline = Instant::now() + QUERY_TIMEOUT;
-    let answer = loop {
-        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            break Err(no_answer());
-        };
-        let line = match rx.recv_timeout(left) {
+    loop {
+        let line = match probe.next_line(deadline) {
             Ok(line) => line,
-            Err(RecvTimeoutError::Timeout) => break Err(no_answer()),
+            Err(RecvTimeoutError::Timeout) => return Err(no_answer()),
             Err(RecvTimeoutError::Disconnected) => {
-                break Err(anyhow!("Claude Code exited before it listed its models"));
+                bail!("Claude Code exited before it listed its models")
             }
         };
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -591,16 +600,12 @@ fn ask_initialize(
         if v.get("type").and_then(Value::as_str) == Some("control_response")
             && v.pointer("/response/request_id").and_then(Value::as_str) == Some(id.as_str())
         {
-            break v
+            return v
                 .pointer("/response/response")
                 .cloned()
                 .context("initialize had no answer");
         }
-    };
-    drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
-    answer
+    }
 }
 
 fn auth_status(binary: &Path) -> AuthInfo {
@@ -708,6 +713,7 @@ mod tests {
             .list_models(
                 Path::new("/nonexistent/claude"),
                 &ProviderId::from("anthropic"),
+                &Sandbox::off(),
             )
             .unwrap();
         assert!(models.iter().any(|m| m.model_ref.model == "opus"));
@@ -718,7 +724,8 @@ mod tests {
                 ClaudeHarness::default()
                     .list_models(
                         Path::new("/nonexistent/claude"),
-                        &ProviderId::from(provider)
+                        &ProviderId::from(provider),
+                        &Sandbox::off(),
                     )
                     .is_err()
             );
@@ -760,7 +767,14 @@ mod tests {
         }
         let anthropic = provider_env(&ProviderId::from("anthropic")).unwrap();
         assert!(anthropic.iter().all(|(_, value)| value.is_none()));
-        assert!(provider_env(&ProviderId::from("mantle")).is_err());
+        // A provider of Claude's that unharness does not offer is left as
+        // the environment has it; an unknown one is refused.
+        assert!(
+            provider_env(&ProviderId::from("mantle"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(provider_env(&ProviderId::from("openai")).is_err());
 
         let cfg = PrintConfig {
             binary: PathBuf::from("/bin/claude"),

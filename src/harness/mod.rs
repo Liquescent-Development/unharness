@@ -94,8 +94,14 @@ pub trait Harness: Send + Sync {
         None
     }
 
-    /// Providers this harness can route to. Default: the static descriptor list.
-    fn list_providers(&self, _binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+    /// Providers this harness can route to. Default: the static descriptor
+    /// list. A harness that starts its CLI for it runs it in `sandbox`, the
+    /// one its session would get.
+    fn list_providers(
+        &self,
+        _binary: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
         match self.descriptor().providers {
             ProviderSource::Static(list) => Ok(list
                 .iter()
@@ -114,7 +120,13 @@ pub trait Harness: Send + Sync {
         }
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
+    /// The models of `provider`; a CLI started for it runs in `sandbox`.
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>>;
 
     /// Setup this harness needs before its first process of a run. A
     /// returned line is shown to the user.

@@ -6,7 +6,6 @@ pub mod app_server_parse;
 pub mod exec;
 pub mod exec_parse;
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -21,6 +20,7 @@ use super::{
 };
 use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
+use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
@@ -265,12 +265,16 @@ impl Harness for CodexHarness {
 
     /// The built-in providers and the ones Codex's configuration adds
     /// (`config/read`), else the built-in ones alone.
-    fn list_providers(&self, binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+    fn list_providers(
+        &self,
+        binary: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
         let mut providers: Vec<(ProviderId, String)> = BUILT_IN_PROVIDERS
             .iter()
             .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
             .collect();
-        let configured = query(binary, "config/read", json!({}))
+        let configured = query(binary, sandbox, "config/read", json!({}))
             .ok()
             .and_then(|r| r.pointer("/config/model_providers")?.as_object().cloned())
             .unwrap_or_default();
@@ -301,13 +305,18 @@ impl Harness for CodexHarness {
 
     /// `model/list` is OpenAI's catalog whichever provider is configured
     /// (0.157.0), so other providers list nothing.
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "openai" {
             return Ok(Vec::new());
         }
         let live = match self.effective_transport(binary) {
             CodexTransport::Exec => Vec::new(),
-            _ => query_models(binary).unwrap_or_default(),
+            _ => query_models(binary, sandbox).unwrap_or_default(),
         };
         if !live.is_empty() {
             return Ok(live
@@ -576,8 +585,8 @@ fn auth_status(binary: &Path) -> AuthInfo {
 }
 
 /// Ask a throwaway `codex app-server` for `model/list`.
-pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
-    let result = query(binary, "model/list", json!({}))?;
+pub fn query_models(binary: &Path, sandbox: &Sandbox) -> Result<Vec<Value>> {
+    let result = query(binary, sandbox, "model/list", json!({}))?;
     Ok(result
         .get("data")
         .and_then(Value::as_array)
@@ -585,71 +594,44 @@ pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
         .unwrap_or_default())
 }
 
-/// The result of one request to a throwaway `codex app-server`.
-fn query(binary: &Path, method: &str, params: Value) -> Result<Value> {
-    let mut child = Command::new(binary)
-        .arg("app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn codex app-server")?;
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let stdout = child.stdout.take().context("stdout")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
+/// The result of one request to a throwaway `codex app-server`, in the
+/// sandbox a session would get: Codex reads its own configuration, which
+/// a session can write.
+fn query(binary: &Path, sandbox: &Sandbox, method: &str, params: Value) -> Result<Value> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("app-server");
+    if sandbox.is_active() {
+        // As for a session: its own sandbox cannot start inside ours.
+        cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    }
+    let mut probe = ProbeProcess::spawn(cmd, sandbox).context("start codex app-server")?;
+    probe.write_line(&jsonrpc::request(
+        1,
+        "initialize",
+        json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}}),
+    ))?;
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    loop {
+        let line = probe
+            .next_line(deadline)
+            .map_err(|_| anyhow::anyhow!("codex app-server did not answer {method}"))?;
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match v.get("id").and_then(Value::as_u64) {
+            Some(1) if v.get("result").is_some() => {
+                probe.write_line(&jsonrpc::notification("initialized", Value::Null))?;
+                probe.write_line(&jsonrpc::request(2, method, params.clone()))?;
             }
-        }
-    });
-    let mut ask = || -> Result<Value> {
-        writeln!(
-            stdin,
-            "{}",
-            jsonrpc::request(
-                1,
-                "initialize",
-                json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}})
-            )
-        )?;
-        stdin.flush()?;
-        let deadline = Instant::now() + QUERY_TIMEOUT;
-        loop {
-            let left = deadline
-                .checked_duration_since(Instant::now())
-                .context("codex app-server did not answer")?;
-            let line = rx
-                .recv_timeout(left)
-                .map_err(|_| anyhow::anyhow!("codex app-server did not answer {method}"))?;
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            match v.get("id").and_then(Value::as_u64) {
-                Some(1) if v.get("result").is_some() => {
-                    writeln!(
-                        stdin,
-                        "{}",
-                        jsonrpc::notification("initialized", Value::Null)
-                    )?;
-                    writeln!(stdin, "{}", jsonrpc::request(2, method, params.clone()))?;
-                    stdin.flush()?;
+            Some(2) => {
+                if let Some(err) = v.get("error") {
+                    anyhow::bail!("codex app-server: {method}: {err}");
                 }
-                Some(2) => {
-                    if let Some(err) = v.get("error") {
-                        anyhow::bail!("codex app-server: {method}: {err}");
-                    }
-                    return Ok(v.get("result").cloned().unwrap_or(Value::Null));
-                }
-                _ => {}
+                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
+            _ => {}
         }
-    };
-    let result = ask();
-    let _ = child.kill();
-    let _ = child.wait();
-    result
+    }
 }
 
 #[cfg(test)]

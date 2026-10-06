@@ -91,9 +91,13 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   bare `tokio::process::Command::spawn` in a transport.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
-  (`--version`, auth, model lists) and unharness's own `git` stay outside;
-  `doctor`'s MCP handshake does not, since what a server command runs may
-  be a file in the workspace.
+  (`--version`, auth) and unharness's own `git` stay outside. A model or
+  provider list that starts the CLI with its own configuration goes
+  through `core::process::ProbeProcess` in the session's sandbox (Claude,
+  Codex), since that configuration is writable from a session and can
+  name commands; pi's and agy's lists do not yet. `doctor`'s MCP
+  handshake runs inside too, since what a server command runs may be a
+  file in the workspace.
   The paths a vendor CLI writes are declared in `src/harness/<name>/`
   (`sandbox_paths`), found by tracing the CLI (`strace -f -e trace=file -e
   status=failed` shows what a confined run was denied), not guessed. Where
@@ -481,11 +485,14 @@ recorded ones. For anything else:
   `supportedEffortLevels`, the first being `default`, which `--model`
   takes); there is no command that prints them. A session reports them
   as `CapabilitiesChanged`; `list_models` starts Claude with
-  `--safe-mode --setting-sources user` in an empty directory, outside the
-  sandbox like the other probes, so that no hook, plugin, MCP server or
-  workspace setting runs (`--safe-mode` keeps the user settings' `env`),
-  and falls back to a table when no answer comes within 15 s (Anthropic
-  only).
+  `--safe-mode --setting-sources user` in an empty directory, so that no
+  hook, plugin, MCP server or workspace setting runs (`--safe-mode` keeps
+  the user settings' `env`), and falls back to a table when no answer
+  comes within 15 s (Anthropic only). `--safe-mode` still runs the
+  settings' `apiKeyHelper` (checked), which a sandboxed session can write
+  into `~/.claude/settings.json`, so the probe runs in the session's
+  sandbox; a probe does not seed the relocated config (`prepare` does,
+  with its notice).
 - Claude providers (2.1.292, read in the binary and run): Claude picks its
   API from `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`,
   `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE`, `_VERTEX` (`1`, `true`, `yes`,

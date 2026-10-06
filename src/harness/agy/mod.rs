@@ -16,7 +16,7 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
-use crate::core::sandbox::SandboxPaths;
+use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
@@ -147,7 +147,12 @@ impl Harness for AgyHarness {
         Some(auth_status().authenticated)
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "google" {
             return Ok(Vec::new());
         }

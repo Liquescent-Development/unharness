@@ -2547,7 +2547,14 @@ impl App {
                 .push_error(format!("{} binary not found", self.short_name()));
             return;
         };
-        let providers = match self.harness().list_providers(&binary) {
+        let sandbox = match self.session_sandbox() {
+            Ok(s) => s,
+            Err(e) => {
+                self.transcript.push_error(format!("list providers: {e:#}"));
+                return;
+            }
+        };
+        let providers = match self.harness().list_providers(&binary, &sandbox) {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
                 self.transcript
@@ -2577,9 +2584,10 @@ impl App {
         let binary = self
             .harness_binary()
             .ok_or_else(|| format!("{} binary not found", self.short_name()))?;
+        let sandbox = self.session_sandbox().map_err(|e| format!("{e:#}"))?;
         let models = self
             .harness()
-            .list_models(&binary, provider)
+            .list_models(&binary, provider, &sandbox)
             .map_err(|e| e.to_string())?;
         self.model_cache.insert(key, models.clone());
         Ok(models)

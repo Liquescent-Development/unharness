@@ -183,6 +183,78 @@ async fn watch(
     }
 }
 
+/// A short-lived child asked one thing on stdin, for a model or provider
+/// list: confined by `sandbox`, since the CLI reads its own configuration,
+/// which a sandboxed session can write and which may name commands to run
+/// (Claude's `apiKeyHelper`). It leads a process group of its own, and
+/// the whole group is killed and reaped when this is dropped, so a helper
+/// it started does not outlive it.
+pub struct ProbeProcess {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    lines: std::sync::mpsc::Receiver<String>,
+}
+
+impl ProbeProcess {
+    pub fn spawn(cmd: std::process::Command, sandbox: &Sandbox) -> Result<Self> {
+        let mut cmd = sandbox.wrap(cmd)?;
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+        let mut child = cmd.spawn().context("spawn")?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().context("stdout")?;
+        let (tx, lines) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(ProbeProcess {
+            child,
+            stdin,
+            lines,
+        })
+    }
+
+    pub fn write_line(&mut self, line: &str) -> Result<()> {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().context("stdin closed")?;
+        writeln!(stdin, "{line}")?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    /// The next stdout line, waiting until `deadline` at most.
+    pub fn next_line(
+        &self,
+        deadline: std::time::Instant,
+    ) -> std::result::Result<String, std::sync::mpsc::RecvTimeoutError> {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        self.lines.recv_timeout(left)
+    }
+}
+
+impl Drop for ProbeProcess {
+    fn drop(&mut self) {
+        self.stdin.take();
+        kill_group(self.child.id());
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// SIGKILL to the process group `id`. A group that is already gone is not
 /// an error.
 fn kill_group(id: u32) {
@@ -210,6 +282,36 @@ fn truncate(mut line: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_takes_its_helpers_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("helper.pid");
+        let mut cmd = std::process::Command::new("sh");
+        // A helper in the background, then an answer, then a long wait.
+        cmd.arg("-c").arg(format!(
+            "sleep 30 & echo $! > {}; read line; echo \"got $line\"; sleep 30",
+            pid_file.display()
+        ));
+        let mut probe = ProbeProcess::spawn(cmd, &Sandbox::off()).unwrap();
+        probe.write_line("hi").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        assert_eq!(probe.next_line(deadline).unwrap(), "got hi");
+        let helper: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        drop(probe);
+        // SAFETY: signal 0 only asks whether the process exists.
+        let alive = |pid| unsafe { libc::kill(pid, 0) } == 0;
+        let gone_by = std::time::Instant::now() + Duration::from_secs(5);
+        while alive(helper) && std::time::Instant::now() < gone_by {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!alive(helper));
+    }
 
     async fn drain(p: &mut LineProcess) -> Vec<RawLine> {
         let mut got = Vec::new();

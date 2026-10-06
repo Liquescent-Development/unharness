@@ -210,7 +210,7 @@ pub fn overrides_from<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Capabilities, ModelInfo, ProviderId, SessionConfig, SessionHandle};
+    use crate::core::{Capabilities, ModelInfo, ProviderId, Sandbox, SessionConfig, SessionHandle};
     use crate::harness::{AuthInfo, HarnessDescriptor, PrintConfig, ProviderSource};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -260,7 +260,12 @@ mod tests {
             self.asked.fetch_add(1, Ordering::SeqCst);
             self.auth
         }
-        fn list_models(&self, _binary: &Path, _provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+        fn list_models(
+            &self,
+            _binary: &Path,
+            _provider: &ProviderId,
+            _sandbox: &Sandbox,
+        ) -> Result<Vec<ModelInfo>> {
             Ok(Vec::new())
         }
         fn start_session(&self, _cfg: SessionConfig) -> Result<SessionHandle> {

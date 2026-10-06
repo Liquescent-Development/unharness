@@ -8,9 +8,11 @@ use anyhow::{Result, bail};
 use colored::*;
 
 use crate::config::Config;
-use crate::core::HarnessId;
 use crate::core::registry::Registry;
+use crate::core::sandbox::SandboxSetup;
+use crate::core::{HarnessId, Sandbox};
 use crate::harness::resolve_binary;
+use crate::sync::find_workspace_root;
 
 pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str>) -> Result<()> {
     let registry = Registry::from_config(config);
@@ -40,6 +42,17 @@ pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str
         },
         None => registry.all().collect(),
     };
+    // A harness started for its list runs as its session would.
+    let level = match &config.sandbox.level {
+        Some(level) => Some(
+            crate::core::SandboxLevel::parse(level)
+                .ok_or_else(|| anyhow::anyhow!("unknown sandbox level '{level}' in config"))?,
+        ),
+        None => None,
+    };
+    let setup = SandboxSetup::detect(level);
+    let cwd = std::env::current_dir()?;
+    let workspace = find_workspace_root(&cwd).unwrap_or(cwd);
 
     for hz in targets {
         let desc = hz.descriptor();
@@ -53,7 +66,8 @@ pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str
             continue;
         };
         println!("{}", desc.display_name.bold().cyan());
-        print_models(hz, &binary, provider)?;
+        let sandbox = crate::runner::session_sandbox(hz, &setup, config, &workspace)?;
+        print_models(hz, &binary, provider, &sandbox)?;
         println!();
     }
     Ok(())
@@ -63,8 +77,9 @@ fn print_models(
     hz: &dyn crate::harness::Harness,
     binary: &Path,
     provider: Option<&str>,
+    sandbox: &Sandbox,
 ) -> Result<()> {
-    let providers = hz.list_providers(binary)?;
+    let providers = hz.list_providers(binary, sandbox)?;
     let selected: Vec<_> = providers
         .into_iter()
         .filter(|(id, _)| provider.is_none_or(|p| p == id.as_str()))
@@ -81,7 +96,7 @@ fn print_models(
     }
     for (pid, pname) in selected {
         println!("  {} ({})", pname.bold(), pid.as_str().dimmed());
-        match hz.list_models(binary, &pid) {
+        match hz.list_models(binary, &pid, sandbox) {
             Ok(models) if models.is_empty() => {
                 println!("    {} no models reported", "[-]".dimmed())
             }
