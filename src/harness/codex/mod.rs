@@ -190,6 +190,8 @@ impl Harness for CodexHarness {
                 reported: app_server,
                 described: false,
                 stop: app_server,
+                // Nothing follows on the main thread when one ends.
+                report_turn: false,
             },
             steer: app_server,
             compaction: app_server,

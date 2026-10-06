@@ -26,9 +26,15 @@ pub struct CommonRunArgs {
     #[arg(short = 'H', long, env = "UNHARNESS_HARNESS")]
     pub harness: Option<String>,
 
-    /// Run single prompt non-interactively and print response
+    /// Run one prompt without the TUI and print the answer (the prompt may
+    /// come on stdin)
     #[arg(short = 'p', long)]
     pub print: bool,
+
+    /// With --print: run the harness's own print mode and pass its output
+    /// through unchanged (--format is then the harness's)
+    #[arg(long, requires = "print")]
+    pub native: bool,
 
     /// Permission policy: ask, accept-edits, auto, bypass
     #[arg(long, env = "UNHARNESS_POLICY")]
@@ -58,7 +64,7 @@ pub struct CommonRunArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub resume: Option<String>,
 
-    /// Output format for print mode (text, json, stream-json)
+    /// Output format for print mode: text, json, stream-json (see docs/headless.md)
     #[arg(long)]
     pub format: Option<String>,
 

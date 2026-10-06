@@ -52,7 +52,7 @@ pub struct Probe {
     pub auth: AuthInfo,
 }
 
-/// Options for the non-TUI paths (`-p` print mode and `--no-tui` passthrough).
+/// Options for the vendor's own interfaces (`-p --native` and `--no-tui`).
 #[derive(Debug, Clone, Default)]
 pub struct PrintConfig {
     pub binary: PathBuf,
@@ -134,8 +134,8 @@ pub trait Harness: Send + Sync {
         Vec::new()
     }
 
-    /// The policies of a run that is not a session: `--print` when
-    /// `print_mode`, the CLI's own interface (`--no-tui`) otherwise.
+    /// The policies of a run that is not a session: `--print --native`
+    /// when `print_mode`, the CLI's own interface (`--no-tui`) otherwise.
     fn print_policies(&self, _print_mode: bool) -> Vec<PolicySupport> {
         self.capabilities().permission_policies
     }
@@ -156,7 +156,7 @@ pub trait Harness: Send + Sync {
     /// Spawn the driver task(s) for an interactive session.
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle>;
 
-    /// Build the vendor command line for print or passthrough mode.
+    /// Build the vendor command line for `--print --native` or `--no-tui`.
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<std::process::Command>;
 }
 

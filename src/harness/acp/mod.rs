@@ -214,7 +214,7 @@ impl Harness for AcpHarness {
 
     fn build_print_command(&self, _cfg: &PrintConfig) -> Result<std::process::Command> {
         bail!(
-            "{} is driven over ACP, which has no print or passthrough mode; run it in the TUI or use its own CLI",
+            "{} is driven over ACP, which has no native print or passthrough mode; use --print without --native, or the TUI",
             self.descriptor.display_name
         )
     }

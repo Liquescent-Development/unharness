@@ -264,6 +264,8 @@ impl Harness for ClaudeHarness {
                 reported: true,
                 described: true,
                 stop: true,
+                // `fixtures/subagent.jsonl`: a turn follows the end.
+                report_turn: true,
             },
             steer: true,
             compaction: true,

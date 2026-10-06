@@ -8,6 +8,7 @@ pub mod config;
 pub mod core;
 pub mod doctor;
 pub mod harness;
+pub mod headless;
 pub mod init;
 pub mod models_cmd;
 pub mod runner;
