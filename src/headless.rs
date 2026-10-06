@@ -83,6 +83,9 @@ pub struct Headless<O: Write, E: Write> {
     /// A subagent ended between turns and the harness will report it in a
     /// turn of its own, which is part of the answer.
     report_due: bool,
+    /// The session's work is over; what still comes in is written out
+    /// but changes nothing.
+    settled: bool,
     usage: Option<Usage>,
     denied: Vec<Value>,
     warnings: Vec<String>,
@@ -121,6 +124,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             turns: 0,
             running: HashSet::new(),
             report_due: false,
+            settled: false,
             usage: None,
             denied: Vec::new(),
             warnings: Vec::new(),
@@ -156,6 +160,11 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             Some(_) => true,
         }
+    }
+
+    /// Nothing more the session sends counts: it is being shut down.
+    pub fn settle(&mut self) {
+        self.settled = true;
     }
 
     /// Something unharness itself has to say: kept for the result and
@@ -207,7 +216,9 @@ impl<O: Write, E: Write> Headless<O, E> {
             self.line(&event_json(&ev));
         }
         let mut commands = Vec::new();
-        self.track(&ev, 0, &mut commands);
+        if !self.settled {
+            self.track(&ev, 0, &mut commands);
+        }
         commands
     }
 
@@ -247,11 +258,12 @@ impl<O: Write, E: Write> Headless<O, E> {
             AgentEvent::TurnCompleted { stop_reason } => {
                 self.turn_running = false;
                 self.turns += 1;
-                // Claude ends an interrupted turn with an error of its own
-                // (`error_during_execution`).
-                self.record(match stop_reason {
-                    StopReason::Error(_) if self.interrupted => StopReason::Interrupted,
-                    reason => reason.clone(),
+                // However the harness words the end of an interrupted turn:
+                // Claude as an error (`error_during_execution`), pi as done.
+                self.record(if self.interrupted {
+                    StopReason::Interrupted
+                } else {
+                    stop_reason.clone()
                 });
                 if *stop_reason == StopReason::Done
                     && !self.running.is_empty()
@@ -459,6 +471,7 @@ pub async fn drive<O: Write, E: Write>(
         run.lost();
         return;
     }
+    let mut interrupts = Interrupts::new();
     loop {
         tokio::select! {
             ev = handle.events.recv() => match ev {
@@ -475,7 +488,7 @@ pub async fn drive<O: Write, E: Write>(
                     return;
                 }
             },
-            _ = tokio::signal::ctrl_c() => {
+            _ = interrupts.recv() => {
                 if run.interrupt() && run.turn_running() {
                     let _ = handle.send(SessionCommand::Interrupt).await;
                 } else {
@@ -485,8 +498,11 @@ pub async fn drive<O: Write, E: Write>(
             }
         }
     }
+    run.settle();
     let _ = handle.send(SessionCommand::Shutdown).await;
-    let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
+    // Until the process is gone, the grace is up, or Ctrl+C. Whatever is
+    // left is killed when the runtime goes (`kill_on_drop`).
+    let drain = async {
         while let Some(ev) = handle.events.recv().await {
             let exited = matches!(ev, AgentEvent::ProcessExited { .. });
             run.on_event(ev);
@@ -494,8 +510,41 @@ pub async fn drive<O: Write, E: Write>(
                 break;
             }
         }
-    })
-    .await;
+    };
+    tokio::select! {
+        _ = tokio::time::timeout(SHUTDOWN_GRACE, drain) => {}
+        _ = interrupts.recv() => {}
+    }
+}
+
+/// Ctrl+C, listened for once for the whole run: one pressed while an
+/// event is being handled waits for the next poll instead of being lost.
+struct Interrupts {
+    #[cfg(unix)]
+    signal: Option<tokio::signal::unix::Signal>,
+}
+
+impl Interrupts {
+    fn new() -> Self {
+        Interrupts {
+            #[cfg(unix)]
+            signal: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok(),
+        }
+    }
+
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        match self.signal.as_mut() {
+            Some(s) => {
+                s.recv().await;
+            }
+            None => std::future::pending().await,
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
 }
 
 fn usage_json(u: &Usage) -> Value {
@@ -996,6 +1045,35 @@ mod tests {
     }
 
     #[test]
+    fn what_comes_while_shutting_down_changes_nothing() {
+        let (_dir, mut run) = headless(Format::StreamJson, false);
+        feed(&mut run, vec![text("hi"), done()]);
+        assert!(run.is_done());
+        run.settle();
+        let late = feed(
+            &mut run,
+            vec![
+                text(" more"),
+                shell_request("late", "rm -rf /"),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error("late".into()),
+                },
+                AgentEvent::ProcessExited { code: Some(1) },
+            ],
+        );
+        assert!(late.is_empty());
+        assert_eq!(run.finish(), 0);
+        let lines = lines(&run);
+        // Written out all the same.
+        assert!(lines.iter().any(|l| l["type"] == "permission_request"));
+        let result = lines.last().unwrap();
+        assert_eq!(result["status"], "done");
+        assert_eq!(result["text"], "hi");
+        assert_eq!(result["turns"], 1);
+        assert_eq!(result["denied"], json!([]));
+    }
+
+    #[test]
     fn an_early_exit_is_an_error_unless_interrupted() {
         let (_dir, mut run) = headless(Format::Json, false);
         feed(
@@ -1019,16 +1097,18 @@ mod tests {
         assert!(!run.interrupt());
         feed(&mut run, vec![AgentEvent::ProcessExited { code: None }]);
         assert_eq!(run.finish(), 130);
-        // However the harness words the end of an interrupted turn.
-        let (_dir, mut run) = headless(Format::Text, false);
-        run.interrupt();
-        feed(
-            &mut run,
-            vec![AgentEvent::TurnCompleted {
-                stop_reason: StopReason::Error("error_during_execution".into()),
-            }],
-        );
-        assert_eq!(run.finish(), 130);
+        // However the harness words the end of an interrupted turn:
+        // Claude as an error, pi as done.
+        for stop_reason in [
+            StopReason::Error("error_during_execution".into()),
+            StopReason::Done,
+        ] {
+            let (_dir, mut run) = headless(Format::Text, false);
+            run.interrupt();
+            feed(&mut run, vec![AgentEvent::TurnCompleted { stop_reason }]);
+            assert!(run.is_done());
+            assert_eq!(run.finish(), 130);
+        }
 
         // An error sticks through a later turn's success.
         let (_dir, mut run) = headless(Format::Text, true);
