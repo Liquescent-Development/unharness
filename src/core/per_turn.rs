@@ -286,6 +286,7 @@ mod tests {
             binary: PathBuf::from("sh"),
             cwd: std::env::temp_dir(),
             model: None,
+            provider: None,
             effort: None,
             policy: PermissionPolicy::Ask,
             resume: None,

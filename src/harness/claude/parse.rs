@@ -44,7 +44,9 @@ pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
             .filter_map(|m| {
                 let id = m.get("value")?.as_str()?;
                 let name = m.get("displayName").and_then(Value::as_str).unwrap_or(id);
+                // On Anthropic's API the description leaves the name out.
                 let description = match m.get("description").and_then(Value::as_str) {
+                    Some(d) if d.starts_with(name) => d.to_string(),
                     Some(d) => format!("{name} · {d}"),
                     None => name.to_string(),
                 };
@@ -214,11 +216,18 @@ impl ClaudeParser {
                 // The answer to `rewind_conversation` is a "success" either
                 // way; `rewound` says whether it happened.
                 let answer = val.pointer("/response/response");
-                if let Some(models) = answer.and_then(initialize_models) {
-                    out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
-                        models: Some(models),
+                if let Some(answer) = answer {
+                    let update = CapsUpdate {
+                        models: initialize_models(answer),
+                        provider: answer
+                            .pointer("/account/apiProvider")
+                            .and_then(Value::as_str)
+                            .map(provider_id),
                         ..Default::default()
-                    }));
+                    };
+                    if update != CapsUpdate::default() {
+                        out.push(AgentEvent::CapabilitiesChanged(update));
+                    }
                 }
                 if answer
                     .and_then(|a| a.get("rewound"))
@@ -841,6 +850,13 @@ mod tests {
     #[test]
     fn fixture_permission_and_question() {
         fixture("permission_and_question");
+    }
+
+    /// Vertex without Google credentials (2.1.292): its own models, then
+    /// retries and a failed turn.
+    #[test]
+    fn fixture_provider_vertex() {
+        fixture("provider_vertex");
     }
 
     #[test]

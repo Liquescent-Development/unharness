@@ -38,7 +38,7 @@ use crate::core::{
     PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, Rule, Rules, SessionCommand,
     StopReason, Usage, resolve_policy,
 };
-use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
+use crate::harness::{Harness, ModelInfo, resolve_binary};
 
 /// Side effects the event loop performs on the App's behalf.
 #[derive(Debug, Clone, PartialEq)]
@@ -222,7 +222,11 @@ pub struct App {
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
+    /// The provider of each harness: the user's choice, else a guess at
+    /// the harness's own default, corrected by what its session reports.
     pub providers: HashMap<HarnessId, ProviderId>,
+    /// Harnesses whose provider the user chose; only those are told it.
+    pub chosen_providers: HashSet<HarnessId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
@@ -478,17 +482,17 @@ impl App {
         }
 
         let mut providers = HashMap::new();
+        let mut chosen_providers = HashSet::new();
         let mut models = HashMap::new();
         let mut efforts = HashMap::new();
         for h in registry.all() {
             let id = h.descriptor().id;
             let settings = config.harness(id.as_str());
-            let provider = settings
-                .and_then(|s| s.default_provider.clone())
-                .or_else(|| match h.descriptor().providers {
-                    ProviderSource::Static(list) => list.first().map(|(p, _)| p.to_string()),
-                    ProviderSource::Dynamic => None,
-                });
+            let chosen = settings.and_then(|s| s.default_provider.clone());
+            if chosen.is_some() {
+                chosen_providers.insert(id);
+            }
+            let provider = chosen.or_else(|| h.default_provider().map(|p| p.0));
             if let Some(p) = provider.clone() {
                 providers.insert(id, ProviderId::new(p));
             }
@@ -504,6 +508,7 @@ impl App {
         }
         if let Some(p) = init.provider {
             providers.insert(init.harness, ProviderId::new(p));
+            chosen_providers.insert(init.harness);
         }
         if let Some(m) = init.model {
             let p = providers
@@ -582,6 +587,7 @@ impl App {
             session_sandbox_level: None,
             guard: None,
             providers,
+            chosen_providers,
             models,
             efforts,
             model_cache: HashMap::new(),
@@ -896,6 +902,14 @@ impl App {
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
         self.providers.get(&self.active)
+    }
+
+    /// The provider to tell the active harness, if the user chose one.
+    pub fn chosen_provider(&self) -> Option<&ProviderId> {
+        self.chosen_providers
+            .contains(&self.active)
+            .then(|| self.current_provider())
+            .flatten()
     }
 
     pub fn current_model(&self) -> Option<&ModelRef> {
@@ -2084,10 +2098,27 @@ impl App {
                     self.transcript
                         .push_notice(format!("effort levels now: {}", levels.join(", ")));
                 }
+                // The harness knows best. A chosen provider it does not run
+                // on was already reported as an error by its driver.
+                if let Some(reported) = &update.provider
+                    && self.current_provider() != Some(reported)
+                {
+                    if !self.chosen_providers.contains(&self.active) {
+                        self.transcript.push_notice(format!(
+                            "{} runs on {reported}, chosen by its own configuration",
+                            self.short_name()
+                        ));
+                    }
+                    self.providers.insert(self.active, reported.clone());
+                    if let Some(m) = self.models.get_mut(&self.active) {
+                        m.provider = reported.clone();
+                    }
+                }
                 if let Some(models) = &update.models {
-                    let provider = self
-                        .current_provider()
-                        .map(|p| p.0.clone())
+                    let provider = models
+                        .first()
+                        .map(|m| m.model_ref.provider.0.clone())
+                        .or_else(|| self.current_provider().map(|p| p.0.clone()))
                         .unwrap_or_else(|| "default".into());
                     self.model_cache
                         .insert((self.active, provider), models.clone());
@@ -2350,13 +2381,33 @@ impl App {
         true
     }
 
+    /// Choose the active harness's provider. Where the provider is fixed
+    /// when the process starts, a live session is shut down and comes back
+    /// on the new one with the next prompt, resumed.
     pub fn set_provider(&mut self, provider: ProviderId) {
-        if self.current_provider() != Some(&provider) {
+        let changed = self.current_provider() != Some(&provider);
+        let restart = changed && self.session_alive && self.caps().provider_per_process;
+        if restart && self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before changing the provider");
+            return;
+        }
+        if changed {
             self.models.remove(&self.active);
         }
         self.providers.insert(self.active, provider.clone());
-        self.transcript
-            .push_system(format!("Provider: {provider} (pick a model with Ctrl+M)"));
+        self.chosen_providers.insert(self.active);
+        self.transcript.push_system(if restart {
+            format!(
+                "Provider: {provider} ({} restarts on it with the next prompt; pick a model with Ctrl+M)",
+                self.display_name()
+            )
+        } else {
+            format!("Provider: {provider} (pick a model with Ctrl+M)")
+        });
+        if restart {
+            self.shutdown_session();
+        }
     }
 
     pub fn set_model(&mut self, model: String) {
@@ -5454,6 +5505,45 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::CODEX);
         assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
         assert!(app.status_warning().is_none());
+    }
+
+    #[test]
+    fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        app.sandbox = SandboxSetup::null(None);
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        assert_eq!(app.chosen_provider(), None);
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("vertex".into()),
+            ..Default::default()
+        }));
+        assert_eq!(app.current_provider(), Some(&"vertex".into()));
+        assert_eq!(app.chosen_provider(), None);
+
+        // Not during a turn: the process is started on its provider.
+        app.set_provider("bedrock".into());
+        assert_eq!(app.current_provider(), Some(&"vertex".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+
+        app.set_provider("bedrock".into());
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+        app.submit_prompt("again".into());
+        let actions = app.take_actions();
+        assert!(
+            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+        );
     }
 
     #[test]

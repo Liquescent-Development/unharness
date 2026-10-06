@@ -484,7 +484,24 @@ recorded ones. For anything else:
   `--safe-mode --setting-sources user` in an empty directory, outside the
   sandbox like the other probes, so that no hook, plugin, MCP server or
   workspace setting runs (`--safe-mode` keeps the user settings' `env`),
-  and falls back to a table when no answer comes within 15 s.
+  and falls back to a table when no answer comes within 15 s (Anthropic
+  only).
+- Claude providers (2.1.292, read in the binary and run): Claude picks its
+  API from `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`,
+  `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE`, `_VERTEX` (`1`, `true`, `yes`,
+  `on` in any case), and with two of them defined, whatever their values
+  and whether in the environment or its settings' `env`, it calls
+  Anthropic's; so a chosen provider sets its switch and removes the rest.
+  unharness offers the documented three. The answer to `initialize`
+  names the provider in effect (`account.apiProvider`: `firstParty`,
+  `bedrock`, `vertex`, `foundry`), which the driver checks against the
+  choice; a switch in the settings' `env` cannot be overridden. Without
+  credentials Vertex and Foundry listed their models at once, Bedrock
+  after 60 s, and a Vertex turn failed after two `api_retry` with
+  `cloud_credential_error` (`fixtures/provider_vertex.jsonl`).
+  Unverified: a turn on any of them with credentials, `_MANTLE` beside
+  `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
+  `CLAUDE_CODE_USE_GATEWAY` (left alone).
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

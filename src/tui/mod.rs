@@ -664,6 +664,7 @@ fn start_session(
         binary,
         cwd: app.cwd.clone(),
         model: app.current_model().cloned(),
+        provider: app.chosen_provider().cloned(),
         effort: app.current_effort().map(str::to_string),
         policy: app
             .effective_policy()

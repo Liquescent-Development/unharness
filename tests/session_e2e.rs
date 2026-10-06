@@ -58,6 +58,7 @@ impl Fake {
             binary: fake_harness(),
             cwd: self._tmp.path().to_path_buf(),
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
+            provider: None,
             effort: None,
             policy,
             resume: None,
@@ -197,6 +198,35 @@ async fn claude_basic_turn_streams_tool_and_text() {
         matches!(ev, AgentEvent::ProcessExited { code: Some(0) }),
         "{ev:?}"
     );
+}
+
+/// A chosen provider reaches Claude as its switch, and a session that runs
+/// on another one (here the settings chose Vertex) says so.
+#[tokio::test]
+async fn claude_reports_running_on_another_provider() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/provider_vertex.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    for (chosen, error) in [("bedrock", true), ("vertex", false)] {
+        let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+        cfg.provider = Some(chosen.into());
+        let mut handle = harness.start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("hi")).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::CapabilitiesChanged(u) if u.provider == Some("vertex".into())
+        )));
+        let reported = events.iter().any(|e| {
+            matches!(e, AgentEvent::Error(m) if m.contains(&format!("runs on vertex, not {chosen}")))
+        });
+        assert_eq!(reported, error, "{chosen}: {events:?}");
+        handle.send(SessionCommand::Shutdown).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1401,6 +1431,7 @@ impl Confined {
             binary: fake_harness(),
             cwd: self.root.join("ws"),
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
+            provider: None,
             effort: None,
             policy: PermissionPolicy::AcceptEdits,
             resume: None,

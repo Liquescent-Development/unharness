@@ -240,6 +240,7 @@ mod tests {
                 "google",
                 "gemini-3.8-flash-high",
             )),
+            provider: None,
             effort: Some("high".into()),
             policy: PermissionPolicy::AcceptEdits,
             resume: Some("conv-1".into()),

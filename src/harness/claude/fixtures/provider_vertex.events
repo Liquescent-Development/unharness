@@ -1,0 +1,8 @@
+CapabilitiesChanged models=14 provider=vertex
+SessionStarted id=820c010e-1af4-4250-9e84-1301ff0f3d8a model=claude-haiku-4-5@20251001
+Notice "MCP server 'plugin:cq:cq' failed to start"
+Notice "API retry 1/2 (cloud_credential_error)"
+Notice "API retry 2/2 (cloud_credential_error)"
+TurnStarted
+TextDelta "API Error: Could not load Google Cloud credentials · Coul..."
+TurnCompleted Error "success: API Error: Could not load Google Cloud credentia..."

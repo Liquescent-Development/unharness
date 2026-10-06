@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::ids::ModelInfo;
+use super::ids::{ModelInfo, ProviderId};
 use super::rules::ToolAction;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,6 +198,8 @@ pub struct CapsUpdate {
     pub plan_mode: Option<bool>,
     /// Models the live session offers (harnesses that only know after a handshake).
     pub models: Option<Vec<ModelInfo>>,
+    /// The provider the live session runs on, as the harness reports it.
+    pub provider: Option<ProviderId>,
 }
 
 impl CapsUpdate {
@@ -227,6 +229,9 @@ impl CapsUpdate {
         }
         if newer.models.is_some() {
             self.models = newer.models;
+        }
+        if newer.provider.is_some() {
+            self.provider = newer.provider;
         }
     }
 }
@@ -513,6 +518,9 @@ impl AgentEvent {
                 }
                 if let Some(m) = &u.models {
                     parts.push(format!("models={}", m.len()));
+                }
+                if let Some(p) = &u.provider {
+                    parts.push(format!("provider={p}"));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

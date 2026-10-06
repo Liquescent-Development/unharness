@@ -61,6 +61,8 @@ pub struct PrintConfig {
     /// `true` = one-shot print mode; `false` = hand the terminal to the vendor TUI.
     pub print_mode: bool,
     pub model: Option<ModelRef>,
+    /// As `SessionConfig::provider`.
+    pub provider: Option<ProviderId>,
     pub effort: Option<String>,
     pub policy: Option<PermissionPolicy>,
     pub format: Option<String>,
@@ -100,6 +102,15 @@ pub trait Harness: Send + Sync {
                 .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
                 .collect()),
             ProviderSource::Dynamic => Ok(Vec::new()),
+        }
+    }
+
+    /// The provider this harness uses when it is told none, as far as can
+    /// be told without starting it. Default: the first static provider.
+    fn default_provider(&self) -> Option<ProviderId> {
+        match self.descriptor().providers {
+            ProviderSource::Static(list) => list.first().map(|(id, _)| ProviderId::from(*id)),
+            ProviderSource::Dynamic => None,
         }
     }
 

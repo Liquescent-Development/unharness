@@ -122,6 +122,9 @@ pub struct Capabilities {
     pub resume_by_id: bool,
     pub live_model_list: bool,
     pub multi_provider: bool,
+    /// The provider is chosen when the process starts, so a session that
+    /// changes it starts again (resumed); otherwise it goes with the model.
+    pub provider_per_process: bool,
     /// The agent can ask the user structured questions.
     pub ask_user_question: bool,
     pub interrupt: bool,

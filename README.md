@@ -103,7 +103,7 @@ See [Usage](docs/usage.md) for every command and flag.
 
 | Harness | Transport | Interactive permissions | Resume | Live models |
 |---|---|---|---|---|
-| Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | static list |
+| Claude Code | `claude -p --input-format stream-json` (long-lived) | yes, incl. AskUserQuestion | `--resume` | `initialize`; Anthropic, Bedrock, Vertex, Foundry |
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list` |
 | pi | `pi --mode rpc` (long-lived) | yes, through an extension unharness loads | `--session-id` | `get_available_models`, many providers |
 | Antigravity | `agy --print= --input-format stream-json` (long-lived) | no | `--conversation` | `agy models` |

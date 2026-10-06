@@ -1,4 +1,4 @@
-CapabilitiesChanged models=12
+CapabilitiesChanged models=12 provider=anthropic
 SessionStarted id=ad4bf7c9-6f7f-4e0a-9a9b-1c8c290879d8 model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21708 window=-

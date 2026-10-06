@@ -32,6 +32,7 @@ deny_read = ["~/Documents"]      # more paths no harness may read
 
 [harnesses.claude]
 # binary = "/path/to/claude"
+# default_provider = "bedrock"   # anthropic | bedrock | vertex | foundry (see Providers)
 default_model  = "opus"
 default_effort = "high"
 default_policy = "accept-edits"
@@ -74,6 +75,33 @@ headers = { Authorization = "Bearer …" }
 | `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental) |
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[mcp_servers.<name>]` | | See [MCP servers](mcp.md) |
+
+## Providers
+
+A harness uses the provider its own configuration chooses unless one is
+chosen with `--provider`, `default_provider` or `/provider`. Only a chosen
+one is passed on; the TUI shows the provider each session reports.
+
+| Harness | Providers | How unharness passes one |
+|---|---|---|
+| Claude Code | `anthropic`, `bedrock` (Amazon Bedrock), `vertex` (Google Vertex AI), `foundry` (Microsoft Foundry) | Sets `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY` and removes the others from Claude's environment |
+| pi | whatever `pi --list-models` reports | `--provider` |
+
+Credentials, region and project stay Claude Code's own (`AWS_REGION`,
+`AWS_PROFILE`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
+`ANTHROPIC_FOUNDRY_RESOURCE`, ...), from the environment or the `env` of
+Claude's settings. Two things to know:
+
+- When the `env` of Claude's settings sets a `CLAUDE_CODE_USE_*` variable,
+  that decides: Claude ignores the choice (it falls back to Anthropic's
+  API when two are set), and unharness reports the provider the session
+  runs on as an error.
+- The provider is fixed when Claude starts, so changing it in the TUI
+  restarts the session (resumed) with the next prompt.
+
+The model list is Claude's own for that provider. Bedrock without
+credentials took a minute to answer; after 15 s unharness gives up and
+`/model <name>` still sets one.
 
 ## Files unharness keeps
 

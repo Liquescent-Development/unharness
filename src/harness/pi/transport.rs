@@ -350,6 +350,7 @@ mod tests {
                 "anthropic",
                 "claude-sonnet-4-5",
             )),
+            provider: None,
             effort: Some("high".into()),
             policy: PermissionPolicy::Ask,
             resume: None,

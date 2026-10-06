@@ -6,9 +6,10 @@ pub mod transport;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use super::{
@@ -140,8 +141,80 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     display_name: "Claude Code (claude)",
     short_name: "Claude",
     binary_names: &["claude"],
-    providers: ProviderSource::Static(&[("anthropic", "Anthropic")]),
+    providers: ProviderSource::Static(&[
+        ("anthropic", "Anthropic"),
+        ("bedrock", "Amazon Bedrock"),
+        ("vertex", "Google Vertex AI"),
+        ("foundry", "Microsoft Foundry"),
+    ]),
 };
+
+/// The variables by which Claude Code chooses the API it calls, with its
+/// name for each (`apiProvider`, 2.1.292). With two of them set, whatever
+/// their values and whether in the environment or in its settings' `env`,
+/// it calls Anthropic's.
+const PROVIDER_SWITCHES: [(&str, &str); 6] = [
+    ("CLAUDE_CODE_USE_BEDROCK", "bedrock"),
+    ("CLAUDE_CODE_USE_FOUNDRY", "foundry"),
+    ("CLAUDE_CODE_USE_ANTHROPIC_AWS", "anthropicAws"),
+    (
+        "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        "anthropicGoogleCloud",
+    ),
+    ("CLAUDE_CODE_USE_MANTLE", "mantle"),
+    ("CLAUDE_CODE_USE_VERTEX", "vertex"),
+];
+
+/// Whether Claude reads a switch's value as on (`0`, `2`, `no` are off).
+fn switch_on(value: &str) -> bool {
+    ["1", "true", "yes", "on"]
+        .iter()
+        .any(|on| value.trim().eq_ignore_ascii_case(on))
+}
+
+/// The provider Claude calls with the switches `var` finds.
+fn provider_from(var: impl Fn(&str) -> Option<String>) -> ProviderId {
+    let set: Vec<(&str, String)> = PROVIDER_SWITCHES
+        .iter()
+        .filter_map(|(name, provider)| Some((*provider, var(name)?)))
+        .collect();
+    match set.as_slice() {
+        [(provider, value)] if switch_on(value) => parse::provider_id(provider),
+        _ => ProviderId::from("anthropic"),
+    }
+}
+
+/// The environment in which Claude calls `provider`: its switch on and
+/// every other one taken away (one set to `0` would still count as set).
+pub fn provider_env(provider: &ProviderId) -> Result<Vec<(&'static str, Option<&'static str>)>> {
+    let own = match provider.as_str() {
+        "anthropic" => None,
+        "bedrock" | "vertex" | "foundry" => PROVIDER_SWITCHES
+            .iter()
+            .find(|(_, name)| *name == provider.as_str())
+            .map(|(var, _)| *var),
+        other => {
+            bail!("Claude Code has no provider '{other}' (anthropic, bedrock, vertex or foundry)")
+        }
+    };
+    Ok(PROVIDER_SWITCHES
+        .iter()
+        .map(|(var, _)| (*var, (Some(*var) == own).then_some("1")))
+        .collect())
+}
+
+/// Why the provider in the answer to `initialize` is not the one that was
+/// chosen, if it is not.
+pub fn provider_mismatch(chosen: Option<&ProviderId>, answer: &Value) -> Option<String> {
+    let chosen = chosen?;
+    let runs_on = parse::provider_id(answer.pointer("/account/apiProvider")?.as_str()?);
+    (runs_on != *chosen).then(|| {
+        format!(
+            "Claude Code runs on {runs_on}, not {chosen}: a CLAUDE_CODE_USE_* variable in the \
+             env of its settings decides, and unharness cannot override it"
+        )
+    })
+}
 
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
@@ -254,7 +327,9 @@ impl Harness for ClaudeHarness {
             effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
             resume_by_id: true,
             live_model_list: true,
-            multi_provider: false,
+            // `CLAUDE_CODE_USE_*` in its environment.
+            multi_provider: true,
+            provider_per_process: true,
             ask_user_question: true,
             interrupt: true,
             usage_reporting: true,
@@ -301,19 +376,40 @@ impl Harness for ClaudeHarness {
         Some(auth_status(binary).authenticated)
     }
 
-    /// What Claude answers to `initialize`, else the static table.
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
-        if provider.as_str() != "anthropic" {
-            return Ok(Vec::new());
-        }
-        let live = initialize_answer(binary, self.config_env()?)
+    /// What the environment and the user's settings choose; a session
+    /// reports what it runs on (the workspace's settings may differ).
+    fn default_provider(&self) -> Option<ProviderId> {
+        let settings = expand_home(&state_dir().join("settings.json"));
+        let env = std::fs::read_to_string(settings)
             .ok()
-            .and_then(|answer| parse::initialize_models(&answer))
-            .filter(|models| {
-                !models.is_empty() && models.iter().all(|m| &m.model_ref.provider == provider)
-            });
-        if let Some(models) = live {
-            return Ok(models);
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|v| v.get("env").cloned())
+            .unwrap_or(Value::Null);
+        Some(provider_from(|var| {
+            match env.get(var) {
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(v) if !v.is_null() => Some(v.to_string()),
+                _ => None,
+            }
+            .or_else(|| std::env::var(var).ok())
+        }))
+    }
+
+    /// What Claude answers to `initialize` on that provider. The table
+    /// only when Anthropic's API cannot be asked.
+    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+        let env = provider_env(provider)?;
+        let answer = initialize_answer(binary, self.config_env()?, &env);
+        if let Ok(answer) = &answer {
+            if let Some(why) = provider_mismatch(Some(provider), answer) {
+                bail!(why);
+            }
+            if let Some(models) = parse::initialize_models(answer) {
+                return Ok(models);
+            }
+        }
+        if provider.as_str() != "anthropic" {
+            return answer.and(Ok(Vec::new()));
         }
         Ok(MODELS
             .iter()
@@ -351,6 +447,9 @@ impl Harness for ClaudeHarness {
         if let Some((key, value)) = self.config_env()? {
             cmd.env(key, value);
         }
+        if let Some(provider) = &cfg.provider {
+            apply_env(&mut cmd, &provider_env(provider)?);
+        }
         let mcp = transport::mcp_config_file(&cfg.mcp_servers, &self.mcp_dir())?;
         if let Some(path) = &mcp {
             cmd.arg("--mcp-config").arg(path);
@@ -386,6 +485,30 @@ impl Harness for ClaudeHarness {
     }
 }
 
+/// Set the variables with a value and take away the others.
+fn apply_env(cmd: &mut Command, vars: &[(&str, Option<&str>)]) {
+    for (key, value) in vars {
+        match value {
+            Some(value) => cmd.env(key, value),
+            None => cmd.env_remove(key),
+        };
+    }
+}
+
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+fn no_answer() -> anyhow::Error {
+    anyhow!(
+        "Claude Code did not list its models within {} s",
+        QUERY_TIMEOUT.as_secs()
+    )
+}
+
 /// How long a model list may take. On Bedrock without credentials Claude
 /// answered after 60 s (2.1.292), on Vertex after 3 s.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -396,15 +519,24 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 /// workspace's: `--safe-mode` turns off hooks, plugins and MCP servers but
 /// keeps the settings' `env`, which chooses the provider; it starts in an
 /// empty directory and reads only the user's settings.
-fn initialize_answer(binary: &Path, env: Option<(String, String)>) -> Result<Value> {
+fn initialize_answer(
+    binary: &Path,
+    config: Option<(String, String)>,
+    provider: &[(&str, Option<&str>)],
+) -> Result<Value> {
     let dir = std::env::temp_dir().join(format!("unharness-claude-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir)?;
-    let answer = ask_initialize(binary, env, &dir);
+    let answer = ask_initialize(binary, config, provider, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     answer
 }
 
-fn ask_initialize(binary: &Path, env: Option<(String, String)>, dir: &Path) -> Result<Value> {
+fn ask_initialize(
+    binary: &Path,
+    config: Option<(String, String)>,
+    provider: &[(&str, Option<&str>)],
+    dir: &Path,
+) -> Result<Value> {
     let mut cmd = Command::new(binary);
     cmd.args([
         "-p",
@@ -422,7 +554,8 @@ fn ask_initialize(binary: &Path, env: Option<(String, String)>, dir: &Path) -> R
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    cmd.envs(env);
+    cmd.envs(config);
+    apply_env(&mut cmd, provider);
     for var in transport::PARENT_SESSION_VARS {
         cmd.env_remove(var);
     }
@@ -443,10 +576,14 @@ fn ask_initialize(binary: &Path, env: Option<(String, String)>, dir: &Path) -> R
     let deadline = Instant::now() + QUERY_TIMEOUT;
     let answer = loop {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            break Err(anyhow!("claude did not answer initialize"));
+            break Err(no_answer());
         };
-        let Ok(line) = rx.recv_timeout(left) else {
-            break Err(anyhow!("claude did not answer initialize"));
+        let line = match rx.recv_timeout(left) {
+            Ok(line) => line,
+            Err(RecvTimeoutError::Timeout) => break Err(no_answer()),
+            Err(RecvTimeoutError::Disconnected) => {
+                break Err(anyhow!("Claude Code exited before it listed its models"));
+            }
         };
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -518,6 +655,7 @@ mod tests {
             prompt: Some("run tests".into()),
             print_mode: true,
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "sonnet")),
+            provider: None,
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Bypass),
             format: Some("stream-json".into()),
@@ -573,11 +711,84 @@ mod tests {
             )
             .unwrap();
         assert!(models.iter().any(|m| m.model_ref.model == "opus"));
-        assert!(
-            ClaudeHarness::default()
-                .list_models(Path::new("claude"), &ProviderId::from("openai"))
-                .unwrap()
-                .is_empty()
+        // The table is Anthropic's; another provider's models come from
+        // Claude or not at all.
+        for provider in ["bedrock", "openai"] {
+            assert!(
+                ClaudeHarness::default()
+                    .list_models(
+                        Path::new("/nonexistent/claude"),
+                        &ProviderId::from(provider)
+                    )
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn the_provider_is_the_one_switch_that_is_on() {
+        let with = |vars: &[(&str, &str)]| {
+            let vars: Vec<(String, String)> = vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            provider_from(|name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())).0
+        };
+        assert_eq!(with(&[]), "anthropic");
+        assert_eq!(with(&[("CLAUDE_CODE_USE_VERTEX", "1")]), "vertex");
+        assert_eq!(with(&[("CLAUDE_CODE_USE_BEDROCK", "True")]), "bedrock");
+        assert_eq!(with(&[("CLAUDE_CODE_USE_FOUNDRY", "yes")]), "foundry");
+        assert_eq!(with(&[("CLAUDE_CODE_USE_MANTLE", "on")]), "mantle");
+        // Off, or two of them: Anthropic's API (checked on 2.1.292).
+        assert_eq!(with(&[("CLAUDE_CODE_USE_VERTEX", "0")]), "anthropic");
+        assert_eq!(with(&[("CLAUDE_CODE_USE_VERTEX", "2")]), "anthropic");
+        assert_eq!(
+            with(&[
+                ("CLAUDE_CODE_USE_BEDROCK", "0"),
+                ("CLAUDE_CODE_USE_FOUNDRY", "1")
+            ]),
+            "anthropic"
+        );
+    }
+
+    #[test]
+    fn choosing_a_provider_takes_the_other_switches_away() {
+        let env = provider_env(&ProviderId::from("vertex")).unwrap();
+        assert_eq!(env.len(), PROVIDER_SWITCHES.len());
+        for (var, value) in &env {
+            assert_eq!(*value, (*var == "CLAUDE_CODE_USE_VERTEX").then_some("1"));
+        }
+        let anthropic = provider_env(&ProviderId::from("anthropic")).unwrap();
+        assert!(anthropic.iter().all(|(_, value)| value.is_none()));
+        assert!(provider_env(&ProviderId::from("mantle")).is_err());
+
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/claude"),
+            cwd: PathBuf::from("/tmp"),
+            provider: Some(ProviderId::from("bedrock")),
+            ..Default::default()
+        };
+        let cmd = ClaudeHarness::default().build_print_command(&cfg).unwrap();
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&("CLAUDE_CODE_USE_BEDROCK".as_ref(), Some("1".as_ref()))));
+        assert!(envs.contains(&("CLAUDE_CODE_USE_VERTEX".as_ref(), None)));
+    }
+
+    #[test]
+    fn a_session_on_another_provider_is_reported() {
+        let answer = serde_json::json!({"account": {"apiProvider": "firstParty"}});
+        let bedrock = ProviderId::from("bedrock");
+        let why = provider_mismatch(Some(&bedrock), &answer).unwrap();
+        assert!(why.contains("runs on anthropic, not bedrock"));
+        assert_eq!(
+            provider_mismatch(Some(&ProviderId::from("anthropic")), &answer),
+            None
+        );
+        // Nothing was chosen, or nothing reported.
+        assert_eq!(provider_mismatch(None, &answer), None);
+        assert_eq!(
+            provider_mismatch(Some(&bedrock), &serde_json::json!({})),
+            None
         );
     }
 
