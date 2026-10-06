@@ -76,6 +76,18 @@ impl Fake {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect()
     }
+
+    /// What the driver sent, once the fake has logged at least `count` lines.
+    async fn sent_lines_eventually(&self, count: usize) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let sent = self.sent_lines();
+            if sent.len() >= count || tokio::time::Instant::now() > deadline {
+                return sent;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 async fn next_event(handle: &mut SessionHandle) -> AgentEvent {
@@ -144,9 +156,11 @@ async fn claude_basic_turn_streams_tool_and_text() {
         events.get(1),
         Some(AgentEvent::SessionStarted { .. })
     ));
+    // The fixture has no `>>` lines: the fake replays the turn without
+    // waiting and logs what it was sent only afterwards.
+    let sent = fake.sent_lines_eventually(2).await;
     assert!(
-        fake.sent_lines()
-            .iter()
+        sent.iter()
             .any(|v| v["type"] == "user" && v["uuid"] == anchor.as_str())
     );
     assert!(
@@ -172,7 +186,6 @@ async fn claude_basic_turn_streams_tool_and_text() {
     ));
 
     // The driver sent the initialize handshake and then the user turn.
-    let sent = fake.sent_lines();
     assert_eq!(sent[0]["type"], "control_request");
     assert_eq!(sent[0]["request"]["subtype"], "initialize");
     assert_eq!(sent[1]["type"], "user");
@@ -914,9 +927,12 @@ async fn agy_stream_session_runs_two_turns() {
             stop_reason: StopReason::Done
         })
     ));
-    // The refusal is on stderr, a pipe of its own, so it can land after the
-    // result; the fake sends nothing more until the next turn.
-    let refusal = |e: &AgentEvent| matches!(e, AgentEvent::Notice(n) if n.contains("refused") && n.contains("RunCommand"));
+    // The refusal is on stderr, a pipe of its own, so it can land on either
+    // side of the result, and whichever comes first gives the one notice
+    // (only the result's names `RunCommand`); the fake sends nothing more
+    // until the next turn.
+    let refusal =
+        |e: &AgentEvent| matches!(e, AgentEvent::Notice(n) if n.starts_with("agy refused"));
     if !events.iter().any(refusal) {
         events.push(next_event(&mut handle).await);
     }
