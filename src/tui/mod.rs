@@ -201,6 +201,8 @@ async fn event_loop(
     let mut needs_redraw = true;
     // File lists for `@` completion, walked off this task.
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Provider and model lists, which may start the harness's CLI.
+    let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -264,6 +266,10 @@ async fn event_loop(
                     handle_event(app, event);
                 }
             }
+            Some((request, result)) = lists_rx.recv() => {
+                app.on_list(request, result);
+                needs_redraw = true;
+            }
             Some(paths) = files_rx.recv() => {
                 match paths {
                     Some(paths) => app.set_file_index(paths),
@@ -271,6 +277,14 @@ async fn event_loop(
                 }
                 needs_redraw = true;
             }
+        }
+
+        for job in app.take_list_jobs() {
+            let tx = lists_tx.clone();
+            // As for the file walk: quitting does not wait for it.
+            std::thread::spawn(move || {
+                let _ = tx.send(job.run());
+            });
         }
 
         if let Some(root) = app.take_file_index_request() {

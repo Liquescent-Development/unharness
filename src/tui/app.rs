@@ -62,6 +62,57 @@ pub enum Action {
     StopShell,
 }
 
+/// A list the TUI wants from a harness. Asking may start the CLI and
+/// take seconds (Claude on Bedrock gives up after 15), so it is done off
+/// the UI thread.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ListRequest {
+    Providers(HarnessId),
+    Models(HarnessId, ProviderId),
+}
+
+#[derive(Debug, Clone)]
+pub enum ListResult {
+    Providers(Result<Vec<(ProviderId, String)>, String>),
+    Models(Result<Vec<ModelInfo>, String>),
+}
+
+/// Everything a thread needs to answer a `ListRequest`.
+pub struct ListJob {
+    pub request: ListRequest,
+    registry: Arc<Registry>,
+    binary: PathBuf,
+    sandbox: Sandbox,
+}
+
+impl ListJob {
+    pub fn run(self) -> (ListRequest, ListResult) {
+        let result = match (&self.request, self.registry.get(self.harness())) {
+            (ListRequest::Providers(_), Some(h)) => ListResult::Providers(
+                h.list_providers(&self.binary, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
+            (ListRequest::Models(_, p), Some(h)) => ListResult::Models(
+                h.list_models(&self.binary, p, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
+            (ListRequest::Providers(_), None) => {
+                ListResult::Providers(Err("not a registered harness".into()))
+            }
+            (ListRequest::Models(..), None) => {
+                ListResult::Models(Err("not a registered harness".into()))
+            }
+        };
+        (self.request, result)
+    }
+
+    fn harness(&self) -> HarnessId {
+        match &self.request {
+            ListRequest::Providers(h) | ListRequest::Models(h, _) => *h,
+        }
+    }
+}
+
 /// The `!` command at work; its output goes to the last running
 /// `Block::Shell`.
 #[derive(Debug, Clone)]
@@ -230,6 +281,12 @@ pub struct App {
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
+    provider_cache: HashMap<HarnessId, Vec<(ProviderId, String)>>,
+    /// Lists being fetched, and the ones still to hand to a thread.
+    lists_pending: HashSet<ListRequest>,
+    list_jobs: Vec<ListJob>,
+    /// The picker the user asked for, opened when its list arrives.
+    open_when_listed: Option<ListRequest>,
 
     pub transcript: Transcript,
     pub bridge_max_chars: usize,
@@ -591,6 +648,10 @@ impl App {
             models,
             efforts,
             model_cache: HashMap::new(),
+            provider_cache: HashMap::new(),
+            lists_pending: HashSet::new(),
+            list_jobs: Vec::new(),
+            open_when_listed: None,
             transcript,
             last_active_index,
             session_ids,
@@ -2542,19 +2603,14 @@ impl App {
             ));
             return;
         }
-        let Some(binary) = self.harness_binary() else {
-            self.transcript
-                .push_error(format!("{} binary not found", self.short_name()));
-            return;
-        };
-        let sandbox = match self.session_sandbox() {
-            Ok(s) => s,
-            Err(e) => {
-                self.transcript.push_error(format!("list providers: {e:#}"));
-                return;
-            }
-        };
-        let providers = match self.harness().list_providers(&binary, &sandbox) {
+        match self.provider_cache.get(&self.active).cloned() {
+            Some(providers) => self.show_provider_picker(Ok(providers)),
+            None => self.wait_for_list(ListRequest::Providers(self.active)),
+        }
+    }
+
+    fn show_provider_picker(&mut self, providers: Result<Vec<(ProviderId, String)>, String>) {
+        let providers = match providers {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
                 self.transcript
@@ -2576,21 +2632,100 @@ impl App {
         self.modal = Some(Modal::Provider(ListPicker::new(items).with_selected(idx)));
     }
 
-    fn models_for(&mut self, provider: &ProviderId) -> Result<Vec<ModelInfo>, String> {
-        let key = (self.active, provider.0.clone());
-        if let Some(m) = self.model_cache.get(&key) {
-            return Ok(m.clone());
+    /// The models of `provider` on the active harness if they are known;
+    /// otherwise they are asked for.
+    fn cached_models(&mut self, provider: &ProviderId) -> Option<Vec<ModelInfo>> {
+        let cached = self
+            .model_cache
+            .get(&(self.active, provider.0.clone()))
+            .cloned();
+        if cached.is_none() {
+            self.request_list(ListRequest::Models(self.active, provider.clone()));
         }
-        let binary = self
-            .harness_binary()
-            .ok_or_else(|| format!("{} binary not found", self.short_name()))?;
-        let sandbox = self.session_sandbox().map_err(|e| format!("{e:#}"))?;
-        let models = self
-            .harness()
-            .list_models(&binary, provider, &sandbox)
-            .map_err(|e| e.to_string())?;
-        self.model_cache.insert(key, models.clone());
-        Ok(models)
+        cached
+    }
+
+    /// Ask for `request` (once at a time) and open its picker when it comes.
+    fn wait_for_list(&mut self, request: ListRequest) {
+        let what = match &request {
+            ListRequest::Providers(_) => "providers".to_string(),
+            ListRequest::Models(_, p) => format!("models on {p}"),
+        };
+        self.open_when_listed = Some(request.clone());
+        if self.request_list(request) {
+            self.transcript
+                .push_notice(format!("Asking {} for its {what}…", self.short_name()));
+        }
+    }
+
+    /// Queue `request` for a thread unless it is already under way.
+    /// Returns whether it was queued now.
+    fn request_list(&mut self, request: ListRequest) -> bool {
+        if self.lists_pending.contains(&request) {
+            return false;
+        }
+        let failed = |e: String| match &request {
+            ListRequest::Providers(_) => ListResult::Providers(Err(e)),
+            ListRequest::Models(..) => ListResult::Models(Err(e)),
+        };
+        let Some(binary) = self.harness_binary() else {
+            let why = format!("{} binary not found", self.short_name());
+            self.on_list(request.clone(), failed(why));
+            return false;
+        };
+        let sandbox = match self.session_sandbox() {
+            Ok(s) => s,
+            Err(e) => {
+                self.on_list(request.clone(), failed(format!("{e:#}")));
+                return false;
+            }
+        };
+        self.lists_pending.insert(request.clone());
+        self.list_jobs.push(ListJob {
+            request,
+            registry: self.registry.clone(),
+            binary,
+            sandbox,
+        });
+        true
+    }
+
+    /// Lists to fetch on threads of their own.
+    pub fn take_list_jobs(&mut self) -> Vec<ListJob> {
+        std::mem::take(&mut self.list_jobs)
+    }
+
+    /// A list has come back. It is kept unless it failed, and opened when
+    /// it is the one the user is waiting for and nothing else came up.
+    pub fn on_list(&mut self, request: ListRequest, result: ListResult) {
+        self.lists_pending.remove(&request);
+        match (&request, &result) {
+            (ListRequest::Providers(h), ListResult::Providers(Ok(p))) => {
+                self.provider_cache.insert(*h, p.clone());
+            }
+            (ListRequest::Models(h, p), ListResult::Models(Ok(m))) => {
+                self.model_cache.insert((*h, p.0.clone()), m.clone());
+            }
+            _ => {}
+        }
+        if self.completing_file.is_none() && self.input.starts_with("/model ") {
+            self.update_suggestions();
+        }
+        let harness = match &request {
+            ListRequest::Providers(h) | ListRequest::Models(h, _) => *h,
+        };
+        if self.open_when_listed.as_ref() != Some(&request) {
+            return;
+        }
+        self.open_when_listed = None;
+        if self.modal.is_some() || harness != self.active {
+            return;
+        }
+        match (request, result) {
+            (ListRequest::Providers(_), ListResult::Providers(p)) => self.show_provider_picker(p),
+            (ListRequest::Models(_, p), ListResult::Models(m)) => self.show_model_picker(&p, m),
+            _ => {}
+        }
     }
 
     pub fn open_model_picker(&mut self) {
@@ -2603,7 +2738,18 @@ impl App {
             }
             return;
         };
-        match self.models_for(&provider) {
+        match self
+            .model_cache
+            .get(&(self.active, provider.0.clone()))
+            .cloned()
+        {
+            Some(models) => self.show_model_picker(&provider, Ok(models)),
+            None => self.wait_for_list(ListRequest::Models(self.active, provider)),
+        }
+    }
+
+    fn show_model_picker(&mut self, provider: &ProviderId, models: Result<Vec<ModelInfo>, String>) {
+        match models {
             Ok(models) if !models.is_empty() => {
                 let idx = self
                     .current_model()
@@ -3265,7 +3411,7 @@ impl App {
             }
             ("/model", Some(s)) => {
                 if let Some(p) = self.current_provider().cloned()
-                    && let Ok(models) = self.models_for(&p)
+                    && let Some(models) = self.cached_models(&p)
                 {
                     for m in models {
                         let id = m.model_ref.model.to_lowercase();
@@ -5552,6 +5698,68 @@ pub(crate) mod tests {
         assert!(
             matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
+    }
+
+    #[test]
+    fn model_lists_arrive_without_holding_the_screen() {
+        // A binary that exists wherever the test runs; nothing starts it.
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".into(),
+            crate::config::HarnessSettings {
+                binary: Some("/bin/sh".into()),
+                ..Default::default()
+            },
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_with(
+            tmp.keep(),
+            HarnessId::CLAUDE,
+            None,
+            false,
+            config,
+            test_registry(),
+        );
+        app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+        let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
+        app.open_model_picker();
+        assert!(app.modal.is_none());
+        // Asked once, however often the user presses Ctrl+M meanwhile.
+        app.open_model_picker();
+        let jobs = app.take_list_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].request, wanted);
+
+        // A failure is shown and not kept: the next Ctrl+M asks again.
+        app.on_list(wanted.clone(), ListResult::Models(Err("timed out".into())));
+        assert!(app.modal.is_none());
+        app.open_model_picker();
+        assert_eq!(app.take_list_jobs().len(), 1);
+
+        let model = ModelInfo {
+            model_ref: ModelRef::new(HarnessId::CLAUDE, "vertex", "haiku"),
+            display_name: "Haiku".into(),
+            description: None,
+            effort_levels: None,
+        };
+        app.on_list(wanted.clone(), ListResult::Models(Ok(vec![model.clone()])));
+        assert!(matches!(app.modal, Some(Modal::Model(_))));
+        app.modal = None;
+        app.open_model_picker();
+        assert!(matches!(app.modal, Some(Modal::Model(_))));
+        assert!(app.take_list_jobs().is_empty());
+
+        // One that comes after the user moved on is kept, not opened.
+        app.modal = None;
+        app.open_provider_picker();
+        let providers = ListRequest::Providers(HarnessId::CLAUDE);
+        assert_eq!(app.take_list_jobs()[0].request, providers);
+        app.switch_harness(HarnessId::CODEX);
+        app.on_list(
+            providers,
+            ListResult::Providers(Ok(vec![("anthropic".into(), "Anthropic".into())])),
+        );
+        assert!(!matches!(app.modal, Some(Modal::Provider(_))));
     }
 
     #[test]
