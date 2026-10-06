@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 use super::code::{code_lines, diff_lines, sanitize};
 
 pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'static>> {
-    let text = sanitize(text);
+    let text = html_as_text(&sanitize(text));
     let mut lines: Vec<Line<'static>> = Vec::new();
     for chunk in split_bare_diffs(&text) {
         let (Chunk::Markdown(part) | Chunk::Diff(part)) = chunk;
@@ -71,22 +71,19 @@ fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
         |l: &str| header(l) || (l.starts_with(['+', '-', ' ', '\\']) && !l.trim().is_empty());
     let mut chunks = Vec::new();
     let mut from = 0;
-    let mut fence: Option<char> = None;
+    let mut fences = Fences::default();
+    // The end of a run already found to be no hunk: the headers inside it
+    // start no hunk either.
+    let mut prose_until = 0;
     let mut i = 0;
     while i < lines.len() {
         let (start, line) = lines[i];
-        let opener = line.trim_start();
-        if let Some(c) = fence {
-            if opener.starts_with(&c.to_string().repeat(3)) {
-                fence = None;
-            }
-        } else if opener.starts_with("```") || opener.starts_with("~~~") {
-            fence = opener.chars().next();
-        } else if header(line) {
+        if !fences.code(line) && i >= prose_until && header(line) {
             let end = lines[i..]
                 .iter()
                 .position(|(_, l)| !hunk_line(l))
                 .map_or(lines.len(), |n| i + n);
+            prose_until = end;
             if lines[i..end]
                 .iter()
                 .any(|(_, l)| l.starts_with("@@") || l.starts_with("diff --git"))
@@ -107,6 +104,90 @@ fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
         chunks.push(Chunk::Markdown(&text[from..]));
     }
     chunks
+}
+
+/// A line's text after the quote markers, list markers and indentation
+/// in front of it.
+fn block_text(line: &str) -> &str {
+    let mut rest = line;
+    loop {
+        let trimmed = rest.trim_start_matches([' ', '>']);
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        let marker = if trimmed.starts_with(['-', '*', '+']) {
+            1
+        } else if (1..=9).contains(&digits) && trimmed[digits..].starts_with(['.', ')']) {
+            digits + 1
+        } else {
+            0
+        };
+        let after = &trimmed[marker..];
+        if marker > 0 && (after.is_empty() || after.starts_with(' ')) {
+            rest = after;
+        } else {
+            return trimmed;
+        }
+    }
+}
+
+/// Which lines are fenced code, told a line at a time: a fence closes on
+/// the same character, at least as many of them and nothing else.
+#[derive(Default)]
+struct Fences {
+    open: Option<(char, usize)>,
+}
+
+impl Fences {
+    /// Whether `line` opens, is inside or closes a fence.
+    fn code(&mut self, line: &str) -> bool {
+        let text = block_text(line);
+        let run = |c: char| text.chars().take_while(|x| *x == c).count();
+        match self.open {
+            Some((c, n)) => {
+                if run(c) >= n && text.trim_end().chars().all(|x| x == c) {
+                    self.open = None;
+                }
+                true
+            }
+            None => match text.chars().next() {
+                Some(c @ ('`' | '~')) if run(c) >= 3 => {
+                    self.open = Some((c, run(c)));
+                    true
+                }
+                _ => false,
+            },
+        }
+    }
+}
+
+/// A terminal cannot draw HTML, and CommonMark takes a line that starts
+/// with a tag for the start of an HTML block, which can run to its closing
+/// tag and swallow the markdown after it (`<script> tags are blocked.`).
+/// Such a `<` is escaped, so the line is text; autolinks, fenced code and
+/// indented code are left alone, and a tag inside a line is still inline
+/// HTML (`<br>`).
+fn html_as_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fences = Fences::default();
+    for line in text.split_inclusive('\n') {
+        let rest = block_text(line);
+        let at = line.len() - rest.len();
+        let indented_code = at >= 4 && line[..at].chars().all(|c| c == ' ');
+        if !fences.code(line) && !indented_code && rest.starts_with('<') && !is_autolink(rest) {
+            out.push_str(&line[..at]);
+            out.push('\\');
+            out.push_str(rest);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// `<https://…>` or `<name@host>` at the start of `text`.
+fn is_autolink(text: &str) -> bool {
+    text[1..].split_once('>').is_some_and(|(inner, _)| {
+        !inner.contains(' ') && (inner.contains(':') || inner.contains('@'))
+    })
 }
 
 /// What the lines being drawn are inside of, outermost first.
@@ -130,8 +211,6 @@ struct TableBuild {
     rows: Vec<Vec<Cell>>,
     row: Vec<Cell>,
     in_head: bool,
-    /// Where it starts in the source, drawn as text when it cannot fit.
-    start: usize,
 }
 
 struct CodeBuild {
@@ -268,7 +347,6 @@ impl<'a> Renderer<'a> {
                     rows: Vec::new(),
                     row: Vec::new(),
                     in_head: false,
-                    start: at,
                 });
             }
             Tag::TableHead => {
@@ -300,8 +378,19 @@ impl<'a> Renderer<'a> {
                 self.flush();
                 self.styles.pop();
             }
-            TagEnd::BlockQuote(_) | TagEnd::List(_) | TagEnd::Item => {
+            TagEnd::BlockQuote(_) | TagEnd::List(_) => {
                 self.flush();
+                self.containers.pop();
+            }
+            TagEnd::Item => {
+                self.flush();
+                // An empty item (or one whose text is still on its way)
+                // is its marker alone.
+                if let Some(Container::Item { fresh: true, .. }) = self.containers.last() {
+                    let mut line = self.prefix();
+                    trim_end(&mut line);
+                    self.out.push(Line::from(line));
+                }
                 self.containers.pop();
             }
             TagEnd::CodeBlock => {
@@ -332,7 +421,7 @@ impl<'a> Renderer<'a> {
             }
             TagEnd::Table => {
                 if let Some(t) = self.table.take() {
-                    self.table_block(t, range.end);
+                    self.table_block(t);
                 }
             }
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
@@ -378,10 +467,11 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// A block's range takes the line end after it: the cursor goes where
-    /// its text ends.
+    /// A block's range takes the line end after it, and in a quote the
+    /// marker of the next line: the cursor goes where its text ends.
     fn block_end(&mut self, end: usize) {
-        self.cursor = Some(self.source[..end].trim_end().len());
+        let text = self.source[..end].trim_end_matches(|c: char| c.is_whitespace() || c == '>');
+        self.cursor = Some(text.len());
     }
 
     fn style(&self) -> Style {
@@ -523,22 +613,31 @@ impl<'a> Renderer<'a> {
         self.push_line(vec![end]);
     }
 
-    fn table_block(&mut self, t: TableBuild, end: usize) {
-        match table_lines(&t, self.avail()) {
-            Some(lines) => {
-                for line in lines {
-                    self.push_line(line);
-                }
-            }
-            // Too narrow for a few cells a column: the source, wrapped.
-            None => {
-                for line in self.source[t.start..end].lines() {
-                    for wrapped in wrap_styled(&[Span::raw(line.trim().to_string())], self.avail())
-                    {
-                        self.push_line(wrapped);
+    fn table_block(&mut self, t: TableBuild) {
+        let lines = table_lines(&t, self.avail()).unwrap_or_else(|| {
+            // Too narrow for a few cells a column: each row as a line of
+            // text, its cells between pipes.
+            std::iter::once(&t.header)
+                .chain(&t.rows)
+                .flat_map(|row| {
+                    let mut spans = Vec::new();
+                    for (c, cell) in row.iter().enumerate() {
+                        if c > 0 {
+                            spans.push(Span::styled(" | ", DIM));
+                        }
+                        for (i, line) in cell.iter().enumerate() {
+                            if i > 0 {
+                                spans.push(Span::raw(" "));
+                            }
+                            spans.extend(line.iter().cloned());
+                        }
                     }
-                }
-            }
+                    wrap_styled(&spans, self.avail())
+                })
+                .collect()
+        });
+        for line in lines {
+            self.push_line(line);
         }
     }
 }
@@ -568,17 +667,12 @@ fn is_br(html: &str) -> bool {
 
 /// Whether a fenced block's source ends with its closing fence; one that
 /// does not is still streaming.
+/// The source starts at the opening fence and may carry quote markers.
 fn fence_closed(source: &str) -> bool {
+    let mut fences = Fences::default();
     let mut lines = source.trim_end().lines();
-    let opener = lines.next().unwrap_or("").trim_start();
-    let Some(c) = opener.chars().next() else {
-        return false;
-    };
-    let len = opener.chars().take_while(|x| *x == c).count();
-    lines.last().is_some_and(|l| {
-        let l = l.trim();
-        l.chars().count() >= len && l.chars().all(|x| x == c)
-    })
+    lines.next().is_some_and(|opener| fences.code(opener))
+        && lines.fold(false, |_, l| fences.code(l) && fences.open.is_none())
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
@@ -1021,7 +1115,11 @@ mod tests {
         );
         let rows = table_rows(&many, 40);
         assert!(rows.iter().all(|r| text_width(r) <= 40), "{rows:#?}");
-        assert_eq!(rows[0], "  |a|a|a|a|a|a|a|a|a|a|a|a|");
+        assert_eq!(rows[0], "  a | a | a | a | a | a | a | a | a | a");
+        assert_eq!(
+            table_rows("> |a|b|c|d|\n> |-|-|-|-|\n> |1|2|3|4|", 20),
+            ["  │ a | b | c | d", "  │ 1 | 2 | 3 | 4"]
+        );
     }
 
     #[test]
@@ -1091,6 +1189,75 @@ mod tests {
                 "       │  two   │    10",
                 "       │ lines  │",
             ]
+        );
+    }
+
+    #[test]
+    fn quoted_code_closes_and_quoted_lists_keep_their_blank_lines() {
+        let rows = table_rows("> ```\n> x\n> ```", 40);
+        assert!(rows.last().unwrap().contains('└'), "{rows:?}");
+        let rows = table_rows("> - item\n>   ```\n>   code\n>   ```", 40);
+        assert!(rows.last().unwrap().contains('└'), "{rows:?}");
+        assert_eq!(
+            table_rows("> - a\n>\n> - b\n>\n> after", 40),
+            ["  │ • a", "", "  │ • b", "", "  │ after"]
+        );
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_tag_is_text() {
+        assert_eq!(
+            table_rows(
+                "<script> tags are blocked.\n\n## Fix\n\n- **a** item\n\n```js\nx()\n```",
+                40
+            )[..5],
+            [
+                "  <script> tags are blocked.",
+                "",
+                "  ## Fix",
+                "",
+                "  • a item"
+            ]
+        );
+        let lines = render_markdown_to_lines("<li> elements need a key.\nSo **add** one.", 40);
+        assert_eq!(line_text(&lines[0]), "  <li> elements need a key.");
+        assert!(
+            lines[1]
+                .spans
+                .iter()
+                .any(|s| s.content == "add" && s.style.add_modifier.contains(Modifier::BOLD))
+        );
+        assert_eq!(
+            table_rows("> <div> in a quote", 40),
+            ["  │ <div> in a quote"]
+        );
+        // An autolink is still a link, and code is left as written.
+        assert_eq!(
+            table_rows("<https://x.example> docs", 40),
+            ["  https://x.example docs"]
+        );
+        assert_eq!(table_rows("```html\n<p>\n```", 40)[1], "  │ <p>");
+    }
+
+    #[test]
+    fn an_empty_item_keeps_its_marker() {
+        assert_eq!(
+            table_rows("1. a\n2.\n3. c", 40),
+            ["  1. a", "  2.", "  3. c"]
+        );
+        // Streaming: the marker is there before the text.
+        assert_eq!(table_rows("- a\n-", 40), ["  • a", "  •"]);
+    }
+
+    #[test]
+    fn a_longer_fence_holds_a_shorter_one() {
+        let rows = table_rows("````md\n```diff\n@@ -1 +1 @@\n-a\n+b\n```\n````", 40);
+        assert!(rows[0].contains("┌─ md"), "{rows:?}");
+        assert!(rows.last().unwrap().contains('└'), "{rows:?}");
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('┌')).count(),
+            1,
+            "{rows:?}"
         );
     }
 
