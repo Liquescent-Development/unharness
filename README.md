@@ -1,22 +1,86 @@
-# unharness
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img alt="unharness" src="assets/logo-light.svg" width="312">
+  </picture>
+</p>
 
-One terminal UI for every AI coding agent you have an account for.
+<p align="center">
+  <strong>One terminal UI for every coding agent you already have an account for.</strong>
+</p>
 
-unharness wraps the vendor CLIs (`claude`, `codex`, `pi`, `agy`) and any agent
-that speaks the [Agent Client Protocol](https://agentclientprotocol.com) behind
-a single ratatui interface with the same transcript, keybindings, permission
-prompts, model/effort pickers and session resume regardless of which agent is
-running. Switch agents mid-conversation and the context follows you.
+<p align="center">
+  <a href="https://github.com/Liquescent-Development/unharness/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Liquescent-Development/unharness/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="https://github.com/Liquescent-Development/unharness/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/Liquescent-Development/unharness?style=flat-square"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-blue?style=flat-square"></a>
+  <img alt="Platforms: Linux, macOS" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey?style=flat-square">
+</p>
 
-Every agent runs inside a sandbox that unharness applies itself: by default
-it can write only to your project, its own state and temp, and cannot read
-your cloud and signing credentials, whatever the agent would or would not
-have asked about. See [Sandbox](#sandbox).
+---
 
-## Why
+unharness runs Claude Code, Codex, pi, Antigravity and any
+[Agent Client Protocol](https://agentclientprotocol.com) agent behind one
+interface. The transcript, keys, permission prompts, model pickers and
+resume work the same whichever agent is running, and you can switch agents
+mid-conversation without losing context.
 
-Agent SDKs churn; the vendor CLIs are the stable surface. Each one already
-speaks a streaming JSON protocol with a permission channel:
+- **One interface.** Every agent gets the same transcript, keybindings,
+  model and effort pickers, and session resume.
+- **Switch mid-conversation.** `/harness codex` hands the conversation to
+  another agent. Switching back resumes the first agent's own session.
+- **One sandbox for every agent.** Landlock on Linux and `sandbox-exec` on
+  macOS confine the whole agent process: it can write only to your
+  project, and cannot read your cloud and signing credentials.
+- **`ask` means `ask`.** Nothing writes, runs or reaches out without your
+  answer, on every harness that offers the policy. "Always allow" rules
+  belong to unharness and apply to every agent.
+- **Rewind with your files.** Go back to any earlier prompt, and restore
+  the working tree to how it was then, on any harness. Checkpoints never
+  touch your `.git`.
+- **Configure once.** MCP servers, skills and `AGENTS.md` are set up once
+  and handed to each agent in the form it understands.
+
+## Install
+
+```bash
+# Shell installer (Linux, macOS)
+curl -fsSL https://github.com/Liquescent-Development/unharness/releases/latest/download/unharness-installer.sh | sh
+
+# Homebrew
+brew install Liquescent-Development/tap/unharness
+
+# From source (Rust 1.89+)
+cargo install --locked --git https://github.com/Liquescent-Development/unharness
+```
+
+You also need at least one agent CLI, installed and signed in:
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[Codex](https://github.com/openai/codex), [pi](https://pi.dev),
+Antigravity (`agy`), or an [ACP agent](docs/acp.md). The sandbox needs
+Linux 6.2 or newer; the macOS backend has not been run on a Mac yet.
+Managing skills needs Node.js.
+
+Then check what unharness found:
+
+```bash
+unharness doctor
+```
+
+## Quick start
+
+```bash
+unharness                                   # TUI with the default harness
+unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
+unharness --policy accept-edits             # ask | accept-edits | auto | bypass
+unharness --sandbox read-only               # read-only | workspace-write (default) | off
+unharness --resume                          # resume the latest conversation
+unharness -p "Summarise src/"               # headless print mode
+unharness models                            # providers and models per harness
+```
+
+See [Usage](docs/usage.md) for every command and flag.
+
+## Supported agents
 
 | Harness | Transport | Interactive permissions | Resume | Live models |
 |---|---|---|---|---|
@@ -26,19 +90,10 @@ speaks a streaming JSON protocol with a permission channel:
 | Antigravity | `agy --print= --input-format stream-json` (long-lived) | no | `--conversation` | `agy models` |
 | ACP agents | Agent Client Protocol v1 over stdio (long-lived) | yes, when the agent asks | `session/resume` or `session/load` | from the session |
 
-unharness normalises those into one event model and one capability set, so
-the TUI never assumes what a harness can do. Anything a harness lacks is shown
-as a degraded capability rather than failing silently.
-
-The same goes for confinement. Codex sandboxes the commands its model runs;
-Claude Code's sandbox is opt-in; pi,
-Antigravity and ACP agents have none, and under `bypass` nothing holds any
-of them. unharness puts one OS-level sandbox (Landlock on Linux,
-`sandbox-exec` on macOS) around the whole agent process, so the same limits
-apply to every harness, its file tools, its shell commands and its MCP
-servers.
-
-What each harness supports beyond a plain turn:
+unharness drives the vendor CLIs, which change more slowly than the agent
+SDKs, and normalises their streaming protocols into one event model. Each
+harness declares what it can do, and anything it lacks shows up as a
+caveat in the TUI instead of failing silently:
 
 | | Claude Code | Codex (app-server) | pi | ACP agents | Codex exec, Antigravity |
 |---|---|---|---|---|---|
@@ -56,219 +111,12 @@ What each harness supports beyond a plain turn:
 | Native fork | yes | yes | yes | no (fresh session) | no (fresh session) |
 | MCP servers from unharness's config | yes | yes | no | yes (http ones per agent) | exec only |
 
-## Install
+## Permissions and sandbox
 
-```bash
-cargo install --path .
-unharness doctor          # harnesses, auth, capabilities, sandbox, MCP servers, skills CLI, rules
-```
-
-Skills are managed by the [`skills`](https://github.com/vercel-labs/skills)
-CLI (`npx skills`), which needs Node.js.
-
-## Use
-
-```bash
-unharness                                   # TUI with the default harness
-unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
-unharness --policy accept-edits             # ask | accept-edits | auto | bypass
-unharness -y                                # alias for --policy bypass
-unharness --sandbox read-only               # read-only | workspace-write (default) | off
-unharness --resume                          # resume the latest conversation (all harnesses in it)
-unharness --resume 01a1                     # by id prefix; -H overrides which harness continues
-unharness -p "Summarise src/"               # headless print mode
-unharness --no-tui                          # drop into the vendor's own TUI
-unharness models                            # providers and models per harness
-unharness sessions                          # recorded sessions in this workspace
-unharness skills add vercel-labs/agent-skills
-```
-
-Without `-H` and without `default_harness` in the config, unharness takes
-the first installed harness that is signed in, in the order Antigravity,
-Claude Code, Codex, pi, then ACP agents. Antigravity, Claude Code and Codex
-can say so quickly; pi and ACP agents cannot (pi needs a model query, an ACP
-agent a session), so they are chosen only when none of those three is signed
-in, and ahead of one that is known to be signed out. `unharness doctor` shows
-the result as "Active Default".
-
-### In the TUI
-
-The transcript fills the window. Everything about the current state sits
-under the prompt: a status rule (what the agent is doing and for how long),
-the prompt box (it grows with what you type, up to eight rows, then
-scrolls), then the working directory and git branch, the harness,
-provider/model, effort, policy and sandbox level, token usage and cost, the
-session id, any capability caveat, and the key hints.
-
-| Key | Action |
-|---|---|
-| `Enter` | Send the prompt; during a turn, queue it for when the turn finishes |
-| `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot) |
-| `Ctrl+J`, `Shift+Enter` | New line in the prompt. `Ctrl+J` works everywhere; `Shift+Enter` only on terminals with the kitty keyboard protocol (see below) |
-| `Up` / `Down` | Move between the prompt's lines; on its first / last line, step back / forward through prompts sent from this workspace |
-| `Home` / `End`, `Ctrl+A` | Start / end of the current line (`Ctrl+A` is start only) |
-| `Ctrl+U` | Clear the prompt |
-| `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`; what the editor saves comes back into the prompt, unsent |
-| `@` | List the files under the working directory and narrow the list by typing; `Tab` or `Enter` puts the chosen one into the prompt (see below) |
-| `Ctrl+V`, `/paste` | Attach the image on the clipboard (a screenshot, say) to the next prompt |
-| `PageUp` / `PageDown`, `Shift+Up` / `Shift+Down` | Scroll the transcript by ten / two lines |
-| Mouse wheel | Scroll the transcript |
-| Scrollbar (right edge of the transcript) | Drag the thumb, or click the track, to move through the transcript |
-| `↓ Jump to bottom` | Shown while scrolled up; click it to return to the end and follow new output again |
-| Drag, double click, triple click | Select transcript text, a word (paths stay whole) or a row, and copy it on release |
-| `Alt+Up` | Pull the last queued prompt back into the prompt box |
-| `Ctrl+H` | Harness picker |
-| `Ctrl+M` | Model picker (provider picker first on multi-provider harnesses) |
-| `Ctrl+E` | Reasoning effort picker (levels come from the harness) |
-| `Ctrl+P` | Permission policy picker |
-| `Ctrl+R` | Resume a saved conversation |
-| `Ctrl+O` | Expand or collapse the last tool call's output |
-| Click on a tool call | Expand or collapse that call; on a call that spawned a subagent, open the subagent's transcript |
-| `Ctrl+T` | Expand or collapse every tool call |
-| `Down` past the prompt's last row | Into the list of subagents under the prompt: `Up`/`Down` choose one, `Enter` opens its own transcript, `Delete` takes a finished one off the list, `Esc` (or typing) returns to the prompt |
-| `Ctrl+S`, `/subagents` | Choose among all the conversation's subagents and open one's transcript |
-| In a subagent's transcript | `Esc` back to the conversation · `s` stop that subagent · `Tab` / `Shift+Tab` next / previous subagent · arrows, `PageUp`/`PageDown`, `End` scroll · `Ctrl+O`, `Ctrl+T` expand its tool calls |
-| `Esc` | Close the autocomplete list, else interrupt the running turn, else clear the prompt (never quits) |
-| `Ctrl+D`, `/quit` | Quit (`Ctrl+C` also quits when idle) |
-
-Slash commands: `/harness` (alias `/switch`), `/provider`, `/model`, `/effort`, `/policy`,
-`/sandbox`, `/resume`, `/sessions`, `/usage`, `/plan`, `/subagents`, `/attach <path>`, `/paste`, `/detach`,
-`/steer <text>`, `/compact [instructions]`, `/rewind`, `/undo-restore`,
-`/fork`, `/skills`,
-`/clear`, `/help`, `/quit`.
-Typing `/` opens autocomplete; Enter on a partial command completes it.
-
-An `@` at the start of a word opens the same list on the files under the
-working directory, hidden ones included, leaving out what `.gitignore`,
-`.ignore` and git's exclude files leave out. What you type after the `@`
-narrows it, fuzzily: `@tuiapp` finds `src/tui/app.rs`. `Tab` or `Enter`
-replaces the word with the file's path, written the way the active harness
-reads it: `@src/tui/app.rs` for Claude Code, which then puts the file's
-content into the turn itself, and the plain path for the others, whose
-agents open it with their own tools. `Esc` closes the list and leaves the
-word as typed. The path is ordinary text from then on: it is not rewritten
-when the prompt is later sent to another harness. The files are listed anew
-at each `@`, up to 50,000 of them.
-
-Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`,
-so on those `Shift+Enter` sends the prompt and `Ctrl+M` cannot open the model
-picker (use `/model`). Terminals that implement the kitty keyboard protocol
-(kitty, foot, Ghostty, WezTerm, Alacritty, recent iTerm2 among them) are
-asked to tell the keys apart, and there both work as listed.
-
-Sent prompts and commands are remembered per workspace (the newest 500, in
-`.unharness/prompt_history.jsonl`, removed by `unharness sessions --clear`).
-`Up` on the prompt's first line recalls them; whatever you had typed comes
-back when you step `Down` past the newest. While the `/` or `@` autocomplete
-list is open the arrows move in it instead.
-
-unharness takes the mouse, so the terminal's own selection is replaced by
-its own: drag in the transcript to select, and the text is copied when you
-let go (the status rule says so). Dragging past the top or bottom edge
-scrolls. The copy goes through `wl-copy`, `xclip`, `xsel` or `pbcopy` when
-one is there, and otherwise, or over ssh, through the terminal (OSC 52),
-which some terminals ignore and tmux only passes on with `set-clipboard on`.
-What is copied is the rows as drawn, so a wrapped paragraph comes out with
-its line breaks and indent. Holding Shift while dragging gives the
-terminal's selection back in most terminals, and `mouse = false` in the
-config turns all of this off.
-
-Pasted text goes into the prompt as it is, newlines included, and is never
-sent until you press Enter (this relies on the terminal's bracketed paste,
-which every current terminal has). A paste while a dialog is open goes into
-the dialog's text field if it has one and is otherwise ignored.
-
-Dropping files onto the terminal attaches them, as `/attach` would: a paste
-that is nothing but the paths of existing files (absolute or `~/`, bare,
-quoted or backslash-escaped as terminals write them, or `file://` URIs) is
-read as a drop. A file the active harness cannot take stays a path in the
-prompt, with a notice saying why.
-
-A terminal's own paste carries text only, so an image on the clipboard is
-attached with `Ctrl+V` or `/paste`: it is read with `wl-paste` (Wayland),
-`xclip` (X11) or `osascript` (macOS), saved under
-`<state dir>/unharness/pasted/` (cleared of images older than a week) and
-attached like any other image. Files copied in a file manager are attached
-the same way. Over ssh those tools would read the remote machine's
-clipboard, so nothing is read and unharness says so; copy the file over and
-`/attach` it. Where the terminal itself takes `Ctrl+V` to paste, use
-`/paste`.
-
-Above the prompt, when there is something to show: the agent's plan as a
-checklist (`/plan` hides it), prompts waiting in the queue, and files
-attached to the next prompt. The usage line shows how full the model's
-context is (`ctx 34%`); `/usage` adds the account's rate-limit windows, and a
-notice appears when one passes 80%.
-
-`/rewind` lists your earlier prompts. Picking one removes it and everything
-after it from the conversation and puts its text back in the prompt box.
-Where the harness can, its own session is rewound (it then genuinely no
-longer knows the removed turns), whether or not it is running at the moment;
-otherwise it starts a fresh session with the remaining conversation as
-context, and the picker says which will happen. If a harness reports that it
-could not rewind, unharness falls back to the fresh session by itself.
-
-Press `f` instead of Enter in the picker to also put the files back to how
-they were before that prompt. For a project that is a git repository,
-unharness checkpoints the working tree before every prompt: tracked and
-untracked files, not ignored ones. The checkpoints go into a shadow
-repository of unharness's own, under your state directory
-(`~/.local/state/unharness/checkpoints/<project>-<hash>.git` on Linux), which
-uses the project as its working tree. Nothing is written to the project's
-own `.git`. The restore works for any harness, since it does not depend on
-the agent, and `/undo-restore` reverses it. Changes outside the project are
-not covered. The first checkpoint copies the project's files once; later
-ones store only what changed. `file_checkpoints = false` turns checkpoints
-off; `unharness sessions --clear` deletes the project's shadow repository.
-
-`/fork` continues in a copy of the conversation and leaves the original as it
-is. Harnesses that can branch a session do, so the copy knows exactly what
-the original knew; the others start fresh with the transcript as context.
-
-Subagents are shown as long as they run, which can be longer than the turn
-that started them (Claude Code launches them in the background by default,
-and a Codex sub-agent keeps going when the agent does not wait for it).
-They are listed under the prompt, each with its task, how long it has run
-and what it is doing: those at work first, then those that have ended,
-latest first. An ended one stays listed, so that what it did can still be
-read, until it is taken off with `Delete` (its transcript is kept, and
-`Ctrl+S` still offers it). While any is at work the status rule stays busy ("2 subagents
-running") instead of "Ready".
-
-The main transcript stays the main agent's: a subagent is one line there,
-the call that spawned it, showing whether it is running, done, failed or
-stopped. What it does and writes (its tool calls, its prose, its final
-report) is a transcript of its own. `Down` from the prompt moves into the
-list under it and `Enter` opens the chosen subagent's transcript; `Ctrl+S`
-or `/subagents` offers every subagent of the conversation, and a click on
-its line in the transcript works too. A subagent's own subagents are in its transcript in the same way.
-A subagent is stopped only from its own transcript, with `s`; `Esc` there
-just goes back. A prompt sent while subagents run goes straight to the main
-agent. All of it is saved with the conversation.
-
-Claude Code starts a turn of its own to report when a background subagent
-ends or is stopped; Codex does not, so there its report is only in its own
-transcript. Codex names a sub-agent but does not describe its task, and
-says what it is doing only through its tool calls.
-
-Policy, model and effort changes apply to the next turn on every harness
-(Claude via its control channel, Codex per `turn/start`, pi per RPC command,
-Antigravity by restarting its process on the same conversation). Antigravity has no
-effort setting: the effort is the end of its model ids, and `--effort` is
-never passed to it. A sandbox change (`/sandbox`) is around the process, so
-the harness is restarted on its session with the next prompt.
-
-Tool calls render as blocks: shell output wrapped in a gutter, file edits as
-syntax-coloured red/green replacements, reads highlighted by file type, and
-unified diffs in red/green. Fenced code in answers is syntax highlighted and
-wrapped, never cut off.
-
-When a harness asks for permission, a modal opens: `y` allow once, `a` allow
-always (see Allow rules), `n` deny with a reason, `i` show the full tool
-input. Agent questions (Claude's AskUserQuestion, Codex's
-requestUserInput, pi's extension dialogs) open the matching modal.
-
-### Permission policy
+Four policies mean the same on every harness. If a harness lacks the one
+you asked for, unharness falls back to the nearest **less** permissive
+policy, never a more permissive one. If there is none, it asks you which
+to use.
 
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
 |---|---|---|---|---|---|
@@ -279,110 +127,8 @@ requestUserInput, pi's extension dialogs) open the matching modal.
 
 `*` shown as a warning in the header.
 
-`ask` means the same wherever it is offered: nothing that writes, runs a
-command or reaches out happens without your answer or one of your allow
-rules. Reads may run. A harness that cannot hold to that does not have
-`ask`: `codex exec` and headless Antigravity cannot prompt, and an ACP
-agent has it only when you say it asks (see ACP agents).
-
-A requested policy a harness does not have falls back to the nearest *less*
-permissive one it has, never to a more permissive one. When there is none
-(`ask`, the default, on a harness without it) unharness does not pick for
-you: the TUI opens the policy picker and starts no session until you
-choose, and that choice holds for that harness only, until you set another
-policy for the run; `--print` and
-`--no-tui` stop with an error naming the policies to pass with `--policy`.
-`--print` on Codex is always `codex exec`, and Codex's own interface
-(`--no-tui`) takes no `untrusted` approval policy, so neither has `ask`.
-
-pi has no permission prompts of its own. unharness loads a small extension
-into it (`-e`, kept in unharness's state directory, your own extensions
-still load) that asks before every tool call except those named `read`,
-`grep`, `find` and `ls`, tools of other extensions included. A path pi
-would rewrite before using it (a leading `@` or `~`, a `file://` URL, a
-Unicode space) is always asked about, whatever your allow rules say. In a `--print` run under
-`ask` there is no one to ask, so those calls are blocked.
-
-The policy does not choose a sandbox. Codex's own sandbox only matters
-where unharness's does not run, and then holds to the level you set under
-every policy, `bypass` included.
-
-### Allow rules
-
-`a` in the permission modal shows what would be allowed from now on, and
-`Enter` keeps it: a rule that belongs to unharness, so it holds after
-`/harness` and in the next session, whichever harness asks. `Tab` switches
-between this workspace and every workspace, and a rule's pattern can be
-edited before it is kept (it has to still cover the request in front of you).
-What is proposed is narrow: the first words of each command, the directory
-of a file inside the workspace, the one file outside it.
-The harness itself is only told "allow": nothing is written to its settings.
-
-Rules are kept in `~/.config/unharness/allow.toml` and, per workspace, in
-`~/.config/unharness/workspaces/<name>-<hash>.allow.toml`. `/allow` and
-`unharness doctor` list them; to change or remove one, edit the file. Rules
-are read when unharness starts, so an edit holds from the next start.
-
-```toml
-[[allow]]
-tool    = "shell"
-command = "cargo test"       # the words the command starts with
-
-[[allow]]
-tool = "edit"                # or "read"
-path = "src/**"              # *, ? and **; relative to the workspace, or /… or ~/…
-
-[[allow]]
-tool = "mcp"
-name = "docs/search"         # server/tool, or docs/* for every tool of a server
-
-[[allow]]
-tool = "WebFetch"            # any other tool, by the harness's own name for it
-```
-
-- `shell`, `edit`, `read` and `mcp` mean the same on Claude Code, Codex
-  (app-server) and ACP agents: Claude's `Bash`, Codex's `shell` and its
-  `/bin/zsh -lc '…'` wrapper, and an ACP `execute` call are one thing to a
-  rule. Any other tool is matched by name, and names differ between
-  harnesses. An `mcp` rule names a server as the harness knows it: the same
-  name in two harnesses' own settings may be two different servers.
-- A command line of several commands (`&&`, `;`, `|`) is allowed only when
-  every one of them is covered. One that uses command substitution,
-  `${…}` or any `$` that is more than a variable's name, redirection, a
-  subshell, a comment or an unusual blank is always asked about. So is a
-  command the harness says it would run outside the workspace.
-- A path is compared after following symbolic links, so a link inside an
-  allowed directory does not extend the rule to where it points. A relative
-  path in a request, and a link to a file that does not exist yet, are
-  always asked about.
-- No rule allows a write or a read in unharness's own config and state
-  directories, however wide its pattern.
-- When a request does not say exactly what it would do, it is asked about:
-  a Codex request with a `grantRoot` or a reason attached, an ACP read,
-  move or delete (only described by the protocol), an MCP approval that
-  cannot be tied to one call.
-- Rules only allow. They apply under every policy, to every request that
-  reaches unharness; what a harness decides without asking (see the table
-  above) never gets here, and neither does anything in `--print` and
-  `--no-tui` runs.
-- Every request a rule answers is noted in the transcript, with the rules
-  that answered it.
-- A rules file that does not parse stops unharness, like a config file.
-
-### Sandbox
-
-unharness confines every harness process itself, whichever agent runs and
-whatever it chooses to ask about. The process and everything it starts (shell
-commands, MCP servers) can:
-
-- **write** only inside the workspace, the harness's own state directories
-  (`~/.claude`, `~/.codex`, `~/.pi`, …; `unharness doctor` lists them) and
-  the temp directories (and herdr's runtime directory);
-- **read** everything except credential locations: `~/.gnupg`,
-  `~/.aws`, `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`,
-  `~/.config/gcloud`, `~/.netrc`, `~/.npmrc`, `~/.pypirc`,
-  `~/.git-credentials` and shell history;
-- use the network freely.
+The sandbox is a separate setting. No policy changes it, not even
+`bypass`:
 
 | Level | Writes |
 |---|---|
@@ -390,278 +136,39 @@ commands, MCP servers) can:
 | `read-only` | harness state and temp only |
 | `off` | unconfined |
 
-Everything else your user can read, the agent can read, other projects
-included. `deny_read` under `[sandbox]` adds paths to the denied list. The
-workspace, the harness's own state and `readable` paths stay readable inside
-a denied path, so `deny_read = ["~/code"]` hides the sibling projects of the
-one you are working in, and `deny_read = ["~"]` with a `readable` list of
-your toolchains (and the agent's own binary, if it is installed under the
-home directory) is a strict mode. A `deny_read` path inside a readable or
-writable one, such as a file in the workspace or anything under `/tmp`,
-cannot be enforced and is refused at startup. On Linux the names inside a
-denied directory can still be listed; the contents cannot be read.
+Read more in [Permissions](docs/permissions.md) and [Sandbox](docs/sandbox.md).
 
-Set it with `--sandbox <level>`, `UNHARNESS_SANDBOX`, `[sandbox] level`, or
-`/sandbox` in the TUI. It is a setting of its own: the default applies under
-every policy, `bypass` included, and no policy picks a level. The level is
-on the status line and holds for the run on every harness; a change in the
-TUI reaches the next harness process, so the session is restarted with the
-next prompt (resumed where the harness can; nothing changes during a
-turn).
+## Essential keys
 
-On Linux this is Landlock (kernel 6.2 or newer, no extra binary); on macOS
-the process is launched through `sandbox-exec`. The macOS side has not been
-run on a Mac yet; Linux is what has been tested. Where neither exists the
-default degrades to `off` with a warning in the status area, in `doctor` and
-on stderr in print mode, and an explicitly requested level is an error.
+| Key | Action |
+|---|---|
+| `Enter` / `Alt+Enter` | Send (queued during a turn) / steer the running turn |
+| `Esc` | Interrupt the running turn |
+| `@` | Reference a file, with fuzzy search |
+| `Ctrl+H` · `Ctrl+M` · `Ctrl+E` · `Ctrl+P` | Harness · model · effort · policy |
+| `Ctrl+R` | Resume a saved conversation |
+| `Ctrl+V` | Attach the clipboard image |
+| `Ctrl+S` | Open a subagent's transcript |
+| `/rewind`, `/fork` | Go back to an earlier prompt; branch the conversation |
 
-Things to know:
+All keys and slash commands are listed in [The TUI](docs/tui.md).
 
-- The vendors' own sandboxes cannot start inside this one, so while it is
-  active Codex is told the sandbox is external (its approvals are
-  unchanged). Where this one does not run (`--sandbox off`, or no backend)
-  Codex's own sandbox holds to the level you set, under every policy:
-  `bypass` switches it off only at `off`. One Codex quirk: on the `exec`
-  transport `auto` has its automatic review only at `workspace-write`, and
-  runs as `accept-edits` at another level.
-- `~/.ssh` stays readable, since git over ssh and commit signing need it;
-  keep keys in an agent or protect them with a passphrase if that matters.
-- An MCP server or extension that keeps data elsewhere needs its directory
-  in `writable`.
-- Claude Code updates `~/.claude.json` by creating files next to it in the
-  home directory, which the sandbox cannot allow without opening the whole
-  of it. unharness therefore runs Claude with `CLAUDE_CONFIG_DIR=~/.claude`,
-  which puts the file inside its state directory. Your `~/.claude.json` is
-  copied there on the first run (a notice says so) and otherwise left
-  alone. A plain `claude` outside unharness keeps using the original, so
-  the two drift apart unless you export the same variable in your shell.
-  `relocate_config = false` under `[harnesses.claude]` turns this off:
-  sessions still work, but "always allow" rules, trust and MCP approvals
-  given in a confined session are then forgotten after it.
-- A confined Claude Code cannot update itself: its installed binaries are
-  not writable.
-- A harness's own state directory has to stay writable, and its settings
-  live there (`~/.claude/settings.json`, `~/.codex/config.toml` and the
-  Codex binary, `~/.pi/agent/settings.json`, skills, hooks, MCP servers).
-  The sandbox cannot stop an agent editing those, so unharness watches
-  them: when one changes during a turn, the transcript (or stderr in print
-  mode) says which, and the version from before the session is saved under
-  `~/.local/state/unharness/guard/`. It cannot tell the CLI's own change
-  (saving an "always allow" rule, say) from the agent's. `--no-tui`
-  passthrough is not watched.
-- A file that is replaced or created directly in the home directory or in
-  `~/.config` after the process started is not readable by it until the
-  next session (Linux).
-- In a git worktree the repository's data lives outside the workspace;
-  add the main repository's `.git` to `writable` to commit from the agent.
-- Programs that need to raise privileges (`sudo`) do not work inside
-  (Linux).
-- unharness's own configuration, the workspace's included, is kept in
-  `~/.config/unharness`, which is never writable from inside: an agent
-  cannot change the settings its next run starts with.
+## Documentation
 
-### Switching harnesses
+- [Usage](docs/usage.md): commands, flags, resume, switching harnesses
+- [The TUI](docs/tui.md): keys, slash commands, attachments, rewind, subagents
+- [Permissions](docs/permissions.md): policies and allow rules
+- [Sandbox](docs/sandbox.md): what is confined and how
+- [Configuration](docs/configuration.md): `config.toml` reference
+- [MCP servers](docs/mcp.md) · [ACP agents](docs/acp.md) · [Rules and skills](docs/skills.md)
 
-`/switch` shuts the current session down and starts the next harness lazily on
-your next prompt, seeding it with the conversation so far (capped by
-`bridge_max_chars`, default 24k characters, keeping the tail). Returning to a
-harness resumes its own session and bridges only what happened since.
+## Contributing
 
-## Configuration
-
-Settings come from `~/.config/unharness/config.toml`, with the workspace's
-overrides merged over it. The overrides are kept outside the workspace, in
-`~/.config/unharness/workspaces/<name>-<hash>.toml` (`unharness doctor`
-prints the path, `unharness init` creates it), because a file inside the
-workspace could be edited by the agent it is meant to configure. A config file that does not parse stops
-unharness with the file and the line, rather than running on defaults
-without your sandbox and policy settings.
-
-```toml
-default_harness  = "claude"      # agy | claude | codex | pi
-default_policy   = "ask"
-mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to select and copy; false leaves the mouse to the terminal
-auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
-bridge_max_chars = 24000
-file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
-
-[sandbox]
-level    = "workspace-write"     # read-only | workspace-write | off
-writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
-readable = ["~/.config/gh"]      # credential paths to allow reading; also reopens paths inside deny_read
-deny_read = ["~/Documents"]      # more paths no harness may read
-
-[harnesses.claude]
-# binary = "/path/to/claude"
-default_model  = "opus"
-default_effort = "high"
-default_policy = "accept-edits"
-extra_args     = []
-sandbox_writable = []            # extra paths this harness may write inside the sandbox
-relocate_config  = true          # keep .claude.json in ~/.claude so a sandboxed Claude can update it (see Sandbox)
-
-[harnesses.codex]
-transport = "auto"               # auto | app-server | exec
-
-[harnesses.pi]
-default_provider = "openai-codex"
-default_model    = "gpt-5.5"
-
-[mcp_servers.files]              # an MCP server the harness launches (see MCP servers)
-command = "npx"
-args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-env     = { LOG_LEVEL = "warn" }
-
-[mcp_servers.docs]               # or one reached over HTTP
-url     = "https://example.com/mcp"
-headers = { Authorization = "Bearer …" }
-# enabled = false                # keep the definition, pass it to no harness
-```
-
-### MCP servers
-
-A server defined under `[mcp_servers.<name>]` is handed to every harness
-that can take one for the session: Claude Code through `--mcp-config`, Codex
-through `-c mcp_servers.…` overrides, ACP agents in the session request
-(http servers only when the agent announces it takes them). Nothing is
-written to `~/.claude`, `~/.codex` or any other vendor configuration, and
-the servers a harness already has there stay available. pi and Antigravity
-have no way to take a server for one session; unharness says so when a
-session starts and passes none. A workspace's table of the same name
-replaces the global one, so `enabled = false` there switches a server off
-for that workspace.
-
-`unharness doctor` lists the servers, starts each `command` one to check
-that it answers (name, version, number of tools), and shows which installed
-harnesses get it. The server is started the way a session starts it, in the
-workspace and inside the sandbox, so a server that cannot run there fails
-here too. A `url` server is listed, not contacted.
-
-Worth knowing:
-
-- The server is started by the harness, inside the sandbox: a server that
-  writes outside the workspace needs its directory in `[sandbox] writable`.
-- `env` and `headers` often hold tokens. For Claude Code the definitions go
-  in a file only you can read (under unharness's state directory), for ACP
-  agents over the protocol, and for Codex `headers` go through its
-  environment. A Codex command server's `env` is the exception: it is on
-  Codex's command line, where other local users can read it.
-- If Codex has a server of the same name in its own `config.toml`, that one
-  is used and unharness says so: Codex would mix the two definitions.
-- Each harness still applies its own permission rules to MCP tools. Under
-  `ask`, Claude Code and Codex prompt for each call (Codex has no "always
-  allow" for these yet); `codex exec` cannot prompt and has no `ask`.
-- A server that fails to start is reported in the transcript by Claude Code
-  and Codex; an ACP agent does not say.
-
-### Conversations
-
-A conversation is the unit of resume. unharness saves it under
-`<workspace>/.unharness/conversations/` (ignored by `unharness init`): the
-merged transcript, the vendor session id of every harness that took part, the
-bridging bookmarks, and which harness was active. `unharness --resume`,
-`/resume`, and Ctrl+R restore the transcript into the pane and reattach each
-harness to its own vendor session when you `/harness` to it, bridging only
-what that harness has not seen. `unharness sessions` lists saved
-conversations; `--clear` removes them.
-
-### ACP agents
-
-Any agent with an [Agent Client Protocol](https://agentclientprotocol.com)
-mode can be added from config, without a dedicated adapter:
-
-```toml
-[harnesses.claude-acp]
-protocol     = "acp"
-command      = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
-display_name = "Claude (ACP)"
-sandbox_writable = ["~/.claude", "~/.npm"]   # the agent's own state, for the sandbox
-asks_permission  = true                      # this agent asks before it acts: offer `ask`
-```
-
-The table name is the harness id (`unharness -H claude-acp`, `/harness
-claude-acp`). Gemini CLI, OpenCode, Goose, GitHub Copilot, Cursor Agent, Qwen
-Code and Kiro are added automatically when their binary is on PATH, using the
-launch commands from the ACP registry; those presets have not been run here
-yet, and `unharness doctor` says so. A table of the same name overrides a
-preset.
-
-The permission policy is applied by unharness to the requests an agent
-makes: `accept-edits` answers file edits itself and shows the rest, `bypass`
-answers everything, `auto` falls back to `accept-edits`, `ask` shows each
-one. But an agent only asks for what it chooses to ask for, and unharness
-cannot make it: codex-acp 2.1.1 ran a command, an edit and a network call
-without asking. So `ask` is offered only for an agent whose table has
-`asks_permission = true`; set it for one you have seen ask before it
-writes, runs a command or reaches out (claude-agent-acp 0.85.1 does). The
-presets do not have it until you add a table for them.
-Models and effort levels come from the running session, so the pickers fill
-in after the first prompt. ACP agents have no print or `--no-tui` mode, and
-sign-in is done with the agent's own CLI.
-
-## Rules and skills
-
-`AGENTS.md` is the canonical instructions file; `CLAUDE.md` and `GEMINI.md`
-are symlinks to it (`unharness init` / `unharness sync`). A `CLAUDE.md` whose
-content differs from `AGENTS.md` is never overwritten.
-
-Skills live in `.agents/skills/` and are installed and projected into every
-agent's directory by `unharness skills <args...>`, a passthrough to `npx
-skills`. The one exception is `import`, which is unharness's own:
-
-```bash
-unharness skills import                    # pick from skills your harnesses already have
-unharness skills import --from plugins -g  # only Claude plugin-bundled skills, globally
-unharness skills import --all --dry-run    # show what would be imported
-```
-
-It scans `~/.claude/skills` (and synced buckets), Claude plugin caches,
-`~/.codex/skills` (`--include-system` for the Codex built-ins), the
-Antigravity and pi skill directories, and project-level `.claude`, `.codex`
-and `.pi` skill dirs, then installs the chosen ones through `skills add
-<path>` so they land in `.agents/skills` and get projected everywhere.
-Plugins and pi extensions are harness-specific; `unharness doctor` lists
-them instead.
-
-## Architecture
-
-```
-src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
-               AgentEvent, SessionHandle/SessionCommand, LineProcess,
-               per-turn driver, JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints, allow rules (rules.rs), the sandbox
-               (sandbox/: levels, profile,
-               Landlock and Seatbelt backends) and the watch on vendor
-               config (guard.rs)
-src/harness/   one module per harness: descriptor, capabilities, probe,
-               list_models, start_session, build_print_command, and what
-               the sandbox must leave writable and watch for it
-  claude/      stream-json transport + parser + fixtures/
-  codex/       app-server + exec transports + parsers + fixtures/
-  pi/          rpc transport + parser + fixtures/
-  agy/         stream-json transport
-  acp/         generic Agent Client Protocol client: one instance per configured agent
-src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
-scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
-               them for tests/session_e2e.rs
-```
-
-Adding a harness: if the agent speaks ACP, a config table is enough. Otherwise
-a module implementing `Harness`, a recorded fixture under `fixtures/` with its
-expected `.events`, and one line in `Registry::from_config`.
-
-## Development
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test                                   # unit + fixture + e2e (needs python3)
-UNHARNESS_UPDATE_FIXTURES=1 cargo test      # regenerate .events after a parser change
-scripts/record-claude.py out.jsonl "prompt"  # record a new fixture (run from a scratch dir)
-scripts/record-acp.py out.jsonl "prompt" -- gemini --acp
-```
+Bug reports and pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md)
+covers the development setup and architecture, and [AGENTS.md](AGENTS.md)
+lists the invariants every change keeps.
 
 ## License
 
-unharness is free software under the GNU Affero General Public License,
-version 3 or (at your option) any later version. See [`LICENSE`](LICENSE).
+unharness is free software under the [GNU Affero General Public License,
+version 3 or later](LICENSE).

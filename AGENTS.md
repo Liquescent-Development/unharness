@@ -7,7 +7,7 @@ Project guidelines for AI coding agents working on unharness. `CLAUDE.md` and
 
 A Rust TUI/CLI that fronts vendor coding-agent CLIs (Claude Code, Codex, pi,
 Antigravity) and any Agent Client Protocol agent through one event model. See
-`README.md` for the architecture map.
+`CONTRIBUTING.md` for the architecture map and `docs/` for user documentation.
 
 ## Commands
 
