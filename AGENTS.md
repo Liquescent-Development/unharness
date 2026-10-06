@@ -36,7 +36,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   or reaches out runs without the user's answer or an allow rule; reads may
   run. A harness, transport or run mode that cannot hold to that does not
   declare `ask` (`Capabilities::permission_policies`, `Harness::
-  print_policies`), and there is no degraded `ask`. Declaring it needs a
+  print_policies` for `--print --native` and `--no-tui`), and there is no
+  degraded `ask`. A `--print` run is a session that answers every request
+  itself: allowed by a rule, denied otherwise (`src/headless.rs`). Declaring it needs a
   recording or a live run that shows the asking. The policy never chooses
   a sandbox level.
 - **Parsers are pure and fixture-tested.** `parse::feed(line) -> Vec<AgentEvent>`
@@ -457,6 +459,23 @@ recorded ones. For anything else:
   `description`.
   The modal sends only from its Submit page, and only once every question
   has an answer; a lone single-select question is sent on `Enter`.
+- Headless `--print` (`src/headless.rs`, `docs/headless.md`) runs one
+  prompt through `start_session` and writes text, a result object or
+  `stream-json` lines (schema 1, `event_json`); `--native` keeps the vendor
+  print command. Checked live on Claude Code 2.1.292 (text, json,
+  stream-json with a `Write` denied under `ask`, a prompt on stdin, SIGINT
+  giving exit 130: Claude ends that turn with `error_during_execution`)
+  and agy 1.2.17 (`accept-edits`). Codex, pi and ACP agents run only
+  against `fake-harness.py` (`tests/session_e2e.rs`). It waits for
+  subagents and, where `SubagentSupport::report_turn` is declared, counts
+  one more turn end per background run of a subagent that completed or
+  failed, wherever its end falls: in every single-prompt Claude recording
+  each such end is followed by one `result` (empty ones with `num_turns:
+  0` included), a blocking one's report is its call's result instead,
+  and one the model stopped (`TaskStop`) brought no turn. A subagent's
+  subagent counts only when it ends after its parent (the only case
+  recorded). A subagent whose end never comes holds the run until
+  `Ctrl+C`. Not persisted as a conversation.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

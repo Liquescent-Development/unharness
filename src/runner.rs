@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
@@ -16,9 +17,11 @@ use crate::core::mcp;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
 use crate::core::{
-    HarnessId, ModelRef, PermissionPolicy, PolicyResolution, ProviderId, resolve_policy,
+    HarnessId, McpServer, ModelRef, PermissionPolicy, PolicyResolution, PolicySupport, ProviderId,
+    SessionConfig, resolve_policy,
 };
 use crate::harness::{Harness, PrintConfig, ProviderSource};
+use crate::headless::{self, Headless, RunInfo};
 use crate::sync::{find_workspace_root, sync_workspace_rules};
 use crate::tui::{self, TuiLaunch};
 
@@ -96,10 +99,10 @@ fn check_configured_policies(config: &Config) -> Result<()> {
 /// in its place, ends the run.
 fn print_policy(
     harness: &dyn Harness,
-    print_mode: bool,
+    policies: &[PolicySupport],
     requested: PermissionPolicy,
 ) -> Result<PolicyResolution> {
-    resolve_policy(&harness.print_policies(print_mode), requested).map_err(|e| {
+    resolve_policy(policies, requested).map_err(|e| {
         let supported: Vec<&str> = e.supported.iter().map(|p| p.as_str()).collect();
         anyhow::anyhow!(
             "policy '{}' is not available for {} without the TUI; pass --policy with one of: {}",
@@ -148,7 +151,10 @@ pub fn session_sandbox(
     )
 }
 
-pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()> {
+/// The exit status is returned rather than exited with, so that the
+/// runtime is dropped first and with it every child still running
+/// (`kill_on_drop`).
+pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<ExitCode> {
     let ws_root = find_workspace_root(cwd);
 
     if !args.no_sync
@@ -209,38 +215,86 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
     let store = ConversationStore::open(ws_root.as_deref(), cwd);
     let (resume, print_resume) = resolve_resume(&store, args.resume.as_deref(), id)?;
 
-    if args.print || args.no_tui {
-        let res = print_policy(harness, args.print, policy)?;
-        if let Some(w) = res.warning {
-            eprintln!("{} {}", "[unharness]".yellow().bold(), w);
+    let workspace = ws_root.as_deref().unwrap_or(cwd);
+    let model_ref = model.clone().map(|m| {
+        ModelRef::new(
+            id,
+            ProviderId::new(provider.clone().unwrap_or_else(|| "default".into())),
+            m,
+        )
+    });
+
+    if args.print && !args.native {
+        let format = headless::Format::parse(args.format.as_deref())?;
+        let prompt = match prompt {
+            Some(p) => p,
+            None => prompt_from_stdin()?,
+        };
+        let caps = harness.capabilities();
+        if print_resume.is_some() && !caps.resume_by_id {
+            bail!(
+                "{} cannot resume a session by id",
+                harness.descriptor().display_name
+            );
         }
-        let sandbox = session_sandbox(
-            harness,
-            &sandbox_setup,
-            config,
-            ws_root.as_deref().unwrap_or(cwd),
-        )?;
-        match sandbox.warning() {
-            Some(w) => eprintln!("{} {}", "[unharness]".yellow().bold(), w),
-            None => eprintln!("{} sandbox: {}", "[unharness]".dimmed(), sandbox.level()),
-        }
-        let (servers, problems) = config.mcp_servers();
-        let (mcp_servers, mcp_warnings) = mcp::for_harness(
-            &servers,
-            harness.capabilities().mcp,
+        let res = print_policy(harness, &caps.permission_policies, policy)?;
+        let setup = RunSetup::new(harness, &sandbox_setup, config, workspace)?;
+        let rules = Rules::load(ws_root.as_deref())?;
+        let mut run = Headless::new(
+            format,
+            rules,
+            cwd.to_path_buf(),
             harness.descriptor().short_name,
-            &harness.own_mcp_servers(),
+            caps.subagents.report_turn,
+            std::io::stdout(),
+            std::io::stderr(),
         );
-        for w in problems.into_iter().chain(mcp_warnings) {
+        {
+            use std::io::IsTerminal;
+            run.set_shared_terminal(
+                std::io::stdout().is_terminal() && std::io::stderr().is_terminal(),
+            );
+        }
+        for w in res.warning.into_iter().chain(setup.warnings) {
+            run.warn(w);
+        }
+        if let Some(note) = harness.prepare()? {
+            run.warn(note);
+        }
+        let info = RunInfo {
+            harness: id.as_str().to_string(),
+            policy: res.effective.to_string(),
+            sandbox: setup.sandbox.level().to_string(),
+            cwd: cwd.to_path_buf(),
+        };
+        let mut watch = Watch::begin(&harness.guarded(workspace), dirs::home_dir().as_deref());
+        let handle = harness.start_session(SessionConfig {
+            binary,
+            cwd: cwd.to_path_buf(),
+            model: model_ref,
+            effort,
+            policy: res.effective,
+            resume: print_resume,
+            fork: false,
+            extra_args: config.extra_args(id.as_str()).to_vec(),
+            env: Vec::new(),
+            mcp_servers: setup.mcp_servers,
+            sandbox: setup.sandbox,
+        })?;
+        run.begin(&info);
+        headless::drive(handle, prompt, &mut run).await;
+        for change in watch.changes(&guard::default_keep_dir()) {
+            run.warn(change.describe(harness.descriptor().display_name));
+        }
+        return Ok(ExitCode::from(run.finish()));
+    }
+
+    if args.print || args.no_tui {
+        let res = print_policy(harness, &harness.print_policies(args.print), policy)?;
+        let setup = RunSetup::new(harness, &sandbox_setup, config, workspace)?;
+        for w in res.warning.into_iter().chain(setup.warnings) {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
-        let model_ref = model.map(|m| {
-            ModelRef::new(
-                id,
-                ProviderId::new(provider.clone().unwrap_or_else(|| "default".into())),
-                m,
-            )
-        });
         let cfg = PrintConfig {
             binary,
             cwd: cwd.to_path_buf(),
@@ -252,18 +306,15 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             format: args.format.clone(),
             resume: print_resume,
             extra_args: config.extra_args(id.as_str()).to_vec(),
-            mcp_servers,
-            sandbox,
+            mcp_servers: setup.mcp_servers,
+            sandbox: setup.sandbox,
         };
         if let Some(note) = harness.prepare()? {
             eprintln!("{} {}", "[unharness]".yellow().bold(), note);
         }
         let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
         if args.print {
-            let mut watch = Watch::begin(
-                &harness.guarded(ws_root.as_deref().unwrap_or(cwd)),
-                dirs::home_dir().as_deref(),
-            );
+            let mut watch = Watch::begin(&harness.guarded(workspace), dirs::home_dir().as_deref());
             let status = cmd.status()?;
             for change in watch.changes(&guard::default_keep_dir()) {
                 eprintln!(
@@ -275,7 +326,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
             if !status.success() {
                 std::process::exit(status.code().unwrap_or(1));
             }
-            return Ok(());
+            return Ok(ExitCode::SUCCESS);
         }
         #[cfg(unix)]
         {
@@ -313,7 +364,60 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<()>
         harness_explicit: args.harness.is_some(),
         initial_prompt: prompt,
     })
-    .await
+    .await?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// What a run without the TUI is confined by and given, and what the user
+/// should hear about it.
+struct RunSetup {
+    sandbox: Sandbox,
+    mcp_servers: Vec<McpServer>,
+    warnings: Vec<String>,
+}
+
+impl RunSetup {
+    fn new(
+        harness: &dyn Harness,
+        sandbox_setup: &SandboxSetup,
+        config: &Config,
+        workspace: &Path,
+    ) -> Result<Self> {
+        let sandbox = session_sandbox(harness, sandbox_setup, config, workspace)?;
+        let mut warnings = Vec::new();
+        match sandbox.warning() {
+            Some(w) => warnings.push(w),
+            None => eprintln!("{} sandbox: {}", "[unharness]".dimmed(), sandbox.level()),
+        }
+        let (servers, problems) = config.mcp_servers();
+        let (mcp_servers, mcp_warnings) = mcp::for_harness(
+            &servers,
+            harness.capabilities().mcp,
+            harness.descriptor().short_name,
+            &harness.own_mcp_servers(),
+        );
+        warnings.extend(problems.into_iter().chain(mcp_warnings));
+        Ok(RunSetup {
+            sandbox,
+            mcp_servers,
+            warnings,
+        })
+    }
+}
+
+/// The prompt of a `--print` run that named none: what is piped in.
+fn prompt_from_stdin() -> Result<String> {
+    use std::io::{IsTerminal, Read};
+    let mut stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        bail!("--print needs a prompt, as arguments or on stdin");
+    }
+    let mut prompt = String::new();
+    stdin.read_to_string(&mut prompt)?;
+    if prompt.trim().is_empty() {
+        bail!("--print needs a prompt, as arguments or on stdin");
+    }
+    Ok(prompt)
 }
 
 /// `--resume [id]` → (conversation id for the TUI, vendor session id for
@@ -375,20 +479,25 @@ mod tests {
     #[test]
     fn a_run_without_the_tui_does_not_pick_a_policy() {
         use crate::harness::codex::{CodexHarness, CodexTransport};
-        // `--print` on Codex is `exec`, which has no `ask`.
+        // `--print --native` on Codex is `exec`, which has no `ask`.
         let codex = CodexHarness::new(CodexTransport::AppServer);
         for print_mode in [true, false] {
-            let e = print_policy(&codex, print_mode, PermissionPolicy::Ask).unwrap_err();
+            let policies = codex.print_policies(print_mode);
+            let e = print_policy(&codex, &policies, PermissionPolicy::Ask).unwrap_err();
             assert_eq!(
                 e.to_string(),
                 "policy 'ask' is not available for Codex (codex) without the TUI; pass --policy with one of: accept-edits, auto, bypass"
             );
         }
-        let res = print_policy(&codex, true, PermissionPolicy::Auto).unwrap();
-        assert_eq!(res.effective, PermissionPolicy::Auto);
-        let claude = crate::harness::claude::ClaudeHarness::default();
-        let res = print_policy(&claude, true, PermissionPolicy::Ask).unwrap();
+        let res = print_policy(&codex, &codex.print_policies(true), PermissionPolicy::Auto);
+        assert_eq!(res.unwrap().effective, PermissionPolicy::Auto);
+        // Headless `--print` is a session, which asks (and is answered no).
+        let policies = codex.capabilities().permission_policies;
+        let res = print_policy(&codex, &policies, PermissionPolicy::Ask).unwrap();
         assert_eq!(res.effective, PermissionPolicy::Ask);
+        let claude = crate::harness::claude::ClaudeHarness::default();
+        let res = print_policy(&claude, &claude.print_policies(true), PermissionPolicy::Ask);
+        assert_eq!(res.unwrap().effective, PermissionPolicy::Ask);
     }
 
     #[test]

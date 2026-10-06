@@ -5,7 +5,7 @@
 ```bash
 unharness                                   # TUI with the default harness
 unharness -H codex "Refactor the parser"    # pick a harness, start with a prompt
-unharness -p "Summarise src/"               # headless print mode
+unharness -p "Summarise src/"               # headless: print the answer
 unharness --no-tui                          # run the vendor's own TUI instead
 ```
 
@@ -32,7 +32,9 @@ unharness --no-tui                          # run the vendor's own TUI instead
 | `-y, --yes` | Short for `--policy bypass` |
 | `--sandbox <level>` | `workspace-write` (default), `read-only` or `off`. Also `UNHARNESS_SANDBOX`. See [Sandbox](sandbox.md) |
 | `--resume [id]` | Resume the latest conversation, or the one whose id starts with `id` |
-| `-p, --print` | Run one prompt headless and print the answer; `--format text\|json\|stream-json` |
+| `-p, --print` | Run one prompt without the TUI and print the answer; the prompt may come on stdin. See [Headless runs](headless.md) |
+| `--format <format>` | With `-p`: `text` (default), `json` or `stream-json` |
+| `--native` | With `-p`: run the harness's own print mode and pass its output through |
 | `--no-tui` | Hand the terminal to the harness's own interface |
 | `--no-sync` | Skip refreshing the rules symlinks before the run |
 

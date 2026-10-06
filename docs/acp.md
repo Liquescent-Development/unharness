@@ -49,5 +49,6 @@ presets do not have it until you add a table for them.
 
 - Models and effort levels come from the running session, so the pickers
   fill in after the first prompt.
-- ACP agents have no print or `--no-tui` mode.
+- ACP agents run [headless](headless.md) with `-p` like any harness, but
+  have no `--native` or `--no-tui` mode.
 - Sign in with the agent's own CLI.

@@ -210,6 +210,9 @@ pub struct SubagentSupport {
     pub described: bool,
     /// A running subagent can be stopped (`SessionCommand::StopSubagent`).
     pub stop: bool,
+    /// One that ends between turns is reported to the agent in a turn the
+    /// harness starts by itself.
+    pub report_turn: bool,
 }
 
 /// How a harness can go back to an earlier turn of its own session. (Files

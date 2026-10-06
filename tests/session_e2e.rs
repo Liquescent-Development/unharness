@@ -1507,3 +1507,105 @@ async fn sandbox_confines_every_turn_of_a_per_turn_harness() {
 
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
+
+fn headless_run(
+    fake: &Fake,
+    format: unharness::headless::Format,
+    report_turn: bool,
+) -> unharness::headless::Headless<Vec<u8>, Vec<u8>> {
+    let rules =
+        unharness::core::Rules::load_in(&fake._tmp.path().join("config"), Some(fake._tmp.path()))
+            .unwrap();
+    let mut run = unharness::headless::Headless::new(
+        format,
+        rules,
+        fake._tmp.path().to_path_buf(),
+        "fake",
+        report_turn,
+        Vec::new(),
+        Vec::new(),
+    );
+    run.begin(&unharness::headless::RunInfo {
+        harness: "fake".into(),
+        policy: "ask".into(),
+        sandbox: "off".into(),
+        cwd: fake._tmp.path().to_path_buf(),
+    });
+    run
+}
+
+#[tokio::test]
+async fn headless_denies_what_no_rule_allows_and_ends_with_the_turn() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/permission_and_question.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    let mut run = headless_run(&fake, unharness::headless::Format::Json, true);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "create spike3.txt".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 0);
+
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "done");
+    assert_eq!(result["turns"], 1);
+    assert_eq!(result["denied"][0]["tool"], "Write");
+    assert_eq!(result["denied"][0]["action"]["kind"], "edit");
+    let sent = fake.sent_lines();
+    let responses: Vec<&Value> = sent
+        .iter()
+        .filter(|v| v["type"] == "control_response")
+        .collect();
+    assert_eq!(responses.len(), 1, "{sent:?}");
+    assert_eq!(responses[0]["response"]["response"]["behavior"], "deny");
+    // One prompt, and the session is shut down after it.
+    assert_eq!(sent.iter().filter(|v| v["type"] == "user").count(), 1);
+}
+
+#[tokio::test]
+async fn headless_runs_an_acp_agent() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let handle = acp_harness().start_session(cfg).unwrap();
+    let mut run = headless_run(&fake, unharness::headless::Format::StreamJson, false);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "pong?".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 0);
+
+    let lines: Vec<Value> = String::from_utf8_lossy(&run.out)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines[0]["type"], "start");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["type"] == "text_delta" && l["text"] == "pong")
+    );
+    assert!(lines.iter().any(|l| l["type"] == "process_exited"));
+    let result = lines.last().unwrap();
+    assert_eq!(result["type"], "result");
+    assert_eq!(result["text"], "pong");
+    assert!(
+        result["session_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("201664ad"))
+    );
+}
