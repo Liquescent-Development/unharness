@@ -123,6 +123,22 @@ pub enum Commands {
 
     /// Explicitly run a prompt through a harness
     Run(CommonRunArgs),
+
+    /// Update unharness itself (a shell-installer install; others are told
+    /// what to run)
+    Update {
+        /// Install this version instead of the latest (e.g. 0.3.0)
+        #[arg(conflicts_with_all = ["check", "prerelease"])]
+        version: Option<String>,
+
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+
+        /// Include prereleases
+        #[arg(long)]
+        prerelease: bool,
+    },
 }
 
 #[cfg(test)]

@@ -63,6 +63,22 @@ Antigravity (`agy`), or an [ACP agent](docs/acp.md). The sandbox needs
 Linux 6.2 or newer; the macOS backend has not been run on a Mac yet.
 Managing skills needs Node.js.
 
+### Updating
+
+```bash
+unharness update            # shell installer: installs the latest release
+unharness update --check    # only says whether a newer release exists
+unharness update 0.3.0      # a specific version (also to go back)
+```
+
+`unharness update` replaces the binary only when the shell installer put
+it there (it reads the installer's receipt in `~/.config/unharness/`).
+For Homebrew run `brew upgrade unharness`; for `cargo install`, run the
+same `cargo install` again with `--force`. Rerunning the curl command
+above also updates a shell-installer install. `unharness doctor` shows
+which one you have. It never checks for updates by itself, and sessions
+already running keep the old version until restarted.
+
 Then check what unharness found:
 
 ```bash

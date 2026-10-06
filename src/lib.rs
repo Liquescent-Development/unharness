@@ -17,3 +17,4 @@ pub mod skills_import;
 pub mod switch;
 pub mod sync;
 pub mod tui;
+pub mod update;

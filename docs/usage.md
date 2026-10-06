@@ -18,6 +18,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 | `unharness sync` | Refreshes the `CLAUDE.md` / `GEMINI.md` symlinks to `AGENTS.md` |
 | `unharness switch <harness> [-g]` | Sets the default harness for this workspace, or globally with `-g` |
 | `unharness skills <args…>` | Manages skills (see [Rules and skills](skills.md)) |
+| `unharness update [<version>] [--check] [--prerelease]` | Updates unharness itself when the shell installer put it there; otherwise says what to run (see [Updating](../README.md#updating)) |
 
 ## Flags
 
