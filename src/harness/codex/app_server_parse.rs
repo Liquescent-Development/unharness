@@ -11,7 +11,7 @@ use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -688,11 +688,9 @@ impl CodexAppServerParser {
                                     .map(|os| {
                                         os.iter()
                                             .map(|o| {
-                                                (
-                                                    s(o.get("label").unwrap_or(&Value::Null))
-                                                        .to_string(),
-                                                    s(o.get("description").unwrap_or(&Value::Null))
-                                                        .to_string(),
+                                                QuestionOption::new(
+                                                    s(o.get("label").unwrap_or(&Value::Null)),
+                                                    s(o.get("description").unwrap_or(&Value::Null)),
                                                 )
                                             })
                                             .collect()

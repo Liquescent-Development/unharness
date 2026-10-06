@@ -279,10 +279,28 @@ pub struct Question {
     pub id: String,
     pub header: String,
     pub text: String,
-    /// (label, description)
-    pub options: Vec<(String, String)>,
+    pub options: Vec<QuestionOption>,
     pub allow_other: bool,
     pub multi: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QuestionOption {
+    pub label: String,
+    /// What choosing it means.
+    pub description: String,
+    /// The text being chosen between (a draft, a snippet), as markdown.
+    pub preview: Option<String>,
+}
+
+impl QuestionOption {
+    pub fn new(label: impl Into<String>, description: impl Into<String>) -> Self {
+        QuestionOption {
+            label: label.into(),
+            description: description.into(),
+            preview: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -373,7 +391,29 @@ impl AgentEvent {
                         format!("ToolUse {} [{}]", tool, short(&action.summary()))
                     }
                     PermissionKind::Question { questions } => {
-                        format!("Question n={}", questions.len())
+                        // Per question: header, `multi`, labels (`+preview`
+                        // marks an option that carries one).
+                        let each: Vec<String> = questions
+                            .iter()
+                            .map(|q| {
+                                let labels: Vec<String> = q
+                                    .options
+                                    .iter()
+                                    .map(|o| {
+                                        let mark =
+                                            if o.preview.is_some() { "+preview" } else { "" };
+                                        format!("{}{mark}", o.label)
+                                    })
+                                    .collect();
+                                format!(
+                                    " [{}{}: {}]",
+                                    q.header,
+                                    if q.multi { " multi" } else { "" },
+                                    short(&labels.join("|"))
+                                )
+                            })
+                            .collect();
+                        format!("Question n={}{}", questions.len(), each.concat())
                     }
                     PermissionKind::Confirm { title, .. } => format!("Confirm {:?}", short(title)),
                     PermissionKind::Select { title, options } => {

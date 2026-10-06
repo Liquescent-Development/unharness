@@ -1639,7 +1639,8 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().add_modifier(Modifier::BOLD),
             ));
             lines.push(Line::default());
-            for (i, (label, desc)) in q.options.iter().enumerate() {
+            for (i, opt) in q.options.iter().enumerate() {
+                let (label, desc) = (&opt.label, &opt.description);
                 let selected = i == m.cursor;
                 let chosen = m.chosen[m.idx][i];
                 let mark = if q.multi {

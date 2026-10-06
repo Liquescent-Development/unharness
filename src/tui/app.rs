@@ -3926,7 +3926,7 @@ fn rate_limit_summary(r: &RateLimitInfo) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::core::{PermissionKind, Question};
+    use crate::core::{PermissionKind, Question, QuestionOption};
     use crate::harness::agy::AgyHarness;
     use crate::harness::claude::ClaudeHarness;
     use crossterm::event::KeyEventKind;
@@ -5839,7 +5839,10 @@ pub(crate) mod tests {
                     id: "Color?".into(),
                     header: "Color".into(),
                     text: "Color?".into(),
-                    options: vec![("Red".into(), "".into()), ("Blue".into(), "".into())],
+                    options: vec![
+                        QuestionOption::new("Red", ""),
+                        QuestionOption::new("Blue", ""),
+                    ],
                     allow_other: true,
                     multi: false,
                 }],

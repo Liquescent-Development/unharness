@@ -254,7 +254,7 @@ impl QuestionModal {
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| self.chosen[qi][*i])
-                .map(|(_, (label, _))| label.clone())
+                .map(|(_, o)| o.label.clone())
                 .collect();
             let v = if !other.is_empty() {
                 Value::String(other.to_string())
@@ -424,13 +424,14 @@ impl Modal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::QuestionOption;
 
     fn q(id: &str, multi: bool) -> Question {
         Question {
             id: id.into(),
             header: "H".into(),
             text: id.into(),
-            options: vec![("A".into(), "a".into()), ("B".into(), "b".into())],
+            options: vec![QuestionOption::new("A", "a"), QuestionOption::new("B", "b")],
             allow_other: true,
             multi,
         }

@@ -63,6 +63,8 @@ def main() -> int:
         "--output-format", "stream-json",
         "--verbose", "--include-partial-messages",
         "--permission-prompts", "host",
+        # As unharness runs it; without it there is no AskUserQuestion.
+        "--permission-prompt-tool", "stdio",
         "--model", args.model,
     ] + (args.extra.split() if args.extra else [])
 

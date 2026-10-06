@@ -51,7 +51,7 @@ ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "\": false"
 ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "\\n  }\\n]"
 ToolCallDelta id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion "}"
 ToolCallStarted id=toolu_01HGSw89Mvoo4czWcapLjTyN name=AskUserQuestion input={"questions":[{"header":"Color Preference","multiSelect":...
-PermissionRequest id=d2ab7e0a-0194-4759-b4bd-c56e431aabe5 Question n=1
+PermissionRequest id=d2ab7e0a-0194-4759-b4bd-c56e431aabe5 Question n=1 [Color Preference: Red|Blue]
 ToolCallResult id=toolu_01HGSw89Mvoo4czWcapLjTyN error=false "Your questions have been answered: \"Do you prefer red or ..."
 Context used=26592 window=-
 TextDelta "you chose Red"
