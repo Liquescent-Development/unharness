@@ -1180,19 +1180,21 @@ mod tests {
             propose("apply_patch", &edit),
             [Rule::edit("src/tui/**"), Rule::edit("Cargo.toml")]
         );
+        // Proposed as the real path: on macOS /etc is a link to /private/etc.
+        let real = |p: &str| real_path(Path::new(p)).unwrap().display().to_string();
         let outside = ToolAction::Read {
             path: "/etc/ssl/openssl.cnf".into(),
         };
         // Outside the workspace: that file, not what happens to be beside it.
         assert_eq!(
             propose("Read", &outside),
-            [Rule::read("/etc/ssl/openssl.cnf")]
+            [Rule::read(real("/etc/ssl/openssl.cnf"))]
         );
-        for (path, pattern) in [("/etc/hosts", "/etc/hosts"), ("/vmlinuz", "/vmlinuz")] {
+        for path in ["/etc/hosts", "/vmlinuz"] {
             let edit = ToolAction::Edit {
                 paths: vec![path.into()],
             };
-            assert_eq!(propose("Write", &edit), [Rule::edit(pattern)]);
+            assert_eq!(propose("Write", &edit), [Rule::edit(real(path))]);
         }
         // A command that runs another is proposed whole.
         for (command, rule) in [
