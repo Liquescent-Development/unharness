@@ -155,6 +155,8 @@ pub struct QuestionModal {
     pub chosen: Vec<Vec<bool>>,
     pub other: Vec<String>,
     pub editing_other: bool,
+    /// The free text as it was when typing started, for Esc.
+    other_before: String,
     /// Lines the preview pane is scrolled down.
     pub preview_scroll: u16,
     /// The furthest the preview can scroll, as last drawn.
@@ -184,6 +186,7 @@ impl QuestionModal {
             chosen,
             other,
             editing_other: false,
+            other_before: String::new(),
             preview_scroll: 0,
             preview_max: Cell::new(0),
         }
@@ -262,7 +265,7 @@ impl QuestionModal {
             return;
         };
         if self.is_other_row() {
-            self.editing_other = true;
+            self.start_other();
             return;
         }
         let row = &mut self.chosen[self.idx];
@@ -282,13 +285,24 @@ impl QuestionModal {
             return self.submit_or_show_missing();
         };
         if self.is_other_row() {
-            self.editing_other = true;
+            self.start_other();
             return QuestionStep::Stay;
         }
         if !multi || !self.has_answer(self.idx) {
             self.choose();
         }
         self.advance()
+    }
+
+    fn start_other(&mut self) {
+        self.editing_other = true;
+        self.other_before = self.other[self.idx].clone();
+    }
+
+    /// Esc while typing on the "Other" row: put the text back as it was.
+    pub fn cancel_other(&mut self) {
+        self.editing_other = false;
+        self.other[self.idx] = std::mem::take(&mut self.other_before);
     }
 
     /// Enter while typing on the "Other" row: free text answers the
@@ -335,7 +349,8 @@ impl QuestionModal {
             .collect()
     }
 
-    /// Open a page with the cursor on its answer.
+    /// Open a page with the cursor on its answer (free text, which wins
+    /// over options, before a chosen option).
     pub fn go_to(&mut self, page: usize) {
         if page >= self.page_count() {
             return;
@@ -344,14 +359,8 @@ impl QuestionModal {
         self.editing_other = false;
         self.preview_scroll = 0;
         self.cursor = match self.questions.get(page) {
-            Some(q) => self.chosen[page]
-                .iter()
-                .position(|c| *c)
-                .or_else(|| {
-                    (q.allow_other && !self.other[page].trim().is_empty())
-                        .then_some(q.options.len())
-                })
-                .unwrap_or(0),
+            Some(q) if !self.other[page].trim().is_empty() => q.options.len(),
+            Some(_) => self.chosen[page].iter().position(|c| *c).unwrap_or(0),
             None => 0,
         };
     }
@@ -692,6 +701,48 @@ mod tests {
         m.go_to(0);
         assert_eq!(m.enter(), QuestionStep::Stay);
         assert_eq!(m.answers(), json!({"many": ["A"]}));
+    }
+
+    #[test]
+    fn esc_while_typing_puts_the_text_back() {
+        let mut m = QuestionModal::new("r".into(), vec![q("one", false), q("two", false)]);
+        m.enter(); // "one" = A
+        m.prev_page();
+        m.cursor = 2;
+        m.enter();
+        assert!(m.editing_other);
+        m.other[0] = "foo".into();
+        m.cancel_other();
+        assert!(!m.editing_other);
+        assert_eq!(m.answers()["one"], "A");
+        // Esc after editing text that was already there restores it.
+        m.cursor = 2;
+        m.enter();
+        m.other[0] = "kept".into();
+        assert_eq!(m.finish_other(), QuestionStep::Stay);
+        m.go_to(0);
+        assert_eq!(m.cursor, 2); // the free text is the answer, so it is highlighted
+        m.choose();
+        m.other[0].push_str(" and more");
+        m.cancel_other();
+        assert_eq!(m.answers()["one"], "kept");
+    }
+
+    #[test]
+    fn free_text_on_a_multi_select_replaces_the_ticks() {
+        let mut m = QuestionModal::new("r".into(), vec![q("many", true)]);
+        m.choose();
+        m.down();
+        m.choose();
+        m.down();
+        m.enter();
+        m.other[0] = "neither".into();
+        assert_eq!(m.finish_other(), QuestionStep::Stay);
+        assert!(m.on_review());
+        assert_eq!(m.answer_text(0).as_deref(), Some("neither"));
+        assert_eq!(m.answers(), json!({"many": "neither"}));
+        m.go_to(0);
+        assert!(m.is_other_row());
     }
 
     #[test]

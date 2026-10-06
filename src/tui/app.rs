@@ -2756,7 +2756,7 @@ impl App {
                     match key.code {
                         KeyCode::Enter => m.finish_other(),
                         KeyCode::Esc => {
-                            m.editing_other = false;
+                            m.cancel_other();
                             QuestionStep::Stay
                         }
                         KeyCode::Backspace => {
