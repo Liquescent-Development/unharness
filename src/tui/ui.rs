@@ -70,8 +70,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if !app.suggestions.is_empty() && app.modal.is_none() {
         render_suggestions(frame, app, prompt_row);
     }
-    if app.modal.is_some() {
-        render_modal(frame, app, frame.area());
+    let area = frame.area();
+    match &mut app.modal {
+        // Drawing it settles how far its preview can scroll.
+        Some(Modal::Question(m)) => render_question(frame, m, area),
+        Some(_) => render_modal(frame, app, area),
+        None => {}
     }
 }
 
@@ -1621,10 +1625,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 lines,
             )
         }
-        Modal::Question(m) => {
-            render_question(frame, m, area);
-            return;
-        }
+        Modal::Question(_) => return, // `render_question`
         Modal::Confirm(m) => {
             let popup = centered_rect(60, 30, area);
             let width = (popup.width.saturating_sub(6)).max(20) as usize;
@@ -1690,7 +1691,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
 /// The question modal: a strip naming every question and the review page,
 /// the question, its options, and the highlighted option's preview beside
 /// them (below them when the terminal is narrow).
-fn render_question(frame: &mut Frame, m: &QuestionModal, area: Rect) {
+fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
     let popup = if m.has_previews() {
         centered_rect(90, 80, area)
     } else {
@@ -1764,7 +1765,11 @@ fn render_question(frame: &mut Frame, m: &QuestionModal, area: Rect) {
             render_question_options(frame, m, options);
             render_question_preview(frame, m, preview);
         }
-        Some(_) => render_question_options(frame, m, body),
+        Some(_) => {
+            m.preview_max = 0;
+            m.preview_scroll = 0;
+            render_question_options(frame, m, body);
+        }
     }
 }
 
@@ -1966,7 +1971,7 @@ fn render_question_options(frame: &mut Frame, m: &QuestionModal, area: Rect) {
 }
 
 /// The highlighted option's preview, as markdown, in a pane of its own.
-fn render_question_preview(frame: &mut Frame, m: &QuestionModal, area: Rect) {
+fn render_question_preview(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
     let pane = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
@@ -1982,8 +1987,9 @@ fn render_question_preview(frame: &mut Frame, m: &QuestionModal, area: Rect) {
         ))],
     };
     let max = lines.len().saturating_sub(inner.height as usize) as u16;
-    m.preview_max.set(max);
-    let scroll = m.preview_scroll.min(max);
+    m.preview_max = max;
+    m.preview_scroll = m.preview_scroll.min(max);
+    let scroll = m.preview_scroll;
     let pane = if max > 0 {
         let more = if scroll < max { "↓" } else { "↑" };
         pane.title(
@@ -2225,6 +2231,37 @@ mod tests {
         let (rows, _) = screen(&mut app, 140, 40);
         find(&rows, "line 60");
         find(&rows, "↑ ");
+    }
+
+    #[test]
+    fn preview_scroll_follows_the_size_it_was_drawn_at() {
+        use crossterm::event::KeyCode;
+        let mut questions = greeting_and_tone();
+        let long: Vec<String> = (1..=60).map(|i| format!("line {i}")).collect();
+        questions[0].options[0].preview = Some(long.join("\n\n"));
+        let mut app = question_app(questions);
+        let scroll = |app: &App| match &app.modal {
+            Some(Modal::Question(m)) => (m.preview_scroll, m.preview_max),
+            _ => unreachable!(),
+        };
+        screen(&mut app, 140, 40);
+        for _ in 0..40 {
+            app.handle_modal_key(KeyEvent::from(KeyCode::PageDown));
+        }
+        screen(&mut app, 140, 40);
+        let (bottom, _) = scroll(&app);
+        // Taller: the end comes sooner, and PageUp moves from there.
+        screen(&mut app, 140, 60);
+        let (at, max) = scroll(&app);
+        assert!(at == max && max < bottom);
+        app.handle_modal_key(KeyEvent::from(KeyCode::PageUp));
+        assert_eq!(scroll(&app).0, max - 5);
+
+        // A page without a preview has nothing to scroll.
+        app.handle_modal_key(KeyEvent::from(KeyCode::Tab));
+        screen(&mut app, 140, 40);
+        app.handle_modal_key(KeyEvent::from(KeyCode::PageDown));
+        assert_eq!(scroll(&app), (0, 0));
     }
 
     #[test]

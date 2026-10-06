@@ -1,7 +1,5 @@
 //! Modal state: list pickers and the permission/question/dialog prompts.
 
-use std::cell::Cell;
-
 use serde_json::{Value, json};
 
 use crate::core::conversations::ConversationSummary;
@@ -160,7 +158,7 @@ pub struct QuestionModal {
     /// Lines the preview pane is scrolled down.
     pub preview_scroll: u16,
     /// The furthest the preview can scroll, as last drawn.
-    pub preview_max: Cell<u16>,
+    pub preview_max: u16,
 }
 
 /// The question has a row for a typed answer: it allows one, or it has
@@ -194,7 +192,7 @@ impl QuestionModal {
             editing_other: false,
             other_before: String::new(),
             preview_scroll: 0,
-            preview_max: Cell::new(0),
+            preview_max: 0,
         }
     }
 
@@ -260,7 +258,7 @@ impl QuestionModal {
     }
 
     pub fn scroll_preview(&mut self, lines: i32) {
-        let max = i32::from(self.preview_max.get());
+        let max = i32::from(self.preview_max);
         self.preview_scroll = (i32::from(self.preview_scroll) + lines).clamp(0, max) as u16;
     }
 
@@ -778,7 +776,7 @@ mod tests {
         let mut m = QuestionModal::new("r".into(), vec![one, q("two", false)]);
         assert!(m.has_previews());
         assert_eq!(m.preview(), Some("# Draft"));
-        m.preview_max.set(5);
+        m.preview_max = 5;
         m.scroll_preview(3);
         m.scroll_preview(10);
         assert_eq!(m.preview_scroll, 5);
