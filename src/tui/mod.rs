@@ -7,6 +7,7 @@ pub mod code;
 pub mod drop;
 pub mod editor;
 pub mod files;
+pub mod herdr;
 pub mod history;
 pub mod markdown;
 pub mod modal;
@@ -141,6 +142,13 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     }));
 
     MOUSE.store(launch.config.mouse.unwrap_or(true), Ordering::SeqCst);
+    let mut herdr = launch
+        .config
+        .herdr
+        .unwrap_or(true)
+        .then(|| herdr::Pane::from_env(|k| std::env::var(k).ok()))
+        .flatten()
+        .map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
     let mut out = stdout();
     enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
@@ -163,7 +171,10 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         rules: launch.rules,
     });
 
-    let res = event_loop(&mut terminal, &mut app, initial_prompt).await;
+    let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;
+    if let Some(h) = herdr {
+        h.release().await;
+    }
 
     restore_terminal()?;
     terminal.show_cursor()?;
@@ -178,6 +189,7 @@ async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
     initial_prompt: Option<String>,
+    mut herdr: Option<&mut herdr::Reporter>,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
@@ -192,6 +204,9 @@ async fn event_loop(
     }
 
     while !app.should_quit {
+        if let Some(h) = herdr.as_deref_mut() {
+            h.update(app.herdr_report());
+        }
         if needs_redraw {
             terminal.draw(|f| ui::render(f, app))?;
             needs_redraw = false;

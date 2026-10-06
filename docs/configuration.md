@@ -19,6 +19,7 @@ doctor` prints the path, and `unharness init` creates the file.
 default_harness  = "claude"      # agy | claude | codex | pi
 default_policy   = "ask"
 mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to select and copy; false leaves the mouse to the terminal
+herdr            = true          # report working/blocked/idle to herdr when run in one of its panes
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
@@ -63,6 +64,7 @@ headers = { Authorization = "Bearer …" }
 | `default_harness` | first signed-in ([how](usage.md#the-default-harness)) | Harness to start with |
 | `default_policy` | `ask` | [Permission policy](permissions.md) |
 | `mouse` | `true` | unharness handles the mouse; `false` leaves it to the terminal |
+| `herdr` | `true` | Inside a [herdr](tui.md#herdr) pane, report the session's state to herdr |
 | `auto_sync` | `true` | Refresh the `CLAUDE.md` / `GEMINI.md` symlinks before each run |
 | `bridge_max_chars` | `24000` | How much of the conversation seeds a newly switched-to harness |
 | `file_checkpoints` | `true` | [Checkpoint](tui.md#rewind-and-checkpoints) the working tree before each prompt |

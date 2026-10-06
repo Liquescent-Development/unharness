@@ -264,6 +264,30 @@ ends or is stopped. Codex does not, so a Codex sub-agent's report is only
 in its own transcript. Codex also names a sub-agent without describing
 its task, and shows what it is doing only through its tool calls.
 
+## herdr
+
+Run inside a [herdr](https://herdr.dev) pane (`HERDR_ENV=1`), unharness
+tells herdr what the session is doing, so the pane shows up in `herdr
+agent list` as `unharness`:
+
+- **blocked** while a permission request, question or confirmation waits
+  for your answer, also when it is queued behind another picker, and
+  while the policy picker holds the session because the policy you asked
+  for is not available;
+- **working** while a turn runs or subagents are still at work;
+- **idle** otherwise. herdr shows it as **done** when the turn ended in a
+  tab you were not looking at.
+
+When unharness quits it hands the pane back. Nothing waits on herdr: if
+its socket cannot be reached, unharness carries on and writes what went
+wrong to `herdr.log` in its state directory (`~/.local/state/unharness/`
+on Linux). `herdr = false` in the config turns this off.
+
+The agent CLIs unharness starts do not get herdr's `HERDR_*` variables,
+so they cannot reach herdr's socket (which drives every pane), and a
+vendor's own herdr integration does not report over unharness's. pi's
+herdr extensions are silent under unharness as a result.
+
 ## Terminal notes
 
 Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`.

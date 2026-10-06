@@ -383,6 +383,18 @@ impl Modal {
         )
     }
 
+    /// What a prompt modal asks of the user, in a few words.
+    pub fn waiting_on(&self) -> Option<String> {
+        match self {
+            Modal::Permission(m) => Some(super::herdr::request_message(&m.request.kind)),
+            Modal::Question(m) => m.questions.get(m.idx).map(super::herdr::question_label),
+            Modal::Confirm(m) => Some(m.title.clone()),
+            Modal::Select(m) => Some(m.title.clone()),
+            Modal::Input(m) => Some(m.title.clone()),
+            _ => None,
+        }
+    }
+
     /// The request id a prompt modal answers.
     pub fn request_id(&self) -> Option<&str> {
         match self {

@@ -5,6 +5,7 @@
 //! `SandboxProfile`; a `SandboxBackend` applies the profile to a command just
 //! before it is spawned. The network is left open.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -252,7 +253,11 @@ impl Sandbox {
         }
     }
 
-    pub fn wrap(&self, cmd: Command) -> Result<Command> {
+    /// Confine `cmd`, and take herdr's variables away from it whether or
+    /// not the sandbox is on: the socket they name drives every pane, and
+    /// a vendor's herdr integration would report over unharness's own.
+    pub fn wrap(&self, mut cmd: Command) -> Result<Command> {
+        strip_herdr(&mut cmd, std::env::vars_os().map(|(key, _)| key));
         match self {
             Sandbox::Off { .. } => Ok(cmd),
             Sandbox::Active { backend, profile } => backend.wrap(cmd, profile),
@@ -469,6 +474,17 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
     })
 }
 
+/// Remove every `HERDR_*` variable `cmd` would inherit from `inherited` or
+/// was given itself.
+fn strip_herdr(cmd: &mut Command, inherited: impl Iterator<Item = OsString>) {
+    let own: Vec<OsString> = cmd.get_envs().map(|(key, _)| key.to_owned()).collect();
+    for key in inherited.chain(own) {
+        if key.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
+            cmd.env_remove(key);
+        }
+    }
+}
+
 fn canonical(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }
@@ -503,6 +519,28 @@ mod tests {
 
     fn available() -> std::result::Result<Arc<dyn SandboxBackend>, String> {
         Ok(Arc::new(NullBackend))
+    }
+
+    #[test]
+    fn harness_processes_lose_herdrs_variables() {
+        let mut cmd = Command::new("true");
+        cmd.env("HERDR_PANE_ID", "w1:p2").env("KEEP", "1");
+        let inherited = ["HERDR_SOCKET_PATH", "HERDR_ENV", "PATH", "XHERDR_ENV"];
+        strip_herdr(&mut cmd, inherited.into_iter().map(OsString::from));
+        let mut envs: Vec<_> = cmd
+            .get_envs()
+            .map(|(k, v)| (k.to_str().unwrap(), v.map(|v| v.to_str().unwrap())))
+            .collect();
+        envs.sort();
+        assert_eq!(
+            envs,
+            [
+                ("HERDR_ENV", None),
+                ("HERDR_PANE_ID", None),
+                ("HERDR_SOCKET_PATH", None),
+                ("KEEP", Some("1")),
+            ]
+        );
     }
 
     /// A home with a workspace, a harness state dir, credentials and
