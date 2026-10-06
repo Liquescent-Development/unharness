@@ -903,13 +903,10 @@ async fn agy_stream_session_runs_two_turns() {
 
     // The first turn ends where agy refused a command it could not ask about.
     handle.send(SessionCommand::turn("echo hi")).await.unwrap();
-    let events = run_turn(&mut handle, |_| None).await;
+    let mut events = run_turn(&mut handle, |_| None).await;
     assert!(events.iter().any(|e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == "7d61bda4-46b7-4d1c-9764-809ad9b86fda")));
     assert!(events.iter().any(
         |e| matches!(e, AgentEvent::ToolCallResult { output, .. } if output == "2 lines, 17 bytes")
-    ));
-    assert!(events.iter().any(
-        |e| matches!(e, AgentEvent::Notice(n) if n.contains("refused") && n.contains("RunCommand"))
     ));
     assert!(matches!(
         events.last(),
@@ -917,6 +914,13 @@ async fn agy_stream_session_runs_two_turns() {
             stop_reason: StopReason::Done
         })
     ));
+    // The refusal is on stderr, a pipe of its own, so it can land after the
+    // result; the fake sends nothing more until the next turn.
+    let refusal = |e: &AgentEvent| matches!(e, AgentEvent::Notice(n) if n.contains("refused") && n.contains("RunCommand"));
+    if !events.iter().any(refusal) {
+        events.push(next_event(&mut handle).await);
+    }
+    assert!(events.iter().any(refusal));
 
     // The second result lists that refusal again; it is not reported twice.
     handle.send(SessionCommand::turn("write")).await.unwrap();
