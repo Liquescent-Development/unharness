@@ -1,3 +1,4 @@
+CapabilitiesChanged models=12
 SessionStarted id=64f918c1-67fa-4bf4-8123-035d2e2d004f model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21706 window=-

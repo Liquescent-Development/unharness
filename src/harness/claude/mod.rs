@@ -3,10 +3,12 @@
 pub mod parse;
 pub mod transport;
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 
 use super::{
@@ -143,7 +145,8 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
 
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
-/// Static catalog, checked 2026-10-02. Aliases resolve to the latest release.
+/// When Claude cannot be asked (`initialize_answer`). Checked 2026-10-02;
+/// aliases resolve to the latest release.
 const MODELS: &[(&str, &str, &str)] = &[
     ("opus", "Opus (latest)", "Alias for the latest Opus release"),
     (
@@ -250,7 +253,7 @@ impl Harness for ClaudeHarness {
                 .collect(),
             effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
             resume_by_id: true,
-            live_model_list: false,
+            live_model_list: true,
             multi_provider: false,
             ask_user_question: true,
             interrupt: true,
@@ -298,9 +301,19 @@ impl Harness for ClaudeHarness {
         Some(auth_status(binary).authenticated)
     }
 
-    fn list_models(&self, _binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    /// What Claude answers to `initialize`, else the static table.
+    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "anthropic" {
             return Ok(Vec::new());
+        }
+        let live = initialize_answer(binary, self.config_env()?)
+            .ok()
+            .and_then(|answer| parse::initialize_models(&answer))
+            .filter(|models| {
+                !models.is_empty() && models.iter().all(|m| &m.model_ref.provider == provider)
+            });
+        if let Some(models) = live {
+            return Ok(models);
         }
         Ok(MODELS
             .iter()
@@ -371,6 +384,86 @@ impl Harness for ClaudeHarness {
         }
         Ok(cmd)
     }
+}
+
+/// How long a model list may take. On Bedrock without credentials Claude
+/// answered after 60 s (2.1.292), on Vertex after 3 s.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Start Claude, send `initialize` and return its answer, which lists the
+/// models (Claude has no command that prints them). It runs outside the
+/// sandbox like the other probes, so it runs nothing of the user's or the
+/// workspace's: `--safe-mode` turns off hooks, plugins and MCP servers but
+/// keeps the settings' `env`, which chooses the provider; it starts in an
+/// empty directory and reads only the user's settings.
+fn initialize_answer(binary: &Path, env: Option<(String, String)>) -> Result<Value> {
+    let dir = std::env::temp_dir().join(format!("unharness-claude-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir)?;
+    let answer = ask_initialize(binary, env, &dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    answer
+}
+
+fn ask_initialize(binary: &Path, env: Option<(String, String)>, dir: &Path) -> Result<Value> {
+    let mut cmd = Command::new(binary);
+    cmd.args([
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--no-session-persistence",
+        "--safe-mode",
+        "--setting-sources",
+        "user",
+    ])
+    .current_dir(dir)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    cmd.envs(env);
+    for var in transport::PARENT_SESSION_VARS {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd.spawn().context("spawn claude")?;
+    let (id, line) = transport::control_request("initialize", serde_json::json!({}));
+    let mut stdin = child.stdin.take().context("stdin")?;
+    writeln!(stdin, "{line}")?;
+    stdin.flush()?;
+    let stdout = child.stdout.take().context("stdout")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let answer = loop {
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            break Err(anyhow!("claude did not answer initialize"));
+        };
+        let Ok(line) = rx.recv_timeout(left) else {
+            break Err(anyhow!("claude did not answer initialize"));
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if v.get("type").and_then(Value::as_str) == Some("control_response")
+            && v.pointer("/response/request_id").and_then(Value::as_str) == Some(id.as_str())
+        {
+            break v
+                .pointer("/response/response")
+                .cloned()
+                .context("initialize had no answer");
+        }
+    };
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
 }
 
 fn auth_status(binary: &Path) -> AuthInfo {
@@ -474,7 +567,10 @@ mod tests {
         assert_eq!(caps.permission_policies.len(), 4);
         assert!(caps.supports_effort("xhigh"));
         let models = ClaudeHarness::default()
-            .list_models(Path::new("claude"), &ProviderId::from("anthropic"))
+            .list_models(
+                Path::new("/nonexistent/claude"),
+                &ProviderId::from("anthropic"),
+            )
             .unwrap();
         assert!(models.iter().any(|m| m.model_ref.model == "opus"));
         assert!(

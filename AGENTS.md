@@ -476,6 +476,15 @@ recorded ones. For anything else:
   subagent counts only when it ends after its parent (the only case
   recorded). A subagent whose end never comes holds the run until
   `Ctrl+C`. Not persisted as a conversation.
+- Claude's models (2.1.292) are the `models` of its answer to
+  `initialize` (`value`, `displayName`, `description`,
+  `supportedEffortLevels`, the first being `default`, which `--model`
+  takes); there is no command that prints them. A session reports them
+  as `CapabilitiesChanged`; `list_models` starts Claude with
+  `--safe-mode --setting-sources user` in an empty directory, outside the
+  sandbox like the other probes, so that no hook, plugin, MCP server or
+  workspace setting runs (`--safe-mode` keeps the user settings' `env`),
+  and falls back to a table when no answer comes within 15 s.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

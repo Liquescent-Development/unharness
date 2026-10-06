@@ -252,6 +252,14 @@ pub fn control_response(request_id: &str, response: Value) -> String {
     .to_string()
 }
 
+/// A parent Claude Code session's identity, never inherited.
+pub const PARENT_SESSION_VARS: [&str; 4] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+];
+
 /// `mcp_config` is the file written by [`mcp_config_file`], if any.
 pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
@@ -263,13 +271,7 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    // Never inherit a parent Claude Code session's identity.
-    for var in [
-        "CLAUDECODE",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION",
-    ] {
+    for var in PARENT_SESSION_VARS {
         cmd.env_remove(var);
     }
 
