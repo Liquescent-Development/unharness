@@ -93,7 +93,7 @@ unharness -H codex "Refactor the parser"    # pick a harness, start with a promp
 unharness --policy accept-edits             # ask | accept-edits | auto | bypass
 unharness --sandbox read-only               # read-only | workspace-write (default) | off
 unharness --resume                          # resume the latest conversation
-unharness -p "Summarise src/"               # headless print mode
+unharness -p "Summarise src/"               # headless: print the answer
 unharness models                            # providers and models per harness
 ```
 
@@ -175,6 +175,7 @@ All keys and slash commands are listed in [The TUI](docs/tui.md).
 ## Documentation
 
 - [Usage](docs/usage.md): commands, flags, resume, switching harnesses
+- [Headless runs](docs/headless.md): `-p`, its output formats and schema
 - [The TUI](docs/tui.md): keys, slash commands, attachments, rewind, subagents
 - [Permissions](docs/permissions.md): policies and allow rules
 - [Sandbox](docs/sandbox.md): what is confined and how

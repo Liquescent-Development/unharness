@@ -25,8 +25,8 @@ of your allow rules.** Reads may run.
 A harness that cannot hold to that does not offer `ask`:
 
 - `codex exec` and headless Antigravity cannot prompt;
-- `--print` on Codex always uses `codex exec`, and Codex's own interface
-  (`--no-tui`) does not accept the `untrusted` approval policy;
+- `--print --native` on Codex uses `codex exec`, and Codex's own
+  interface (`--no-tui`) does not accept the `untrusted` approval policy;
 - an ACP agent offers `ask` only when you have marked it as one that asks
   ([ACP agents](acp.md#permissions)).
 
@@ -43,6 +43,13 @@ unharness does not choose for you:
 - `--print` and `--no-tui` stop with an error naming the policies you can
   pass with `--policy`.
 
+### `--print`
+
+A [headless run](headless.md) has nobody to ask: what an allow rule
+covers is allowed, every other request is denied (and the agent told
+why), and a question is dismissed. Each denial is written to stderr and
+listed in the result.
+
 ### pi
 
 pi has no permission prompts of its own. unharness loads a small
@@ -55,7 +62,8 @@ extensions.
   `file://` URL, a Unicode space) is always asked about, whatever your
   allow rules say.
 - In a `--print` run under `ask` there is no one to ask, so those calls are
-  blocked.
+  denied unless an allow rule covers them (`--print --native`: all of
+  them are blocked).
 
 ### Policy and sandbox are separate
 
@@ -134,8 +142,8 @@ or an MCP approval that cannot be tied to one call.
   directories, however wide its pattern.
 - Rules only allow. They apply under every policy to every request that
   reaches unharness. What a harness decides without asking (see the policy
-  table) never gets here, and neither does anything in `--print` and
-  `--no-tui` runs.
+  table) never gets here, and neither does anything in `--print --native`
+  and `--no-tui` runs.
 - Every request a rule answers is noted in the transcript, together with
   the rules that answered it.
 - A rules file that does not parse stops unharness, like a config file.

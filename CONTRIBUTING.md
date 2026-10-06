@@ -35,6 +35,8 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   agy/         stream-json transport
   acp/         generic Agent Client Protocol client: one instance per configured agent
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
+src/headless.rs  `--print`: one prompt through a session, written as text,
+               json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
                them for tests/session_e2e.rs
 ```
