@@ -389,9 +389,12 @@ recorded ones. For anything else:
   arrived, about 1.5 s after launch, and the report wins after that.
   Unverified: where herdr shows the `message` of a blocked report (no
   API view returns it), whether the release or the exit cleared the
-  pane, a vendor integration (`herdr integration install claude`)
-  reporting for the same pane from inside unharness (it would, with
-  its own `source`; none was installed). pi's herdr extension reports
+  pane. `Sandbox::wrap` takes every `HERDR_*` variable away from what
+  it starts, sandbox on or off: the socket drives every pane, and a
+  vendor integration (`herdr integration install claude`) would
+  otherwise report for the same pane under its own `source`. What
+  follows was seen before that, with the variables inherited: pi's
+  herdr extension reports
   only when `ctx.mode` is `tui`, so it is silent in unharness's `rpc`
   sessions; pi's A2A extension (`herdr-a2a`) fails with "client session
   readiness timed out" because its broker answers `POST /v1/register`

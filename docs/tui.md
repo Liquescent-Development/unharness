@@ -283,6 +283,11 @@ its socket cannot be reached, unharness carries on and writes what went
 wrong to `herdr.log` in its state directory (`~/.local/state/unharness/`
 on Linux). `herdr = false` in the config turns this off.
 
+The agent CLIs unharness starts do not get herdr's `HERDR_*` variables,
+so they cannot reach herdr's socket (which drives every pane), and a
+vendor's own herdr integration does not report over unharness's. pi's
+herdr extensions are silent under unharness as a result.
+
 ## Terminal notes
 
 Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`.
