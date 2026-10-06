@@ -249,6 +249,12 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
             std::io::stdout(),
             std::io::stderr(),
         );
+        {
+            use std::io::IsTerminal;
+            run.set_shared_terminal(
+                std::io::stdout().is_terminal() && std::io::stderr().is_terminal(),
+            );
+        }
         for w in res.warning.into_iter().chain(setup.warnings) {
             run.warn(w);
         }

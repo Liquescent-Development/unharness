@@ -94,6 +94,12 @@ pub struct Headless<O: Write, E: Write> {
     /// The session's work is over; what still comes in is written out
     /// but changes nothing.
     settled: bool,
+    /// stdout and stderr are the same terminal, where a line on stderr
+    /// would land in the middle of the answer's.
+    shared_terminal: bool,
+    /// How much of `text` was out when stderr last ended a line: the
+    /// cursor is at a line start while nothing has been added since.
+    text_at_err: usize,
     usage: Option<Usage>,
     denied: Vec<Value>,
     warnings: Vec<String>,
@@ -135,6 +141,8 @@ impl<O: Write, E: Write> Headless<O, E> {
             spawned_by: HashMap::new(),
             owing: HashSet::new(),
             settled: false,
+            shared_terminal: false,
+            text_at_err: 0,
             usage: None,
             denied: Vec::new(),
             warnings: Vec::new(),
@@ -180,12 +188,32 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// written to stderr.
     pub fn warn(&mut self, message: impl Into<String>) {
         let message = message.into();
-        let _ = writeln!(self.err, "{} {}", "[unharness]".yellow().bold(), message);
+        self.err_line(format!("{} {}", "[unharness]".yellow().bold(), message));
         self.warnings.push(message);
     }
 
     fn note(&mut self, message: &str) {
-        let _ = writeln!(self.err, "{} {}", "[unharness]".dimmed(), message);
+        self.err_line(format!("{} {}", "[unharness]".dimmed(), message));
+    }
+
+    /// Say that stdout and stderr are one terminal (`--format text` only
+    /// streams to stdout as it goes).
+    pub fn set_shared_terminal(&mut self, shared: bool) {
+        self.shared_terminal = shared;
+    }
+
+    /// A line on stderr, on a line of its own where it shares the terminal
+    /// with an answer that stopped mid-line. stdout is never changed.
+    fn err_line(&mut self, line: String) {
+        let mid_line = self.format == Format::Text
+            && self.shared_terminal
+            && self.text.len() != self.text_at_err
+            && !self.text.ends_with('\n');
+        if mid_line {
+            let _ = writeln!(self.err);
+        }
+        let _ = writeln!(self.err, "{line}");
+        self.text_at_err = self.text.len();
     }
 
     /// Ctrl+C: the process going away from here on is no error. Returns
@@ -315,12 +343,8 @@ impl<O: Write, E: Write> Headless<O, E> {
                 self.note(&line);
             }
             AgentEvent::Error(e) if self.format != Format::StreamJson => {
-                let _ = writeln!(
-                    self.err,
-                    "{} {}: {e}",
-                    "[unharness]".red().bold(),
-                    self.name
-                );
+                let line = format!("{} {}: {e}", "[unharness]".red().bold(), self.name);
+                self.err_line(line);
             }
             AgentEvent::ProcessExited { code } => {
                 self.turn_running = false;
@@ -466,6 +490,8 @@ impl<O: Write, E: Write> Headless<O, E> {
                 if !self.text.is_empty() && !self.text.ends_with('\n') {
                     let _ = writeln!(self.out);
                 }
+                // The answer's own line is ended now.
+                self.text_at_err = self.text.len();
             }
             Format::Json => {
                 let _ = writeln!(
@@ -481,13 +507,14 @@ impl<O: Write, E: Write> Headless<O, E> {
             Some(StopReason::Done) => 0,
             Some(StopReason::Interrupted) => {
                 if self.format == Format::Text {
-                    let _ = writeln!(self.err, "{} interrupted", "[unharness]".yellow().bold());
+                    self.err_line(format!("{} interrupted", "[unharness]".yellow().bold()));
                 }
                 130
             }
             Some(StopReason::Error(e)) => {
                 if self.format == Format::Text {
-                    let _ = writeln!(self.err, "{} {e}", "[unharness]".red().bold());
+                    let line = format!("{} {e}", "[unharness]".red().bold());
+                    self.err_line(line);
                 }
                 1
             }
@@ -1174,6 +1201,31 @@ mod tests {
                 checked.iter().any(|c| c == case),
                 "{case} not checked: {checked:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_note_starts_its_own_line_on_a_shared_terminal() {
+        let notice = || AgentEvent::Notice("1 permission denial(s)".into());
+        let (_dir, mut run) = headless(Format::Text, false);
+        run.set_shared_terminal(true);
+        feed(&mut run, vec![text("so I"), notice(), notice()]);
+        feed(&mut run, vec![text(" don't know."), notice(), done()]);
+        assert_eq!(run.finish(), 0);
+        // stdout is the answer alone; stderr breaks the line once per
+        // stretch of text.
+        assert_eq!(String::from_utf8_lossy(&run.out), "so I don't know.\n");
+        let err = String::from_utf8_lossy(&run.err);
+        let lines: Vec<&str> = err.split('\n').collect();
+        let blank: Vec<bool> = lines.iter().map(|l| l.is_empty()).collect();
+        assert_eq!(blank, [true, false, false, true, false, true], "{err:?}");
+
+        // Piped, or ending on a line end, nothing is added.
+        for (shared, t) in [(false, "so I"), (true, "line\n")] {
+            let (_dir, mut run) = headless(Format::Text, false);
+            run.set_shared_terminal(shared);
+            feed(&mut run, vec![text(t), notice()]);
+            assert!(!run.err.starts_with(b"\n"));
         }
     }
 
