@@ -23,6 +23,7 @@ use crate::sync::find_workspace_root;
 pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     println!("{}", "=== unharness doctor ===".bold().cyan());
     println!();
+    report_install();
 
     let registry = Registry::from_config(config);
     let overrides = binary_overrides(&registry, config);
@@ -332,6 +333,25 @@ const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 type McpTaker = (&'static str, McpSupport, Vec<String>);
 
 /// What is allowed without asking, and where that is written down.
+/// The version and how it updates; `unharness update --check` asks the
+/// network, this does not.
+fn report_install() {
+    print!("unharness {}", env!("CARGO_PKG_VERSION").bold());
+    match crate::update::detect() {
+        Ok(install) => {
+            println!(" ({})", install.exe.display().to_string().dimmed());
+            println!(
+                "  {} {}; update with: {}",
+                "↳".dimmed(),
+                install.method.describe(),
+                install.method.how()
+            );
+        }
+        Err(e) => println!(" {} {e:#}", "[!]".yellow().bold()),
+    }
+    println!();
+}
+
 fn report_allow_rules(ws_root: Option<&Path>) {
     let rules = match Rules::load(ws_root) {
         Ok(rules) => rules,

@@ -8,11 +8,23 @@ use unharness::cli::{Cli, Commands};
 use unharness::config::Config;
 use unharness::core::conversations::ConversationStore;
 use unharness::sync::find_workspace_root;
-use unharness::{doctor, init, models_cmd, runner, skills_cmd, skills_import, switch, sync};
+use unharness::{
+    doctor, init, models_cmd, runner, skills_cmd, skills_import, switch, sync, update,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Before the config is read: a config that does not parse must not stand
+    // between the user and the release that may fix it.
+    if let Some(Commands::Update {
+        version,
+        check,
+        prerelease,
+    }) = cli.command
+    {
+        return update::run(version, check, prerelease).await;
+    }
     let cwd = env::current_dir()?;
     let ws_root = find_workspace_root(&cwd);
     let config = Config::load_effective(ws_root.as_deref())?;
@@ -35,6 +47,7 @@ async fn main() -> Result<()> {
         Some(Commands::Switch { harness, global }) => {
             switch::switch_default_harness(&cwd, &harness, global)?
         }
+        Some(Commands::Update { .. }) => unreachable!("handled above"),
         Some(Commands::Run(run_args)) => runner::run(run_args, &config, &cwd).await?,
         None => runner::run(cli.run_args, &config, &cwd).await?,
     }
