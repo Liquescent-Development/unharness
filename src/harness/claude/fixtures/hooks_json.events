@@ -1,0 +1,44 @@
+HookStarted id=77904b4f-6060-436f-91c2-5ffde3591f89 SessionStart:startup
+HookEnded id=77904b4f-6060-436f-91c2-5ffde3591f89 SessionStart:startup ok ""
+CapabilitiesChanged models=12 provider=anthropic
+SessionStarted id=c8dbc108-cc92-44e4-aa06-1fc4b7b60b16 model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=22884 window=-
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash "{\"command\": \"rm -f nothing.txt"
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash "\", \"description\": \"Remove"
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash " nothing"
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash ".txt if"
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash " it exists"
+ToolCallDelta id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash "\"}"
+ToolCallStarted id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash input={"command":"rm -f nothing.txt","description":"Remove noth...
+HookStarted id=992b2a88-6980-4ac0-b13b-e1b3c4259ba9 PreToolUse:Bash
+HookEnded id=992b2a88-6980-4ac0-b13b-e1b3c4259ba9 PreToolUse:Bash blocked "rm is off limits"
+ToolCallResult id=toolu_01K167S33QkBRizKyd9mdHP5 error=true "PreToolUse:Bash hook error: rm is off limits"
+RateLimit status=allowed five_hour=28% seven_day=4%
+Context used=26398 window=-
+TextDelta "The"
+TextDelta " `"
+TextDelta "rm` command is blocked"
+TextDelta " by"
+TextDelta " your permission"
+TextDelta " settings and"
+TextDelta " can"
+TextDelta "'t run"
+TextDelta " in this session"
+TextDelta "."
+HookStarted id=4f53888e-a3b8-48ba-800f-0546e8bab347 Stop
+HookEnded id=4f53888e-a3b8-48ba-800f-0546e8bab347 Stop blocked "Before stopping, also say the word banana."
+Context used=26578 window=-
+TextDelta "Got"
+TextDelta " it —"
+TextDelta " I'll say"
+TextDelta " \"banana\" before stopping or"
+TextDelta " ending any"
+TextDelta " conversation in"
+TextDelta " this session."
+HookStarted id=3db0ebee-d7a9-410f-afa5-e1ac993dcfa1 Stop
+HookEnded id=3db0ebee-d7a9-410f-afa5-e1ac993dcfa1 Stop ok ""
+Usage in=28 out=508 cache_read=64178 cache_write=11654 cost=0.0323 cumulative=false
+Context used=- window=200000
+Notice "1 permission denial(s): Bash"
+TurnCompleted Done

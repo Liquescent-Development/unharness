@@ -18,8 +18,8 @@ use colored::*;
 use serde_json::{Value, json};
 
 use crate::core::{
-    AgentEvent, CapsUpdate, PermissionDecision, PermissionKind, PermissionRequest, Rule, Rules,
-    SessionCommand, SessionHandle, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionRequest,
+    Rule, Rules, SessionCommand, SessionHandle, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
@@ -301,6 +301,22 @@ impl<O: Write, E: Write> Headless<O, E> {
                 self.owed = self.owed.saturating_sub(1);
             }
             AgentEvent::ToolCallResult { .. } => {}
+            // A hook that did its job quietly is not worth a line.
+            AgentEvent::HookEnded {
+                name,
+                outcome,
+                output,
+                ..
+            } if self.format != Format::StreamJson && *outcome != HookOutcome::Succeeded => {
+                let line = format!(
+                    "{}{}: hook {name} {}: {}",
+                    self.name,
+                    if main { "" } else { " subagent" },
+                    outcome.label(),
+                    output.trim()
+                );
+                self.note(line.trim_end_matches([':', ' ']));
+            }
             _ if !main => {}
             AgentEvent::SessionStarted { session_id, model } => {
                 self.session_id = Some(session_id.clone());
@@ -782,6 +798,21 @@ pub fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::SubagentEnded { id, status, result } => {
             json!({"type": "subagent_ended", "id": id, "status": status, "result": result})
         }
+        AgentEvent::HookStarted { id, name } => {
+            json!({"type": "hook_started", "id": id, "name": name})
+        }
+        AgentEvent::HookEnded {
+            id,
+            name,
+            outcome,
+            output,
+        } => json!({
+            "type": "hook_ended",
+            "id": id,
+            "name": name,
+            "outcome": outcome,
+            "output": output,
+        }),
         AgentEvent::Context(c) => json!({"type": "context", "used": c.used, "window": c.window}),
         AgentEvent::RateLimit(r) => json!({
             "type": "rate_limit",
@@ -1230,6 +1261,45 @@ mod tests {
             feed(&mut run, vec![text(t), notice()]);
             assert!(!run.err.starts_with(b"\n"));
         }
+    }
+
+    #[test]
+    fn a_hook_is_noted_only_when_it_did_not_succeed() {
+        let hook = |id: &str, outcome, output: &str| AgentEvent::HookEnded {
+            id: id.into(),
+            name: "PreToolUse:Bash".into(),
+            outcome,
+            output: output.into(),
+        };
+        let (_dir, mut run) = headless(Format::Text, false);
+        feed(
+            &mut run,
+            vec![
+                hook("1", HookOutcome::Succeeded, "checked"),
+                hook("2", HookOutcome::Blocked, "no rm\n"),
+                hook("3", HookOutcome::Failed, ""),
+                AgentEvent::Sub {
+                    parent: "spawn".into(),
+                    event: Box::new(hook("4", HookOutcome::Blocked, "not here")),
+                },
+                done(),
+            ],
+        );
+        assert_eq!(run.finish(), 0);
+        let err = String::from_utf8_lossy(&run.err);
+        assert!(!err.contains("checked"), "{err:?}");
+        assert!(
+            err.contains("claude subagent: hook PreToolUse:Bash blocked: not here\n"),
+            "{err:?}"
+        );
+        assert!(
+            err.contains("claude: hook PreToolUse:Bash blocked: no rm\n"),
+            "{err:?}"
+        );
+        assert!(
+            err.contains("claude: hook PreToolUse:Bash failed\n"),
+            "{err:?}"
+        );
     }
 
     #[test]

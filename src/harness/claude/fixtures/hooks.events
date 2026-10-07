@@ -1,0 +1,60 @@
+HookStarted id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup
+HookEnded id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup ok ""
+CapabilitiesChanged models=12 provider=anthropic
+HookStarted id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit
+HookEnded id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit ok "prompt-hook-context"
+SessionStarted id=ccd8a477-177b-4874-be0c-b14fa46bca99 model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=22933 window=-
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash "{\"command\": \"echo hello"
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash "\", \"description\": \"Echo"
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash " hello"
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash " to"
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash " stdout"
+ToolCallDelta id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash "\"}"
+ToolCallStarted id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd name=Bash input={"command":"echo hello","description":"Echo hello to stdo...
+HookStarted id=90c42c7f-4c9e-4bbe-98d8-493f1ab6a730 PreToolUse:Bash
+HookEnded id=90c42c7f-4c9e-4bbe-98d8-493f1ab6a730 PreToolUse:Bash ok "pre-bash checked"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash "{\"command\": \"rm"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash " -f nothing."
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash "txt"
+ToolCallResult id=toolu_01P6Qa1sNtPHJ5i7Z8FugjWd error=false "hello"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash "\", \"description\": \"Remove"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash " nothing"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash ".txt if"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash " it exists"
+ToolCallDelta id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash "\"}"
+ToolCallStarted id=toolu_01G4mEPyBfrJUaTKNSbcRgkL name=Bash input={"command":"rm -f nothing.txt","description":"Remove noth...
+HookStarted id=cad89df0-84f4-4e18-832f-38f0d3988578 PreToolUse:Bash
+HookEnded id=cad89df0-84f4-4e18-832f-38f0d3988578 PreToolUse:Bash blocked "rm is not allowed in this workspace"
+ToolCallResult id=toolu_01G4mEPyBfrJUaTKNSbcRgkL error=true "PreToolUse:Bash hook error: [sh /WORKSPACE/hooks/pre.sh]:..."
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "{\"file_path\": \"/W"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "OR"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "KS"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "PA"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "CE"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "/note.txt"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "\", \"content\": \"hi"
+ToolCallDelta id=toolu_015pAsabN9vnsJatcauhW7nR name=Write "\"}"
+ToolCallStarted id=toolu_015pAsabN9vnsJatcauhW7nR name=Write input={"content":"hi","file_path":"/WORKSPACE/note.txt"}
+PermissionRequest id=ebea8532-416b-45aa-ac61-fbcf826ca9bc ToolUse Write [edit /WORKSPACE/note.txt]
+HookStarted id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write
+HookEnded id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write failed "post-write-failed"
+RateLimit status=allowed five_hour=28% seven_day=4%
+ToolCallResult id=toolu_015pAsabN9vnsJatcauhW7nR error=false "File created successfully at: /WORKSPACE/note.txt (file s..."
+Context used=26760 window=-
+TextDelta "The"
+TextDelta " `echo"
+TextDelta " hello` and"
+TextDelta " note"
+TextDelta " creation worked"
+TextDelta ", but `rm"
+TextDelta "`"
+TextDelta " is blocked by workspace"
+TextDelta " restrictions."
+HookStarted id=488a0839-40b3-40a1-8ef2-f863dc033ed3 Stop
+HookEnded id=488a0839-40b3-40a1-8ef2-f863dc033ed3 Stop ok "stop-hook-ran"
+Usage in=18 out=495 cache_read=37837 cache_write=11838 cost=0.0300 cumulative=false
+Context used=- window=200000
+Notice "1 permission denial(s): Bash"
+TurnCompleted Done

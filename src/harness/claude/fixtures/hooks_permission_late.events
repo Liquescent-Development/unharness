@@ -1,0 +1,43 @@
+HookStarted id=992164e0-0334-4445-adc1-7f5141b555da SessionStart:startup
+HookEnded id=992164e0-0334-4445-adc1-7f5141b555da SessionStart:startup ok ""
+CapabilitiesChanged models=12 provider=anthropic
+SessionStarted id=42c0d6fe-31e2-4703-bc96-64d3c7376e8f model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=22893 window=-
+ToolCallDelta id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash "{\"command\": \"echo hi"
+ToolCallDelta id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash "\", \"description\": \"Echo"
+ToolCallDelta id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash " \\\""
+ToolCallDelta id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash "hi\\\" to stdout"
+ToolCallDelta id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash "\"}"
+ToolCallStarted id=toolu_017jq5NUY8UY4oGPN8MY3GM2 name=Bash input={"command":"echo hi","description":"Echo \"hi\" to stdout"}
+HookStarted id=d0280219-a773-48ee-bcf3-89abb4164191 PreToolUse:Bash
+HookEnded id=d0280219-a773-48ee-bcf3-89abb4164191 PreToolUse:Bash ok "echo is harmless"
+ToolCallResult id=toolu_017jq5NUY8UY4oGPN8MY3GM2 error=false "hi"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "{\"file_path\": \"/W"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "O"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "R"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "K"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "S"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "PACE"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "/note.txt"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "\", \"content\": \"hi"
+ToolCallDelta id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write "\"}"
+ToolCallStarted id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 name=Write input={"content":"hi","file_path":"/WORKSPACE/note.txt"}
+PermissionRequest id=e332436c-b244-442e-a98e-3bfb65ade317 ToolUse Write [edit /WORKSPACE/note.txt]
+HookStarted id=68c676e7-0dde-4106-80e7-258a0dcb06df PermissionRequest:Write
+HookEnded id=68c676e7-0dde-4106-80e7-258a0dcb06df PermissionRequest:Write ok "said deny after the request was answered: writes are revi..."
+ToolCallResult id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 error=false "File created successfully at: /WORKSPACE/note.txt (file s..."
+RateLimit status=allowed five_hour=42% seven_day=6%
+Context used=26517 window=-
+TextDelta "Done"
+TextDelta ":"
+TextDelta " bash"
+TextDelta " ech"
+TextDelta "oed \"hi\""
+TextDelta " and note"
+TextDelta ".txt was created"
+TextDelta " with that"
+TextDelta " content."
+Usage in=18 out=289 cache_read=45766 cache_write=3626 cost=0.0133 cumulative=false
+Context used=- window=200000
+TurnCompleted Done

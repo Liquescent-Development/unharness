@@ -72,7 +72,7 @@ pub struct CommonRunArgs {
     #[arg(long)]
     pub no_tui: bool,
 
-    /// Skip pre-flight sync of rules symlinks
+    /// Skip pre-flight sync of rules symlinks and of commands and subagents under .agents/
     #[arg(long)]
     pub no_sync: bool,
 }
@@ -82,7 +82,7 @@ pub enum Commands {
     /// Initialize unharness in current repository (AGENTS.md, .agents/skills, symlinks)
     Init,
 
-    /// Synchronize rules symlinks (CLAUDE.md, GEMINI.md -> AGENTS.md)
+    /// Synchronize rules symlinks (CLAUDE.md, GEMINI.md -> AGENTS.md) and project .agents/commands and .agents/agents into each harness
     Sync,
 
     /// Health check: detect installed harnesses, auth status, skills CLI, symlinks

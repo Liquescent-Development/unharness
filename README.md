@@ -180,7 +180,7 @@ All keys and slash commands are listed in [The TUI](docs/tui.md).
 - [Permissions](docs/permissions.md): policies and allow rules
 - [Sandbox](docs/sandbox.md): what is confined and how
 - [Configuration](docs/configuration.md): `config.toml` reference
-- [MCP servers](docs/mcp.md) · [ACP agents](docs/acp.md) · [Rules and skills](docs/skills.md)
+- [MCP servers](docs/mcp.md) · [ACP agents](docs/acp.md) · [Rules, skills, commands and subagents](docs/skills.md)
 
 ## Contributing
 

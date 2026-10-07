@@ -22,7 +22,7 @@ use crate::core::{
 };
 use crate::harness::{Harness, PrintConfig};
 use crate::headless::{self, Headless, RunInfo};
-use crate::sync::{find_workspace_root, sync_workspace_rules};
+use crate::sync::{find_workspace_root, sync_projections, sync_workspace_rules};
 use crate::tui::{self, TuiLaunch};
 
 /// Binary overrides from config for every registered harness.
@@ -160,9 +160,10 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
     if !args.no_sync
         && config.auto_sync
         && let Some(root) = &ws_root
-        && let Ok(report) = sync_workspace_rules(root)
     {
-        for w in &report.warnings {
+        let rules = sync_workspace_rules(root).map(|r| r.warnings);
+        let shared = sync_projections(root).map(|r| r.warnings);
+        for w in [rules, shared].into_iter().flatten().flatten() {
             eprintln!("{} {}", "[unharness]".yellow().bold(), w);
         }
     }

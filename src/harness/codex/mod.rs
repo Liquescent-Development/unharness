@@ -408,7 +408,8 @@ impl Harness for CodexHarness {
             .collect())
     }
 
-    /// `packages` holds the standalone install's binary.
+    /// `packages` holds the standalone install's binary; `agents` the roles
+    /// every project gets.
     fn guarded(&self, workspace: &Path) -> Vec<Guarded> {
         let home = codex_home();
         let workspace = workspace.to_path_buf();
@@ -420,7 +421,7 @@ impl Harness for CodexHarness {
             Guarded::File(home.join("hooks.json")),
             Guarded::File(home.join("AGENTS.md")),
         ];
-        for tree in ["prompts", "skills", "packages"] {
+        for tree in ["prompts", "skills", "agents", "packages"] {
             guarded.push(Guarded::Tree(home.join(tree)));
         }
         guarded
@@ -686,6 +687,21 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// A user-level role is loaded in every project: a change is reported.
+    #[test]
+    fn user_level_roles_are_guarded() {
+        let h = CodexHarness::default();
+        let trees: Vec<_> = h
+            .guarded(Path::new("/w"))
+            .into_iter()
+            .filter_map(|g| match g {
+                Guarded::Tree(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        assert!(trees.contains(&codex_home().join("agents")), "{trees:?}");
     }
 
     #[test]

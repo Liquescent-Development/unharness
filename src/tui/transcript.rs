@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::code::sanitize;
-use crate::core::SubagentStatus;
 use crate::core::conversations::{AgentRecord, BlockRecord, ShellStatus};
+use crate::core::{HookOutcome, SubagentStatus};
 
 /// A subagent's work, kept on the tool call that spawned it. The call
 /// itself may be long done (a background launch returns at once). What the
@@ -108,6 +108,15 @@ pub enum Block {
     System(String),
     Notice(String),
     Error(String),
+    /// A hook the harness ran on its own events.
+    Hook {
+        id: String,
+        name: String,
+        state: HookState,
+        output: String,
+        /// The transcript's turn when it was added ([`Transcript::begin_turn`]).
+        turn: u64,
+    },
     /// A command the user ran from the prompt with `!`.
     Shell {
         command: String,
@@ -123,10 +132,22 @@ pub enum Block {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HookState {
+    Running,
+    Ended(HookOutcome),
+    /// Its end was never reported: the process exited, the turn was cut
+    /// short, or it was still running when the conversation was saved.
+    Unknown,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     pub blocks: Vec<Block>,
     thought_start: Option<Instant>,
+    /// Counts the turns begun, so a turn's hooks are known by their tag
+    /// and not by a position that `/clear` or a rewind can move.
+    turn: u64,
 }
 
 /// Default cap on bridged transcript text.
@@ -203,6 +224,19 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
             Block::System(t) => BlockRecord::System { text: t.clone() },
             Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
             Block::Error(t) => BlockRecord::Error { text: t.clone() },
+            Block::Hook {
+                name,
+                state,
+                output,
+                ..
+            } => BlockRecord::Hook {
+                name: name.clone(),
+                outcome: match state {
+                    HookState::Ended(o) => Some(*o),
+                    HookState::Running | HookState::Unknown => None,
+                },
+                output: output.clone(),
+            },
             Block::Shell {
                 command,
                 output,
@@ -240,6 +274,87 @@ impl Transcript {
 
     pub fn push_error(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::Error(sanitize(&text.into())));
+    }
+
+    pub fn hook_started(&mut self, id: &str, name: &str) {
+        self.close_thought();
+        self.blocks.push(Block::Hook {
+            id: id.to_string(),
+            name: sanitize(name),
+            state: HookState::Running,
+            output: String::new(),
+            turn: self.turn,
+        });
+    }
+
+    /// Ends the hook `id` where it started, or adds it when its start went
+    /// unseen. Ids are not unique (a Codex `Stop` hook has the same one in
+    /// every turn): the latest one running is meant, or else the latest
+    /// one given up on (an end that came after its turn was cut short).
+    pub fn hook_ended(&mut self, id: &str, name: &str, outcome: HookOutcome, output: &str) {
+        let output = sanitize(output.trim());
+        let latest = |want: HookState| {
+            self.blocks.iter().rposition(
+                |b| matches!(b, Block::Hook { id: hid, state, .. } if hid == id && *state == want),
+            )
+        };
+        let found = latest(HookState::Running).or_else(|| {
+            (!id.is_empty())
+                .then(|| latest(HookState::Unknown))
+                .flatten()
+        });
+        if let Some(Block::Hook {
+            state, output: out, ..
+        }) = found.map(|i| &mut self.blocks[i])
+        {
+            *state = HookState::Ended(outcome);
+            *out = output;
+            return;
+        }
+        self.close_thought();
+        self.blocks.push(Block::Hook {
+            id: id.to_string(),
+            name: sanitize(name),
+            state: HookState::Ended(outcome),
+            output,
+            turn: self.turn,
+        });
+    }
+
+    /// A turn begins: the hooks added from now on are its own.
+    pub fn begin_turn(&mut self) {
+        self.turn += 1;
+    }
+
+    /// The hooks of the latest turn that are still running belong to a
+    /// turn cut short and will not be reported on. Not earlier turns' (an
+    /// async hook may outlive the turn that finished) nor subagents' (a
+    /// Codex sub-agent outlives an interrupt of the main turn).
+    pub fn end_turn_hooks(&mut self) {
+        for b in &mut self.blocks {
+            if let Block::Hook { state, turn, .. } = b
+                && *turn == self.turn
+                && *state == HookState::Running
+            {
+                *state = HookState::Unknown;
+            }
+        }
+    }
+
+    /// The hooks still running will not be reported on (the process
+    /// exited), here and in subagents' transcripts.
+    pub fn end_running_hooks(&mut self) {
+        for b in &mut self.blocks {
+            match b {
+                Block::Hook { state, .. } if *state == HookState::Running => {
+                    *state = HookState::Unknown
+                }
+                Block::Tool {
+                    agent: Some(run), ..
+                } => run.log.end_running_hooks(),
+                _ => {}
+            }
+        }
     }
 
     /// A `!` command starts.
@@ -312,6 +427,7 @@ impl Transcript {
         for r in records {
             let mut parent = None;
             let block = match r {
+                BlockRecord::Unknown => continue,
                 BlockRecord::User { text } => Block::User { text: text.clone() },
                 BlockRecord::Assistant { text, sender, secs } => Block::Assistant {
                     text: text.clone(),
@@ -365,6 +481,18 @@ impl Transcript {
                 BlockRecord::System { text } => Block::System(text.clone()),
                 BlockRecord::Notice { text } => Block::Notice(text.clone()),
                 BlockRecord::Error { text } => Block::Error(text.clone()),
+                BlockRecord::Hook {
+                    name,
+                    outcome,
+                    output,
+                } => Block::Hook {
+                    id: String::new(),
+                    name: name.clone(),
+                    // One still running is reported by no one now.
+                    state: outcome.map_or(HookState::Unknown, HookState::Ended),
+                    output: output.clone(),
+                    turn: 0,
+                },
                 BlockRecord::Shell {
                     command,
                     output,
@@ -1179,5 +1307,117 @@ mod tests {
             tool_summary_full("TaskUpdate", &json!({"taskId": "1", "status": "completed"})),
             "#1 completed"
         );
+    }
+
+    #[test]
+    fn a_hook_ends_where_it_started_and_survives_a_reload() {
+        let states = |t: &Transcript| -> Vec<(String, HookState, String)> {
+            t.blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Hook {
+                        name,
+                        state,
+                        output,
+                        ..
+                    } => Some((name.clone(), *state, output.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ended = |o| HookState::Ended(o);
+        let mut t = Transcript::default();
+        t.hook_started("h1", "PreToolUse:Bash");
+        t.push_notice("between");
+        t.hook_ended("h1", "PreToolUse:Bash", HookOutcome::Blocked, "no rm\n");
+        // Its start went unseen.
+        t.hook_ended("h2", "Stop", HookOutcome::Succeeded, "");
+        // The same id again (Codex's `Stop`): the running one ends.
+        t.hook_started("h2", "Stop");
+        t.hook_ended("h2", "Stop", HookOutcome::Failed, "bad JSON");
+        t.hook_started("h3", "SessionEnd");
+        assert_eq!(
+            states(&t),
+            [
+                (
+                    "PreToolUse:Bash".into(),
+                    ended(HookOutcome::Blocked),
+                    "no rm".into()
+                ),
+                ("Stop".into(), ended(HookOutcome::Succeeded), "".into()),
+                ("Stop".into(), ended(HookOutcome::Failed), "bad JSON".into()),
+                ("SessionEnd".into(), HookState::Running, "".into()),
+            ]
+        );
+        // Saved while it ran, it comes back as unknown, not as failed.
+        let back = Transcript::from_records(&t.to_records());
+        assert_eq!(states(&back)[3].1, HookState::Unknown);
+        assert_eq!(states(&back)[..3], states(&t)[..3]);
+    }
+
+    #[test]
+    fn hooks_left_running_end_as_unknown() {
+        let mut t = Transcript::default();
+        t.hook_started("h1", "SessionEnd");
+        t.hook_ended("h0", "Stop", HookOutcome::Succeeded, "");
+        t.end_running_hooks();
+        assert!(matches!(
+            t.blocks[0],
+            Block::Hook {
+                state: HookState::Unknown,
+                ..
+            }
+        ));
+        assert!(matches!(
+            t.blocks[1],
+            Block::Hook {
+                state: HookState::Ended(HookOutcome::Succeeded),
+                ..
+            }
+        ));
+        // An end that comes after all ends it, and adds nothing.
+        t.hook_ended("h1", "SessionEnd", HookOutcome::Failed, "late");
+        assert_eq!(t.blocks.len(), 2);
+        assert!(matches!(
+            &t.blocks[0],
+            Block::Hook {
+                state: HookState::Ended(HookOutcome::Failed),
+                output,
+                ..
+            } if output == "late"
+        ));
+        // One without an id is not taken for another.
+        t.hook_started("", "Stop");
+        t.end_running_hooks();
+        t.hook_ended("", "Stop", HookOutcome::Succeeded, "");
+        assert_eq!(t.blocks.len(), 4);
+    }
+
+    #[test]
+    fn a_turn_cut_short_gives_up_only_on_its_own_hooks() {
+        let mut t = Transcript::default();
+        t.hook_started("async", "PostToolUse");
+        t.tool_started("spawn", "Agent", serde_json::json!({}));
+        t.agent_started("spawn", "look", None);
+        t.agent_log("spawn")
+            .unwrap()
+            .hook_started("s", "preToolUse");
+        let from = t.blocks.len();
+        t.begin_turn();
+        t.hook_started("mine", "PreToolUse:Bash");
+        t.end_turn_hooks();
+        let state = |b: &Block| match b {
+            Block::Hook { state, .. } => Some(*state),
+            _ => None,
+        };
+        assert_eq!(state(&t.blocks[0]), Some(HookState::Running));
+        assert_eq!(state(&t.blocks[from]), Some(HookState::Unknown));
+        let Block::Tool {
+            agent: Some(run), ..
+        } = &t.blocks[1]
+        else {
+            panic!("{:?}", t.blocks[1]);
+        };
+        assert_eq!(state(&run.log.blocks[0]), Some(HookState::Running));
     }
 }

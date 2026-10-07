@@ -47,6 +47,8 @@ def main() -> int:
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--file", help="attach this PDF or text file to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--answer-delay", type=float, default=0.0,
+                    help="answer permission requests this many seconds late, as a person would")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
@@ -181,8 +183,18 @@ def main() -> int:
                     resp = {"behavior": "deny", "message": "recording: denied by user"}
                 else:
                     resp = {"behavior": "allow", "updatedInput": inp}
-                send({"type": "control_response",
-                      "response": {"subtype": "success", "request_id": rid, "response": resp}})
+                answer = {"type": "control_response",
+                          "response": {"subtype": "success", "request_id": rid, "response": resp}}
+                if args.answer_delay:
+                    def late(answer=answer):
+                        # Claude may have cancelled the request and ended already.
+                        try:
+                            send(answer)
+                        except (ValueError, BrokenPipeError):
+                            pass
+                    threading.Timer(args.answer_delay, late).start()
+                else:
+                    send(answer)
             else:
                 sys.stderr.write(f"[control_request] {json.dumps(req)[:200]}\n")
         elif t == "control_response" and rewind_id and obj.get("response", {}).get("request_id") == rewind_id:

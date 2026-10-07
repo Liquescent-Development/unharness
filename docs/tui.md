@@ -292,6 +292,16 @@ unchanged. Harnesses that can branch a session do so, and the copy knows
 exactly what the original knew. The others start fresh with the
 transcript as context.
 
+## Hooks
+
+A hook the harness runs (Claude Code, and Codex over `app-server`) is a
+line in the transcript, `⚙ hook PreToolUse:Bash`, with the first line of
+what it said: grey when it succeeded, yellow when it failed, red when it
+blocked what it ran before (a tool call, a prompt, the end of the turn),
+with the reason it gave. One whose end never came (the harness exited, the
+turn it ran in was interrupted) says so instead, until the end arrives
+after all.
+
 ## Subagents
 
 Subagents are shown for as long as they run, which can outlast the turn

@@ -1148,6 +1148,7 @@ impl App {
 
     fn start_generation(&mut self) {
         self.is_generating = true;
+        self.transcript.begin_turn();
         self.generation_start = Some(Instant::now());
         self.generation_duration = None;
         self.turn_usage = Usage::default();
@@ -2183,6 +2184,13 @@ impl App {
                         AgentEvent::ThinkingDelta(t) => log.append_thought(&t),
                         AgentEvent::Notice(n) => log.push_notice(n),
                         AgentEvent::Error(e) => log.push_error(e),
+                        AgentEvent::HookStarted { id, name } => log.hook_started(&id, &name),
+                        AgentEvent::HookEnded {
+                            id,
+                            name,
+                            outcome,
+                            output,
+                        } => log.hook_ended(&id, &name, outcome, &output),
                         _ => {}
                     }
                 }
@@ -2302,6 +2310,10 @@ impl App {
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 let done = stop_reason == StopReason::Done;
+                // A hook of a turn cut short is not reported on.
+                if !done {
+                    self.transcript.end_turn_hooks();
+                }
                 match stop_reason {
                     StopReason::Done => {}
                     StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
@@ -2324,11 +2336,19 @@ impl App {
                     ));
                 }
             }
+            AgentEvent::HookStarted { id, name } => self.transcript.hook_started(&id, &name),
+            AgentEvent::HookEnded {
+                id,
+                name,
+                outcome,
+                output,
+            } => self.transcript.hook_ended(&id, &name, outcome, &output),
             AgentEvent::Notice(n) => self.transcript.push_notice(n),
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
                 self.drop_subagents();
+                self.transcript.end_running_hooks();
                 if self.is_generating {
                     self.finish_generation();
                     self.transcript.push_error(format!(
@@ -5016,6 +5036,7 @@ pub(crate) mod tests {
                 Block::Notice(_) => "notice".to_string(),
                 Block::Error(_) => "error".to_string(),
                 Block::Shell { command, .. } => format!("shell:{command}"),
+                Block::Hook { name, .. } => format!("hook:{name}"),
             })
             .collect()
     }
@@ -5025,6 +5046,138 @@ pub(crate) mod tests {
             parent: parent.into(),
             event: Box::new(event),
         }
+    }
+
+    /// A hook whose end will not come is not left running, nor called failed.
+    #[test]
+    fn hooks_still_running_end_as_unknown() {
+        use super::super::transcript::{Block, HookState};
+        let state = |app: &App, n: usize| {
+            app.transcript
+                .blocks
+                .iter()
+                .filter_map(|b| match b {
+                    Block::Hook { state, .. } => Some(*state),
+                    _ => None,
+                })
+                .nth(n)
+        };
+        let started = |id: &str| AgentEvent::HookStarted {
+            id: id.into(),
+            name: "Stop".into(),
+        };
+        let sub_state = |app: &App| match spawn_block(app, "spawn").log.blocks.first() {
+            Some(Block::Hook { state, .. }) => Some(*state),
+            _ => None,
+        };
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("go".into());
+        app.on_event(started("a"));
+        spawn(&mut app, "spawn", "look around", None);
+        app.on_event(sub("spawn", started("s")));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        // An async hook may outlive a turn that finished.
+        assert_eq!(state(&app, 0), Some(HookState::Running));
+        app.submit_prompt("again".into());
+        app.on_event(started("b"));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert_eq!(state(&app, 1), Some(HookState::Unknown));
+        // Not an earlier turn's, nor a sub-agent's, which outlives it.
+        assert_eq!(state(&app, 0), Some(HookState::Running));
+        assert_eq!(sub_state(&app), Some(HookState::Running));
+        // Its end came after all: it is ended where it is.
+        app.on_event(AgentEvent::HookEnded {
+            id: "b".into(),
+            name: "Stop".into(),
+            outcome: crate::core::HookOutcome::Succeeded,
+            output: String::new(),
+        });
+        assert_eq!(
+            state(&app, 1),
+            Some(HookState::Ended(crate::core::HookOutcome::Succeeded))
+        );
+        assert_eq!(state(&app, 2), None);
+        app.on_event(started("c"));
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        assert_eq!(state(&app, 0), Some(HookState::Unknown));
+        assert_eq!(state(&app, 2), Some(HookState::Unknown));
+        assert_eq!(sub_state(&app), Some(HookState::Unknown));
+    }
+
+    /// `/clear` during a turn moves every block: the turn's hooks after it
+    /// are still the turn's.
+    #[test]
+    fn a_hook_after_a_clear_is_still_its_turns() {
+        use super::super::transcript::{Block, HookState};
+        let mut app = test_app(HarnessId::CLAUDE);
+        for prompt in ["one", "two"] {
+            app.submit_prompt(prompt.into());
+            app.on_event(AgentEvent::TextDelta(format!("re {prompt}")));
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+        }
+        app.submit_prompt("three".into());
+        app.handle_slash_command("/clear");
+        app.on_event(AgentEvent::HookStarted {
+            id: "h".into(),
+            name: "PreToolUse:Bash".into(),
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        let states: Vec<_> = app
+            .transcript
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Hook { state, .. } => Some(*state),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(states, [HookState::Unknown]);
+    }
+
+    /// A sub-agent's hooks (a Codex child thread's `hook/*`) belong to its
+    /// own transcript.
+    #[test]
+    fn a_subagents_hook_goes_to_its_transcript() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("delegate".into());
+        spawn(&mut app, "spawn", "look around", None);
+        let main = kinds(&app.transcript.blocks);
+        app.on_event(sub(
+            "spawn",
+            AgentEvent::HookStarted {
+                id: "h".into(),
+                name: "preToolUse".into(),
+            },
+        ));
+        app.on_event(sub(
+            "spawn",
+            AgentEvent::HookEnded {
+                id: "h".into(),
+                name: "preToolUse".into(),
+                outcome: crate::core::HookOutcome::Blocked,
+                output: "no rm".into(),
+            },
+        ));
+        assert_eq!(kinds(&app.transcript.blocks), main);
+        let run = spawn_block(&app, "spawn");
+        assert_eq!(kinds(&run.log.blocks), ["hook:preToolUse"]);
+        assert!(matches!(
+            &run.log.blocks[0],
+            super::super::transcript::Block::Hook {
+                state: super::super::transcript::HookState::Ended(
+                    crate::core::HookOutcome::Blocked
+                ),
+                ..
+            }
+        ));
     }
 
     fn spawn(app: &mut App, id: &str, description: &str, kind: Option<&str>) {

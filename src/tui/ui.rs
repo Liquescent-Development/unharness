@@ -21,14 +21,15 @@ use super::markdown::render_markdown_to_lines;
 use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
 use super::prompt;
 use super::transcript::{
-    Block as TBlock, input_beyond_summary, tool_summary, tool_summary_full, truncate_chars,
-    waits_on_user,
+    Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
+    truncate_chars, waits_on_user,
 };
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
 use crate::core::{
-    HarnessId, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus, resolve_policy,
+    HarnessId, HookOutcome, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus,
+    resolve_policy,
 };
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -515,6 +516,33 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             ));
             lines.push(Line::default());
         }
+        TBlock::Hook {
+            name,
+            state,
+            output,
+            ..
+        } => {
+            let (state, color) = match state {
+                HookState::Running => (" …", Color::Yellow),
+                HookState::Unknown => (" (its end was not reported)", Color::DarkGray),
+                HookState::Ended(HookOutcome::Succeeded) => ("", Color::DarkGray),
+                HookState::Ended(HookOutcome::Failed) => (" failed", Color::Yellow),
+                HookState::Ended(HookOutcome::Blocked) => (" blocked", Color::Red),
+            };
+            // What a hook said can be long (its whole stderr): its first line.
+            let said = output.lines().next().unwrap_or("");
+            let text = if said.is_empty() {
+                format!("hook {name}{state}")
+            } else {
+                format!("hook {name}{state}: {said}")
+            };
+            lines.extend(wrap_prefixed_text(
+                "  ⚙ ",
+                &text,
+                width,
+                Style::default().fg(color),
+            ));
+        }
         TBlock::Shell {
             command,
             output,
@@ -648,6 +676,12 @@ fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
             value(input, &mut h);
         }
         TBlock::System(t) | TBlock::Notice(t) | TBlock::Error(t) => t.hash(&mut h),
+        TBlock::Hook {
+            name,
+            state,
+            output,
+            ..
+        } => (name, state, output).hash(&mut h),
         TBlock::Shell {
             command,
             output,

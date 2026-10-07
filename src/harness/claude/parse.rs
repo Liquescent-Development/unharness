@@ -3,14 +3,14 @@
 //! Pure: one stdout line in, zero or more `AgentEvent`s out. Fixture-tested
 //! against recordings in `fixtures/` made with `scripts/record-claude.py`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessId, ModelInfo, ModelRef, PermissionKind,
-    PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo,
-    RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessId, HookOutcome, ModelInfo, ModelRef,
+    PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question, QuestionOption,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// unharness's id for the API Claude calls, from Claude's own name for it
@@ -155,6 +155,73 @@ pub struct ClaudeParser {
     /// Subagent tasks that ended without their report, which the
     /// `task_notification` normally brings right after.
     unreported_agents: HashSet<String>,
+    /// `can_use_tool` requests with a tool call id, in the order they came,
+    /// with the `PermissionRequest` hook that runs beside each, until both
+    /// are done or [`KEPT_REQUESTS`] newer ones came.
+    requests: VecDeque<Request>,
+}
+
+/// The most permission requests kept for their hooks. One is dropped
+/// once it is decided and its hook has answered; one that never is (a
+/// request no hook runs for, a subagent stopped while it asked) goes
+/// when this many newer ones came. Not at a turn's end: a background
+/// subagent's request can be open across the main turn's `result`.
+const KEPT_REQUESTS: usize = 64;
+
+#[derive(Debug)]
+struct Request {
+    request_id: String,
+    tool: String,
+    tool_use_id: String,
+    /// The id of the `PermissionRequest` hook that started for it.
+    hook: Option<String>,
+    /// How it was decided: `Some(true)` once Claude cancelled it (the
+    /// hook won), `Some(false)` once its call has a result (the host
+    /// answered first).
+    decided: Option<bool>,
+    /// Its hook's answer came.
+    answered: bool,
+    /// Its hook's deny, held until it is decided.
+    deny: Option<HeldDeny>,
+}
+
+impl Request {
+    fn done(&self) -> bool {
+        self.decided.is_some() && self.answered
+    }
+}
+
+#[derive(Debug)]
+struct HeldDeny {
+    hook_id: String,
+    name: String,
+    reason: String,
+}
+
+/// What a `PermissionRequest` hook's deny came to once it is known:
+/// `won` when its request was cancelled, not when its call ran, and
+/// `None` when its request is not known.
+fn deny_ended(deny: HeldDeny, won: Option<bool>) -> AgentEvent {
+    let (outcome, output) = if won == Some(true) {
+        (HookOutcome::Blocked, deny.reason)
+    } else {
+        let said = match won {
+            Some(_) => "said deny after the request was answered",
+            None => "said deny to a request whose answer is not known",
+        };
+        let output = if deny.reason.is_empty() {
+            said.to_string()
+        } else {
+            format!("{said}: {}", deny.reason)
+        };
+        (HookOutcome::Succeeded, output)
+    };
+    AgentEvent::HookEnded {
+        id: deny.hook_id,
+        name: deny.name,
+        outcome,
+        output,
+    }
 }
 
 impl ClaudeParser {
@@ -191,11 +258,13 @@ impl ClaudeParser {
     }
 
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        self.settle_requests(val, &mut out);
         // Messages produced inside a subagent name the tool call that spawned it.
         if let Some(parent) = val.get("parent_tool_use_id").and_then(Value::as_str) {
-            return self.feed_sub(parent, val);
+            out.extend(self.feed_sub(parent, val));
+            return out;
         }
-        let mut out = Vec::new();
         match str_at(val, "type") {
             "system" => self.on_system(val, &mut out),
             "stream_event" => self.on_stream_event(val, &mut out),
@@ -260,6 +329,104 @@ impl ClaudeParser {
             _ => {}
         }
         out
+    }
+
+    /// Decides the permission requests `val` settles: a cancel names its
+    /// request, a tool result (in a subagent's message too) its call. A
+    /// deny held for one is then known to have won or come too late.
+    fn settle_requests(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let mut decide = |this: &mut Self, won: bool, matches: &dyn Fn(&Request) -> bool| {
+            for r in this.requests.iter_mut().filter(|r| matches(r)) {
+                if r.decided.is_none() {
+                    r.decided = Some(won);
+                    out.extend(r.deny.take().map(|d| deny_ended(d, Some(won))));
+                }
+            }
+            this.requests.retain(|r| !r.done());
+        };
+        match str_at(val, "type") {
+            "control_cancel_request" => {
+                let id = str_at(val, "request_id");
+                decide(self, true, &|r| r.request_id == id);
+            }
+            "user" => {
+                for block in val
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|b| str_at(b, "type") == "tool_result")
+                {
+                    let id = str_at(block, "tool_use_id");
+                    if !id.is_empty() {
+                        decide(self, false, &|r| r.tool_use_id == id);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Keeps a `can_use_tool` request for the hook that runs beside it.
+    fn open_request(&mut self, request: Request, out: &mut Vec<AgentEvent>) {
+        self.requests.push_back(request);
+        while self.requests.len() > KEPT_REQUESTS {
+            if let Some(deny) = self.requests.pop_front().and_then(|r| r.deny) {
+                out.push(deny_ended(deny, None));
+            }
+        }
+    }
+
+    /// Ties a starting `PermissionRequest` hook to its request. The hook
+    /// names only the tool (`PermissionRequest:Write`), but Claude starts
+    /// it right after sending the request (`fixtures/hooks_permission_*`),
+    /// so it is the newest request for that tool without a hook. Decided
+    /// requests are among those looked at, so a hook that starts after
+    /// its request was answered is not given another one.
+    fn hook_started(&mut self, hook_id: &str, name: &str) {
+        let Some(tool) = name.strip_prefix("PermissionRequest:") else {
+            return;
+        };
+        if let Some(r) = self
+            .requests
+            .iter_mut()
+            .rev()
+            .find(|r| r.tool == tool && r.hook.is_none())
+        {
+            r.hook = Some(hook_id.to_string());
+        }
+    }
+
+    /// The request the hook `hook_id` started for, now answered.
+    fn hook_answered(&mut self, hook_id: &str) -> Option<&mut Request> {
+        let r = self
+            .requests
+            .iter_mut()
+            .find(|r| r.hook.as_deref() == Some(hook_id))?;
+        r.answered = true;
+        Some(r)
+    }
+
+    /// A `PermissionRequest` hook's deny, settled by its own request: one
+    /// already decided says whether it won, an open one holds it until it
+    /// is. A deny whose request is not known (its start went unseen) says
+    /// so.
+    fn hold_deny(&mut self, hook_id: String, name: String, reason: String) -> Option<AgentEvent> {
+        let deny = HeldDeny {
+            hook_id,
+            name,
+            reason,
+        };
+        let Some(r) = self.hook_answered(&deny.hook_id) else {
+            return Some(deny_ended(deny, None));
+        };
+        if r.decided.is_none() {
+            r.deny = Some(deny);
+            return None;
+        }
+        let won = r.decided;
+        self.requests.retain(|r| !r.done());
+        Some(deny_ended(deny, won))
     }
 
     /// A subagent's message: same shapes as the main agent's, attributed to
@@ -404,7 +571,34 @@ impl ClaudeParser {
                     });
                 }
             }
-            // status, thinking_tokens, hook_*, plugin_install: not shown.
+            // Sent for every hook under `--include-hook-events`, and for
+            // `SessionStart` without it.
+            "hook_started" => {
+                let id = str_at(val, "hook_id").to_string();
+                let name = str_at(val, "hook_name").to_string();
+                self.hook_started(&id, &name);
+                out.push(AgentEvent::HookStarted { id, name });
+            }
+            "hook_response" => {
+                let id = str_at(val, "hook_id").to_string();
+                let name = str_at(val, "hook_name").to_string();
+                match hook_outcome(val) {
+                    HookVerdict::Ended(outcome, output) => {
+                        if self.hook_answered(&id).is_some() {
+                            self.requests.retain(|r| !r.done());
+                        }
+                        out.push(AgentEvent::HookEnded {
+                            id,
+                            name,
+                            outcome,
+                            output,
+                        });
+                    }
+                    // The request's cancel or its call's result tells.
+                    HookVerdict::Denied(reason) => out.extend(self.hold_deny(id, name, reason)),
+                }
+            }
+            // status, thinking_tokens, hook_progress, plugin_install: not shown.
             _ => {}
         }
     }
@@ -683,6 +877,20 @@ impl ClaudeParser {
                 let tool = str_at(req, "tool_name").to_string();
                 let input = req.get("input").cloned().unwrap_or(Value::Null);
                 let tool_call_id = opt_str(req, "tool_use_id");
+                if let Some(call) = tool_call_id.as_ref().filter(|c| !c.is_empty())
+                    && !request_id.is_empty()
+                {
+                    let request = Request {
+                        request_id: request_id.clone(),
+                        tool: tool.clone(),
+                        tool_use_id: call.clone(),
+                        hook: None,
+                        decided: None,
+                        answered: false,
+                        deny: None,
+                    };
+                    self.open_request(request, out);
+                }
                 let kind = if tool == "AskUserQuestion" {
                     PermissionKind::Question {
                         questions: parse_questions(&input),
@@ -772,6 +980,85 @@ pub fn flatten_content(content: Option<&Value>) -> String {
     }
 }
 
+/// What a `hook_response` comes to.
+#[derive(Debug, PartialEq)]
+enum HookVerdict {
+    Ended(HookOutcome, String),
+    /// A `PermissionRequest` hook said deny. It races the host's answer to
+    /// the same request (`--permission-prompt-tool stdio`): it blocked only
+    /// if Claude then cancels that request (`fixtures/hooks_permission_*`).
+    Denied(String),
+}
+
+/// How a `hook_response` ended, and what to show of it. Claude's `outcome`
+/// is `error` for any exit status but 0, and `success` for a hook that
+/// blocked by printing a decision (`fixtures/hooks_json.jsonl`), so both are
+/// read here. Exit status 2 and a decision block only the events that can
+/// be blocked; on the others Claude passes the hook's words on and goes on.
+fn hook_outcome(val: &Value) -> HookVerdict {
+    let stdout = str_at(val, "stdout").trim();
+    let stderr = str_at(val, "stderr").trim();
+    let event = str_at(val, "hook_event");
+    let blockable = matches!(
+        event,
+        "PreToolUse" | "PermissionRequest" | "UserPromptSubmit" | "Stop" | "SubagentStop"
+    );
+    let printed = serde_json::from_str::<Value>(stdout)
+        .ok()
+        .filter(Value::is_object);
+    let text = |v: &Value, key: &str| opt_str(v, key).unwrap_or_default();
+    let exit_code = val.get("exit_code").and_then(Value::as_i64);
+    if let Some(d) = &printed {
+        let specific = d.get("hookSpecificOutput").unwrap_or(&Value::Null);
+        if d.get("continue").and_then(Value::as_bool) == Some(false) {
+            return HookVerdict::Ended(HookOutcome::Blocked, text(d, "stopReason"));
+        }
+        if event == "PermissionRequest"
+            && specific
+                .pointer("/decision/behavior")
+                .and_then(Value::as_str)
+                == Some("deny")
+        {
+            return HookVerdict::Denied(text(&specific["decision"], "message"));
+        }
+        if blockable && str_at(d, "decision") == "block" {
+            return HookVerdict::Ended(HookOutcome::Blocked, text(d, "reason"));
+        }
+        if blockable && str_at(specific, "permissionDecision") == "deny" {
+            return HookVerdict::Ended(
+                HookOutcome::Blocked,
+                text(specific, "permissionDecisionReason"),
+            );
+        }
+    }
+    if exit_code == Some(2) && event == "PermissionRequest" {
+        return HookVerdict::Denied(stderr.to_string());
+    }
+    if exit_code == Some(2) && blockable {
+        return HookVerdict::Ended(HookOutcome::Blocked, stderr.to_string());
+    }
+    if str_at(val, "outcome") == "success" {
+        // A decision printed as JSON is shown by what it says, not as JSON.
+        let said = match &printed {
+            Some(d) => [
+                d.get("systemMessage"),
+                d.pointer("/hookSpecificOutput/permissionDecisionReason"),
+                d.pointer("/hookSpecificOutput/additionalContext"),
+                d.get("reason"),
+            ]
+            .into_iter()
+            .flatten()
+            .find_map(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+            None => stdout.to_string(),
+        };
+        return HookVerdict::Ended(HookOutcome::Succeeded, said);
+    }
+    let output = if stderr.is_empty() { stdout } else { stderr };
+    HookVerdict::Ended(HookOutcome::Failed, output.to_string())
+}
+
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -827,7 +1114,7 @@ fn rate_limit_windows(info: &Value) -> Vec<RateLimitWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
+    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir, replay};
 
     impl LineParser for ClaudeParser {
         fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -862,6 +1149,370 @@ mod tests {
     #[test]
     fn fixture_ask_previews() {
         fixture("ask_previews");
+    }
+
+    #[test]
+    fn fixture_hooks() {
+        fixture("hooks");
+    }
+
+    #[test]
+    fn fixture_hooks_json() {
+        fixture("hooks_json");
+    }
+
+    /// A `PermissionRequest` hook that denies before the host answers
+    /// blocks (Claude cancels the request); after, it changes nothing.
+    #[test]
+    fn fixture_hooks_permission() {
+        fixture("hooks_permission_denied");
+        fixture("hooks_permission_late");
+        let ended = |case: &str| {
+            let text = std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl")))
+                .unwrap();
+            replay(&mut ClaudeParser::new(), &text)
+                .into_iter()
+                .find_map(|e| match e {
+                    AgentEvent::HookEnded {
+                        name,
+                        outcome,
+                        output,
+                        ..
+                    } if name.starts_with("PermissionRequest") => Some((outcome, output)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(
+            ended("hooks_permission_denied"),
+            (
+                HookOutcome::Blocked,
+                "writes are reviewed by hand here".to_string()
+            )
+        );
+        let (outcome, output) = ended("hooks_permission_late");
+        assert_eq!(outcome, HookOutcome::Succeeded);
+        assert!(output.starts_with("said deny after"), "{output}");
+        // Two Write calls in one message: Claude asked about them one
+        // after the other, and the hook won both times.
+        fixture("hooks_permission_parallel");
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join("hooks_permission_parallel.jsonl"))
+                .unwrap();
+        let blocked: Vec<_> = replay(&mut ClaudeParser::new(), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::HookEnded { name, outcome, .. }
+                    if name == "PermissionRequest:Write" =>
+                {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocked, [HookOutcome::Blocked, HookOutcome::Blocked]);
+    }
+
+    /// Synthetic lines in the shapes of `fixtures/hooks_permission_*`.
+    mod deny_lines {
+        pub fn request(id: &str, tool: &str, call: &str) -> String {
+            serde_json::json!({"type": "control_request", "request_id": id, "request": {
+                "subtype": "can_use_tool", "tool_name": tool, "input": {}, "tool_use_id": call}})
+            .to_string()
+        }
+        pub fn started(hook: &str, tool: &str) -> String {
+            serde_json::json!({"type": "system", "subtype": "hook_started", "hook_id": hook,
+                "hook_name": format!("PermissionRequest:{tool}"), "hook_event": "PermissionRequest"})
+            .to_string()
+        }
+        pub fn passed(hook: &str, tool: &str) -> String {
+            serde_json::json!({"type": "system", "subtype": "hook_response", "hook_id": hook,
+                "hook_name": format!("PermissionRequest:{tool}"), "hook_event": "PermissionRequest",
+                "stdout": "", "stderr": "", "exit_code": 0, "outcome": "success"})
+            .to_string()
+        }
+        pub fn deny(hook: &str, tool: &str, message: &str) -> String {
+            let said = serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "deny", "message": message}}});
+            serde_json::json!({"type": "system", "subtype": "hook_response", "hook_id": hook,
+                "hook_name": format!("PermissionRequest:{tool}"), "hook_event": "PermissionRequest",
+                "stdout": said.to_string(), "stderr": "", "exit_code": 0, "outcome": "success"})
+            .to_string()
+        }
+        pub fn cancel(id: &str) -> String {
+            serde_json::json!({"type": "control_cancel_request", "request_id": id}).to_string()
+        }
+        pub fn result(call: &str, parent: Option<&str>) -> String {
+            serde_json::json!({"type": "user", "parent_tool_use_id": parent, "message": {
+                "role": "user", "content": [{"type": "tool_result", "tool_use_id": call,
+                "content": "done"}]}})
+            .to_string()
+        }
+    }
+
+    /// The `HookEnded` events of a run, as (hook id, outcome, output), each
+    /// with the index of the line that brought it.
+    fn hook_ends(lines: &[String]) -> Vec<(usize, String, HookOutcome, String)> {
+        let mut p = ClaudeParser::new();
+        let mut ends = Vec::new();
+        for (n, line) in lines.iter().enumerate() {
+            for event in p.feed(line) {
+                if let AgentEvent::HookEnded {
+                    id,
+                    outcome,
+                    output,
+                    ..
+                } = event
+                {
+                    ends.push((n, id, outcome, output));
+                }
+            }
+        }
+        ends
+    }
+
+    #[test]
+    fn parallel_denies_are_each_settled_by_their_own_cancel() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            request("r2", "Write", "t2"),
+            started("h2", "Write"),
+            deny("h1", "Write", "one"),
+            deny("h2", "Write", "two"),
+            cancel("r1"),
+            cancel("r2"),
+            result("t1", None),
+            result("t2", None),
+        ]);
+        assert_eq!(
+            ends,
+            [
+                (6, "h1".into(), HookOutcome::Blocked, "one".into()),
+                (7, "h2".into(), HookOutcome::Blocked, "two".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancel_of_another_request_does_not_settle_a_deny() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            request("r2", "Bash", "t2"),
+            deny("h1", "Write", "no"),
+            cancel("r2"),
+            // Its call ran: the host had allowed it.
+            result("t1", None),
+        ]);
+        assert_eq!(
+            ends,
+            [(
+                5,
+                "h1".into(),
+                HookOutcome::Succeeded,
+                "said deny after the request was answered: no".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_line_between_a_deny_and_its_cancel_changes_nothing() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            deny("h1", "Write", "no"),
+            // A subagent's call ends meanwhile, and a status line comes.
+            result("other", Some("agent")),
+            r#"{"type":"system","subtype":"status","status":"requesting"}"#.to_string(),
+            cancel("r1"),
+        ]);
+        assert_eq!(ends, [(5, "h1".into(), HookOutcome::Blocked, "no".into())]);
+    }
+
+    #[test]
+    fn a_deny_for_an_answered_request_came_too_late() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            result("t1", None),
+            deny("h1", "Write", ""),
+            // A deny whose hook was not seen to start is not tied to one.
+            request("r2", "Write", "t2"),
+            deny("h9", "Write", "x"),
+            cancel("r2"),
+        ]);
+        assert_eq!(
+            ends,
+            [
+                (
+                    3,
+                    "h1".into(),
+                    HookOutcome::Succeeded,
+                    "said deny after the request was answered".into()
+                ),
+                (
+                    5,
+                    "h9".into(),
+                    HookOutcome::Succeeded,
+                    "said deny to a request whose answer is not known: x".into()
+                ),
+            ]
+        );
+    }
+
+    /// A request answered by the host while another for the same tool (a
+    /// background subagent's) is open: each deny goes with the request
+    /// its hook started for.
+    #[test]
+    fn a_late_deny_is_not_taken_for_another_requests() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            request("r2", "Write", "t2"),
+            started("h2", "Write"),
+            result("t1", None),
+            deny("h1", "Write", "one"),
+            deny("h2", "Write", "two"),
+            cancel("r2"),
+        ]);
+        assert_eq!(
+            ends,
+            [
+                (
+                    5,
+                    "h1".into(),
+                    HookOutcome::Succeeded,
+                    "said deny after the request was answered: one".into()
+                ),
+                (7, "h2".into(), HookOutcome::Blocked, "two".into()),
+            ]
+        );
+    }
+
+    /// A request that is never decided does not take the next one's deny.
+    #[test]
+    fn a_request_never_decided_takes_no_other_deny() {
+        use deny_lines::*;
+        let ends = hook_ends(&[
+            request("r1", "Write", "t1"),
+            started("h1", "Write"),
+            passed("h1", "Write"),
+            request("r2", "Write", "t2"),
+            started("h2", "Write"),
+            deny("h2", "Write", "no"),
+            cancel("r2"),
+        ]);
+        assert_eq!(
+            ends,
+            [
+                (2, "h1".into(), HookOutcome::Succeeded, String::new()),
+                (6, "h2".into(), HookOutcome::Blocked, "no".into()),
+            ]
+        );
+    }
+
+    /// What is kept for hooks is bounded, and done requests are dropped.
+    #[test]
+    fn requests_kept_for_hooks_are_bounded() {
+        use deny_lines::*;
+        let mut p = ClaudeParser::new();
+        let n = KEPT_REQUESTS + 6;
+        let mut ends = Vec::new();
+        for i in 0..n {
+            for line in [
+                request(&format!("r{i}"), "Write", &format!("t{i}")),
+                started(&format!("h{i}"), "Write"),
+                deny(&format!("h{i}"), "Write", ""),
+            ] {
+                ends.extend(p.feed(&line).into_iter().filter_map(|e| match e {
+                    AgentEvent::HookEnded { id, output, .. } => Some((id, output)),
+                    _ => None,
+                }));
+            }
+        }
+        assert_eq!(p.requests.len(), KEPT_REQUESTS);
+        // The oldest denies were given up on, not left running.
+        assert_eq!(ends.len(), 6);
+        assert_eq!(
+            ends[0],
+            (
+                "h0".to_string(),
+                "said deny to a request whose answer is not known".to_string()
+            )
+        );
+        for i in 0..n {
+            p.feed(&cancel(&format!("r{i}")));
+        }
+        assert!(p.requests.is_empty(), "{:?}", p.requests);
+    }
+
+    #[test]
+    fn hook_outcomes_by_event_and_output() {
+        let verdict = |event: &str, exit: i64, stdout: &str, stderr: &str| {
+            hook_outcome(&serde_json::json!({
+                "hook_event": event,
+                "exit_code": exit,
+                "outcome": if exit == 0 { "success" } else { "error" },
+                "stdout": stdout,
+                "stderr": stderr,
+            }))
+        };
+        let ended = |o, s: &str| HookVerdict::Ended(o, s.to_string());
+        // Exit 2 blocks only what can be blocked.
+        assert_eq!(
+            verdict("PreToolUse", 2, "", "no"),
+            ended(HookOutcome::Blocked, "no")
+        );
+        assert_eq!(
+            verdict("PostToolUse", 2, "", "no"),
+            ended(HookOutcome::Failed, "no")
+        );
+        assert_eq!(
+            verdict("PermissionRequest", 2, "", "no"),
+            HookVerdict::Denied("no".into())
+        );
+        // `continue: false` stops anything.
+        assert_eq!(
+            verdict(
+                "PostToolUse",
+                0,
+                r#"{"continue":false,"stopReason":"halt"}"#,
+                ""
+            ),
+            ended(HookOutcome::Blocked, "halt")
+        );
+        // A block on an event that cannot be blocked is words only.
+        assert_eq!(
+            verdict(
+                "PostToolUse",
+                0,
+                r#"{"decision":"block","reason":"look again"}"#,
+                ""
+            ),
+            ended(HookOutcome::Succeeded, "look again")
+        );
+        // A decision is shown by what it says, never as JSON.
+        assert_eq!(
+            verdict(
+                "PreToolUse",
+                0,
+                r#"{"hookSpecificOutput":{"permissionDecision":"allow"}}"#,
+                ""
+            ),
+            ended(HookOutcome::Succeeded, "")
+        );
+        assert_eq!(
+            verdict("SessionStart", 0, "plain words\n", ""),
+            ended(HookOutcome::Succeeded, "plain words")
+        );
+        assert_eq!(verdict("Stop", 1, "", ""), ended(HookOutcome::Failed, ""));
     }
 
     #[test]

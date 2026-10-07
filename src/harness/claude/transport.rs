@@ -116,6 +116,7 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
         "--verbose",
         "--include-partial-messages",
         "--forward-subagent-text",
+        "--include-hook-events",
         "--permission-prompts",
         "host",
         "--permission-prompt-tool",
@@ -489,7 +490,7 @@ mod tests {
     fn session_args_shape() {
         let a = session_args(&cfg(PermissionPolicy::Ask));
         let s = a.join(" ");
-        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text --permission-prompts host --permission-prompt-tool stdio"));
+        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text --include-hook-events --permission-prompts host --permission-prompt-tool stdio"));
         assert!(s.contains("--model opus"));
         assert!(s.contains("--effort high"));
         assert!(s.contains("--session-id "));

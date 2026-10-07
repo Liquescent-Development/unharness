@@ -10,8 +10,9 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, ContextUsage, HookOutcome, PermissionKind, PermissionRequest, PlanEntry,
+    PlanStatus, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
+    SubagentStatus, ToolAction, Usage,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -287,6 +288,40 @@ impl CodexAppServerParser {
                         self.file_changes.remove(&id);
                     }
                     self.on_item_completed(item, &mut out);
+                }
+            }
+            // A run's id is not unique: a `Stop` hook has the same one in
+            // every turn (`fixtures/app_server_hooks.jsonl`).
+            "hook/started" => {
+                if let Some(run) = p.get("run") {
+                    out.push(AgentEvent::HookStarted {
+                        id: s(run.get("id").unwrap_or(&Value::Null)).to_string(),
+                        name: s(run.get("eventName").unwrap_or(&Value::Null)).to_string(),
+                    });
+                }
+            }
+            "hook/completed" => {
+                if let Some(run) = p.get("run") {
+                    let outcome = match s(run.get("status").unwrap_or(&Value::Null)) {
+                        "completed" => HookOutcome::Succeeded,
+                        // `stopped`: it ended the turn (never recorded).
+                        "blocked" | "stopped" => HookOutcome::Blocked,
+                        _ => HookOutcome::Failed,
+                    };
+                    let output = run
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|e| e.get("text").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    out.push(AgentEvent::HookEnded {
+                        id: s(run.get("id").unwrap_or(&Value::Null)).to_string(),
+                        name: s(run.get("eventName").unwrap_or(&Value::Null)).to_string(),
+                        outcome,
+                        output,
+                    });
                 }
             }
             "item/agentMessage/delta" => {
@@ -844,6 +879,15 @@ mod tests {
             &mut CodexAppServerParser::new(),
             &fixtures_dir(file!()),
             "app_server_file_change",
+        );
+    }
+
+    #[test]
+    fn fixture_app_server_hooks() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_hooks",
         );
     }
 

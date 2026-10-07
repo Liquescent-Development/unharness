@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::event::{PlanEntry, SubagentStatus, Usage};
+use super::event::{HookOutcome, PlanEntry, SubagentStatus, Usage};
 use super::ids::HarnessId;
 
 /// Conversations kept in the index; older ones are deleted on save.
@@ -65,6 +65,13 @@ pub enum BlockRecord {
     Error {
         text: String,
     },
+    /// A hook the harness ran on its own events.
+    Hook {
+        name: String,
+        /// `None`: it had not ended when the conversation was saved.
+        outcome: Option<HookOutcome>,
+        output: String,
+    },
     /// A command the user ran from the prompt with `!`.
     Shell {
         command: String,
@@ -80,6 +87,10 @@ pub enum BlockRecord {
         #[serde(default)]
         secs: Option<f32>,
     },
+    /// A kind of block a later unharness wrote. Skipped on load, so that
+    /// the rest of the conversation still opens; never written.
+    #[serde(other)]
+    Unknown,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -595,6 +606,31 @@ mod tests {
         );
         std::fs::remove_file(store.index_path()).unwrap();
         assert_eq!(store.list().len(), MAX_CONVERSATIONS);
+    }
+
+    /// A block a later unharness wrote does not keep the rest from opening.
+    #[test]
+    fn a_block_of_an_unknown_kind_is_skipped() {
+        let blocks: Vec<BlockRecord> = serde_json::from_value(serde_json::json!([
+            {"kind": "user", "text": "hi"},
+            {"kind": "from_the_future", "whatever": [1, 2]},
+            {"kind": "hook", "name": "Stop", "outcome": "blocked", "output": "no"},
+        ]))
+        .unwrap();
+        assert_eq!(
+            blocks,
+            [
+                BlockRecord::User { text: "hi".into() },
+                BlockRecord::Unknown,
+                BlockRecord::Hook {
+                    name: "Stop".into(),
+                    outcome: Some(HookOutcome::Blocked),
+                    output: "no".into(),
+                },
+            ]
+        );
+        let back = crate::tui::transcript::Transcript::from_records(&blocks);
+        assert_eq!(back.blocks.len(), 2);
     }
 
     #[test]

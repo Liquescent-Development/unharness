@@ -68,6 +68,20 @@ pub enum AgentEvent {
         /// comes after the end is sent in a second `SubagentEnded`.
         result: Option<String>,
     },
+    /// A hook the harness runs on its own events (before a tool call, when
+    /// the turn would stop...) began. `name` is the harness's, e.g.
+    /// `PreToolUse:Bash`.
+    HookStarted {
+        id: String,
+        name: String,
+    },
+    HookEnded {
+        id: String,
+        name: String,
+        outcome: HookOutcome,
+        /// What it said: the reason it gave for a block, its output otherwise.
+        output: String,
+    },
     Context(ContextUsage),
     RateLimit(RateLimitInfo),
     /// Vendor id of the user turn the harness just accepted (rewind / fork target).
@@ -108,6 +122,27 @@ impl SubagentStatus {
             SubagentStatus::Completed => "completed",
             SubagentStatus::Failed => "failed",
             SubagentStatus::Cancelled => "stopped",
+        }
+    }
+}
+
+/// How a hook ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutcome {
+    Succeeded,
+    /// It failed without stopping anything.
+    Failed,
+    /// It stopped what it ran before (a tool call, a prompt, the turn's end).
+    Blocked,
+}
+
+impl HookOutcome {
+    pub fn label(&self) -> &'static str {
+        match self {
+            HookOutcome::Succeeded => "ok",
+            HookOutcome::Failed => "failed",
+            HookOutcome::Blocked => "blocked",
         }
     }
 }
@@ -474,6 +509,17 @@ impl AgentEvent {
                     .as_deref()
                     .map(|r| format!("{:?}", short(r)))
                     .unwrap_or_else(|| "-".into())
+            ),
+            AgentEvent::HookStarted { id, name } => format!("HookStarted id={id} {name}"),
+            AgentEvent::HookEnded {
+                id,
+                name,
+                outcome,
+                output,
+            } => format!(
+                "HookEnded id={id} {name} {} {:?}",
+                outcome.label(),
+                short(output)
             ),
             AgentEvent::Context(c) => format!(
                 "Context used={} window={}",

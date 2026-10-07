@@ -15,9 +15,9 @@ unharness --no-tui                          # run the vendor's own TUI instead
 | `unharness models [-H <harness>] [--provider <p>]` | Providers and models per harness |
 | `unharness sessions [--clear]` | Saved conversations in this workspace; `--clear` removes them, the prompt history and the checkpoints |
 | `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file |
-| `unharness sync` | Refreshes the `CLAUDE.md` / `GEMINI.md` symlinks to `AGENTS.md` |
+| `unharness sync` | Refreshes the `CLAUDE.md` / `GEMINI.md` symlinks to `AGENTS.md` and projects `.agents/commands` and `.agents/agents` (see [Rules, skills, commands and subagents](skills.md)) |
 | `unharness switch <harness> [-g]` | Sets the default harness for this workspace, or globally with `-g` |
-| `unharness skills <args…>` | Manages skills (see [Rules and skills](skills.md)) |
+| `unharness skills <args…>` | Manages skills (see [Rules, skills, commands and subagents](skills.md)) |
 | `unharness update [<version>] [--check] [--prerelease]` | Updates unharness itself when the shell installer put it there; otherwise says what to run (see [Updating](../README.md#updating)) |
 
 ## Flags

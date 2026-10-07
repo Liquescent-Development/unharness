@@ -1,0 +1,55 @@
+SessionStarted id=01a11372-6fd8-73d0-a66a-5e0fe1948c29 model=gpt-6-astra
+TurnStarted
+TextDelta "I"
+TextDelta "’ll"
+TextDelta " run"
+TextDelta " the"
+TextDelta " two"
+TextDelta " commands"
+TextDelta " in"
+TextDelta " order"
+TextDelta ".\\n"
+HookStarted id=pre-tool-use:1:/<session-flags>/config.toml:exec-430d94f3-d6fd-4f82-8add-bfe903e8ae3f preToolUse
+HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-430d94f3-d6fd-4f82-8add-bfe903e8ae3f preToolUse ok ""
+ToolCallStarted id=exec-430d94f3-d6fd-4f82-8add-bfe903e8ae3f name=shell input={"command":"/usr/bin/zsh -lc 'cat /HOME/.codex/plugins/ca...
+PermissionRequest id=0 ToolUse shell [shell "cat /HOME/.codex/plugins/cache/openai-curated-remo...]
+ToolCallResult id=exec-430d94f3-d6fd-4f82-8add-bfe903e8ae3f error=false "---\\nname: using-superpowers\\ndescription: Use when start..."
+Usage in=16330 out=152 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=16482 window=258400
+RateLimit status=- 7d=11%
+HookStarted id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse
+HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse ok ""
+ToolCallStarted id=exec-6f355fb6-3912-4ef7-9657-1e89f0329745 name=shell input={"command":"/usr/bin/zsh -lc 'echo hello'","cwd":"/WORKSP...
+PermissionRequest id=1 ToolUse shell [shell "echo hello"]
+ToolCallResult id=exec-6f355fb6-3912-4ef7-9657-1e89f0329745 error=false "hello\\n"
+HookStarted id=pre-tool-use:1:/<session-flags>/config.toml:exec-1affd254-9086-40f6-8de9-3c89041f8b38 preToolUse
+Notice "codex: \u{1b}[2m2026-10-06T23:00:39.034067Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m..."
+HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-1affd254-9086-40f6-8de9-3c89041f8b38 preToolUse blocked "rm is not allowed in this workspace"
+Usage in=22313 out=49 cache_read=16128 cache_write=0 cost=- cumulative=false
+Context used=22362 window=258400
+RateLimit status=- 7d=11%
+TextDelta "`"
+TextDelta "echo"
+TextDelta " hello"
+TextDelta "`"
+TextDelta " printed"
+TextDelta " “"
+TextDelta "hello"
+TextDelta "”;"
+TextDelta " the"
+TextDelta " workspace"
+TextDelta " hook"
+TextDelta " blocked"
+TextDelta " `"
+TextDelta "rm"
+TextDelta " -"
+TextDelta "f"
+TextDelta " nothing"
+TextDelta ".txt"
+TextDelta "`."
+Usage in=22447 out=23 cache_read=22144 cache_write=0 cost=- cumulative=false
+Context used=22470 window=258400
+RateLimit status=- 7d=11%
+HookStarted id=stop:2:/<session-flags>/config.toml stop
+HookEnded id=stop:2:/<session-flags>/config.toml stop failed "hook returned invalid stop hook JSON output"
+TurnCompleted Done

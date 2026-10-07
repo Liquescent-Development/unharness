@@ -1,0 +1,40 @@
+HookStarted id=6d503964-5bb7-4caf-bf26-523b980b5d21 SessionStart:startup
+HookEnded id=6d503964-5bb7-4caf-bf26-523b980b5d21 SessionStart:startup ok ""
+CapabilitiesChanged models=12 provider=anthropic
+SessionStarted id=677c5743-8170-4cff-9aeb-dee7efa79d76 model=claude-haiku-4-5-20251001
+TurnStarted
+Context used=22893 window=-
+ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash "{\"command\": \"echo hi"
+ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash "\", \"description\": \"Echo"
+ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash " \\\""
+ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash "hi\\\" to stdout"
+ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash "\"}"
+ToolCallStarted id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash input={"command":"echo hi","description":"Echo \"hi\" to stdout"}
+HookStarted id=cc95e196-6a8e-4d21-b446-6b14d917a833 PreToolUse:Bash
+HookEnded id=cc95e196-6a8e-4d21-b446-6b14d917a833 PreToolUse:Bash ok "echo is harmless"
+RateLimit status=allowed five_hour=41% seven_day=6%
+ToolCallResult id=toolu_01YWfAt9DUkD7P3QgEwgk4yA error=false "hi"
+Context used=26456 window=-
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "{\"file_path\": \"/"
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "WORK"
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "SPACE"
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "/note.txt"
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "\", \"content\": \"hi"
+ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "\"}"
+ToolCallStarted id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write input={"content":"hi","file_path":"/WORKSPACE/note.txt"}
+PermissionRequest id=7a8f1e1c-d9cf-4bb3-98a0-fdefa767ab94 ToolUse Write [edit /WORKSPACE/note.txt]
+HookStarted id=83d64dbd-3eb1-435f-9d2c-42a6348b90c8 PermissionRequest:Write
+HookEnded id=83d64dbd-3eb1-435f-9d2c-42a6348b90c8 PermissionRequest:Write blocked "writes are reviewed by hand here"
+Notice "permission request cancelled by harness"
+ToolCallResult id=toolu_01Br2ZqjQqQhgxPUzhy47iTF error=true "writes are reviewed by hand here"
+Context used=26649 window=-
+TextDelta "Waiting"
+TextDelta " for permission"
+TextDelta " to"
+TextDelta " write note.txt"
+TextDelta " with the"
+TextDelta " content \"hi\"."
+Usage in=26 out=456 cache_read=72214 cache_write=3758 cost=0.0170 cumulative=false
+Context used=- window=200000
+Notice "1 permission denial(s): Write"
+TurnCompleted Done

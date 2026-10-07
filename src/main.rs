@@ -80,6 +80,20 @@ fn handle_sync(cwd: &std::path::Path) -> Result<()> {
             for w in &rules.warnings {
                 println!("  {} {}", "[!]".yellow().bold(), w);
             }
+            let shared = sync::sync_projections(&root)?;
+            for p in &shared.written {
+                println!("  {} Projected {}", "[✓]".green().bold(), p.display());
+            }
+            for p in &shared.removed {
+                println!(
+                    "  {} Removed {} (its source is gone)",
+                    "[✓]".green().bold(),
+                    p.display()
+                );
+            }
+            for w in &shared.warnings {
+                println!("  {} {}", "[!]".yellow().bold(), w);
+            }
         }
         None => println!("No workspace detected (not inside a git or unharness repo)"),
     }
