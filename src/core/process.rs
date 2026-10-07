@@ -33,6 +33,36 @@ pub struct LineProcess {
     pub lines: mpsc::Receiver<RawLine>,
 }
 
+/// `cmd` in the sandbox, in a session of its own, on pipes.
+fn spawn_child(
+    cmd: std::process::Command,
+    sandbox: &Sandbox,
+    input: bool,
+) -> Result<tokio::process::Child> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut wrapped = sandbox.wrap(cmd)?;
+    // After `wrap`: a backend may build a new command around this one.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe and allocates nothing.
+        unsafe {
+            wrapped.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut cmd = Command::from(wrapped);
+    cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    Ok(cmd.spawn()?)
+}
+
 /// Kills a [`LineProcess`] ([`LineProcess::stopper`]); once it is gone,
 /// or its owner has ended it and let go, this does nothing.
 #[derive(Clone)]
@@ -79,36 +109,24 @@ impl LineProcess {
     }
 
     fn start(cmd: Command, sandbox: &Sandbox, input: bool) -> Result<Self> {
-        #[cfg_attr(not(unix), allow(unused_mut))]
         let cmd = cmd.into_std();
         let program = cmd.get_program().to_os_string();
-        // Through the reaper first, inside the sandbox like the CLI.
-        let reaped =
-            super::reaper::wrap(cmd).with_context(|| format!("failed to spawn {program:?}"))?;
-        let mut wrapped = sandbox.wrap(reaped)?;
-        // After `wrap`: a backend may build a new command around this one.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: `setsid` is async-signal-safe and allocates nothing.
-            unsafe {
-                wrapped.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        let mut cmd = Command::from(wrapped);
-        cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn {:?}", program))?;
+        let failed = || format!("failed to spawn {program:?}");
+        // Through the reaper, inside the sandbox like the CLI.
+        #[cfg(target_os = "linux")]
+        let mut child = match super::reaper::wrap(&cmd).with_context(failed)? {
+            Some((reaper, reaped)) => match spawn_child(reaper, sandbox, input) {
+                Ok(child) => {
+                    reaped.started().with_context(failed)?;
+                    child
+                }
+                // The reaper could not be run here: the CLI goes bare.
+                Err(_) => spawn_child(cmd, sandbox, input).with_context(failed)?,
+            },
+            None => spawn_child(cmd, sandbox, input).with_context(failed)?,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mut child = spawn_child(cmd, sandbox, input).with_context(failed)?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("child stdout not piped")?;
         let stderr = child.stderr.take().context("child stderr not piped")?;
