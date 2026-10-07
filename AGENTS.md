@@ -535,7 +535,10 @@ recorded ones. For anything else:
   the word limit it was given, the switch followed the turn, and Codex
   answered from the first prompt and the summary it was sent. Windows
   reported then: Claude's default model 1,000,000, Codex's 258,400, so an
-  unset budget is about a quarter of those in characters. Unverified: a
+  unset budget is about a quarter of those in characters. The windows are
+  kept in `<state dir>/unharness/context_windows.json`, not in the
+  workspace (a window decides how much a harness is sent), and taken as
+  between 8,000 and 2,000,000 tokens. Unverified: a
   summary turn on pi, agy or an ACP agent, and one in which the agent
   asks for a tool anyway.
 - Claude's `total_cost_usd` is a running total per process, and an ACP

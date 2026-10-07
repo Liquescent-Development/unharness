@@ -176,6 +176,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         resume: launch.resume,
         harness_explicit: launch.harness_explicit,
         checkpoint_store: None,
+        context_windows: None,
         rules: launch.rules,
         default_providers,
     });

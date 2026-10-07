@@ -74,7 +74,7 @@ conversation so far: each prompt, what the agent said, and its tool
 calls with the part of their output that matters (none for a read or an
 edit, the end of a command's output, the last 20 lines of a call that
 failed, a subagent's report). The seed takes at most a quarter of the
-context window the next harness's model last reported in this workspace
+context window the next harness's model last reported
 (24,000 characters before it has reported one, or `bridge_max_chars`
 when that is set). Over the cap, older turns are told more
 briefly first (the files they edited, the calls that failed, the final

@@ -24,8 +24,9 @@ use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    CheckpointRecord, ContextWindows, Conversation, ConversationStore, ShellStatus,
-    TurnAnchorRecord, now_rfc3339, truncate_title,
+    CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, CheckpointRecord, ContextWindows, Conversation,
+    ConversationStore, ShellStatus, TurnAnchorRecord, default_context_windows_path,
+    load_context_windows, now_rfc3339, save_context_windows, truncate_title,
 };
 use crate::core::guard::{self, Watch};
 use crate::core::mcp::{self, McpServer};
@@ -307,6 +308,7 @@ pub struct App {
     bridge_summary: BridgeSummary,
     /// What the bridge to a harness is measured against otherwise.
     context_windows: ContextWindows,
+    context_windows_path: PathBuf,
     handoff: Option<Handoff>,
     /// Transcript length when each harness was last active (bridge start).
     last_active_index: HashMap<HarnessId, usize>,
@@ -441,6 +443,9 @@ pub struct AppInit {
     /// Where file-checkpoint shadow repositories go; `None` = the user's
     /// state directory.
     pub checkpoint_store: Option<PathBuf>,
+    /// Where the context windows harnesses reported are kept; `None` = the
+    /// user's state directory.
+    pub context_windows: Option<PathBuf>,
     /// The user's allow rules, and where "allow always" adds to them.
     pub rules: Rules,
     /// Each harness's guess at its own provider (`Harness::default_provider`),
@@ -650,13 +655,17 @@ impl App {
         };
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
+        let context_windows_path = init
+            .context_windows
+            .unwrap_or_else(default_context_windows_path);
         let mut app = App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
             git_branch,
             registry,
             bridge_max_chars: config.bridge_max_chars,
-            context_windows: store.context_windows(),
+            context_windows: load_context_windows(&context_windows_path),
+            context_windows_path,
             bridge_summary: config.bridge_summary.unwrap_or_default(),
             handoff: None,
             config,
@@ -1280,6 +1289,7 @@ impl App {
     /// Keep the window the active harness's model reported, for the next
     /// bridge to it.
     fn learn_context_window(&mut self, window: u64) {
+        let window = window.clamp(CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX);
         let model = self.model_key(self.active);
         let known = self.context_windows.entry(self.active).or_default();
         if known.get(&model) == Some(&window) {
@@ -1287,7 +1297,7 @@ impl App {
         }
         known.insert(model, window);
         // Only a measure: a write that fails costs a default budget later.
-        let _ = self.store.save_context_windows(&self.context_windows);
+        let _ = save_context_windows(&self.context_windows_path, &self.context_windows);
     }
 
     /// Where the bridge to `harness` starts: where it was last active,
@@ -4478,6 +4488,7 @@ pub(crate) mod tests {
         App::new(AppInit {
             // Tests never write to the real state directory.
             checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
+            context_windows: Some(cwd.join(".unharness/test-state/context_windows.json")),
             // Nor to the real config directory.
             rules: Rules::load_in(&cwd.join(".unharness/test-config"), Some(&cwd)).unwrap(),
             cwd: cwd.clone(),
@@ -5868,6 +5879,34 @@ pub(crate) mod tests {
         // A budget the user set wins.
         again.bridge_max_chars = Some(1_000);
         assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 1_000);
+    }
+
+    #[test]
+    fn context_windows_are_not_taken_from_the_workspace_or_out_of_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        // What an agent could write: a window that would empty the bridge.
+        std::fs::create_dir_all(cwd.join(".unharness")).unwrap();
+        std::fs::write(
+            cwd.join(".unharness/context_windows.json"),
+            r#"{"claude": {"default": 1}}"#,
+        )
+        .unwrap();
+        let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: None,
+            window: Some(1),
+        }));
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 8_000);
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: None,
+            window: Some(u64::MAX),
+        }));
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 2_000_000);
     }
 
     #[test]
