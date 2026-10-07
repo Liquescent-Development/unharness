@@ -180,7 +180,16 @@ async fn drive(
                     SessionCommand::SetEffort(e) => state.effort = e,
                     SessionCommand::SetPolicy(p) => state.policy = p,
                     SessionCommand::Shutdown => {
-                        if let Some(mut p) = current.take() { p.kill().await; }
+                        if let Some(mut p) = current.take() {
+                            p.kill().await;
+                            // Gone before it is said to be: the next
+                            // session resumes the thread it was writing.
+                            while let Some(line) = p.lines.recv().await {
+                                if matches!(line, RawLine::Exited(_)) {
+                                    break;
+                                }
+                            }
+                        }
                         let _ = events.send(AgentEvent::ProcessExited { code: Some(0) }).await;
                         return;
                     }
@@ -342,6 +351,46 @@ mod tests {
         h.send(SessionCommand::Shutdown).await.unwrap();
         let ev = h.events.recv().await.unwrap();
         assert!(matches!(ev, AgentEvent::ProcessExited { .. }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_turn_ended_with_its_session_is_gone_when_the_exit_is_reported() {
+        struct Pid;
+        impl PerTurnProtocol for Pid {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("echo SID:$$; exec sleep 30");
+                Ok(TurnSpec {
+                    command,
+                    stdin: None,
+                })
+            }
+            fn new_parser(&self) -> Box<dyn TurnParser> {
+                Box::new(EchoParser)
+            }
+        }
+        let mut h = start(cfg(), Arc::new(Pid)).unwrap();
+        h.send(SessionCommand::turn("x")).await.unwrap();
+        let pid = loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::SessionStarted { session_id, .. } = ev {
+                break session_id.parse::<u32>().unwrap();
+            }
+        };
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(10), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(ev, AgentEvent::ProcessExited { .. }), "{ev:?}");
+        assert!(!crate::core::process::running(pid));
     }
 
     #[tokio::test]
