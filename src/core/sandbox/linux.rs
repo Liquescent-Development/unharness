@@ -112,6 +112,12 @@ fn ruleset(profile: &SandboxProfile) -> Result<OwnedFd> {
     for path in &profile.writable {
         created = allow(created, path, all)?;
     }
+    // A CLI's reaper is unharness's own binary (`core::reaper`): it runs
+    // also where reading its directory is denied, which this file alone
+    // does not open up.
+    if let Some(exe) = crate::core::reaper::image() {
+        created = allow(created, &exe, AccessFs::Execute | AccessFs::ReadFile)?;
+    }
 
     let fd: Option<OwnedFd> = created.into();
     fd.context("Landlock is not supported by this kernel")

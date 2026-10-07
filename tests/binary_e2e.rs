@@ -5,7 +5,7 @@
 #![cfg(target_os = "linux")]
 
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -73,8 +73,12 @@ impl Setup {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        self.command_in("off", args)
+    }
+
+    fn command_in(&self, sandbox: &str, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_unharness"));
-        cmd.args(["-H", "claude", "--sandbox", "off", "--policy", "bypass"])
+        cmd.args(["-H", "claude", "--sandbox", sandbox, "--policy", "bypass"])
             .args(args)
             .current_dir(self.path("ws"))
             .env("HOME", self.path("home"))
@@ -578,4 +582,59 @@ fn what_a_cli_left_in_a_session_of_its_own_goes_when_it_exits_by_itself() {
     );
     assert!(gone_within(cli, Duration::from_secs(2)));
     assert!(gone_within(child, Duration::from_secs(2)), "left running");
+}
+
+// Reading the directory unharness is in denied (`~/.cargo`, for its
+// credentials), a sandboxed CLI still starts below its reaper: the binary
+// alone is executable there.
+#[test]
+fn a_sandboxed_cli_runs_below_its_reaper_where_unharness_s_directory_is_denied() {
+    let landlock = std::fs::read_to_string("/sys/kernel/security/lsm")
+        .is_ok_and(|lsm| lsm.split(',').any(|m| m.trim() == "landlock"));
+    if !python_available() || !landlock {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_unharness")).parent().unwrap();
+    let config = setup.path("config/unharness/config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[sandbox]\ndeny_read = [\"{}\"]\n",
+        bin_dir.display()
+    ));
+    std::fs::write(&config, text).unwrap();
+    // Where the sandbox lets the fake write.
+    let log = setup.path("ws/log");
+    let pids = setup.path("ws/pids");
+    let mut cmd = setup.command_in("workspace-write", &["--print", "hi"]);
+    cmd.env("UNHARNESS_FAKE_LOG", &log)
+        .env(
+            "UNHARNESS_FAKE_BACKGROUND",
+            format!("group:{}", pids.display()),
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let unharness = Unharness(cmd.spawn().unwrap());
+    wait_until("the turn is sent", Duration::from_secs(20), || {
+        std::fs::read_to_string(&log).is_ok_and(|l| l.lines().count() >= 2)
+    });
+    let text = std::fs::read_to_string(&pids).unwrap();
+    let cli: u32 = text.split_whitespace().next().unwrap().parse().unwrap();
+    let parent = std::fs::read_to_string(format!("/proc/{cli}/stat"))
+        .unwrap()
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let reaper = std::fs::read(format!("/proc/{parent}/cmdline")).unwrap();
+    assert!(
+        String::from_utf8_lossy(&reaper).contains("__unharness-reap"),
+        "{:?}",
+        String::from_utf8_lossy(&reaper)
+    );
+    drop(unharness);
 }
