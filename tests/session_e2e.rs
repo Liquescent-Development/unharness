@@ -1907,3 +1907,197 @@ async fn headless_runs_an_acp_agent() {
             .is_some_and(|id| id.starts_with("201664ad"))
     );
 }
+
+/// A fake that replays `lines` and holds at its `# gate` until the file
+/// returned is created.
+fn gated_config(fake: &Fake, lines: &[&str]) -> (SessionConfig, PathBuf) {
+    let fixture = fake._tmp.path().join("gated.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    (cfg, gate)
+}
+
+/// Events up to the one `stop` matches.
+async fn events_until(
+    handle: &mut SessionHandle,
+    stop: impl Fn(&AgentEvent) -> bool,
+) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(handle).await;
+        let done = stop(&ev);
+        events.push(ev);
+        if done {
+            return events;
+        }
+    }
+}
+
+/// Every command sent before has been handled once this returns: an
+/// answer to no request comes back as a notice.
+async fn settle(handle: &mut SessionHandle) -> Vec<AgentEvent> {
+    handle
+        .send(SessionCommand::RespondPermission {
+            id: "settle".into(),
+            decision: PermissionDecision::Deny {
+                reason: String::new(),
+            },
+        })
+        .await
+        .unwrap();
+    events_until(handle, |e| matches!(e, AgentEvent::Notice(_))).await
+}
+
+fn interrupted(events: &[AgentEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            }
+        )
+    })
+}
+
+fn codex_app_server() -> unharness::harness::codex::CodexHarness {
+    unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    )
+}
+
+// Ctrl+C in `--print` reaches the CLI only as `Interrupt`.
+#[tokio::test]
+async fn codex_interrupts_a_turn_sent_before_it_had_an_id() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"id":1,"result":{}}"#,
+            r#">> {"method": "initialized"}"#,
+            r#">> {"method": "thread/start"}"#,
+            r#"{"id":2,"result":{"thread":{"id":"t1"}}}"#,
+            r#">> {"method": "turn/start"}"#,
+            "# gate",
+            r#"{"id":3,"result":{"turn":{"id":"u1","status":"inProgress"}}}"#,
+            r#">> {"method": "turn/interrupt"}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"interrupted"}}}"#,
+        ],
+    );
+    let mut handle = codex_app_server().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(4).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let before = settle(&mut handle).await;
+    assert!(!interrupted(&before), "{before:?}");
+    std::fs::write(&gate, "").unwrap();
+
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+    let sent = fake.sent_lines();
+    let interrupt = sent
+        .iter()
+        .find(|l| l["method"] == "turn/interrupt")
+        .expect("turn/interrupt");
+    assert_eq!(interrupt["params"]["turnId"], "u1");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_drops_a_turn_interrupted_while_it_waits_for_the_thread() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"id":1,"result":{}}"#,
+            r#">> {"method": "initialized"}"#,
+            r#">> {"method": "thread/start"}"#,
+            "# gate",
+            r#"{"id":2,"result":{"thread":{"id":"t1"}}}"#,
+            r#"{"method":"thread/started","params":{"thread":{"id":"t1"}}}"#,
+        ],
+    );
+    let mut handle = codex_app_server().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(3).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+
+    // The thread comes, and the turn does not go out on it.
+    std::fs::write(&gate, "").unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::ProcessExited { .. })
+    })
+    .await;
+    let sent = fake.sent_lines();
+    assert!(
+        !sent.iter().any(|l| l["method"] == "turn/start"),
+        "{sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn acp_drops_a_turn_interrupted_while_it_waits_for_the_session() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            "# gate",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+        ],
+    );
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(2).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+
+    std::fs::write(&gate, "").unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::ProcessExited { .. })
+    })
+    .await;
+    let sent = fake.sent_lines();
+    assert!(
+        !sent.iter().any(|l| l["method"] == "session/prompt"),
+        "{sent:?}"
+    );
+}

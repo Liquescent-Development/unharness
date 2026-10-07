@@ -177,6 +177,8 @@ struct Driver {
     own_sandbox: OwnSandbox,
     /// A turn requested before the thread was ready.
     queued_turn: Option<(String, Vec<Attachment>)>,
+    /// Interrupt the turn asked for as soon as it has an id.
+    interrupt_wanted: bool,
 }
 
 impl Driver {
@@ -213,6 +215,21 @@ impl Driver {
         Ok(())
     }
 
+    /// The main thread's turn has an id: interrupt it if that was asked
+    /// for before it had one.
+    async fn turn_known(&mut self) -> Result<()> {
+        if !std::mem::take(&mut self.interrupt_wanted) {
+            return Ok(());
+        }
+        let (Some(thread), Some(turn)) = (self.thread_id.clone(), self.turn_id.clone()) else {
+            return Ok(());
+        };
+        let params = json!({"threadId": thread, "turnId": turn});
+        self.request("turn/interrupt", params, Outstanding::Interrupt)
+            .await
+            .map(|_| ())
+    }
+
     /// A sub-agent's turn counts as one: it runs on with the main turn over.
     async fn shut_down(&mut self) {
         let turn_open = self.turn_id.is_some()
@@ -247,6 +264,7 @@ async fn drive(
         policy: cfg.policy,
         own_sandbox: OwnSandbox::for_session(&cfg.sandbox),
         queued_turn: None,
+        interrupt_wanted: false,
     };
     let mut shutting_down = false;
 
@@ -306,6 +324,17 @@ async fn drive(
                             (Some(t), Some(turn)) => {
                                 let params = json!({"threadId": t, "turnId": turn});
                                 d.request("turn/interrupt", params, Outstanding::Interrupt).await.map(|_| ())
+                            }
+                            // Waiting for the thread: it is never sent.
+                            _ if d.queued_turn.take().is_some() => {
+                                let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
+                                let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Interrupted }).await;
+                                Ok(())
+                            }
+                            // Sent, with no id to interrupt it by yet.
+                            _ if d.outstanding.values().any(|o| *o == Outstanding::TurnStart) => {
+                                d.interrupt_wanted = true;
+                                Ok(())
                             }
                             _ => Ok(()),
                         }
@@ -444,6 +473,7 @@ async fn drive(
                                     }
                                     Some(Outstanding::TurnStart) => {
                                         if let Some(err) = error {
+                                            d.interrupt_wanted = false;
                                             let msg = err.get("message").and_then(Value::as_str).unwrap_or("turn start failed");
                                             // No turn id to rewind to: keep the anchor sequence aligned.
                                             let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
@@ -458,6 +488,9 @@ async fn drive(
                                             if let Some(id) = d.turn_id.clone() {
                                                 let _ = events.send(AgentEvent::TurnAnchor { id }).await;
                                             }
+                                            if let Err(e) = d.turn_known().await {
+                                                let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                                            }
                                         }
                                     }
                                     _ => {}
@@ -471,8 +504,14 @@ async fn drive(
                                 match method.as_str() {
                                     "turn/started" => {
                                         d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
+                                        if let Err(e) = d.turn_known().await {
+                                            let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                                        }
                                     }
-                                    "turn/completed" => d.turn_id = None,
+                                    "turn/completed" => {
+                                        d.turn_id = None;
+                                        d.interrupt_wanted = false;
+                                    }
                                     _ => {}
                                 }
                             }

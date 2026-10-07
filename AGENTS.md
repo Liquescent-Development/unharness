@@ -518,7 +518,11 @@ recorded ones. For anything else:
   stream-json with a `Write` denied under `ask`, a prompt on stdin, SIGINT
   giving exit 130: Claude ends that turn with `error_during_execution`)
   and agy 1.2.17 (`accept-edits`). Codex, pi and ACP agents run only
-  against `fake-harness.py` (`tests/session_e2e.rs`). It waits for
+  against `fake-harness.py` (`tests/session_e2e.rs`). Ctrl+C reaches the
+  CLI only as `Interrupt`: one before Codex app-server has a thread
+  drops the turn, one before its turn has an id is sent once it has one
+  (checked live on 0.157.0, the turn ended interrupted at 0.4 s and at
+  0.9 s), and an ACP turn waiting for its session is dropped. It waits for
   subagents and, where `SubagentSupport::report_turn` is declared, counts
   one more turn end per background run of a subagent that completed or
   failed, wherever its end falls: in every single-prompt Claude recording

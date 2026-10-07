@@ -340,7 +340,15 @@ async fn drive(
                             }
                             res
                         }
-                        None => Ok(()),
+                        // Waiting for the session: it is never sent.
+                        None => {
+                            if d.queued_turn.take().is_some() {
+                                let _ = events.send(AgentEvent::TurnCompleted {
+                                    stop_reason: StopReason::Interrupted,
+                                }).await;
+                            }
+                            Ok(())
+                        }
                     },
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
                         Some((rpc_id, options)) => {

@@ -26,6 +26,10 @@ with `group` it stays in the fake's process group. With HANG,
 $UNHARNESS_FAKE_LINGER=<seconds> waits that long once stdin closes, then
 logs `{"ended": true}` and exits (a CLI finishing its own work first).
 
+A `# gate` line in the fixture waits until the file named by
+$UNHARNESS_FAKE_GATE exists, so that a test can hold the fake's next line
+until the driver has seen something first.
+
 $UNHARNESS_FAKE_PROBE makes the fake try the filesystem before it replays,
 for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
 `;`. Each result is appended to the log as `{"probe", "path", "ok"}`.
@@ -90,6 +94,11 @@ def main() -> int:
     with open(fixture) as f:
         for raw in f:
             line = raw.rstrip("\n")
+            if line == "# gate":
+                gate = os.environ.get("UNHARNESS_FAKE_GATE")
+                while gate and not os.path.exists(gate):
+                    time.sleep(0.02)
+                continue
             if line.startswith("#"):
                 # A recorder's trailing `# exit=N` sets our exit status too.
                 if line.startswith("# exit=") and line[7:].strip().isdigit():
