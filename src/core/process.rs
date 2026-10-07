@@ -687,12 +687,13 @@ mod tests {
         let Some(RawLine::Stdout(_pid)) = p.lines.recv().await else {
             panic!("no pid");
         };
-        p.end_within(Duration::from_millis(300));
+        p.end_within(Duration::from_secs(1));
         drop(p);
         #[cfg(target_os = "linux")]
         {
             std::thread::sleep(Duration::from_millis(100));
             assert!(running(&_pid), "killed before its grace was up");
+            std::thread::sleep(Duration::from_millis(900));
             assert!(!alive(&_pid));
         }
     }
