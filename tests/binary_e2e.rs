@@ -95,6 +95,24 @@ impl Setup {
                 cmd.env_remove(key);
             }
         }
+        // unharness keeps a signal it was started with ignored, as from a
+        // background job or `nohup`; these tests send them.
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `signal` is async-signal-safe and allocates nothing.
+        unsafe {
+            cmd.pre_exec(|| {
+                for signo in [
+                    libc::SIGINT,
+                    libc::SIGQUIT,
+                    libc::SIGHUP,
+                    libc::SIGTERM,
+                    libc::SIGTSTP,
+                ] {
+                    libc::signal(signo, libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
         cmd
     }
 
