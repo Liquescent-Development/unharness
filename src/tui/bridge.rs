@@ -259,14 +259,18 @@ fn omission(n: usize) -> String {
     }
 }
 
-/// At most `max` characters: the start and the end, the middle left out.
+/// At most `max` characters: the start and the end, the middle left out,
+/// or only the start when `max` leaves no room to say so.
 fn cut_middle(text: &str, max: usize) -> String {
     let len = text.chars().count();
     if len <= max {
         return text.to_string();
     }
     const MARK: &str = "\n[…]\n";
-    let room = max.saturating_sub(MARK.chars().count());
+    if max < MARK.chars().count() {
+        return text.chars().take(max).collect();
+    }
+    let room = max - MARK.chars().count();
     let head = room / 3;
     let tail = room - head;
     let start: String = text.chars().take(head).collect();
@@ -930,6 +934,15 @@ mod tests {
             );
         }
         assert!(telling.text().contains("turns omitted]"));
+    }
+
+    #[test]
+    fn a_cut_is_never_longer_than_asked() {
+        assert_eq!(cut_middle("abcdefgh", 3), "abc");
+        assert_eq!(cut_middle("abcdefgh", 0), "");
+        assert_eq!(cut_middle("abcdefgh", 5), "\n[…]\n");
+        assert_eq!(cut_middle("abcdefgh", 7), "\n[…]\ngh");
+        assert_eq!(cut_middle("abc", 3), "abc");
     }
 
     #[test]
