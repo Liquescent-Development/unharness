@@ -13,10 +13,10 @@ use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, Scrollbar};
+use super::app::{App, KeptBlock, Scrollbar};
 use super::code::{
-    clamp_lines, code_lines, diff_lines, looks_like_diff, plain_lines, replacement_lines, sanitize,
-    wrap_words,
+    clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
+    sanitize, wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
 use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
@@ -297,7 +297,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .add_modifier(Modifier::BOLD),
             )));
             lines.extend(wrap_prefixed_text("  ", text, width, Style::default()));
-            lines.push(Line::default());
         }
         TBlock::Assistant {
             text,
@@ -314,7 +313,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .add_modifier(Modifier::BOLD),
             )));
             lines.extend(render_markdown_to_lines(text, width));
-            lines.push(Line::default());
         }
         TBlock::Handoff { text, sender, to } => {
             lines.push(Line::from(Span::styled(
@@ -324,7 +322,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .add_modifier(Modifier::BOLD),
             )));
             lines.extend(render_markdown_to_lines(text, width));
-            lines.push(Line::default());
         }
         TBlock::Thought { text, duration } => {
             let title = match duration {
@@ -359,7 +356,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                 "  └".to_string() + &"─".repeat(width.saturating_sub(3).min(50)),
                 Style::default().fg(Color::DarkGray),
             )));
-            lines.push(Line::default());
         }
         TBlock::Tool {
             name,
@@ -406,42 +402,53 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             if let Some(kind) = agent.as_ref().and_then(|a| a.kind.as_deref()) {
                 summary.push_str(&format!(" ({kind})"));
             }
+            // The command in the terminal's own colour, its output dimmed
+            // below it, and the status on the first line: at the end of the
+            // line's width when the summary wraps, not inside the command. A
+            // name that leaves too little room beside it (an MCP tool's) has
+            // that line to itself, shortened if need be so the status fits,
+            // and the summary goes below, under the name.
             let marker = "  ⚡ ";
-            let indent = UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(name.as_str()) + 2;
-            let head_width = width.saturating_sub(indent + 11).max(10);
+            let marker_width = UnicodeWidthStr::width(marker);
+            let beside = marker_width + UnicodeWidthStr::width(name.as_str()) + 2;
+            let own_line = beside + SUMMARY_MIN + STATUS_ROOM > width;
+            let (shown_name, indent, head_width) = if own_line {
+                let room = width.saturating_sub(marker_width + STATUS_ROOM).max(1);
+                let shown = shorten(name, room);
+                (
+                    shown,
+                    marker_width,
+                    width.saturating_sub(marker_width).max(10),
+                )
+            } else {
+                (name.clone(), beside, width - beside - STATUS_ROOM)
+            };
             let mut summary_lines = wrap_words(&summary, head_width).into_iter();
             let mut first = vec![
                 Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::styled(
-                    name.clone(),
+                    shown_name,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("  "),
-                Span::styled(
-                    summary_lines.next().unwrap_or_default(),
-                    Style::default().fg(Color::Gray),
-                ),
             ];
-            let rest: Vec<String> = summary_lines.collect();
-            let status = vec![status];
-            if rest.is_empty() {
-                first.extend(status);
-                lines.push(Line::from(first));
-            } else {
-                lines.push(Line::from(first));
-                let n = rest.len();
-                for (i, seg) in rest.into_iter().enumerate() {
-                    let mut l = vec![
-                        Span::raw(" ".repeat(indent)),
-                        Span::styled(seg, Style::default().fg(Color::Gray)),
-                    ];
-                    if i + 1 == n {
-                        l.extend(status.clone());
-                    }
-                    lines.push(Line::from(l));
+            if !own_line {
+                let mut words = summary_lines.next().unwrap_or_default();
+                if summary_lines.len() > 0 {
+                    let pad =
+                        (head_width + 1).saturating_sub(UnicodeWidthStr::width(words.as_str()));
+                    words.push_str(&" ".repeat(pad));
                 }
+                first.extend([Span::raw("  "), Span::raw(words)]);
+            }
+            first.push(status);
+            lines.push(Line::from(first));
+            for seg in summary_lines.filter(|s| !s.is_empty()) {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::raw(seg),
+                ]));
             }
 
             let body_width = width.saturating_sub(2);
@@ -483,11 +490,12 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                             format!(
                                 "  │ … {hidden} more lines (click the call, or Ctrl+T, to expand)"
                             ),
-                            Style::default().fg(Color::DarkGray),
+                            faint(),
                         )));
                     }
                 }
             }
+            close_gutter(&mut lines);
         }
         TBlock::System(t) => {
             lines.extend(wrap_prefixed_text(
@@ -498,7 +506,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .fg(Color::Blue)
                     .add_modifier(Modifier::ITALIC),
             ));
-            lines.push(Line::default());
         }
         TBlock::Notice(t) => {
             lines.extend(wrap_prefixed_text(
@@ -515,7 +522,6 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                 width,
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ));
-            lines.push(Line::default());
         }
         TBlock::Hook {
             name,
@@ -611,20 +617,66 @@ fn shell_lines(
     if dropped > 0 {
         lines.push(Line::from(Span::styled(
             format!("  │ … {dropped} earlier lines not kept"),
-            Style::default().fg(Color::DarkGray),
+            faint(),
         )));
     }
-    lines.extend(plain_lines(
-        output,
-        body_width,
-        Style::default().fg(Color::Gray),
-    ));
-    lines.push(Line::default());
+    lines.extend(plain_lines(output, body_width, faint()));
+    close_gutter(&mut lines);
     lines
 }
 
-/// A fingerprint of everything `block_lines` reads from a block.
-fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
+/// Columns kept for a tool call's status after its summary (` ⠿ running`,
+/// ` ✓ 274.0s`) and the space before it.
+const STATUS_ROOM: usize = 11;
+
+/// Fewest columns a tool call's summary gets beside its name; with less, the
+/// name has a line of its own.
+const SUMMARY_MIN: usize = 25;
+
+/// `text` cut to at most `width` cells, ending in `…` when cut.
+fn shorten(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(1);
+        if used + w + 1 > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// Blank lines between two blocks: one, except inside a run of tool calls
+/// and hooks, which stay compact (each call's gutter is closed off with `└`
+/// instead), so a burst of calls does not take a row more per call.
+fn block_gap(before: &TBlock, after: &TBlock) -> usize {
+    let compact = |b: &TBlock| matches!(b, TBlock::Tool { .. } | TBlock::Hook { .. });
+    usize::from(!(compact(before) && compact(after)))
+}
+
+fn is_blank(line: &Line<'_>) -> bool {
+    line.spans.iter().all(|s| s.content.trim().is_empty())
+}
+
+/// Ends the gutter on a block's last line (`└` for `│`), closing it off
+/// from whatever comes next.
+fn close_gutter(lines: &mut [Line<'static>]) {
+    if let Some(span) = lines.last_mut().and_then(|l| l.spans.first_mut())
+        && let Some(rest) = span.content.strip_prefix("  │")
+    {
+        span.content = format!("  └{rest}").into();
+    }
+}
+
+/// A fingerprint of everything `block_lines` reads from a block, and of the
+/// space above it.
+fn block_key(b: &TBlock, gap: usize, thinking_live: bool, elapsed: f32) -> u64 {
     fn value<H: Hasher>(v: &serde_json::Value, h: &mut H) {
         use serde_json::Value;
         std::mem::discriminant(v).hash(h);
@@ -641,6 +693,7 @@ fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
         }
     }
     let mut h = DefaultHasher::new();
+    gap.hash(&mut h);
     std::mem::discriminant(b).hash(&mut h);
     match b {
         TBlock::User { text } => text.hash(&mut h),
@@ -742,20 +795,34 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut fresh = 0;
     let shown = app.shown_blocks();
     for (i, b) in shown.iter().enumerate() {
-        let key = block_key(b, thinking_live, elapsed);
-        if i == fresh && view.blocks.get(i).is_some_and(|(k, _)| *k == key) {
+        // The space above a block is laid out with it: it depends on the
+        // block before, and a change there lays out this one again anyway.
+        let gap = i.checked_sub(1).map_or(0, |p| block_gap(&shown[p], b));
+        let key = block_key(b, gap, thinking_live, elapsed);
+        if i == fresh && view.blocks.get(i).is_some_and(|k| k.key == key) {
             fresh += 1;
             continue;
         }
         if i == fresh {
             // First stale block: drop its lines and everything after.
-            let keep = i.checked_sub(1).map_or(0, |p| view.blocks[p].1);
+            let keep = i.checked_sub(1).map_or(0, |p| view.blocks[p].end);
             view.blocks.truncate(i);
             view.rendered.truncate(keep);
             view.lines.truncate(keep);
         }
         let mut lines = block_lines(b, width, thinking_live, elapsed);
+        // The gap is the only space between blocks.
+        while lines.last().is_some_and(is_blank) {
+            lines.pop();
+        }
         clamp_lines(&mut lines, inner.width as usize);
+        if !lines.is_empty() {
+            for _ in 0..gap {
+                view.lines.push(String::new());
+                view.rendered.push(Line::default());
+            }
+        }
+        let top = view.rendered.len();
         view.lines.extend(lines.iter().map(|l| {
             l.spans
                 .iter()
@@ -763,11 +830,15 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 .collect::<String>()
         }));
         view.rendered.extend(lines);
-        view.blocks.push((key, view.rendered.len()));
+        view.blocks.push(KeptBlock {
+            key,
+            top,
+            end: view.rendered.len(),
+        });
     }
     if fresh == shown.len() && view.blocks.len() > fresh {
         // Blocks were removed from the end (rewind, /clear).
-        let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].1);
+        let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].end);
         view.blocks.truncate(fresh);
         view.rendered.truncate(keep);
         view.lines.truncate(keep);
@@ -895,7 +966,7 @@ fn tool_body_lines(
         let style = if is_error {
             Style::default().fg(Color::Red)
         } else {
-            Style::default().fg(Color::Gray)
+            faint()
         };
         if !is_error && looks_like_diff(output) {
             lines.extend(diff_lines(output, width));
@@ -2570,9 +2641,10 @@ mod tests {
         assert!(app.tick_mouse());
         app.handle_mouse(mouse(MouseEventKind::Up(left), x + 5, 23));
         assert!(!app.tick_mouse());
-        assert!(
-            app.take_copy_request()
-                .is_some_and(|t| t.trim_end().ends_with("  second prompt"))
+        // The transcript ends with that prompt, so the drag stops in it.
+        assert_eq!(
+            app.take_copy_request().as_deref(),
+            Some("src/tui/app.rs please\n\n❯ You\n  second")
         );
 
         // A press outside the transcript, or a key, drops the selection.
@@ -2628,6 +2700,222 @@ mod tests {
             "{asked:?}"
         );
         assert!(!asked[0].contains("274"), "{asked:?}");
+    }
+
+    #[test]
+    fn blocks_are_one_blank_line_apart_and_a_run_of_calls_is_closed_off() {
+        use super::super::app::tests::mouse;
+        use crate::core::AgentEvent as E;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        // Text that ends in blank lines of its own gets no second one.
+        app.on_event(E::TextDelta("Looking.\n\n\n".into()));
+        for id in ["t1", "t2"] {
+            app.on_event(E::ToolCallStarted {
+                id: id.into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": format!("run {id}")}),
+            });
+            app.on_event(E::ToolCallResult {
+                id: id.into(),
+                output: format!("{id}-out\n{id}-end"),
+                is_error: false,
+            });
+        }
+        app.on_event(E::HookStarted {
+            id: "h".into(),
+            name: "PostToolUse:Bash".into(),
+        });
+        app.on_event(E::ToolCallStarted {
+            id: "t3".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "run t3"}),
+        });
+        app.on_event(E::ThinkingDelta("hmm".into()));
+        app.on_event(E::TextDelta("Done.".into()));
+        app.transcript.push_notice("a notice");
+        app.transcript.push_system("a system line");
+        screen(&mut app, 80, 50);
+        let lines = app.transcript_view.lines.clone();
+        let text = lines.join("\n");
+        let blank = |s: &str| s.trim().is_empty();
+        assert!(
+            !lines.windows(2).any(|w| blank(&w[0]) && blank(&w[1])),
+            "{text}"
+        );
+        assert!(!blank(lines.last().unwrap()), "{text}");
+        let at = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+
+        // Calls, the hook between them and the running one form one run.
+        let (t1, t2, hook, t3) = (at("run t1"), at("run t2"), at("hook "), at("run t3"));
+        assert!(blank(&lines[t1 - 1]), "{text}");
+        assert_eq!(
+            lines[t1..=t3].to_vec(),
+            [
+                lines[t1].clone(),
+                "  │ t1-out".into(),
+                "  └ t1-end".into(),
+                lines[t2].clone(),
+                "  │ t2-out".into(),
+                "  └ t2-end".into(),
+                lines[hook].clone(),
+                lines[t3].clone(),
+            ],
+            "{text}"
+        );
+        // And everything else is one blank line apart.
+        assert!(
+            blank(&lines[t3 + 1]) && lines[t3 + 2].contains("💭"),
+            "{text}"
+        );
+        for (before, after) in [("Done.", "a notice"), ("a notice", "a system line")] {
+            assert_eq!(at(before) + 2, at(after), "{text}");
+        }
+        for header in ["● Claude", "❯ You"] {
+            assert!(blank(&lines[at(header) - 1]), "{text}");
+        }
+
+        // A click on the blank line above a call does nothing; one on its
+        // head expands it.
+        let top = app.transcript_view.area.y as usize;
+        let scroll = app.scroll as usize;
+        let row = |line: usize| (top + line - scroll) as u16;
+        let click = |app: &mut App, row: u16| {
+            app.last_click_forget();
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 10, row));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
+        };
+        let collapsed = |app: &App| {
+            app.transcript.blocks.iter().find_map(|b| match b {
+                TBlock::Tool { id, collapsed, .. } if id == "t1" => Some(*collapsed),
+                _ => None,
+            })
+        };
+        let before = collapsed(&app);
+        click(&mut app, row(t1 - 1));
+        assert_eq!(collapsed(&app), before);
+        click(&mut app, row(t1));
+        assert_eq!(collapsed(&app), before.map(|c| !c));
+    }
+
+    #[test]
+    fn a_call_shows_its_command_plainly_and_its_output_dimmed() {
+        let block = TBlock::Tool {
+            id: "t".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command": format!("grep {} file", "pattern ".repeat(12))}),
+            output: "found it".into(),
+            is_error: false,
+            done: true,
+            collapsed: false,
+            started: std::time::Instant::now(),
+            duration: Some(std::time::Duration::from_millis(700)),
+            agent: None,
+        };
+        let lines = block_lines(&block, 80, false, 0.0);
+        let text: Vec<String> = lines.iter().map(crate::tui::code::line_text).collect();
+        // The command wraps; its status is on the first line, after its words.
+        assert_eq!(text.len(), 3, "{text:?}");
+        assert!(text[0].ends_with("  ✓ 0.7s"), "{text:?}");
+        assert!(!text[1].contains('✓'), "{text:?}");
+        let span = |line: usize, s: &str| {
+            lines[line]
+                .spans
+                .iter()
+                .find(|sp| sp.content.contains(s))
+                .unwrap()
+                .style
+        };
+        for line in [0, 1] {
+            let style = span(line, "pattern");
+            assert_eq!(style.fg, None, "{text:?}");
+            assert!(!style.add_modifier.contains(Modifier::DIM), "{text:?}");
+        }
+        // At the end of the first line's width, apart from the command.
+        let cells = |s: &str| UnicodeWidthStr::width(s);
+        assert_eq!(cells(&text[0]) - cells(" ✓ 0.7s"), 80 - 10, "{text:?}");
+        assert_eq!(text[2], "  └ found it");
+        for s in ["└", "found it"] {
+            assert!(span(2, s).add_modifier.contains(Modifier::DIM), "{text:?}");
+        }
+
+        // Collapsed, the gutter ends on the row that counts what is hidden.
+        let mut block = block;
+        if let TBlock::Tool {
+            output, collapsed, ..
+        } = &mut block
+        {
+            *output = "1\n2\n3\n4\n5\n6".into();
+            *collapsed = true;
+        }
+        let text: Vec<String> = block_lines(&block, 80, false, 0.0)
+            .iter()
+            .map(crate::tui::code::line_text)
+            .collect();
+        assert_eq!(text[2..6], ["  │ 1", "  │ 2", "  │ 3", "  │ 4"], "{text:?}");
+        assert!(text[6].starts_with("  └ … 2 more lines"), "{text:?}");
+    }
+
+    #[test]
+    fn a_long_tool_name_keeps_its_status_in_view() {
+        let block = |name: &str, done: bool| TBlock::Tool {
+            id: "t".into(),
+            name: name.into(),
+            input: serde_json::json!({"query": "word ".repeat(30)}),
+            output: String::new(),
+            is_error: false,
+            done,
+            collapsed: true,
+            started: std::time::Instant::now(),
+            duration: Some(std::time::Duration::from_millis(700)),
+            agent: None,
+        };
+        let render = |name: &str, done: bool, width: usize| -> Vec<String> {
+            let mut lines = block_lines(&block(name, done), width, false, 0.0);
+            clamp_lines(&mut lines, width + 4);
+            lines.iter().map(crate::tui::code::line_text).collect()
+        };
+        // Raw MCP names as Claude Code lists them (the longest in
+        // `mcp_server.jsonl` is 83), on 70, 80 and 120 columns.
+        let names = [
+            "mcp__claude_ai_Google_Sheets__copy_sheet_to_another_spreadsheet",
+            "mcp__claude_ai_Intuit_QuickBooks__qbo_accounting_get_sales_by_customer_summary_text",
+        ];
+        for name in names {
+            for width in [64, 74, 114] {
+                for (done, status) in [(false, "⠿ running"), (true, "✓ 0.7s")] {
+                    let text = render(name, done, width);
+                    let all = format!("{width}: {text:?}");
+                    assert!(text.len() > 1, "{all}");
+                    assert!(text.iter().all(|l| l.width() <= width), "{all}");
+                    assert!(text[0].ends_with(&format!(" {status}")), "{all}");
+                    if 5 + name.len() + 2 + SUMMARY_MIN + STATUS_ROOM <= width {
+                        // Room enough beside it: the summary stays there.
+                        assert!(text[0].contains(&format!("{name}  word")), "{all}");
+                        continue;
+                    }
+                    // The name, shortened if it must be, and the status on a
+                    // line of their own; the summary below, under the name.
+                    let fits = 5 + name.len() + STATUS_ROOM <= width;
+                    assert_eq!(text[0].contains(name), fits, "{all}");
+                    assert!(text[0].starts_with("  ⚡ mcp__claude_ai_"), "{all}");
+                    assert!(text[1].starts_with("     word word"), "{all}");
+                    assert!(!text[1..].concat().contains('…'), "{all}");
+                }
+            }
+        }
+
+        // The summary stays beside a name that leaves it room enough.
+        let at_most = 74 - SUMMARY_MIN - STATUS_ROOM - 2 - 5;
+        let text = render(&"n".repeat(at_most), true, 74);
+        assert!(text[0].contains("  word") && text[1].starts_with(&" ".repeat(at_most + 6)));
+        let text = render(&"n".repeat(at_most + 1), true, 74);
+        assert!(
+            text[0].ends_with(" ✓ 0.7s") && !text[0].contains("word"),
+            "{text:?}"
+        );
     }
 
     #[test]

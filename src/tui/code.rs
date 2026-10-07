@@ -130,36 +130,41 @@ pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
 }
 
 /// Safety net: no rendered line may exceed `width` cells, whatever the
-/// wrapping code did. Cuts the offending span and appends `…`.
+/// wrapping code did. Cuts the line to leave room for a `…`, which takes the
+/// style of the span it was cut in.
 pub fn clamp_lines(lines: &mut [Line<'static>], width: usize) {
     for line in lines.iter_mut() {
+        let total: usize = line
+            .spans
+            .iter()
+            .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        if total <= width || width == 0 {
+            continue;
+        }
+        let room = width - 1;
         let mut used = 0usize;
-        let mut cut_at: Option<(usize, String)> = None;
-        for (i, span) in line.spans.iter().enumerate() {
-            let w = unicode_width::UnicodeWidthStr::width(span.content.as_ref());
-            if used + w > width {
-                let room = width.saturating_sub(used).saturating_sub(1);
-                let mut kept = String::new();
-                let mut kw = 0;
-                for c in span.content.chars() {
-                    let cw = UnicodeWidthChar::width(c).unwrap_or(1);
-                    if kw + cw > room {
-                        break;
-                    }
-                    kept.push(c);
-                    kw += cw;
+        let mut kept: Vec<Span<'static>> = Vec::new();
+        for span in std::mem::take(&mut line.spans) {
+            let mut text = String::new();
+            let mut cut = false;
+            for c in span.content.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+                if used + cw > room {
+                    cut = true;
+                    break;
                 }
-                kept.push('…');
-                cut_at = Some((i, kept));
+                text.push(c);
+                used += cw;
+            }
+            if cut {
+                text.push('…');
+                kept.push(Span::styled(text, span.style));
                 break;
             }
-            used += w;
+            kept.push(Span::styled(text, span.style));
         }
-        if let Some((i, kept)) = cut_at {
-            let style = line.spans[i].style;
-            line.spans.truncate(i);
-            line.spans.push(Span::styled(kept, style));
-        }
+        line.spans = kept;
     }
 }
 
@@ -255,12 +260,19 @@ fn wrap_spans(
     lines
 }
 
+/// Output and the gutter beside it: the terminal's own colour, dimmed, which
+/// stays readable on a dark background and a light one alike (a named grey
+/// all but vanishes on one of them).
+pub fn faint() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
 fn gutter() -> Vec<Span<'static>> {
-    vec![Span::styled(GUTTER, Style::default().fg(Color::DarkGray))]
+    vec![Span::styled(GUTTER, faint())]
 }
 
 fn cont() -> Vec<Span<'static>> {
-    vec![Span::styled(CONT, Style::default().fg(Color::DarkGray))]
+    vec![Span::styled(CONT, faint())]
 }
 
 /// Highlighted, wrapped source lines with a gutter. `hint` is a language
@@ -359,7 +371,7 @@ pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
             line[1..].to_string()
         };
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(marker, style.add_modifier(Modifier::BOLD)),
         ];
         out.extend(wrap_spans(
@@ -386,7 +398,7 @@ pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<
             .map(|(s, t)| (s.bg(Color::Rgb(60, 20, 20)), t))
             .collect();
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(
                 "- ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -400,7 +412,7 @@ pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<
             .map(|(s, t)| (s.bg(Color::Rgb(15, 50, 20)), t))
             .collect();
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(
                 "+ ",
                 Style::default()
@@ -482,6 +494,17 @@ mod tests {
             unicode_width::UnicodeWidthStr::width(line_text(&lines[0]).as_str()),
             5
         );
+        // Full exactly at a span boundary: the `…` still fits.
+        let mut lines = vec![Line::from(vec![Span::raw("abcde"), Span::raw("fg")])];
+        clamp_lines(&mut lines, 5);
+        assert_eq!(line_text(&lines[0]), "abcd…");
+        // A wide character that would straddle the edge is dropped.
+        let mut lines = vec![Line::from(vec![Span::raw("abc"), Span::raw("界x")])];
+        clamp_lines(&mut lines, 4);
+        assert_eq!(line_text(&lines[0]), "abc…");
+        let mut lines = vec![Line::from(Span::raw("abcde"))];
+        clamp_lines(&mut lines, 5);
+        assert_eq!(line_text(&lines[0]), "abcde");
     }
 
     #[test]
