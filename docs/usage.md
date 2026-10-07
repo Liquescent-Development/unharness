@@ -91,7 +91,7 @@ for is denied. The next harness then gets the first prompt and the
 summary in place of everything before it, and what came after it turn by
 turn. Esc while it writes switches without one; `bridge_summary =
 "never"` turns it off. Only a harness whose session saw the whole
-conversation is asked.
+conversation is asked, and not while its subagents are at work.
 
 Policy, model and effort changes apply from the next turn on every harness:
 

@@ -2476,10 +2476,13 @@ impl App {
 
     /// Whether the conversation will not fit in the bridge to `next`, and
     /// the harness being left can say what it was about: it has a session,
-    /// and that session saw the whole transcript.
+    /// and that session saw the whole transcript. Not while its subagents
+    /// are at work: what they ask or report would land in the summary's
+    /// turn.
     fn handoff_wanted(&self, next: HarnessId) -> bool {
         self.bridge_summary == BridgeSummary::Auto
             && (self.session_alive || self.session_ids.contains_key(&self.active))
+            && self.subagents.is_empty()
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
             && self.shell.is_none()
             && self.effective_policy().is_some()
@@ -5762,6 +5765,38 @@ pub(crate) mod tests {
             [.., Action::SendTurn { text, .. }] => text.clone(),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Claude, live, after a turn too long for a bridge of 500 characters.
+    fn over_budget_app() -> App {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.bridge_max_chars = Some(500);
+        app.submit_prompt("the task".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app
+    }
+
+    #[test]
+    fn no_handoff_is_asked_for_while_subagents_are_at_work() {
+        let mut app = over_budget_app();
+        app.on_event(AgentEvent::SubagentStarted {
+            id: "agent-1".into(),
+            description: "look around".into(),
+            kind: None,
+        });
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     }
 
     #[test]

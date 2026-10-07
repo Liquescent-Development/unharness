@@ -530,7 +530,8 @@ recorded ones. For anything else:
 - Bridging (`tui/bridge.rs`): a switch whose bridge is over budget first
   asks the harness being left for a handoff summary (`App::ask_handoff`,
   `Block::Handoff`), with every permission request denied while it
-  writes. Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
+  writes; not while its subagents are at work (their requests and reports
+  would land in that turn). Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
   app-server, `bridge_max_chars = 600`): Claude wrote the summary within
   the word limit it was given, the switch followed the turn, and Codex
   answered from the first prompt and the summary it was sent. Windows
