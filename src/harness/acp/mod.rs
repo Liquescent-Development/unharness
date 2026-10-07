@@ -182,6 +182,9 @@ impl Harness for AcpHarness {
             // session.
             mcp: McpSupport::via(McpChannel::Protocol, false),
             plan_mode: false,
+            // The spec's commands are run by a prompt that starts with
+            // `/name`, and listed by `available_commands_update`.
+            slash_commands: true,
         }
     }
 

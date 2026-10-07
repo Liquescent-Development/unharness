@@ -376,6 +376,10 @@ impl Harness for ClaudeHarness {
             mcp: McpSupport::via(McpChannel::CommandLine, true),
             // `--permission-mode plan`.
             plan_mode: true,
+            // A stream-json prompt runs its built-ins, custom commands and
+            // skills, and an unknown `/name` reaches the model as text
+            // (2.1.292); `initialize` answers with the list.
+            slash_commands: true,
         }
     }
 

@@ -1,6 +1,6 @@
 HookStarted id=bf82b57f-0145-4cb2-8022-362d1b5ea1f3 SessionStart:startup
 HookEnded id=bf82b57f-0145-4cb2-8022-362d1b5ea1f3 SessionStart:startup ok ""
-CapabilitiesChanged models=12 provider=anthropic
+CapabilitiesChanged models=12 provider=anthropic commands=71
 SessionStarted id=eb690459-6244-4a7f-931e-8eca5e2eb29e model=claude-haiku-4-5-20251001
 Notice "MCP server 'plugin:cq:cq' failed to start"
 TurnStarted

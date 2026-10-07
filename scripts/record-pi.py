@@ -6,6 +6,8 @@ Usage: scripts/record-pi.py OUT.jsonl [--provider P --model M] [--no-models] PRO
 
 With `--extension src/harness/pi/gate.ts --select Allow --select Deny` the
 gate's dialogs are answered in that order (the last answer repeats).
+`--no-extensions`, `--no-context-files`, `--skill F` and `--prompt-template
+F` keep the user's own resources (and their text) out of the recording.
 """
 import argparse
 import json
@@ -45,6 +47,13 @@ def main() -> int:
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
     ap.add_argument("--extension", action="append", default=[],
                     help="load this extension file (repeatable); others are not discovered")
+    ap.add_argument("--no-extensions", action="store_true", help="discover no extensions")
+    ap.add_argument("--no-context-files", action="store_true",
+                    help="leave out AGENTS.md files (pi's own global one included)")
+    ap.add_argument("--skill", action="append", default=[],
+                    help="load this skill (repeatable); others are not discovered")
+    ap.add_argument("--prompt-template", action="append", default=[],
+                    help="load this prompt template (repeatable); others are not discovered")
     ap.add_argument("--select", action="append", default=[],
                     help="the answer to the next select dialog (repeatable; default: ok)")
     args = ap.parse_args()
@@ -57,10 +66,20 @@ def main() -> int:
         cmd += ["--model", args.model]
     if args.thinking:
         cmd += ["--thinking", args.thinking]
-    if args.extension:
+    if args.extension or args.no_extensions:
         cmd += ["--no-extensions"]
         for e in args.extension:
             cmd += ["-e", os.path.abspath(e)]
+    if args.no_context_files:
+        cmd += ["--no-context-files"]
+    if args.skill:
+        cmd += ["--no-skills"]
+        for s in args.skill:
+            cmd += ["--skill", os.path.abspath(s)]
+    if args.prompt_template:
+        cmd += ["--no-prompt-templates"]
+        for t in args.prompt_template:
+            cmd += ["--prompt-template", os.path.abspath(t)]
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, bufsize=1)
@@ -93,6 +112,7 @@ def main() -> int:
         return f"req-{seq}"
 
     send({"id": next_id(), "type": "get_state"})
+    send({"id": next_id(), "type": "get_commands"})
     if not args.no_models:
         send({"id": next_id(), "type": "get_available_models"})
     if args.thinking_levels:

@@ -130,6 +130,9 @@ impl Harness for AgyHarness {
             // `--mode plan` makes agy write a plan file under its state
             // directory and then act in the same turn: nothing waits.
             plan_mode: false,
+            // Not seen to read a `/name` prompt as a command (unverified),
+            // and it lists none.
+            slash_commands: false,
         }
     }
 

@@ -235,6 +235,37 @@ pub struct CapsUpdate {
     pub models: Option<Vec<ModelInfo>>,
     /// The provider the live session runs on, as the harness reports it.
     pub provider: Option<ProviderId>,
+    /// The commands of its own the live session takes as `/name` at the
+    /// start of a prompt; each list replaces the one before.
+    pub commands: Option<Vec<HarnessCommand>>,
+}
+
+/// A command a harness runs when a prompt starts with `/name`: one of its
+/// own, a custom one or a skill, as its session lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessCommand {
+    /// Without the `/`.
+    pub name: String,
+    pub description: String,
+    /// What it takes after its name, when the harness says.
+    pub hint: Option<String>,
+}
+
+impl HarnessCommand {
+    /// `None` for a name that is empty or has a space in it: no prompt
+    /// could name it. An empty hint is none.
+    pub fn new(name: &str, description: Option<&str>, hint: Option<&str>) -> Option<Self> {
+        let name = name.trim().trim_start_matches('/');
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return None;
+        }
+        let hint = hint.map(str::trim).filter(|h| !h.is_empty());
+        Some(HarnessCommand {
+            name: name.to_string(),
+            description: description.unwrap_or_default().trim().to_string(),
+            hint: hint.map(str::to_string),
+        })
+    }
 }
 
 impl CapsUpdate {
@@ -267,6 +298,9 @@ impl CapsUpdate {
         }
         if newer.provider.is_some() {
             self.provider = newer.provider;
+        }
+        if newer.commands.is_some() {
+            self.commands = newer.commands;
         }
     }
 }
@@ -568,6 +602,9 @@ impl AgentEvent {
                 if let Some(p) = &u.provider {
                     parts.push(format!("provider={p}"));
                 }
+                if let Some(c) = &u.commands {
+                    parts.push(format!("commands={}", c.len()));
+                }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }
             AgentEvent::TurnCompleted { stop_reason } => match stop_reason {
@@ -660,6 +697,16 @@ mod tests {
             AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec!["low".into()])).summary(),
             "CapabilitiesChanged efforts=low"
         );
+    }
+
+    #[test]
+    fn a_command_needs_a_name_a_prompt_can_carry() {
+        let c = HarnessCommand::new("/review ", None, Some("  ")).unwrap();
+        assert_eq!(c.name, "review");
+        assert_eq!(c.description, "");
+        assert_eq!(c.hint, None);
+        assert!(HarnessCommand::new("", Some("d"), None).is_none());
+        assert!(HarnessCommand::new("two words", Some("d"), None).is_none());
     }
 
     #[test]

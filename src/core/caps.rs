@@ -152,6 +152,11 @@ pub struct Capabilities {
     /// for approval before acting. (`plan_updates` only says that a todo
     /// list is reported.)
     pub plan_mode: bool,
+    /// A prompt that starts with `/name` runs the harness's command of that
+    /// name (its own, a custom one or a skill), so a command unharness
+    /// does not have itself is passed on. Which ones there are comes with
+    /// `CapsUpdate::commands`, where the harness lists them.
+    pub slash_commands: bool,
 }
 
 /// Whether a harness takes MCP server definitions for one session, without

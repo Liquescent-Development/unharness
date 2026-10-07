@@ -686,8 +686,8 @@ async fn pi_rpc_session_streams_tool_and_text() {
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
-    // The driver sends get_state first; the fixture then replays the catalog
-    // responses before the first prompt.
+    // The driver sends get_state and get_commands first; the fixture then
+    // replays their answers before the first prompt.
     handle.send(SessionCommand::turn("pong?")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
@@ -695,6 +695,10 @@ async fn pi_rpc_session_streams_tool_and_text() {
             .iter()
             .any(|e| matches!(e, AgentEvent::SessionStarted { .. }))
     );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::CapabilitiesChanged(u) if u.commands.as_ref().is_some_and(|c| c.len() == 3)
+    )));
     assert!(
         events
             .iter()
@@ -719,6 +723,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
 
     let sent = fake.sent_lines();
     assert_eq!(sent[0]["type"], "get_state");
+    assert_eq!(sent[1]["type"], "get_commands");
     assert!(
         sent.iter()
             .any(|v| v["type"] == "prompt" && v["message"] == "run bash")

@@ -1,6 +1,6 @@
 HookStarted id=01140a59-4d7f-4bc8-ab90-4e0ad1c454a5 SessionStart:startup
 HookEnded id=01140a59-4d7f-4bc8-ab90-4e0ad1c454a5 SessionStart:startup ok ""
-CapabilitiesChanged models=14 provider=vertex
+CapabilitiesChanged models=14 provider=vertex commands=60
 SessionStarted id=820c010e-1af4-4250-9e84-1301ff0f3d8a model=claude-haiku-4-5@20251001
 Notice "MCP server 'plugin:cq:cq' failed to start"
 Notice "API retry 1/2 (cloud_credential_error)"

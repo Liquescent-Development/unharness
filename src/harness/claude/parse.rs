@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::Value;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessId, HookOutcome, ModelInfo, ModelRef,
-    PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question, QuestionOption,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
+    ModelRef, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question,
+    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// unharness's id for the API Claude calls, from Claude's own name for it
@@ -27,6 +27,25 @@ pub fn provider_id(api_provider: &str) -> ProviderId {
 /// Vertex's carry an `@` date (2.1.292, without credentials for either).
 /// `default` is one of them, and `--model default` takes it. `None` for an
 /// empty list, as some older recordings carry.
+/// The commands in Claude's answer to `initialize` (`commands`: `name`,
+/// `description`, `argumentHint`, `aliases`). `init` names them too, some
+/// by an alias (`anthropic-skills:pdf` for `pdf`), and nothing else.
+fn initialize_commands(answer: &Value) -> Option<Vec<HarnessCommand>> {
+    let commands = answer.get("commands")?.as_array()?;
+    Some(
+        commands
+            .iter()
+            .filter_map(|c| {
+                HarnessCommand::new(
+                    c.get("name")?.as_str()?,
+                    c.get("description").and_then(Value::as_str),
+                    c.get("argumentHint").and_then(Value::as_str),
+                )
+            })
+            .collect(),
+    )
+}
+
 pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
     let models = answer.get("models")?.as_array()?;
     if models.is_empty() {
@@ -288,6 +307,7 @@ impl ClaudeParser {
                 if let Some(answer) = answer {
                     let update = CapsUpdate {
                         models: initialize_models(answer),
+                        commands: initialize_commands(answer),
                         provider: answer
                             .pointer("/account/apiProvider")
                             .and_then(Value::as_str)
@@ -1159,6 +1179,27 @@ mod tests {
     #[test]
     fn fixture_hooks_json() {
         fixture("hooks_json");
+    }
+
+    /// The answer to `initialize` lists the commands, with what each takes.
+    #[test]
+    fn initialize_lists_the_commands() {
+        let text = std::fs::read_to_string(fixtures_dir(file!()).join("hooks.jsonl")).unwrap();
+        let commands: Vec<HarnessCommand> = replay(&mut ClaudeParser::new(), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::CapabilitiesChanged(u) => u.commands,
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(commands.len(), 71);
+        let debug = commands.iter().find(|c| c.name == "debug").unwrap();
+        assert_eq!(debug.hint.as_deref(), Some("[issue description]"));
+        assert!(debug.description.starts_with("Enable debug logging"));
+        // An empty `argumentHint` is none.
+        let status = commands.iter().find(|c| c.name == "cq:status").unwrap();
+        assert_eq!(status.hint, None);
     }
 
     /// A `PermissionRequest` hook that denies before the host answers

@@ -1,6 +1,6 @@
 HookStarted id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup
 HookEnded id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup ok ""
-CapabilitiesChanged models=12 provider=anthropic
+CapabilitiesChanged models=12 provider=anthropic commands=71
 HookStarted id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit
 HookEnded id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit ok "prompt-hook-context"
 SessionStarted id=ccd8a477-177b-4874-be0c-b14fa46bca99 model=claude-haiku-4-5-20251001

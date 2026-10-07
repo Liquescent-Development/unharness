@@ -1,7 +1,9 @@
 CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=201664ad-6914-49da-8f50-0e36f73b8d3b model=claude-fable-5-1[1m]
 CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
+CapabilitiesChanged commands=0
 CapabilitiesChanged efforts= models=12
+CapabilitiesChanged commands=0
 Context used=17065 window=200000
 TextDelta "hello"
 Context used=17137 window=200000
