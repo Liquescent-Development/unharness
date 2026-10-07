@@ -1383,12 +1383,14 @@ impl App {
     }
 
     /// Inject a message into the running turn, where the harness can; queue it otherwise.
+    /// A handoff summary's turn is not steered: the answer to the message
+    /// would be taken for the summary. The message goes to the next harness.
     pub fn steer(&mut self, text: String) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
-        if !self.is_generating || self.compacting {
+        if !self.is_generating || self.compacting || self.handoff.is_some() {
             self.queue_prompt(text);
             return;
         }
@@ -5850,6 +5852,29 @@ pub(crate) mod tests {
             &app.take_actions()[..],
             [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
         ));
+    }
+
+    #[test]
+    fn steering_a_handoff_summary_queues_the_message_for_the_next_harness() {
+        use super::super::transcript::Block;
+        let mut app = over_budget_app();
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        app.steer("and the tests".into());
+        assert!(app.take_actions().is_empty());
+        app.on_event(AgentEvent::TextDelta("Goal: the task.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Handoff { text, .. } if text == "Goal: the task."))
+        );
+        let sent = sent_turn(&mut app);
+        assert!(sent.ends_with("and the tests"), "{sent}");
     }
 
     #[test]
