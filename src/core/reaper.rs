@@ -15,11 +15,13 @@ pub const ARG: &str = "__unharness-reap";
 static EXE: OnceLock<PathBuf> = OnceLock::new();
 
 /// Start CLIs through this binary from now on: unharness's `main` does.
-/// A test binary is not unharness, so its CLIs are started bare.
+/// A test binary is not unharness, so its CLIs are started bare. The
+/// child execs the image it was forked from, also once an update has
+/// replaced the file it came from, so the reaper is always this version.
 pub fn enable() {
     #[cfg(target_os = "linux")]
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = EXE.set(exe);
+    if std::fs::metadata("/proc/self/exe").is_ok() {
+        let _ = EXE.set(PathBuf::from("/proc/self/exe"));
     }
 }
 
@@ -41,6 +43,12 @@ pub fn wrap(cmd: std::process::Command) -> std::io::Result<std::process::Command
         ));
     }
     let mut outer = std::process::Command::new(exe);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // As `ps` shows it.
+        outer.arg0("unharness");
+    }
     outer.arg(ARG).arg("--").arg(program).args(cmd.get_args());
     for (key, value) in cmd.get_envs() {
         match value {
