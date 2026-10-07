@@ -245,6 +245,10 @@ one passes 80%.
 
 ## Rendering
 
+Blocks are one blank line apart, except tool calls (and hooks) in a row,
+which stay together: each call's gutter ends with `└`. A call's command
+is in the terminal's own colour and its output dimmed below it.
+
 Tool calls render as blocks:
 
 - shell output in a gutter;

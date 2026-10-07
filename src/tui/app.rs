@@ -479,15 +479,25 @@ pub struct TranscriptView {
     pub lines: Vec<String>,
     /// Every rendered line, kept between frames.
     pub rendered: Vec<Line<'static>>,
-    /// Per transcript block: the fingerprint it was rendered from, and
-    /// where its lines end in `rendered` and `lines`.
-    pub blocks: Vec<(u64, usize)>,
+    /// Per transcript block, where its lines are in `rendered` and `lines`.
+    pub blocks: Vec<KeptBlock>,
     /// The width `rendered` was laid out for.
     pub width: u16,
     /// The scrollbar, when there is more transcript than fits.
     pub scrollbar: Option<Scrollbar>,
     /// The jump-to-bottom label, shown while scrolled away from the end.
     pub jump: Option<Rect>,
+}
+
+/// One transcript block as it was laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptBlock {
+    /// A fingerprint of the block and of the space above it.
+    pub key: u64,
+    /// Its first line, below that space.
+    pub top: usize,
+    /// One past its last line.
+    pub end: usize,
 }
 
 /// The transcript's scrollbar: a thumb on the right border whose size and
@@ -4248,18 +4258,12 @@ impl App {
     /// Expand or collapse the tool call whose first row is rendered line
     /// `line` (a click on it).
     fn toggle_tool_at(&mut self, line: usize) -> bool {
-        let mut start = 0;
-        let mut at = None;
-        for (i, (_, end)) in self.transcript_view.blocks.iter().enumerate() {
-            if line == start {
-                at = Some(i);
-            }
-            if line < *end {
-                break;
-            }
-            start = *end;
-        }
-        let Some(i) = at else {
+        let Some(i) = self
+            .transcript_view
+            .blocks
+            .iter()
+            .position(|b| b.top == line && b.top < b.end)
+        else {
             return false;
         };
         match self.shown_transcript_mut().blocks.get_mut(i) {

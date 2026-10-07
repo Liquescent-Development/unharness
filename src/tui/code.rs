@@ -255,12 +255,19 @@ fn wrap_spans(
     lines
 }
 
+/// Output and the gutter beside it: the terminal's own colour, dimmed, which
+/// stays readable on a dark background and a light one alike (a named grey
+/// all but vanishes on one of them).
+pub fn faint() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
 fn gutter() -> Vec<Span<'static>> {
-    vec![Span::styled(GUTTER, Style::default().fg(Color::DarkGray))]
+    vec![Span::styled(GUTTER, faint())]
 }
 
 fn cont() -> Vec<Span<'static>> {
-    vec![Span::styled(CONT, Style::default().fg(Color::DarkGray))]
+    vec![Span::styled(CONT, faint())]
 }
 
 /// Highlighted, wrapped source lines with a gutter. `hint` is a language
@@ -359,7 +366,7 @@ pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
             line[1..].to_string()
         };
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(marker, style.add_modifier(Modifier::BOLD)),
         ];
         out.extend(wrap_spans(
@@ -386,7 +393,7 @@ pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<
             .map(|(s, t)| (s.bg(Color::Rgb(60, 20, 20)), t))
             .collect();
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(
                 "- ",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
@@ -400,7 +407,7 @@ pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<
             .map(|(s, t)| (s.bg(Color::Rgb(15, 50, 20)), t))
             .collect();
         let first = vec![
-            Span::styled(GUTTER, Style::default().fg(Color::DarkGray)),
+            Span::styled(GUTTER, faint()),
             Span::styled(
                 "+ ",
                 Style::default()
