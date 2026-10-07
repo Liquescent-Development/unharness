@@ -22,7 +22,8 @@ use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -37,7 +38,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
@@ -152,6 +153,8 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         .then(|| herdr::Pane::from_env(|k| std::env::var(k).ok()))
         .flatten()
         .map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
+    // Before the terminal is taken, where an error can still be read.
+    let frames = FrameLog::from_env()?;
     let mut out = stdout();
     enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
@@ -181,7 +184,14 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         default_providers,
     });
 
-    let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;
+    let res = event_loop(
+        &mut terminal,
+        &mut app,
+        initial_prompt,
+        herdr.as_mut(),
+        frames,
+    )
+    .await;
     // A list still being asked for is not waited for.
     crate::core::process::ProbeProcess::kill_all();
     if let Some(h) = herdr {
@@ -202,6 +212,7 @@ async fn event_loop(
     app: &mut App,
     initial_prompt: Option<String>,
     mut herdr: Option<&mut herdr::Reporter>,
+    mut frames: Option<FrameLog>,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
@@ -225,7 +236,16 @@ async fn event_loop(
             h.update(app.herdr_report());
         }
         if needs_redraw {
-            terminal.draw(|f| ui::render(f, app))?;
+            let started = Instant::now();
+            let mut render = Duration::ZERO;
+            terminal.draw(|f| {
+                let rendering = Instant::now();
+                ui::render(f, app);
+                render = rendering.elapsed();
+            })?;
+            if let Some(log) = frames.as_mut() {
+                log.frame(app.transcript_view.took, render, started.elapsed());
+            }
             needs_redraw = false;
         }
 
@@ -257,6 +277,9 @@ async fn event_loop(
                         session = None;
                     }
                 }
+                if let Some(log) = frames.as_mut() {
+                    log.events += 1;
+                }
                 needs_redraw = true;
             }
             line = async {
@@ -270,11 +293,19 @@ async fn event_loop(
             }
             Some(Ok(event)) = input.next() => {
                 needs_redraw = true;
+                let started = Instant::now();
+                let mut taken = 1;
                 handle_event(app, event);
                 // A drag or a spin of the wheel arrives as a burst: take
                 // everything already waiting and draw once for all of it.
-                while let Some(Some(Ok(event))) = input.next().now_or_never() {
+                take_waiting(&mut input, |event| {
                     handle_event(app, event);
+                    taken += 1;
+                })
+                .await;
+                if let Some(log) = frames.as_mut() {
+                    log.inputs += taken;
+                    log.handling += started.elapsed();
                 }
             }
             Some((request, result)) = lists_rx.recv() => {
@@ -290,6 +321,7 @@ async fn event_loop(
             }
             _ = ends.recv() => app.quit(),
         }
+        let woke = Instant::now();
 
         for job in app.take_list_jobs() {
             let tx = lists_tx.clone();
@@ -336,6 +368,10 @@ async fn event_loop(
         }
 
         run_actions(app, &mut session, &mut shell).await;
+        if let Some(log) = frames.as_mut() {
+            log.wakes += 1;
+            log.after += woke.elapsed();
+        }
     }
 
     if let Some(s) = session.take() {
@@ -403,6 +439,84 @@ fn handle_event(app: &mut App, event: Event) {
         Event::Paste(_) => {}
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         _ => {}
+    }
+}
+
+/// With `UNHARNESS_FRAME_LOG=<file>`, a line per frame drawn: seconds
+/// since the start; since the last frame, how often the loop woke (for
+/// input, a harness event, the ticker or anything else), the input and
+/// harness events among that, how long the input took to handle and how
+/// long the work after each wake took (actions, a prompt sent, an editor
+/// while open); then how long the frame took to lay out the transcript,
+/// to render, and to draw (the render, a resize and the write).
+struct FrameLog {
+    file: std::fs::File,
+    start: Instant,
+    wakes: usize,
+    inputs: usize,
+    handling: Duration,
+    events: usize,
+    after: Duration,
+}
+
+impl FrameLog {
+    fn from_env() -> Result<Option<Self>> {
+        let Some(path) = std::env::var_os("UNHARNESS_FRAME_LOG") else {
+            return Ok(None);
+        };
+        let file = std::fs::File::create(&path).with_context(|| {
+            format!(
+                "could not create UNHARNESS_FRAME_LOG {}",
+                PathBuf::from(&path).display()
+            )
+        })?;
+        Ok(Some(Self {
+            file,
+            start: Instant::now(),
+            wakes: 0,
+            inputs: 0,
+            handling: Duration::ZERO,
+            events: 0,
+            after: Duration::ZERO,
+        }))
+    }
+
+    fn frame(&mut self, transcript: Duration, render: Duration, draw: Duration) {
+        let line = format!(
+            "{:.3} wakes={} input={} handling={}us events={} after={}us \
+             transcript={}us render={}us draw={}us\n",
+            self.start.elapsed().as_secs_f64(),
+            self.wakes,
+            self.inputs,
+            self.handling.as_micros(),
+            self.events,
+            self.after.as_micros(),
+            transcript.as_micros(),
+            render.as_micros(),
+            draw.as_micros(),
+        );
+        // A debugging aid: a line that cannot be written is not worth
+        // stopping for.
+        let _ = self.file.write_all(line.as_bytes());
+        self.wakes = 0;
+        self.inputs = 0;
+        self.handling = Duration::ZERO;
+        self.events = 0;
+        self.after = Duration::ZERO;
+    }
+}
+
+/// Hand every event `input` already has to `handle`. Polled with the
+/// calling task's waker: `EventStream` keeps the waker it was first left
+/// pending with until an event comes, so polled with any other
+/// (`now_or_never`) it would wake nobody for the next key, which then
+/// waited for the ticker (held keys came in clumps, #75).
+async fn take_waiting<S>(input: &mut S, mut handle: impl FnMut(Event))
+where
+    S: futures::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    while let Poll::Ready(Some(Ok(event))) = futures::poll!(input.next()) {
+        handle(event);
     }
 }
 
@@ -1135,6 +1249,58 @@ mod tests {
                 _ => None,
             })
             .expect("a shell block")
+    }
+
+    #[test]
+    fn the_task_that_took_the_input_is_woken_by_the_next_key() {
+        use std::collections::VecDeque;
+        use std::pin::Pin;
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Wake, Waker};
+
+        // As crossterm's `EventStream`: the waker it is first left
+        // pending with is the one woken by the next event.
+        struct Keys {
+            waiting: VecDeque<Event>,
+            waker: Option<Waker>,
+        }
+        impl futures::Stream for Keys {
+            type Item = std::io::Result<Event>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                match self.waiting.pop_front() {
+                    Some(event) => Poll::Ready(Some(Ok(event))),
+                    None => {
+                        self.waker.get_or_insert_with(|| cx.waker().clone());
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+        struct Task(AtomicUsize);
+        impl Wake for Task {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let key = |c| Event::Key(crossterm::event::KeyEvent::new(KeyCode::Char(c), NONE));
+        let mut keys = Keys {
+            waiting: [key('a'), key('b')].into(),
+            waker: None,
+        };
+        let task = Arc::new(Task(AtomicUsize::new(0)));
+        let waker = Waker::from(task.clone());
+        let mut taken = 0;
+        let drained = std::pin::pin!(take_waiting(&mut keys, |_| taken += 1))
+            .poll(&mut Context::from_waker(&waker));
+        assert!(drained.is_ready());
+        assert_eq!(taken, 2);
+        // The next key.
+        keys.waker.take().expect("left pending").wake();
+        assert_eq!(task.0.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

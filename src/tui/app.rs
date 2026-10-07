@@ -488,6 +488,8 @@ pub struct TranscriptView {
     pub scrollbar: Option<Scrollbar>,
     /// The jump-to-bottom label, shown while scrolled away from the end.
     pub jump: Option<Rect>,
+    /// How long the last frame took to bring `rendered` up to date.
+    pub took: Duration,
 }
 
 /// The transcript's scrollbar: a thumb on the right border whose size and
