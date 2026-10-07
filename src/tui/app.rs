@@ -4348,7 +4348,8 @@ const CHARS_PER_TOKEN: usize = 4;
 /// However large the window, a summary longer than this is no longer one.
 const HANDOFF_MAX_WORDS: usize = 1_500;
 
-/// What the harness being left is asked for.
+/// What the harness being left is asked for. It stays in that harness's
+/// session, so what it forbids is said to hold for this reply only.
 /// `budget`: the characters the bridge to `to` may take, half of which
 /// the summary is asked to stay within (in words, at about six characters
 /// a word), the rest being for the first prompt and what follows it.
@@ -4360,8 +4361,9 @@ fn handoff_prompt(to: &str, budget: usize) -> String {
          {words} words: the user's goal and constraints, the decisions made and why, what has \
          been done (files changed, commands run and what came of them), what is unfinished or \
          failing, and the next steps. Be specific (paths, names, error messages). Leave out \
-         your own setup (tools, connectors, MCP servers) unless the task depends on it. Do \
-         not use any tools and do not change anything: answer from what you already know."
+         your own setup (tools, connectors, MCP servers) unless the task depends on it. For \
+         this reply only, use no tools and change nothing: answer from what you already know. \
+         The conversation may come back to you later, with your tools as before."
     )
 }
 
@@ -5875,6 +5877,14 @@ pub(crate) mod tests {
         );
         let sent = sent_turn(&mut app);
         assert!(sent.ends_with("and the tests"), "{sent}");
+    }
+
+    #[test]
+    fn a_handoff_prompt_forbids_tools_for_its_own_reply_only() {
+        let ask = handoff_prompt("Codex", 24_000);
+        assert!(ask.contains("For this reply only, use no tools and change nothing"));
+        assert!(ask.contains("with your tools as before"));
+        assert!(!ask.contains("Do not use any tools"));
     }
 
     #[test]
