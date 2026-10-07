@@ -18,7 +18,8 @@ use super::mcp::McpServer;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
 use super::session::{
-    Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    Attachment, ProcessModel, ProcessSlot, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo,
 };
 
 /// Mutable per-session state a protocol needs to build the next turn.
@@ -85,13 +86,15 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         harness: protocol.harness(),
         process_model: ProcessModel::PerTurn,
     });
-    tokio::spawn(drive(state, protocol, events_tx, cmd_rx));
+    let slot = handle.process_slot();
+    tokio::spawn(drive(state, protocol, slot, events_tx, cmd_rx));
     Ok(handle)
 }
 
 async fn drive(
     mut state: TurnState,
     protocol: Arc<dyn PerTurnProtocol>,
+    slot: ProcessSlot,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
@@ -144,6 +147,9 @@ async fn drive(
                         match protocol.build_turn(&state, &text, &attachments) {
                             Ok(spec) => match LineProcess::spawn(spec.command, &state.sandbox) {
                                 Ok(mut proc) => {
+                                    // Before the prompt is written, which
+                                    // a CLI that does not read can hold up.
+                                    slot.set(&proc);
                                     if let Some(input) = spec.stdin
                                         && let Err(e) = proc.write_line(&input).await
                                     {
@@ -291,6 +297,44 @@ mod tests {
         fn new_parser(&self) -> Box<dyn TurnParser> {
             Box::new(EchoParser)
         }
+    }
+
+    /// Each turn runs a CLI that never reads its stdin.
+    struct Deaf;
+    impl PerTurnProtocol for Deaf {
+        fn harness(&self) -> HarnessId {
+            HarnessId::CODEX
+        }
+        fn build_turn(
+            &self,
+            _state: &TurnState,
+            text: &str,
+            _attachments: &[Attachment],
+        ) -> Result<TurnSpec> {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            Ok(TurnSpec {
+                command,
+                stdin: Some(text.to_string()),
+            })
+        }
+        fn new_parser(&self) -> Box<dyn TurnParser> {
+            Box::new(EchoParser)
+        }
+    }
+
+    // A prompt larger than a pipe holds the driver on writing it to a CLI
+    // that does not read; the session's process can still be killed.
+    #[tokio::test]
+    async fn a_turn_stuck_on_its_prompt_can_be_killed_through_the_session() {
+        let mut h = start(cfg(), Arc::new(Deaf)).unwrap();
+        h.send(SessionCommand::turn("x".repeat(1 << 20)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        h.process_slot().kill();
+        // The write fails, and the turn ends with its process.
+        collect_turn(&mut h).await;
     }
 
     fn cfg() -> SessionConfig {
