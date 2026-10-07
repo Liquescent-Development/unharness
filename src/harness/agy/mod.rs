@@ -1,6 +1,7 @@
 //! Antigravity (`agy`) harness, checked against agy 1.2.17 with an account
 //! (see the status notes in `AGENTS.md`).
 
+mod brain;
 pub mod parse;
 pub mod transport;
 
@@ -117,7 +118,15 @@ impl Harness for AgyHarness {
             image_input: false,
             file_input: false,
             plan_updates: false,
-            subagents: SubagentSupport::default(),
+            // From its stream and its files (`brain.rs`, agy 1.3.1). No
+            // event on stdin stops one, and the turn waits for them, so
+            // none reports between turns.
+            subagents: SubagentSupport {
+                reported: true,
+                described: false,
+                stop: false,
+                report_turn: false,
+            },
             steer: false,
             compaction: false,
             context_usage: false,

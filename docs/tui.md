@@ -370,6 +370,10 @@ Claude Code starts a turn of its own to report when a background subagent
 ends or is stopped. Codex does not, so a Codex sub-agent's report is only
 in its own transcript. Codex also names a sub-agent without describing
 its task, and shows what it is doing only through its tool calls.
+Antigravity names a subagent by its role and shows neither its tool
+calls nor what it is doing: its transcript holds its report, or the
+error that stopped it. Antigravity's turn waits for its subagents, and
+none can be stopped.
 
 ## herdr
 

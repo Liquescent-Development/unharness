@@ -247,9 +247,30 @@ recorded ones. For anything else:
   the plan recording, whose text carried the home path split across
   deltas. Unverified: content blocks on stdin (the binary has a
   `streamInputContentBlock`), `AGY_ERROR:` on stderr (from 1.2.15's
-  strings), a model other than the default family's, sub-agents, MCP tool
+  strings), a model other than the default family's, MCP tool
   steps, what agy's own interface writes to `settings.json` when a
   workspace is trusted there (`trustedWorkspaces`).
+  Subagents (agy 1.3.1, `fixtures/subagent_*.jsonl`, `brain.rs`): an
+  `invoke_subagent` call opens as a `tool` or a `subagent` step and closes
+  as `subagent`, listing each subagent (`conversation_id`, `role`,
+  `type_name`, `initial_prompt`); one that opened as `tool` had stayed
+  running in the TUI (#96). A subagent reports with `send_message`, which
+  agy files as `brain/<parent>/.system_generated/messages/<id>.json`
+  (`sender`, `content`) and delivers as a `system_message` step that
+  carries neither, so the transport reads the file when the step comes.
+  The turn waited for every subagent in four recordings and on the Mac of
+  #96 (also after the agent said it had ended its turn), so at `result`
+  one that has not reported has ended: its `logs/transcript.jsonl` ends
+  in an `ERROR` step when a call of its was refused (default mode, `ls`;
+  it stopped without a report, and the parent's `denied_actions` named
+  the command) or in its final response. Nothing came on stdout for
+  240 s after a result. There is nothing on stdin to stop one. Checked
+  live on 1.3.1 with `--print` and in the TUI (pty, Landlock): both rows
+  ran and ended with their reports. Unverified: a subagent put back to
+  work by a later `send_message` from the parent (its second report is
+  shown as a second end), `manage_subagents` actions other than `list`, a
+  subagent's own subagents, macOS's brain directory (taken to be the
+  same `~/.gemini/antigravity-cli/brain`).
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
   in `[harnesses.codex]` forces the fallback. Each `exec` turn is a
   process of its own, and what it leaves behind is killed when it exits;

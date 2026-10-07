@@ -16,10 +16,20 @@
 //! line (`jetski: no output produced — a tool required the "command"
 //! permission …`); `result.denied_actions` only names the kinds refused so
 //! far in the process, so it is the fallback when the line has not come.
+//!
+//! Subagents (agy 1.3.1): an `invoke_subagent` call is a step that opens as
+//! `tool` or as `subagent` and closes as `subagent`, its `DONE` update
+//! listing each subagent (`subagent_info.subagents[]`: `conversation_id`,
+//! `role`, `type_name`, `initial_prompt`). Nothing on the stream ends one: a
+//! report is a `system_message` step with no content and no sender, and the
+//! transport reads it from agy's files (`brain.rs`, `feed_report`). The
+//! turn's `result` waited for the subagents in every recording (a turn whose
+//! agent said it was done went on when a report came in), so one still
+//! open then has ended without a report (`feed_last_step`, then `result`).
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, StopReason, Usage};
+use crate::core::{AgentEvent, StopReason, SubagentStatus, Usage};
 
 #[derive(Debug, Default)]
 pub struct AgyParser {
@@ -31,6 +41,10 @@ pub struct AgyParser {
     open_tools: Vec<u64>,
     /// A refusal was reported for the open turn.
     refusal_noted: bool,
+    /// Subagents started and not ended, by conversation id.
+    open_subagents: Vec<String>,
+    /// Every subagent started in this process.
+    subagents: Vec<String>,
 }
 
 impl AgyParser {
@@ -46,6 +60,60 @@ impl AgyParser {
             return vec![AgentEvent::Notice(line.to_string())];
         };
         self.feed_value(&v)
+    }
+
+    /// The conversation agy reported, which owns the subagents' reports.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Subagents started and not ended.
+    pub fn open_subagents(&self) -> &[String] {
+        &self.open_subagents
+    }
+
+    /// A message agy filed for the conversation (`brain::new_messages`).
+    /// One from a subagent of this process is its report, and ends it; a
+    /// later one is a report after its end.
+    pub fn feed_report(&mut self, message: &Value) -> Vec<AgentEvent> {
+        let sender = str_of(message, "sender");
+        if !self.subagents.iter().any(|s| s == sender) {
+            return vec![];
+        }
+        self.open_subagents.retain(|s| s != sender);
+        vec![AgentEvent::SubagentEnded {
+            id: sender.to_string(),
+            status: SubagentStatus::Completed,
+            result: Some(str_of(message, "content").to_string()),
+        }]
+    }
+
+    /// The last step in the transcript of `id`, a subagent that has not
+    /// reported, read when the turn ends: a refused or failed call ends it
+    /// as failed, a response with no call as completed with that response.
+    pub fn feed_last_step(&mut self, id: &str, step: &Value) -> Vec<AgentEvent> {
+        if !self.open_subagents.iter().any(|s| s == id) {
+            return vec![];
+        }
+        let (status, result) = if str_of(step, "status") == "ERROR" {
+            (SubagentStatus::Failed, str_of(step, "error"))
+        } else if str_of(step, "type") == "PLANNER_RESPONSE"
+            && str_of(step, "status") == "DONE"
+            && step
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_none_or(|c| c.is_empty())
+        {
+            (SubagentStatus::Completed, str_of(step, "content"))
+        } else {
+            return vec![];
+        };
+        self.open_subagents.retain(|s| s != id);
+        vec![AgentEvent::SubagentEnded {
+            id: id.to_string(),
+            status,
+            result: (!result.is_empty()).then(|| result.to_string()),
+        }]
     }
 
     pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -136,6 +204,13 @@ impl AgyParser {
                 };
                 self.turn_started = false;
                 self.open_tools.clear();
+                for id in std::mem::take(&mut self.open_subagents) {
+                    out.push(AgentEvent::SubagentEnded {
+                        id,
+                        status: SubagentStatus::Completed,
+                        result: None,
+                    });
+                }
                 out.push(AgentEvent::TurnCompleted { stop_reason });
             }
             _ => {}
@@ -183,36 +258,82 @@ impl AgyParser {
                     out.push(AgentEvent::TextDelta(delta.to_string()));
                 }
             }
-            "tool" => {
+            step_type @ ("tool" | "subagent") => {
                 let Some(index) = step.get("step_index").and_then(Value::as_u64) else {
                     return;
                 };
                 let id = format!("step-{index}");
                 let info = step.get("tool_info");
+                let subagents = step
+                    .pointer("/subagent_info/subagents")
+                    .and_then(Value::as_array);
                 if !self.open_tools.contains(&index) {
                     self.open_tools.push(index);
+                    let input = match (info.and_then(|i| i.get("parameters")), subagents) {
+                        (Some(p), _) => p.clone(),
+                        (None, Some(s)) => serde_json::json!({ "Subagents": s }),
+                        (None, None) => Value::Null,
+                    };
                     out.push(AgentEvent::ToolCallStarted {
                         id: id.clone(),
                         name: str_of(step, "tool_name").to_string(),
-                        input: info
-                            .and_then(|i| i.get("parameters"))
-                            .cloned()
-                            .unwrap_or(Value::Null),
+                        input,
                     });
                 }
                 if str_of(step, "state") == "DONE" {
                     self.open_tools.retain(|i| *i != index);
+                    let output = if step_type == "subagent" {
+                        subagents
+                            .into_iter()
+                            .flatten()
+                            .map(|s| {
+                                format!("{}: {}", str_of(s, "role"), str_of(s, "initial_prompt"))
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    } else {
+                        info.map(|i| str_of(i, "output")).unwrap_or("").to_string()
+                    };
                     // A command that failed and a call agy refused look the
                     // same here: no status, at most an output.
                     out.push(AgentEvent::ToolCallResult {
                         id,
-                        output: info.map(|i| str_of(i, "output")).unwrap_or("").to_string(),
+                        output,
                         is_error: false,
                     });
+                    for s in subagents.into_iter().flatten() {
+                        self.subagent_started(s, out);
+                    }
                 }
             }
             _ => {}
         }
+    }
+}
+
+impl AgyParser {
+    fn subagent_started(&mut self, s: &Value, out: &mut Vec<AgentEvent>) {
+        let id = str_of(s, "conversation_id");
+        if id.is_empty() {
+            return;
+        }
+        let role = str_of(s, "role");
+        let kind = str_of(s, "type_name");
+        if !self.subagents.iter().any(|k| k == id) {
+            self.subagents.push(id.to_string());
+        }
+        if !self.open_subagents.iter().any(|k| k == id) {
+            self.open_subagents.push(id.to_string());
+        }
+        out.push(AgentEvent::SubagentStarted {
+            id: id.to_string(),
+            description: if role.is_empty() {
+                str_of(s, "initial_prompt").to_string()
+            } else {
+                role.to_string()
+            },
+            kind: (!kind.is_empty()).then(|| kind.to_string()),
+        });
     }
 }
 
@@ -256,6 +377,9 @@ mod tests {
             "default",
             "denied_twice",
             "bad_model",
+            "subagent_refused",
+            "subagent_wait",
+            "subagent_followup",
         ] {
             assert_fixture(&mut AgyParser::new(None), &fixtures_dir(file!()), case);
         }

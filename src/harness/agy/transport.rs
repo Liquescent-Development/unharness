@@ -3,11 +3,15 @@
 //! stdin per turn (agy 1.2.17 names the `event` field when it is missing and
 //! ignores every event but `user`).
 
+use std::collections::HashSet;
+use std::path::Path;
+
 use anyhow::Result;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::brain;
 use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::session::ProcessSlot;
@@ -61,6 +65,40 @@ pub fn encode_turn(text: &str) -> String {
     json!({"event": "user", "message": {"content": text}}).to_string()
 }
 
+/// What agy's files say about the subagents before `line` is parsed: on
+/// a `system_message` step (how a report is delivered) the reports filed
+/// since, and before a `result` also how each that never reported ended.
+fn subagent_ends(
+    parser: &mut AgyParser,
+    brain_dir: &Path,
+    line: &Value,
+    seen: &mut HashSet<String>,
+) -> Vec<AgentEvent> {
+    let result = line.get("event").and_then(Value::as_str) == Some("result");
+    let delivered = line
+        .pointer("/step_update/step_type")
+        .and_then(Value::as_str)
+        == Some("system_message");
+    if parser.open_subagents().is_empty() || !(result || delivered) {
+        return Vec::new();
+    }
+    let Some(parent) = parser.session_id().map(str::to_string) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for message in brain::new_messages(brain_dir, &parent, seen) {
+        out.extend(parser.feed_report(&message));
+    }
+    if result {
+        for id in parser.open_subagents().to_vec() {
+            if let Some(step) = brain::last_step(brain_dir, &id) {
+                out.extend(parser.feed_last_step(&id, &step));
+            }
+        }
+    }
+    out
+}
+
 pub fn start_stream(cfg: SessionConfig) -> Result<SessionHandle> {
     let proc = spawn_stream(&cfg)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
@@ -97,6 +135,12 @@ async fn drive(
     // on the next turn, resuming the conversation by id.
     let mut restart_needed = false;
     let mut session_id = resume.clone();
+    let brain_dir = brain::default_dir();
+    // Messages already read, also in an earlier process of the conversation.
+    let mut seen = HashSet::new();
+    if let (Some(dir), Some(id)) = (&brain_dir, &resume) {
+        brain::new_messages(dir, id, &mut seen);
+    }
     if let Some(id) = resume {
         let _ = events
             .send(AgentEvent::SessionStarted {
@@ -111,7 +155,7 @@ async fn drive(
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    // No subagents are reported here, so none can be running.
+                    // agy takes no event on stdin that would stop one.
                     SessionCommand::StopSubagent { .. } => {}
                     SessionCommand::Steer { .. }
                     | SessionCommand::Compact { .. }
@@ -186,7 +230,12 @@ async fn drive(
             raw = proc.lines.recv() => {
                 match raw {
                     Some(RawLine::Stdout(line)) => {
-                        for ev in parser.feed(&line) {
+                        let mut evs = Vec::new();
+                        if let (Some(dir), Ok(v)) = (&brain_dir, serde_json::from_str::<Value>(&line)) {
+                            evs = subagent_ends(&mut parser, dir, &v, &mut seen);
+                        }
+                        evs.extend(parser.feed(&line));
+                        for ev in evs {
                             match &ev {
                                 AgentEvent::TurnCompleted { .. } => turn_open = false,
                                 AgentEvent::SessionStarted { session_id: id, .. } => {
@@ -274,6 +323,106 @@ mod tests {
             stream_args(&cfg).join(" "),
             "--print= --input-format stream-json --output-format stream-json --print-timeout 0 --dangerously-skip-permissions --add-dir /x"
         );
+    }
+
+    /// The `Subagent*` events of `case` as the transport sees it, with
+    /// `brain` as agy's directory; `before_delivery(n)` runs before the
+    /// `n`th `system_message` step is read.
+    fn subagent_events(
+        case: &str,
+        brain: &Path,
+        mut before_delivery: impl FnMut(usize),
+    ) -> Vec<String> {
+        let dir = crate::core::testing::fixtures_dir(file!());
+        let fixture = std::fs::read_to_string(dir.join(format!("{case}.jsonl"))).unwrap();
+        let mut parser = AgyParser::new(None);
+        let mut seen = HashSet::new();
+        let mut deliveries = 0;
+        let mut out = Vec::new();
+        for line in fixture.lines().filter(|l| l.starts_with('{')) {
+            let v: Value = serde_json::from_str(line).unwrap();
+            if v.pointer("/step_update/step_type").and_then(Value::as_str) == Some("system_message")
+            {
+                before_delivery(deliveries);
+                deliveries += 1;
+            }
+            let mut evs = subagent_ends(&mut parser, brain, &v, &mut seen);
+            evs.extend(parser.feed(line));
+            out.extend(evs.iter().filter_map(|e| match e {
+                AgentEvent::SubagentStarted { .. }
+                | AgentEvent::SubagentEnded { .. }
+                | AgentEvent::TurnCompleted { .. } => Some(e.summary()),
+                _ => None,
+            }));
+        }
+        out
+    }
+
+    #[test]
+    fn a_report_ends_its_subagent_when_it_is_delivered() {
+        // The two messages agy filed in the recording, cut down.
+        let brain = tempfile::tempdir().unwrap();
+        let messages = brain
+            .path()
+            .join("d8a5df5b-cb3d-4358-b8ad-8d63750349a4/.system_generated/messages");
+        std::fs::create_dir_all(&messages).unwrap();
+        let reports = [
+            (
+                "5ec40763-0e64-4726-809c-b8787f74daef",
+                r#"{"id":"5ec40763-0e64-4726-809c-b8787f74daef","recipient":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","sender":"3e3112f0-bf16-4840-a3a8-0802c43769f4","priority":"MESSAGE_PRIORITY_HIGH","timestamp":"2026-10-07T20:21:34.546864664Z","renderDetails":{"messageTitle":"Message from Spec Reviewer (self)"},"content":"`calc.py` does not match `SPEC.md` because `add(a, b)` subtracts `b` from `a` instead of returning their sum."}"#,
+            ),
+            (
+                "b06c478e-a62d-48b5-a2a2-257e88985ffe",
+                r#"{"id":"b06c478e-a62d-48b5-a2a2-257e88985ffe","recipient":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","sender":"70c61b66-3d4e-4459-849c-4f61647eef76","priority":"MESSAGE_PRIORITY_HIGH","timestamp":"2026-10-07T20:21:49.425103896Z","renderDetails":{"messageTitle":"Message from Bug Reviewer (self)"},"content":"The `add` function in `calc.py` incorrectly subtracts `b` from `a` instead of adding them."}"#,
+            ),
+        ];
+        let events = subagent_events("subagent_followup", brain.path(), |n| {
+            let (id, body) = reports[n];
+            std::fs::write(messages.join(format!("{id}.json")), body).unwrap();
+        });
+        assert_eq!(
+            events,
+            [
+                r#"SubagentStarted id=70c61b66-3d4e-4459-849c-4f61647eef76 kind=self "Bug Reviewer""#,
+                r#"SubagentStarted id=3e3112f0-bf16-4840-a3a8-0802c43769f4 kind=self "Spec Reviewer""#,
+                r#"SubagentEnded id=3e3112f0-bf16-4840-a3a8-0802c43769f4 completed "`calc.py` does not match `SPEC.md` because `add(a, b)` su...""#,
+                r#"SubagentEnded id=70c61b66-3d4e-4459-849c-4f61647eef76 completed "The `add` function in `calc.py` incorrectly subtracts `b`...""#,
+                "TurnCompleted Done",
+                "TurnCompleted Done",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_subagent_that_never_reported_ends_as_its_transcript_does() {
+        let brain = tempfile::tempdir().unwrap();
+        // How the refused subagents' transcripts ended, cut down.
+        for id in [
+            "07b35f72-9201-45ef-a97c-7f3094885937",
+            "b5abd3a7-fa61-4801-827d-f8215a6efb98",
+        ] {
+            let logs = brain.path().join(id).join(".system_generated/logs");
+            std::fs::create_dir_all(&logs).unwrap();
+            std::fs::write(
+                logs.join("transcript.jsonl"),
+                r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","tool_calls":[{"name":"run_command","args":{"CommandLine":"\"ls -la /mnt\""}}]}
+{"step_index":4,"source":"MODEL","type":"GENERIC","status":"ERROR","error":"permission check failed for unsandboxed \"ls -la /mnt\": user denied permission to run command"}
+"#,
+            )
+            .unwrap();
+        }
+        let events = subagent_events("subagent_refused", brain.path(), |_| {});
+        assert!(
+            events[2].starts_with(
+                "SubagentEnded id=07b35f72-9201-45ef-a97c-7f3094885937 failed \"permission check failed"
+            ),
+            "{events:?}"
+        );
+        assert!(events[3].contains(" failed "), "{events:?}");
+        // Without the files, the result ends them all the same.
+        let none = tempfile::tempdir().unwrap();
+        let events = subagent_events("subagent_refused", none.path(), |_| {});
+        assert!(events[2].ends_with("completed -"), "{events:?}");
     }
 
     #[test]
