@@ -142,6 +142,7 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         harness: HarnessId::CODEX,
         process_model: ProcessModel::LongLived,
     });
+    handle.process_slot().set(&proc);
     tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));
     Ok(handle)
 }

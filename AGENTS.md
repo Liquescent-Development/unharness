@@ -126,8 +126,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   background job) is not listened for. The TUI says when it waits, and
   Ctrl+C, Ctrl+D or one of those signals stops the wait. The TUI resumes
   or forks a vendor session only once the CLI that ended it is gone
-  (`tui::Ending`, at most `END_GRACE + DRAIN_TIMEOUT + 1s`), so that two
-  never write one session; meanwhile it says so, refuses a switch,
+  (`tui::Ending`), so that two never write one session: one still there
+  after `END_GRACE + DRAIN_TIMEOUT + 1s` (its driver stuck) is killed
+  through the session's `ProcessSlot`; meanwhile it says so, refuses a switch,
   resume, fork or rewind (each would take the held start for its own),
   and an interrupt drops the prompt that waits. Not caught: what left the tree
   before the kill (a `setsid cmd &` whose shell exited, a double fork);

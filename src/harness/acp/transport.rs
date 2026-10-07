@@ -151,6 +151,7 @@ pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Resul
         harness,
         process_model: ProcessModel::LongLived,
     });
+    handle.process_slot().set(&proc);
     tokio::spawn(drive(harness, proc, cfg, events_tx, cmd_rx));
     Ok(handle)
 }

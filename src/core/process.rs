@@ -33,6 +33,19 @@ pub struct LineProcess {
     pub lines: mpsc::Receiver<RawLine>,
 }
 
+/// Kills a [`LineProcess`] ([`LineProcess::stopper`]); once it is gone,
+/// or its owner has ended it and let go, this does nothing.
+#[derive(Clone)]
+pub struct Stopper(mpsc::WeakUnboundedSender<Stop>);
+
+impl Stopper {
+    pub fn kill(&self) {
+        if let Some(stop) = self.0.upgrade() {
+            let _ = stop.send(Stop::Now);
+        }
+    }
+}
+
 /// How long a CLI asked to end ([`LineProcess::end`]) has to exit by
 /// itself before what is left of it is killed.
 pub const END_GRACE: Duration = Duration::from_secs(3);
@@ -196,6 +209,12 @@ impl LineProcess {
     pub async fn kill(&mut self) {
         self.stdin.take();
         let _ = self.stop_tx.send(Stop::Now);
+    }
+
+    /// What kills this from outside its owner, also while the owner is
+    /// stuck. It does not keep it alive: dropped, this is killed as before.
+    pub fn stopper(&self) -> Stopper {
+        Stopper(self.stop_tx.downgrade())
     }
 
     pub fn pid(&self) -> Option<u32> {
@@ -881,6 +900,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.last(), Some(&RawLine::Exited(Some(4))));
+    }
+
+    #[tokio::test]
+    async fn a_stopper_kills_but_does_not_keep_alive() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 30");
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
+        p.stopper().kill();
+        let got = tokio::time::timeout(Duration::from_secs(5), drain(&mut p))
+            .await
+            .unwrap();
+        assert!(matches!(got.last(), Some(RawLine::Exited(_))), "{got:?}");
+
+        // Dropped with a stopper around, it is killed as before.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo $$; exec sleep 30");
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
+        let Some(RawLine::Stdout(pid)) = p.lines.recv().await else {
+            panic!("no pid");
+        };
+        let stopper = p.stopper();
+        drop(p);
+        let pid: u32 = pid.trim().parse().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            assert!(tokio::time::Instant::now() < deadline, "kept alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stopper.kill();
     }
 
     // Threads of its own: the watcher runs while this one waits.

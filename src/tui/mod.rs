@@ -759,6 +759,8 @@ struct Ending {
     gone_tx: tokio::sync::mpsc::UnboundedSender<HarnessId>,
     gone_rx: tokio::sync::mpsc::UnboundedReceiver<HarnessId>,
     held: VecDeque<Action>,
+    /// How long a CLI asked to end may take before it is killed.
+    patience: Duration,
 }
 
 impl Ending {
@@ -769,6 +771,11 @@ impl Ending {
             gone_tx,
             gone_rx,
             held: VecDeque::new(),
+            // Its grace, its kill and its drain are bounded; this is in
+            // case a driver never gets that far (stuck on a write).
+            patience: crate::core::process::END_GRACE
+                + crate::core::process::DRAIN_TIMEOUT
+                + Duration::from_secs(1),
         }
     }
 
@@ -779,10 +786,12 @@ impl Ending {
         let harness = session.info.harness;
         *self.running.entry(harness).or_default() += 1;
         let gone = self.gone_tx.clone();
+        let patience = self.patience;
         tokio::spawn(async move {
             // All of it: its command channel closed, the driver would
             // stop reading the CLI and go.
             let mut session = session;
+            let process = session.process_slot();
             let exited = async {
                 while let Some(ev) = session.events.recv().await {
                     if matches!(ev, crate::core::AgentEvent::ProcessExited { .. }) {
@@ -790,15 +799,16 @@ impl Ending {
                     }
                 }
             };
-            // Its grace, its kill and its drain are bounded; this is in
-            // case a driver never says.
-            let _ = tokio::time::timeout(
-                crate::core::process::END_GRACE
-                    + crate::core::process::DRAIN_TIMEOUT
-                    + Duration::from_secs(1),
-                exited,
-            )
-            .await;
+            tokio::pin!(exited);
+            if tokio::time::timeout(patience, &mut exited).await.is_err() {
+                // Not to be resumed beside it, whatever its driver does.
+                process.kill();
+                let _ = tokio::time::timeout(
+                    crate::core::process::DRAIN_TIMEOUT + Duration::from_secs(1),
+                    exited,
+                )
+                .await;
+            }
             let _ = gone.send(harness);
         });
     }
@@ -1460,6 +1470,38 @@ mod tests {
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_some());
         assert!(ending.held.is_empty() && !app.start_held);
+    }
+
+    // A driver stuck before its CLI ends, holding it: the hold does not
+    // lift with the CLI still there.
+    #[tokio::test]
+    async fn a_cli_that_outlasts_the_hold_is_killed_before_it_lifts() {
+        use crate::core::{SessionInfo, session::ProcessModel};
+        let (handle, _events, _cmds) = SessionHandle::channels(SessionInfo {
+            harness: HarnessId::CLAUDE,
+            process_model: ProcessModel::LongLived,
+        });
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 30");
+        let mut cli = LineProcess::spawn(cmd, &crate::core::sandbox::Sandbox::off()).unwrap();
+        handle.process_slot().set(&cli);
+        let mut ending = Ending::new();
+        ending.patience = Duration::from_millis(200);
+        ending.follow(handle);
+        let gone = tokio::time::timeout(Duration::from_secs(10), ending.recv())
+            .await
+            .expect("the hold never lifted");
+        assert_eq!(gone, HarnessId::CLAUDE);
+        let exited = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(line) = cli.lines.recv().await {
+                if matches!(line, RawLine::Exited(_)) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(exited, Ok(true), "the CLI was left running");
     }
 
     #[tokio::test]
