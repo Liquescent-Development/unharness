@@ -321,7 +321,10 @@ async fn event_loop(
                 }
                 needs_redraw = true;
             }
-            harness = ending.recv() => ending.gone(harness),
+            harness = ending.recv() => {
+                ending.gone(harness);
+                needs_redraw = true;
+            }
             _ = ends.recv() => app.quit(),
         }
         let woke = Instant::now();
@@ -833,6 +836,7 @@ async fn run_actions(
 ) {
     let mut actions = std::mem::take(&mut ending.held);
     actions.extend(app.take_actions());
+    app.start_held = false;
     while let Some(action) = actions.pop_front() {
         match action {
             Action::RunShell { command } => {
@@ -860,8 +864,32 @@ async fn run_actions(
                 // writing it, or hold its lock: it is resumed, or forked,
                 // once that one is gone. What follows waits with it.
                 if resume.is_some() && ending.running(app.active) {
+                    // An interrupt can only be for the turn that waits:
+                    // it is not sent at all.
+                    if actions
+                        .iter()
+                        .any(|a| matches!(a, Action::Command(SessionCommand::Interrupt)))
+                    {
+                        actions.retain(|a| {
+                            !matches!(
+                                a,
+                                Action::SendTurn { .. }
+                                    | Action::Command(
+                                        SessionCommand::Interrupt | SessionCommand::Steer { .. }
+                                    )
+                            )
+                        });
+                        app.on_event(crate::core::AgentEvent::TurnCompleted {
+                            stop_reason: crate::core::StopReason::Interrupted,
+                        });
+                    }
+                    app.flash(format!(
+                        "Waiting for the previous {} to exit",
+                        app.short_name()
+                    ));
                     actions.push_front(Action::StartSession { resume });
                     ending.held = actions;
+                    app.start_held = true;
                     return;
                 }
                 let prepared = app.harness().prepare();
@@ -1372,11 +1400,16 @@ mod tests {
         }
     }
 
-    // A sandbox change restarts the session: the prompt after it resumes
-    // the same thread, which the CLI that had it may still be writing.
-    #[tokio::test]
-    async fn a_session_is_resumed_once_the_cli_that_ended_it_is_gone() {
-        use crate::core::{AgentEvent, SessionInfo, session::ProcessModel};
+    /// A Codex session restarted by a sandbox change, whose old driver
+    /// has not seen its CLI exit, and a prompt typed after it.
+    async fn a_held_restart() -> (
+        App,
+        Option<SessionHandle>,
+        Ending,
+        tokio::sync::mpsc::Sender<crate::core::AgentEvent>,
+        tokio::sync::mpsc::Receiver<SessionCommand>,
+    ) {
+        use crate::core::{SessionInfo, session::ProcessModel};
         let mut app = test_app(HarnessId::CODEX);
         // What starts in its place exits at once, and touches nothing.
         app.config.harnesses.insert(
@@ -1410,10 +1443,18 @@ mod tests {
         handle_key(&mut app, NONE, KeyCode::Enter);
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_none(), "started beside the old CLI");
-        assert!(app.is_generating);
+        assert!(app.is_generating && app.start_held);
+        (app, session, ending, events, cmds)
+    }
 
+    // A sandbox change restarts the session: the prompt after it resumes
+    // the same thread, which the CLI that had it may still be writing.
+    #[tokio::test]
+    async fn a_session_is_resumed_once_the_cli_that_ended_it_is_gone() {
+        let (mut app, mut session, mut ending, events, _cmds) = a_held_restart().await;
+        let mut shell = None;
         events
-            .send(AgentEvent::ProcessExited { code: Some(0) })
+            .send(crate::core::AgentEvent::ProcessExited { code: Some(0) })
             .await
             .unwrap();
         let gone = tokio::time::timeout(Duration::from_secs(5), ending.recv())
@@ -1422,7 +1463,31 @@ mod tests {
         ending.gone(gone);
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_some());
-        assert!(ending.held.is_empty());
+        assert!(ending.held.is_empty() && !app.start_held);
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_while_the_start_is_held_drops_the_prompt() {
+        let (mut app, mut session, mut ending, _events, _cmds) = a_held_restart().await;
+        let mut shell = None;
+        app.interrupt();
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert!(!app.is_generating);
+        assert!(
+            ending
+                .held
+                .iter()
+                .all(|a| matches!(a, Action::StartSession { .. })),
+            "{:?}",
+            ending.held
+        );
+        // Nothing else starts a session meanwhile, also with no turn
+        // running: it would take the held start for its own.
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("still exiting"))
+        ));
     }
 
     fn sent_turns(app: &mut App) -> Vec<String> {

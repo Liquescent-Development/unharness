@@ -123,10 +123,13 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
-  background job) is not listened for. The TUI says when it waits, and a
-  key or a second signal stops the wait. The TUI resumes or forks a
-  vendor session only once the CLI that ended it is gone (`tui::Ending`),
-  so that two never write one session. Not caught: what left the tree
+  background job) is not listened for. The TUI says when it waits, and
+  Ctrl+C, Ctrl+D or one of those signals stops the wait. The TUI resumes
+  or forks a vendor session only once the CLI that ended it is gone
+  (`tui::Ending`, at most `END_GRACE + DRAIN_TIMEOUT + 1s`), so that two
+  never write one session; meanwhile it says so, refuses a switch,
+  resume, fork or rewind (each would take the held start for its own),
+  and an interrupt drops the prompt that waits. Not caught: what left the tree
   before the kill (a `setsid cmd &` whose shell exited, a double fork);
   its pipes are closed on it once the drain is up.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the

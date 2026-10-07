@@ -340,6 +340,10 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
+    /// The session's start waits for the CLI that ended the one before it
+    /// to be gone (`tui::Ending`): what would start another is refused
+    /// meanwhile, as during a turn.
+    pub start_held: bool,
     pub store: ConversationStore,
     pub conversation: Conversation,
     persist_failed: bool,
@@ -728,6 +732,7 @@ impl App {
             last_active_index,
             session_ids,
             session_alive: false,
+            start_held: false,
             store,
             conversation,
             persist_failed: false,
@@ -1567,7 +1572,7 @@ impl App {
     /// first put back to how it was before that turn.
     pub fn rewind_to(&mut self, block: usize, restore_files: bool) {
         // A rewind may start a session, which needs a policy.
-        if self.is_generating || !self.require_policy() {
+        if self.is_generating || self.refused_while_start_held() || !self.require_policy() {
             return;
         }
         let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
@@ -1707,6 +1712,9 @@ impl App {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before forking");
+            return;
+        }
+        if self.refused_while_start_held() {
             return;
         }
         if !self.conversation.has_content() {
@@ -1876,6 +1884,17 @@ impl App {
         } else if !refused.is_empty() {
             self.insert_str(&refused.join(" "));
         }
+    }
+
+    /// True, with an error shown, while the session's start is held.
+    fn refused_while_start_held(&mut self) -> bool {
+        if self.start_held {
+            self.transcript.push_error(format!(
+                "the previous {} is still exiting; try again in a moment",
+                self.short_name()
+            ));
+        }
+        self.start_held
     }
 
     pub fn interrupt(&mut self) {
@@ -2578,6 +2597,9 @@ impl App {
                 .push_error("finish or interrupt the current turn before switching harness");
             return;
         }
+        if self.refused_while_start_held() {
+            return;
+        }
         if self.handoff_wanted(next) {
             self.ask_handoff(next);
             return;
@@ -2851,6 +2873,9 @@ impl App {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before resuming");
+            return;
+        }
+        if self.refused_while_start_held() {
             return;
         }
         let conv = match self.store.load(&id_or_prefix) {
