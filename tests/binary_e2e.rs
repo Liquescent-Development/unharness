@@ -391,6 +391,56 @@ fn ctrl_z_in_print_stops_the_cli_with_unharness_and_fg_continues_it() {
     }
 }
 
+// What was stopped is continued, also once it is out of the tree.
+#[test]
+fn fg_continues_what_left_the_tree_while_stopped() {
+    if !python_available() {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let mut cmd = setup.command(&["--print", "hi"]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    let unharness = Unharness(cmd.spawn().unwrap());
+    let pid = unharness.id();
+    wait_until("the turn is sent", Duration::from_secs(20), || {
+        std::fs::read_to_string(setup.path("log")).is_ok_and(|l| l.lines().count() >= 2)
+    });
+    wait_until("unharness listens", Duration::from_secs(5), || {
+        catches(pid, libc::SIGTSTP)
+    });
+    let (cli, child) = setup.pids();
+    // It is in a session of its own, and outlives the CLI's death.
+    struct Reap(u32);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: the `sleep` the fake CLI started for this test.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+    let _child = Reap(child);
+
+    // SAFETY: signals to the processes this test started.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTSTP) };
+    for p in [pid, cli, child] {
+        wait_until("all of them are stopped", Duration::from_secs(5), || {
+            state(p) == Some('T')
+        });
+    }
+    // Its parent gone, the `sleep` is no longer under the CLI.
+    unsafe { libc::kill(cli as libc::pid_t, libc::SIGKILL) };
+    wait_until("the CLI is gone", Duration::from_secs(5), || {
+        state(cli).is_none_or(|s| s == 'Z')
+    });
+    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    wait_until("the orphan runs again", Duration::from_secs(5), || {
+        state(child).is_some_and(|s| s != 'T')
+    });
+}
+
 // While a run ends, its CLI given its grace: Ctrl+Z still stops both.
 #[test]
 fn ctrl_z_while_print_ends_stops_the_cli_too() {

@@ -582,10 +582,12 @@ fn stop_tree(pid: u32) -> Vec<u32> {
 pub fn suspend() {
     // Held throughout: none is reaped meanwhile, so no pid names another.
     let live = unreaped();
+    #[cfg(target_os = "linux")]
+    let mut stopped: Vec<u32> = Vec::new();
     for &pid in live.iter() {
         signal_group(pid, libc::SIGSTOP);
         #[cfg(target_os = "linux")]
-        stop_tree(pid);
+        stopped.extend(stop_tree(pid));
     }
     // SAFETY: the disposition is read into, and restored from, a zeroed
     // struct owned here; `raise` stops the process until SIGCONT.
@@ -597,15 +599,16 @@ pub fn suspend() {
         libc::raise(libc::SIGTSTP);
         libc::sigaction(libc::SIGTSTP, &handler, std::ptr::null_mut());
     }
+    // What was stopped, also what left the tree meanwhile (its parent
+    // killed), and what is in it now.
     for &pid in live.iter() {
         signal_group(pid, libc::SIGCONT);
         #[cfg(target_os = "linux")]
-        {
-            signal(pid, libc::SIGCONT);
-            for p in descendants(pid) {
-                signal(p, libc::SIGCONT);
-            }
-        }
+        stopped.extend(descendants(pid));
+    }
+    #[cfg(target_os = "linux")]
+    for p in stopped {
+        signal(p, libc::SIGCONT);
     }
 }
 
