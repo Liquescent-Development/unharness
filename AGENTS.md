@@ -106,15 +106,14 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
-  bare `tokio::process::Command::spawn` in a transport. The TUI resumes or
-  forks a vendor session only once the CLI that ended it is gone
-  (`tui::Ending`), so that two never write one session. Each leads a
+  bare `tokio::process::Command::spawn` in a transport. Each leads a
   session of its own (`setsid`), and is killed with its process group and,
   on Linux, every process descended from it (stopped first, read from
   `/proc`): Claude Code runs each command in a session of its own, which a
   group kill misses. What it left in its group goes when it exits by
-  itself, and its tree when the runtime drops the watcher. A session ends
-  the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
+  itself, killed before it is reaped (a pidfd) so that the group's id
+  names no other, and its tree when the runtime drops the watcher. A
+  session ends the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
   driver sends first, then stdin closed) and is killed only after
   `END_GRACE`, also when the handle is dropped meanwhile (a switch, a
   fork, a resume, a sandbox or provider change; `/clear` keeps the
@@ -124,7 +123,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
-  background job) is not listened for.
+  background job) is not listened for. The TUI says when it waits, and a
+  key or a second signal stops the wait. The TUI resumes or forks a
+  vendor session only once the CLI that ended it is gone (`tui::Ending`),
+  so that two never write one session. Not caught: what left the tree
+  before the kill (a `setsid cmd &` whose shell exited, a double fork);
+  its pipes are closed on it once the drain is up.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
   (`--version`, auth) and unharness's own `git` stay outside. A model or
@@ -226,7 +230,15 @@ recorded ones. For anything else:
   steps, what agy's own interface writes to `settings.json` when a
   workspace is trusted there (`trustedWorkspaces`).
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
-  in `[harnesses.codex]` forces the fallback.
+  in `[harnesses.codex]` forces the fallback. Each `exec` turn is a
+  process of its own, and what it leaves in its process group is killed
+  when it exits; an `app-server` process keeps its group until the
+  session ends. The difference did not show for a command's background
+  job on 0.157.0 (pty runs, `sleep 123`): a `cmd &` one did not outlive
+  its command on either transport, and a `setsid cmd &` one outlived
+  the turn, the session and unharness on both, having left the tree
+  before anything was killed. What else Codex keeps in its group
+  between turns (MCP servers) is unverified.
 - ACP (`src/harness/acp/`) is verified against
   `@agentclientprotocol/claude-agent-acp` 0.85.1 and
   `@agentclientprotocol/codex-acp` 2.1.1. The presets in `PRESETS` (gemini,
