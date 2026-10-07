@@ -20,7 +20,9 @@ export default function (pi: ExtensionAPI) {
 			ctx.mode === "rpc"
 				? PREFIX + JSON.stringify(call)
 				: `Allow ${event.toolName}?\n\n${JSON.stringify(event.input, null, 2)}`;
-		const choice = await ctx.ui.select(title, ["Allow", "Deny"]);
+		// The turn's signal closes the dialog on `abort`, which blocks the
+		// call. Without it pi waits for an answer and never ends the turn.
+		const choice = await ctx.ui.select(title, ["Allow", "Deny"], { signal: ctx.signal });
 		if (choice !== "Allow") {
 			return { block: true, reason: "Denied by the user" };
 		}

@@ -737,6 +737,34 @@ impl Transcript {
         }
     }
 
+    /// The session was ended mid-turn: no call still running will report.
+    pub fn end_running_tools(&mut self) {
+        for b in &mut self.blocks {
+            if let Block::Tool {
+                output,
+                is_error,
+                done,
+                started,
+                duration,
+                agent,
+                ..
+            } = b
+            {
+                if !*done {
+                    if output.is_empty() {
+                        *output = "stopped: the session was ended".to_string();
+                    }
+                    *is_error = true;
+                    *done = true;
+                    *duration = Some(started.elapsed());
+                }
+                if let Some(run) = agent {
+                    run.log.end_running_tools();
+                }
+            }
+        }
+    }
+
     fn find_tool(&mut self, id: &str) -> Option<&mut Block> {
         find_in(&mut self.blocks, id)
     }
@@ -1353,6 +1381,39 @@ mod tests {
         let back = Transcript::from_records(&t.to_records());
         assert_eq!(states(&back)[3].1, HookState::Unknown);
         assert_eq!(states(&back)[..3], states(&t)[..3]);
+    }
+
+    #[test]
+    fn calls_left_running_end_as_stopped() {
+        let mut t = Transcript::default();
+        t.tool_started("t1", "bash", json!({"command":"echo one"}));
+        t.tool_started("t2", "bash", json!({"command":"echo two"}));
+        t.tool_result("t2", "two", false);
+        t.tool_started("t3", "bash", json!({"command":"tail -F log"}));
+        t.tool_delta("t3", "first line");
+        t.end_running_tools();
+        let rows: Vec<(bool, bool, &str)> = t
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Tool {
+                    done,
+                    is_error,
+                    output,
+                    ..
+                } => Some((*done, *is_error, output.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (true, true, "stopped: the session was ended"),
+                (true, false, "two"),
+                // What it printed is kept.
+                (true, true, "first line"),
+            ]
+        );
     }
 
     #[test]

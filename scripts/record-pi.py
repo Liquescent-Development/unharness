@@ -5,9 +5,11 @@ record-claude.py: `>>` sent lines, `!!` stderr, plain = stdout).
 Usage: scripts/record-pi.py OUT.jsonl [--provider P --model M] [--no-models] PROMPT [PROMPT...]
 
 With `--extension src/harness/pi/gate.ts --select Allow --select Deny` the
-gate's dialogs are answered in that order (the last answer repeats).
-`--no-extensions`, `--no-context-files`, `--skill F` and `--prompt-template
-F` keep the user's own resources (and their text) out of the recording.
+gate's dialogs are answered in that order (the last answer repeats);
+`--abort-on-select` sends `abort` instead of answering the first one.
+`--no-extensions`, `--no-context-files`, `--no-skills`, `--no-prompt-templates`,
+`--skill F` and `--prompt-template F` keep the user's own resources (and
+their text) out of the recording.
 """
 import argparse
 import json
@@ -50,12 +52,16 @@ def main() -> int:
     ap.add_argument("--no-extensions", action="store_true", help="discover no extensions")
     ap.add_argument("--no-context-files", action="store_true",
                     help="leave out AGENTS.md files (pi's own global one included)")
+    ap.add_argument("--no-skills", action="store_true", help="load no skills")
+    ap.add_argument("--no-prompt-templates", action="store_true", help="load no prompt templates")
     ap.add_argument("--skill", action="append", default=[],
                     help="load this skill (repeatable); others are not discovered")
     ap.add_argument("--prompt-template", action="append", default=[],
                     help="load this prompt template (repeatable); others are not discovered")
     ap.add_argument("--select", action="append", default=[],
                     help="the answer to the next select dialog (repeatable; default: ok)")
+    ap.add_argument("--abort-on-select", action="store_true",
+                    help="send abort instead of answering the first select dialog")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -72,11 +78,11 @@ def main() -> int:
             cmd += ["-e", os.path.abspath(e)]
     if args.no_context_files:
         cmd += ["--no-context-files"]
-    if args.skill:
+    if args.skill or args.no_skills:
         cmd += ["--no-skills"]
         for s in args.skill:
             cmd += ["--skill", os.path.abspath(s)]
-    if args.prompt_template:
+    if args.prompt_template or args.no_prompt_templates:
         cmd += ["--no-prompt-templates"]
         for t in args.prompt_template:
             cmd += ["--prompt-template", os.path.abspath(t)]
@@ -133,6 +139,7 @@ def main() -> int:
     send(first)
 
     steered = False
+    aborted = False
     compacting = False
     rewound = False
     turns = 0
@@ -158,7 +165,11 @@ def main() -> int:
         if t == "extension_ui_request":
             method = obj.get("method")
             rid = obj.get("id")
-            if method == "confirm":
+            if method == "select" and args.abort_on_select and not aborted:
+                # The dialog is left open: what pi does with it is the point.
+                aborted = True
+                send({"id": next_id(), "type": "abort"})
+            elif method == "confirm":
                 send({"type": "extension_ui_response", "id": rid, "confirmed": True})
             elif method == "select" and args.select:
                 answer = args.select.pop(0) if len(args.select) > 1 else args.select[0]

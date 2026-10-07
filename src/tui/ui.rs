@@ -1130,11 +1130,7 @@ fn render_bottom(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if let Some(label) = app.subagents_label().filter(|_| {
-        !app.modal
-            .as_ref()
-            .is_some_and(super::modal::Modal::is_prompt)
-    }) {
+    } else if let Some(label) = app.subagents_label().filter(|_| !app.awaiting_answer()) {
         // The turn is over but its subagents are not: still busy.
         Span::styled(
             format!(
@@ -1147,11 +1143,7 @@ fn render_bottom(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if app
-        .modal
-        .as_ref()
-        .is_some_and(super::modal::Modal::is_prompt)
-    {
+    } else if app.awaiting_answer() {
         Span::styled(" Waiting for you ", Style::default().fg(Color::Cyan))
     } else if let Some(d) = app.generation_duration {
         Span::styled(

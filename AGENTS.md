@@ -119,7 +119,13 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   fork, a resume, a sandbox or provider change; `/clear` keeps the
   session). Mid-turn a CLI that is sent nothing to stop the turn (all
   but Claude) is killed at once (`end_or_kill`): given its grace it could
-  go on with the turn where nobody sees it. Quitting waits for every CLI
+  go on with the turn where nobody sees it. A turn still running
+  `STOP_GRACE` (5 s) after an interrupt is ended with its process when the
+  user interrupts again, once told that would (`App::end_stuck_turn`);
+  what it changed in the harness's configuration is checked first, its
+  requests and owed rewind anchors are dropped, and the next prompt
+  resumes the session. A session shut down takes its open requests with
+  it. Quitting waits for every CLI
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
@@ -453,11 +459,19 @@ recorded ones. For anything else:
   expands `~` and reads `file://` URLs, so such a path is `Opaque`
   (`gate::path_is_literal`); every extension's `tool_call` handler runs in
   turn and may change the input after the gate saw it, and the gate knows
-  a read by its tool name alone. Unverified: the gate's human-readable dialog in
-  pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), several
-  gate dialogs open at once (pi can run a message's tool calls in
-  parallel), tool calls made by a pi sub-agent or an extension that runs
-  tools without `tool_call`, agy's own interface under `ask`.
+  a read by its tool name alone. pi 1.0.4: two calls in one message are
+  asked about one after the other, each after its `tool_execution_start`
+  (`tool_call` handlers run in turn, `fixtures/gate_parallel.jsonl`); the gate passes the turn's
+  `ctx.signal` to its dialog, because without it `abort` while the
+  dialog is open went unanswered and the turn never ended (#89). With it
+  the call fails with "Operation aborted" and the turn settles as any
+  other (`fixtures/gate_abort.jsonl`), and pi sends nothing about the
+  dialog, so the transport withdraws it (`PermissionWithdrawn`) and
+  reports the turn interrupted. A request that arrives while a picker is
+  open waits until the picker closes. Unverified: the gate's human-readable dialog in
+  pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), tool
+  calls made by a pi sub-agent or an extension that runs tools without
+  `tool_call`, agy's own interface under `ask`.
 - Allow rules, checked live on Claude Code 2.1.289 and Codex 0.157.0
   (app-server): a shell rule written from a Claude `Bash` request answered
   Codex's request for the same command in the same workspace, a command

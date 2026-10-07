@@ -638,6 +638,60 @@ async fn pi_gate_asks_before_a_tool_acts() {
 }
 
 #[tokio::test]
+async fn pi_interrupt_closes_an_open_gate_dialog() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    // As recorded on pi 1.0.4: `abort` while the gate's dialog is open.
+    let fixture = repo().join("src/harness/pi/fixtures/gate_abort.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    let mut asked = None;
+    let mut after = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            asked = Some(req.id.clone());
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            continue;
+        }
+        if asked.is_some() {
+            after.push(ev.clone());
+        }
+        if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+            break;
+        }
+    }
+    // The dialog is withdrawn before the turn ends, which says it was
+    // interrupted; nothing answered it.
+    let asked = asked.expect("the gate asked");
+    let tail: Vec<&AgentEvent> = after
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::PermissionWithdrawn { .. } | AgentEvent::TurnCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            &AgentEvent::PermissionWithdrawn { id: asked },
+            &AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            }
+        ]
+    );
+    let sent: Vec<Value> = fake.sent_lines();
+    assert!(sent.iter().any(|v| v["type"] == "abort"));
+    assert!(!sent.iter().any(|v| v["type"] == "extension_ui_response"));
+}
+
+#[tokio::test]
 async fn pi_gate_is_answered_without_asking_under_bypass() {
     if !python_available() {
         return;
@@ -1579,6 +1633,64 @@ async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
         .unwrap();
     assert!(fork < state_after_fork && state_after_fork < prompt);
 
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn pi_interrupt_drops_a_turn_held_for_a_fork() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    let mut anchors = Vec::new();
+    for prompt in ["alpha", "beta"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        run_turn(&mut handle, |_| None).await;
+        loop {
+            if let AgentEvent::TurnAnchor { id } = next_event(&mut handle).await {
+                anchors.push(id);
+                break;
+            }
+        }
+    }
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchors[1].clone(),
+        })
+        .await
+        .unwrap();
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    // The held turn ends at once, interrupted; pi never sees it, and is not
+    // sent an abort for a turn it does not have.
+    let events = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    );
+    // Let the fork answer and the driver re-read the session.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !fake
+        .sent_lines()
+        .iter()
+        .skip_while(|v| v["type"] != "fork")
+        .any(|v| v["type"] == "get_fork_messages")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fork never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent = fake.sent_lines();
+    assert!(!sent.iter().any(|v| v["message"] == "which?"), "{sent:?}");
+    assert!(!sent.iter().any(|v| v["type"] == "abort"), "{sent:?}");
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 

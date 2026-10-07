@@ -33,6 +33,11 @@ pub enum AgentEvent {
         is_error: bool,
     },
     PermissionRequest(PermissionRequest),
+    /// The harness no longer waits for the answer to request `id` (its turn
+    /// was stopped): the question is closed unanswered.
+    PermissionWithdrawn {
+        id: String,
+    },
     Usage(Usage),
     /// The agent's plan / todo list. Each event replaces the previous plan.
     PlanUpdated {
@@ -513,6 +518,7 @@ impl AgentEvent {
                 };
                 format!("PermissionRequest id={} {}", req.id, kind)
             }
+            AgentEvent::PermissionWithdrawn { id } => format!("PermissionWithdrawn id={id}"),
             AgentEvent::Usage(u) => format!(
                 "Usage in={} out={} cache_read={} cache_write={} cost={} cumulative={}",
                 u.input,
