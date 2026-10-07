@@ -4339,7 +4339,6 @@ impl App {
     }
 }
 
-/// Current branch from `.git/HEAD` without spawning git.
 /// The bridge takes at most this fraction (1/n) of the window it goes to.
 const BRIDGE_WINDOW_SHARE: usize = 4;
 /// About what a token is in English prose and code.
@@ -4367,6 +4366,7 @@ fn handoff_prompt(to: &str, budget: usize) -> String {
     )
 }
 
+/// Current branch from `.git/HEAD` without spawning git.
 fn git_branch(root: &std::path::Path) -> Option<String> {
     let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
     let head = head.trim();
