@@ -36,7 +36,7 @@
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"8-0802c43769f4)):\n\n\u003e [ca"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"lc.py](file:"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"///"}}
-{"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"mnt/calc.py) does not ma"}}
+{"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"WORKSPACE/calc.py) does not ma"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"tch [SPEC.md"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"](file:///WORKSPACE/SPEC.md) b"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":5,"state":"ACTIVE","step_type":"agent_response","text_delta":"ecause "}}
@@ -80,7 +80,7 @@
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"c61b66-3d4e-4459-849c-4f"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"61647eef76)):\n  \u003e The `add` function"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":" in [calc.py](file:///"}}
-{"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"mnt/calc.py) incorrectly"}}
+{"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"WORKSPACE/calc.py) incorrectly"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":" subtracts `b` from `a` "}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"instead of adding them.\n"}}
 {"event":"step_update","step_update":{"conversation_id":"d8a5df5b-cb3d-4358-b8ad-8d63750349a4","step_index":9,"state":"ACTIVE","step_type":"agent_response","text_delta":"\n- **"}}

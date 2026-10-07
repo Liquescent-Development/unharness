@@ -25,10 +25,15 @@
 //! transport reads it from agy's files (`brain.rs`, `feed_report`). The
 //! turn's `result` waited for the subagents in every recording (a turn whose
 //! agent said it was done went on when a report came in), so one still
-//! open then has ended without a report (`feed_last_step`, then `result`).
+//! open then has ended without a report (`feed_last_step`, then `result`:
+//! completed, or cancelled or failed with a turn that was). Each subagent's
+//! `log_uri` names agy's brain directory, which the transport reads.
+
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use super::brain;
 use crate::core::{AgentEvent, StopReason, SubagentStatus, Usage};
 
 #[derive(Debug, Default)]
@@ -45,6 +50,8 @@ pub struct AgyParser {
     open_subagents: Vec<String>,
     /// Every subagent started in this process.
     subagents: Vec<String>,
+    /// agy's brain directory, as a subagent's `log_uri` names it.
+    brain_dir: Option<PathBuf>,
 }
 
 impl AgyParser {
@@ -72,19 +79,30 @@ impl AgyParser {
         &self.open_subagents
     }
 
+    /// Every subagent started in this process, ended ones included.
+    pub fn subagents(&self) -> &[String] {
+        &self.subagents
+    }
+
+    /// Where agy keeps its conversations, if a subagent's `log_uri` said.
+    pub fn brain_dir(&self) -> Option<&Path> {
+        self.brain_dir.as_deref()
+    }
+
     /// A message agy filed for the conversation (`brain::new_messages`).
     /// One from a subagent of this process is its report, and ends it; a
-    /// later one is a report after its end.
-    pub fn feed_report(&mut self, message: &Value) -> Vec<AgentEvent> {
-        let sender = str_of(message, "sender");
-        if !self.subagents.iter().any(|s| s == sender) {
+    /// later one is a report after its end (the subagent was put back to
+    /// work).
+    pub fn feed_report(&mut self, message: &brain::Message) -> Vec<AgentEvent> {
+        let sender = &message.sender;
+        if !self.subagents.contains(sender) {
             return vec![];
         }
         self.open_subagents.retain(|s| s != sender);
         vec![AgentEvent::SubagentEnded {
-            id: sender.to_string(),
+            id: sender.clone(),
             status: SubagentStatus::Completed,
-            result: Some(str_of(message, "content").to_string()),
+            result: Some(message.content.clone()),
         }]
     }
 
@@ -204,10 +222,16 @@ impl AgyParser {
                 };
                 self.turn_started = false;
                 self.open_tools.clear();
+                // The turn waited for them, or was cut short with them.
+                let status = match stop_reason {
+                    StopReason::Done => SubagentStatus::Completed,
+                    StopReason::Interrupted => SubagentStatus::Cancelled,
+                    _ => SubagentStatus::Failed,
+                };
                 for id in std::mem::take(&mut self.open_subagents) {
                     out.push(AgentEvent::SubagentEnded {
                         id,
-                        status: SubagentStatus::Completed,
+                        status,
                         result: None,
                     });
                 }
@@ -319,6 +343,9 @@ impl AgyParser {
         }
         let role = str_of(s, "role");
         let kind = str_of(s, "type_name");
+        if self.brain_dir.is_none() {
+            self.brain_dir = brain::dir_from_log_uri(str_of(s, "log_uri"), id);
+        }
         if !self.subagents.iter().any(|k| k == id) {
             self.subagents.push(id.to_string());
         }
@@ -412,6 +439,37 @@ mod tests {
                 stop_reason: StopReason::Interrupted
             }]
         );
+    }
+
+    #[test]
+    fn a_turn_cut_short_ends_its_subagents_with_it() {
+        let started = r#"{"event":"step_update","step_update":{"conversation_id":"c","step_index":2,"state":"DONE","step_type":"subagent","tool_name":"invoke_subagent","subagent_info":{"subagents":[{"type_name":"research","role":"Reviewer","conversation_id":"07b3","log_uri":"file:///Users/a/.gemini/antigravity-cli/brain/07b3/.system_generated/logs/transcript.jsonl"}]}}}"#;
+        for (result, status) in [
+            (
+                r#"{"event":"result","result":{"conversation_id":"c","status":"ERROR","error":"interrupted"}}"#,
+                SubagentStatus::Cancelled,
+            ),
+            (
+                r#"{"event":"result","result":{"conversation_id":"c","status":"ERROR","error":"quota"}}"#,
+                SubagentStatus::Failed,
+            ),
+        ] {
+            let mut p = AgyParser::new(Some("c".into()));
+            p.feed(started);
+            assert_eq!(
+                p.brain_dir(),
+                Some(Path::new("/Users/a/.gemini/antigravity-cli/brain"))
+            );
+            let ev = p.feed(result);
+            assert_eq!(
+                ev[0],
+                AgentEvent::SubagentEnded {
+                    id: "07b3".into(),
+                    status,
+                    result: None
+                }
+            );
+        }
     }
 
     #[test]

@@ -253,24 +253,34 @@ recorded ones. For anything else:
   Subagents (agy 1.3.1, `fixtures/subagent_*.jsonl`, `brain.rs`): an
   `invoke_subagent` call opens as a `tool` or a `subagent` step and closes
   as `subagent`, listing each subagent (`conversation_id`, `role`,
-  `type_name`, `initial_prompt`); one that opened as `tool` had stayed
-  running in the TUI (#96). A subagent reports with `send_message`, which
-  agy files as `brain/<parent>/.system_generated/messages/<id>.json`
-  (`sender`, `content`) and delivers as a `system_message` step that
-  carries neither, so the transport reads the file when the step comes.
-  The turn waited for every subagent in four recordings and on the Mac of
-  #96 (also after the agent said it had ended its turn), so at `result`
-  one that has not reported has ended: its `logs/transcript.jsonl` ends
-  in an `ERROR` step when a call of its was refused (default mode, `ls`;
-  it stopped without a report, and the parent's `denied_actions` named
-  the command) or in its final response. Nothing came on stdout for
+  `type_name`, `initial_prompt`, `log_uri`); one that opened as `tool`
+  had stayed running in the TUI (#96). A subagent reports with
+  `send_message`, which agy files as `brain/<parent>/.system_generated/
+  messages/<id>.json` (`sender`, `recipient`, `timestamp`, `content`)
+  and delivers as a `system_message` step that carries none of them, so
+  the transport reads the files when the step comes and at `result`. The
+  brain directory is the one `log_uri` names
+  (`file://<brain>/<id>/.system_generated/logs/transcript.jsonl`), else
+  `~/.gemini/antigravity-cli/brain`. It is writable from the sandbox: a
+  message is shown only from a subagent started in the process, no
+  directory on the way may be a link, and a read is bounded (4096
+  entries, 16 MiB, 1 MiB a file). The timestamps are RFC 3339 with
+  nanoseconds whose trailing zeros are left out. The turn waited for
+  every subagent in four recordings and on the Mac of #96 (also after
+  the agent said it had ended its turn), so at `result` one that has not
+  reported has ended: its `logs/transcript.jsonl` ends in an `ERROR`
+  step when a call of its was refused (default mode, `ls`; it stopped
+  without a report, and the parent's `denied_actions` named the command)
+  or in its final response. With a `result` that is an interrupt or an
+  error, one left is cancelled or failed. Nothing came on stdout for
   240 s after a result. There is nothing on stdin to stop one. Checked
   live on 1.3.1 with `--print` and in the TUI (pty, Landlock): both rows
   ran and ended with their reports. Unverified: a subagent put back to
   work by a later `send_message` from the parent (its second report is
-  shown as a second end), `manage_subagents` actions other than `list`, a
-  subagent's own subagents, macOS's brain directory (taken to be the
-  same `~/.gemini/antigravity-cli/brain`).
+  read at the next delivery or result and shown as a second end),
+  `manage_subagents` actions other than `list`, a subagent's own
+  subagents, what agy does with its subagents on an interrupt, macOS
+  (where the brain directory is taken from `log_uri`).
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
   in `[harnesses.codex]` forces the fallback. Each `exec` turn is a
   process of its own, and what it leaves behind is killed when it exits;
