@@ -47,7 +47,7 @@ const READ_LIMIT: u64 = 4 << 20;
 /// sandbox and before every launch, so a FIFO (whose read would wait for
 /// a writer) or a device an agent left in the workspace must not hang it:
 /// the open does not block (`O_NONBLOCK`) and the handle is checked.
-fn open_regular(path: &Path, follow: bool) -> std::io::Result<fs::File> {
+pub(crate) fn open_regular(path: &Path, follow: bool) -> std::io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -96,7 +96,7 @@ fn is_link_error(_: &std::io::Error) -> bool {
 }
 
 #[cfg(all(test, unix))]
-mod testing {
+pub(crate) mod testing {
     use std::path::Path;
     use std::time::Duration;
 
