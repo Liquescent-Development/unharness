@@ -249,31 +249,40 @@ fn print_ends_on_sigterm_sighup_and_sigquit_with_the_cli_and_what_it_started() {
 struct Pty {
     master: OwnedFd,
     screen: Arc<Mutex<Vec<u8>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    reader: std::thread::JoinHandle<()>,
 }
 
 impl Pty {
     fn spawn(mut cmd: Command) -> (Unharness, Pty) {
-        let (mut master, mut slave) = (0, 0);
-        let size = libc::winsize {
-            ws_row: 40,
-            ws_col: 120,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+        // Close-on-exec from the start: another test's child, or this
+        // one's, holding the master would keep the terminal from hanging up.
+        // SAFETY: plain calls on descriptors opened here, owned below.
+        let (master, slave) = unsafe {
+            let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+            assert!(master >= 0, "posix_openpt");
+            assert_eq!(libc::grantpt(master), 0, "grantpt");
+            assert_eq!(libc::unlockpt(master), 0, "unlockpt");
+            let mut name = [0 as libc::c_char; 128];
+            assert_eq!(
+                libc::ptsname_r(master, name.as_mut_ptr(), name.len()),
+                0,
+                "ptsname"
+            );
+            let slave = libc::open(
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+            );
+            assert!(slave >= 0, "open the pty");
+            let size = libc::winsize {
+                ws_row: 40,
+                ws_col: 120,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            libc::ioctl(slave, libc::TIOCSWINSZ, &size);
+            (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave))
         };
-        // SAFETY: out-pointers to locals; the fds returned are owned below.
-        let ok = unsafe {
-            libc::openpty(
-                &mut master,
-                &mut slave,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &size,
-            )
-        };
-        assert_eq!(ok, 0, "openpty");
-        // SAFETY: both are new descriptors nothing else owns.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
         cmd.stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
             .stderr(slave.try_clone().unwrap());
@@ -291,16 +300,47 @@ impl Pty {
         let screen = Arc::new(Mutex::new(Vec::new()));
         let reader = master.try_clone().unwrap();
         let into = screen.clone();
-        std::thread::spawn(move || {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = stop.clone();
+        let reader = std::thread::spawn(move || {
             let mut file = std::fs::File::from(reader);
             let mut chunk = [0u8; 65536];
             use std::io::Read;
-            // EIO once the TUI is gone.
-            while let Ok(n @ 1..) = file.read(&mut chunk) {
+            while !stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut ready = libc::pollfd {
+                    fd: file.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one pollfd, on a descriptor owned here.
+                match unsafe { libc::poll(&mut ready, 1, 100) } {
+                    0 => continue,
+                    1.. => {}
+                    _ => break,
+                }
+                // EIO once the TUI is gone.
+                let Ok(n @ 1..) = file.read(&mut chunk) else {
+                    break;
+                };
                 into.lock().unwrap().extend_from_slice(&chunk[..n]);
             }
         });
-        (Unharness(child), Pty { master, screen })
+        (
+            Unharness(child),
+            Pty {
+                master,
+                screen,
+                stop,
+                reader,
+            },
+        )
+    }
+
+    /// Close the terminal, as a closed window does: the TUI is hung up.
+    fn hang_up(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.reader.join().unwrap();
+        drop(self.master);
     }
 
     fn shows(&self, text: &str) -> bool {
@@ -637,4 +677,55 @@ fn a_sandboxed_cli_runs_below_its_reaper_where_unharness_s_directory_is_denied()
         String::from_utf8_lossy(&reaper)
     );
     drop(unharness);
+}
+
+// A closed terminal while the prompt is in the editor: the TUI cannot
+// take the terminal back, and still ends its session the orderly way.
+#[test]
+fn a_hangup_while_the_prompt_is_in_the_editor_still_ends_the_session_in_order() {
+    if !python_available() {
+        return;
+    }
+    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    let setup = Setup::new(&std::fs::read_to_string(fixture).unwrap());
+    let editor_pid = setup.path("editor-pid");
+    let mut cmd = setup.command(&[]);
+    cmd.env(
+        "VISUAL",
+        format!(
+            "sh -c 'echo $$ > {}; while :; do sleep 0.1; done'",
+            editor_pid.display()
+        ),
+    );
+    let (mut unharness, pty) = Pty::spawn(cmd);
+    wait_until("the TUI is up", Duration::from_secs(20), || {
+        pty.shows("Welcome to unharness")
+    });
+    pty.type_keys(b"hi\r");
+    wait_until("the turn is over", Duration::from_secs(20), || {
+        pty.shows("last turn")
+    });
+    let (cli, _) = setup.pids();
+    pty.type_keys(b"\x07");
+    wait_until("the editor runs", Duration::from_secs(10), || {
+        editor_pid.exists()
+    });
+    let editor: u32 = std::fs::read_to_string(&editor_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    pty.hang_up();
+    assert!(
+        unharness.exit_within(Duration::from_secs(15)).is_some(),
+        "the TUI did not exit"
+    );
+    let sent = std::fs::read_to_string(setup.path("log")).unwrap();
+    assert!(sent.contains("interrupt"), "no orderly end: {sent}");
+    assert!(gone_within(cli, Duration::from_secs(2)));
+    assert!(
+        gone_within(editor, Duration::from_secs(2)),
+        "the editor runs on"
+    );
 }

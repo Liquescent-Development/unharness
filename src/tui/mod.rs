@@ -233,6 +233,9 @@ async fn event_loop(
         run_actions(app, &mut session, &mut ending, &mut shell).await;
     }
 
+    // An error (the terminal gone, say) still ends the session the
+    // orderly way below, and is returned after.
+    let mut failed: Option<anyhow::Error> = None;
     while !app.should_quit {
         if let Some(h) = herdr.as_deref_mut() {
             h.update(app.herdr_report());
@@ -240,11 +243,16 @@ async fn event_loop(
         if needs_redraw {
             let started = Instant::now();
             let mut render = Duration::ZERO;
-            terminal.draw(|f| {
+            let drawn = terminal.draw(|f| {
                 let rendering = Instant::now();
                 ui::render(f, app);
                 render = rendering.elapsed();
-            })?;
+            });
+            if let Err(e) = drawn {
+                failed = Some(e.into());
+                app.quit();
+                break;
+            }
             if let Some(log) = frames.as_mut() {
                 log.frame(app.transcript_view.took, render, started.elapsed());
             }
@@ -368,9 +376,14 @@ async fn event_loop(
             // The editor needs the keyboard to itself: stop our reader for
             // as long as it runs.
             drop(input);
-            edit_prompt(terminal, app, &mut ends).await?;
+            let edited = edit_prompt(terminal, app, &mut ends).await;
             input = EventStream::new();
             needs_redraw = true;
+            if let Err(e) = edited {
+                failed = Some(e);
+                app.quit();
+                break;
+            }
         }
 
         run_actions(app, &mut session, &mut ending, &mut shell).await;
@@ -398,7 +411,7 @@ async fn event_loop(
         .is_err()
     {
         app.flash("Waiting for the agent to exit · Ctrl+C to stop waiting");
-        terminal.draw(|f| ui::render(f, app))?;
+        let _ = terminal.draw(|f| ui::render(f, app));
         tokio::select! {
             _ = tokio::time::timeout(
                 crate::core::process::END_GRACE
@@ -407,17 +420,21 @@ async fn event_loop(
                 ended,
             ) => {}
             _ = ends.recv() => {}
-            _ = quit_key(&mut input) => {}
+            // Not from a terminal that failed (hung up): crossterm would
+            // block the thread on reading it.
+            _ = quit_key(&mut input), if failed.is_none() => {}
         }
     }
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// The next Ctrl+C or Ctrl+D. Polled from the event loop's task, as the
 /// stream always is (`take_waiting`), so its waker is the one kept.
 async fn quit_key(input: &mut EventStream) {
-    while let Some(ev) = input.next().await {
-        if let Ok(Event::Key(key)) = ev
+    // An error is the terminal gone (hung up): no key comes any more, and
+    // the stream would give it again at once.
+    while let Some(Ok(ev)) = input.next().await {
+        if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'd'))
