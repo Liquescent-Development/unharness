@@ -100,9 +100,11 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   fork, a resume, a sandbox or provider change; `/clear` keeps the
   session). Mid-turn a CLI that is sent nothing to stop the turn (all
   but Claude) is killed at once (`end_or_kill`): given its grace it could
-  go on with the turn where nobody sees it. Quitting waits for every CLI to be gone (`LineProcess::
-  all_ended`), and SIGTERM or SIGHUP to unharness is a quit, since
-  neither reaches a CLI in a session of its own.
+  go on with the turn where nobody sees it. Quitting waits for every CLI
+  to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
+  to unharness is a quit, since none reaches a CLI in a session of its
+  own; a signal unharness was started with ignored (`nohup`, SIGINT in a
+  background job) is not listened for.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
   (`--version`, auth) and unharness's own `git` stay outside. A model or
