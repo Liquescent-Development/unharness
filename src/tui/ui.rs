@@ -9,6 +9,7 @@ use ratatui::{
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -732,6 +733,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     // Rendering a block (markdown, syntax highlighting, diffs) is far too
     // slow to redo on every frame, so the lines are kept and only blocks
     // whose content changed, and those after them, are rendered again.
+    let started = Instant::now();
     let mut view = std::mem::take(&mut app.transcript_view);
     if view.width != inner.width {
         view.width = inner.width;
@@ -770,6 +772,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         view.rendered.truncate(keep);
         view.lines.truncate(keep);
     }
+    view.took = started.elapsed();
 
     let total = view.rendered.len().min(u16::MAX as usize) as u16;
     let max_scroll = total.saturating_sub(inner.height);

@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -215,6 +215,7 @@ async fn event_loop(
     // Provider and model lists, which may start the harness's CLI.
     let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut ends = crate::core::process::EndSignals::listen();
+    let mut frames = FrameLog::from_env();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -226,7 +227,15 @@ async fn event_loop(
             h.update(app.herdr_report());
         }
         if needs_redraw {
-            terminal.draw(|f| ui::render(f, app))?;
+            let started = Instant::now();
+            let mut render = Duration::ZERO;
+            terminal.draw(|f| {
+                ui::render(f, app);
+                render = started.elapsed();
+            })?;
+            if let Some(log) = frames.as_mut() {
+                log.frame(app.transcript_view.took, render, started.elapsed());
+            }
             needs_redraw = false;
         }
 
@@ -258,6 +267,9 @@ async fn event_loop(
                         session = None;
                     }
                 }
+                if let Some(log) = frames.as_mut() {
+                    log.events += 1;
+                }
                 needs_redraw = true;
             }
             line = async {
@@ -271,10 +283,20 @@ async fn event_loop(
             }
             Some(Ok(event)) = input.next() => {
                 needs_redraw = true;
+                let started = Instant::now();
+                let mut taken = 1;
                 handle_event(app, event);
                 // A drag or a spin of the wheel arrives as a burst: take
                 // everything already waiting and draw once for all of it.
-                take_waiting(&mut input, |event| handle_event(app, event)).await;
+                take_waiting(&mut input, |event| {
+                    handle_event(app, event);
+                    taken += 1;
+                })
+                .await;
+                if let Some(log) = frames.as_mut() {
+                    log.inputs += taken;
+                    log.handling += started.elapsed();
+                }
             }
             Some((request, result)) = lists_rx.recv() => {
                 app.on_list(request, result);
@@ -402,6 +424,48 @@ fn handle_event(app: &mut App, event: Event) {
         Event::Paste(_) => {}
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         _ => {}
+    }
+}
+
+/// With `UNHARNESS_FRAME_LOG=<file>`, a line per frame drawn: seconds
+/// since the start, the input events and harness events taken since the
+/// last frame and how long the input took, then how long the frame took
+/// to lay out the transcript, to render and to draw (render and write).
+struct FrameLog {
+    file: std::fs::File,
+    start: Instant,
+    inputs: usize,
+    handling: Duration,
+    events: usize,
+}
+
+impl FrameLog {
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("UNHARNESS_FRAME_LOG")?;
+        Some(Self {
+            file: std::fs::File::create(path).ok()?,
+            start: Instant::now(),
+            inputs: 0,
+            handling: Duration::ZERO,
+            events: 0,
+        })
+    }
+
+    fn frame(&mut self, transcript: Duration, render: Duration, draw: Duration) {
+        let _ = writeln!(
+            self.file,
+            "{:.3} input={} handling={}us events={} transcript={}us render={}us draw={}us",
+            self.start.elapsed().as_secs_f64(),
+            self.inputs,
+            self.handling.as_micros(),
+            self.events,
+            transcript.as_micros(),
+            render.as_micros(),
+            draw.as_micros(),
+        );
+        self.inputs = 0;
+        self.handling = Duration::ZERO;
+        self.events = 0;
     }
 }
 

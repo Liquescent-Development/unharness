@@ -17,6 +17,10 @@ cargo test                                  # unit, fixture replay and e2e
 UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .events files
 ```
 
+`UNHARNESS_FRAME_LOG=<file>` makes the TUI write a line per frame: the input
+and harness events taken since the last one, how long the input took, and how
+long the frame took to lay out the transcript, to render and to draw.
+
 ## Architecture
 
 ```
