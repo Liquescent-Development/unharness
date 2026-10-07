@@ -1637,6 +1637,64 @@ async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
 }
 
 #[tokio::test]
+async fn pi_interrupt_drops_a_turn_held_for_a_fork() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    let mut anchors = Vec::new();
+    for prompt in ["alpha", "beta"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        run_turn(&mut handle, |_| None).await;
+        loop {
+            if let AgentEvent::TurnAnchor { id } = next_event(&mut handle).await {
+                anchors.push(id);
+                break;
+            }
+        }
+    }
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchors[1].clone(),
+        })
+        .await
+        .unwrap();
+    handle.send(SessionCommand::turn("which?")).await.unwrap();
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    // The held turn ends at once, interrupted; pi never sees it, and is not
+    // sent an abort for a turn it does not have.
+    let events = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        events.last(),
+        Some(&AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    );
+    // Let the fork answer and the driver re-read the session.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !fake
+        .sent_lines()
+        .iter()
+        .skip_while(|v| v["type"] != "fork")
+        .any(|v| v["type"] == "get_fork_messages")
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fork never answered"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let sent = fake.sent_lines();
+    assert!(!sent.iter().any(|v| v["message"] == "which?"), "{sent:?}");
+    assert!(!sent.iter().any(|v| v["type"] == "abort"), "{sent:?}");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
 async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
     if !python_available() {
         return;

@@ -224,8 +224,18 @@ async fn drive(
                         Some(cmd.to_string())
                     }
                     SessionCommand::Interrupt => {
-                        aborting |= turn_open;
-                        Some(json!({"id": next_id(), "type":"abort"}).to_string())
+                        if held_turn.take().is_some() {
+                            // A turn held for a fork has not reached pi: it
+                            // is dropped, and ends here.
+                            turn_open = false;
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Interrupted,
+                            }).await;
+                            None
+                        } else {
+                            aborting |= turn_open;
+                            Some(json!({"id": next_id(), "type":"abort"}).to_string())
+                        }
                     }
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => None,
