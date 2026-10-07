@@ -92,24 +92,20 @@ pub async fn edit(
 async fn end(child: &mut tokio::process::Child) {
     #[cfg(target_os = "linux")]
     if let Some(pid) = child.id() {
-        use crate::core::process::running;
-        let tree = crate::core::process::signal_tree(pid, libc::SIGTERM);
+        let tree = crate::core::process::HeldTree::of(pid);
+        tree.signal(libc::SIGTERM);
         let deadline = tokio::time::Instant::now() + STOP_GRACE;
-        while tree.iter().any(|&p| running(p)) && tokio::time::Instant::now() < deadline {
+        while tree.any_running() && tokio::time::Instant::now() < deadline {
             // Reaped as it goes, so that it no longer counts.
             let _ = child.try_wait();
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        for p in tree.into_iter().filter(|&p| running(p)) {
-            // SAFETY: a plain syscall to a process of the editor's tree.
-            unsafe {
-                libc::kill(p as libc::pid_t, libc::SIGKILL);
-            }
-        }
+        tree.signal(libc::SIGKILL);
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     if let Some(pid) = child.id() {
-        crate::core::process::signal_tree(pid, libc::SIGTERM);
+        // SAFETY: a signal to the editor's shell, a child not yet reaped.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
         let _ = tokio::time::timeout(STOP_GRACE, child.wait()).await;
     }
     let _ = child.kill().await;

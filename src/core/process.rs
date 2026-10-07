@@ -682,23 +682,62 @@ pub fn running(pid: u32) -> bool {
     })
 }
 
-/// `sig` to `pid` and, on Linux, every process below it, which are
-/// returned: for a child that shares unharness's process group (the
+/// `pid` and every process below it, held by pidfd: a signal through one
+/// reaches the process it was opened for or none, never one that took its
+/// pid since. For a child that shares unharness's process group (the
 /// prompt's editor, which needs the terminal), where a group signal would
 /// reach unharness too.
-#[cfg(unix)]
-pub fn signal_tree(pid: u32, sig: libc::c_int) -> Vec<u32> {
-    #[allow(unused_mut)]
-    let mut tree = vec![pid];
-    #[cfg(target_os = "linux")]
-    tree.extend(descendants(pid));
-    for &p in &tree {
-        // SAFETY: a plain syscall; a process that is gone is not an error.
-        unsafe {
-            libc::kill(p as libc::pid_t, sig);
+#[cfg(target_os = "linux")]
+pub struct HeldTree(Vec<std::os::fd::OwnedFd>);
+
+#[cfg(target_os = "linux")]
+impl HeldTree {
+    pub fn of(pid: u32) -> Self {
+        use std::os::fd::FromRawFd;
+        let mut pids = vec![pid];
+        pids.extend(descendants(pid));
+        let fds = pids
+            .into_iter()
+            .filter_map(|p| {
+                // SAFETY: a plain syscall; the descriptor is owned below.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, p as libc::pid_t, 0) };
+                // SAFETY: a new descriptor nothing else owns.
+                (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+            })
+            .collect();
+        HeldTree(fds)
+    }
+
+    pub fn signal(&self, sig: libc::c_int) {
+        use std::os::fd::AsRawFd;
+        for fd in &self.0 {
+            // SAFETY: a plain syscall; one that has exited is not an error.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    sig,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
         }
     }
-    tree
+
+    /// Whether one of them has not exited yet.
+    pub fn any_running(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        self.0.iter().any(|fd| {
+            let mut exited = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd, on a descriptor owned here; readable
+            // once the process has exited.
+            unsafe { libc::poll(&mut exited, 1, 0) == 0 }
+        })
+    }
 }
 
 /// Everything below `root`, which is not touched: stopped, so that none
