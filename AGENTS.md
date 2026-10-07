@@ -453,11 +453,18 @@ recorded ones. For anything else:
   expands `~` and reads `file://` URLs, so such a path is `Opaque`
   (`gate::path_is_literal`); every extension's `tool_call` handler runs in
   turn and may change the input after the gate saw it, and the gate knows
-  a read by its tool name alone. Unverified: the gate's human-readable dialog in
-  pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), several
-  gate dialogs open at once (pi can run a message's tool calls in
-  parallel), tool calls made by a pi sub-agent or an extension that runs
-  tools without `tool_call`, agy's own interface under `ask`.
+  a read by its tool name alone. pi 1.0.4: two calls in one message are
+  asked about one after the other, each after its `tool_execution_start`
+  (`tool_call` handlers run in turn); the gate passes the turn's
+  `ctx.signal` to its dialog, because without it `abort` while the
+  dialog is open went unanswered and the turn never ended (#89). With it
+  the call fails with "Operation aborted" and the turn settles as any
+  other (`fixtures/gate_abort.jsonl`), and pi sends nothing about the
+  dialog, so the transport withdraws it (`PermissionWithdrawn`) and
+  reports the turn interrupted. Unverified: the gate's human-readable dialog in
+  pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), tool
+  calls made by a pi sub-agent or an extension that runs tools without
+  `tool_call`, agy's own interface under `ask`.
 - Allow rules, checked live on Claude Code 2.1.289 and Codex 0.157.0
   (app-server): a shell rule written from a Claude `Bash` request answered
   Codex's request for the same command in the same workspace, a command

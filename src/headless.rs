@@ -806,6 +806,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             is_error,
         } => json!({"type": "tool_call_result", "id": id, "output": output, "is_error": is_error}),
         AgentEvent::PermissionRequest(req) => permission_json(req),
+        AgentEvent::PermissionWithdrawn { id } => json!({"type": "permission_withdrawn", "id": id}),
         AgentEvent::Usage(u) => {
             let mut v = usage_json(u);
             v["type"] = json!("usage");

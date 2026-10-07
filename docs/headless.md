@@ -84,6 +84,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `tool_call_delta` | `id`, `name`, `delta` (live output, or input before `tool_call_started`) |
 | `tool_call_result` | `id`, `output`, `is_error` |
 | `permission_request` | `id`, `tool_call_id`, `kind`, and per kind the fields below |
+| `permission_withdrawn` | `id` of a `permission_request` the harness stopped waiting for (its turn was interrupted) |
 | `usage` | `input`, `output`, `cache_read`, `cache_write`, `cost_usd`, `cumulative` (whether the numbers are session totals rather than this turn's) |
 | `context` | `used`, `window` (tokens) |
 | `rate_limit` | `status`, `windows`: [{`label`, `used_percent`, `resets_at` (Unix seconds)}] |

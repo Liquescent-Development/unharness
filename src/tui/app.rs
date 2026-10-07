@@ -2248,6 +2248,7 @@ impl App {
                 is_error,
             } => self.transcript.tool_result(&id, &output, is_error),
             AgentEvent::PermissionRequest(req) => self.on_permission_request(req),
+            AgentEvent::PermissionWithdrawn { id } => self.withdraw_prompt(&id),
             AgentEvent::Usage(u) => {
                 if u.cumulative {
                     self.session_usage = u;
@@ -2560,13 +2561,35 @@ impl App {
                 }));
         }
         self.modal = None;
-        // The next one waiting that still needs an answer: a rule added in
-        // the meantime may cover some of them.
+        self.show_next_prompt();
+    }
+
+    /// Open the next request waiting behind another modal, if none is
+    /// open now: a rule added in the meantime may answer some of them.
+    fn show_next_prompt(&mut self) {
         while self.modal.is_none()
             && let Some(req) = self.pending_prompts.pop_front()
         {
             self.on_permission_request(req);
         }
+    }
+
+    /// The harness stopped waiting for request `id`: close it unanswered.
+    fn withdraw_prompt(&mut self, id: &str) {
+        if self.modal.as_ref().and_then(Modal::request_id) == Some(id) {
+            self.modal = None;
+            self.transcript.push_notice(format!(
+                "{} stopped waiting for your answer",
+                self.short_name()
+            ));
+            self.show_next_prompt();
+        }
+        self.pending_prompts.retain(|req| req.id != id);
+    }
+
+    /// Whether a request waits for the user, open or behind another modal.
+    pub fn awaiting_answer(&self) -> bool {
+        self.modal.as_ref().is_some_and(Modal::is_prompt) || !self.pending_prompts.is_empty()
     }
 
     /// "Allow always": the request is allowed, and so is what the rules
@@ -7198,6 +7221,50 @@ pub(crate) mod tests {
             [(Scope::Global, &Rule::shell("cargo test"))]
         );
         assert!(!app.rules.path(Scope::Workspace).unwrap().exists());
+    }
+
+    /// pi's gate asking about `command`, as dialog `id`.
+    fn pi_gate_request(id: &str, command: &str) -> AgentEvent {
+        use crate::harness::pi::parse::PiParser;
+        let call = serde_json::json!({"toolCallId": format!("call-{id}"), "toolName": "bash",
+            "input": {"command": command}});
+        let line = serde_json::json!({"type": "extension_ui_request", "id": id,
+            "method": "select", "title": format!("unharness-gate:{call}"),
+            "options": ["Allow", "Deny"]});
+        let mut events = PiParser::new(None).feed(&line.to_string());
+        assert!(
+            matches!(events.as_slice(), [AgentEvent::PermissionRequest(_)]),
+            "{events:?}"
+        );
+        events.remove(0)
+    }
+
+    #[test]
+    fn a_withdrawn_request_closes_unanswered() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        app.start_generation();
+        app.on_event(pi_gate_request("g1", "echo one"));
+        app.on_event(pi_gate_request("g2", "echo two"));
+        app.on_event(pi_gate_request("g3", "echo three"));
+        // One waiting behind the open one goes quietly.
+        app.on_event(AgentEvent::PermissionWithdrawn { id: "g2".into() });
+        assert_eq!(app.modal.as_ref().and_then(Modal::request_id), Some("g1"));
+        // The open one closes, and the next comes up.
+        app.on_event(AgentEvent::PermissionWithdrawn { id: "g1".into() });
+        assert_eq!(app.modal.as_ref().and_then(Modal::request_id), Some("g3"));
+        app.on_event(AgentEvent::PermissionWithdrawn { id: "g3".into() });
+        assert!(app.modal.is_none() && !app.awaiting_answer());
+        // Nothing was answered for the user.
+        assert_eq!(app.take_actions(), vec![]);
+        let said = app
+            .transcript
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Notice(n) if n.contains("stopped waiting")))
+            .count();
+        assert_eq!(said, 2);
     }
 
     #[test]

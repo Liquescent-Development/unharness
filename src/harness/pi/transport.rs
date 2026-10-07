@@ -65,6 +65,24 @@ pub enum PendingKind {
     Gate,
 }
 
+/// The gate dialogs still open, taken out of `pending`. A turn ends with
+/// one open only when it was aborted: the gate passes the turn's signal to
+/// its dialog, which closes with the turn, and pi says nothing about that
+/// (`fixtures/gate_abort.jsonl`). Other extensions' dialogs may outlive a
+/// turn, so they stay.
+fn take_gate_dialogs(pending: &mut HashMap<String, PendingKind>) -> Vec<String> {
+    let mut ids: Vec<String> = pending
+        .iter()
+        .filter(|(_, kind)| **kind == PendingKind::Gate)
+        .map(|(id, _)| id.clone())
+        .collect();
+    ids.sort();
+    for id in &ids {
+        pending.remove(id);
+    }
+    ids
+}
+
 /// Whether `line` is pi's response to `command`.
 fn is_response_to(line: &str, command: &str) -> bool {
     serde_json::from_str::<Value>(line).is_ok_and(|v| {
@@ -148,6 +166,9 @@ async fn drive(
     };
     let mut shutting_down = false;
     let mut turn_open = false;
+    // `abort` was sent during the open turn. pi ends an aborted turn the way
+    // it ends any other (`agent_settled`), so this is what tells them apart.
+    let mut aborting = false;
     // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
     let mut forking = false;
     let mut held_turn: Option<String> = None;
@@ -202,7 +223,10 @@ async fn drive(
                         }
                         Some(cmd.to_string())
                     }
-                    SessionCommand::Interrupt => Some(json!({"id": next_id(), "type":"abort"}).to_string()),
+                    SessionCommand::Interrupt => {
+                        aborting |= turn_open;
+                        Some(json!({"id": next_id(), "type":"abort"}).to_string())
+                    }
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => None,
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
@@ -258,7 +282,7 @@ async fn drive(
                                 let _ = proc.write_line(&turn).await;
                             }
                         }
-                        for ev in parser.feed(&line) {
+                        for mut ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let kind = match &req.kind {
                                     PermissionKind::ToolUse { .. } => PendingKind::Gate,
@@ -287,8 +311,14 @@ async fn drive(
                                 pending.insert(req.id.clone(), kind);
                             }
                             // Context usage is only available on request.
-                            if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+                            if let AgentEvent::TurnCompleted { stop_reason } = &mut ev {
                                 turn_open = false;
+                                if std::mem::take(&mut aborting) && *stop_reason == StopReason::Done {
+                                    *stop_reason = StopReason::Interrupted;
+                                }
+                                for id in take_gate_dialogs(&mut pending) {
+                                    let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
+                                }
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
                                 // The turn's user message now has an entry id to rewind to.
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
@@ -399,6 +429,17 @@ mod tests {
         let (args, sid) = session_args(&r, gate);
         assert_eq!(sid, "abc");
         assert!(args.join(" ").contains("--session-id abc"));
+    }
+
+    #[test]
+    fn only_gate_dialogs_close_with_the_turn() {
+        let mut pending = HashMap::from([
+            ("g2".to_string(), PendingKind::Gate),
+            ("s1".to_string(), PendingKind::Select),
+            ("g1".to_string(), PendingKind::Gate),
+        ]);
+        assert_eq!(take_gate_dialogs(&mut pending), ["g1", "g2"]);
+        assert_eq!(pending.keys().collect::<Vec<_>>(), ["s1"]);
     }
 
     #[test]

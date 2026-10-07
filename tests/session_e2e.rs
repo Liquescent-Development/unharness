@@ -638,6 +638,60 @@ async fn pi_gate_asks_before_a_tool_acts() {
 }
 
 #[tokio::test]
+async fn pi_interrupt_closes_an_open_gate_dialog() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    // As recorded on pi 1.0.4: `abort` while the gate's dialog is open.
+    let fixture = repo().join("src/harness/pi/fixtures/gate_abort.jsonl");
+    let mut handle = pi_harness()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    let mut asked = None;
+    let mut after = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            asked = Some(req.id.clone());
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            continue;
+        }
+        if asked.is_some() {
+            after.push(ev.clone());
+        }
+        if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+            break;
+        }
+    }
+    // The dialog is withdrawn before the turn ends, which says it was
+    // interrupted; nothing answered it.
+    let asked = asked.expect("the gate asked");
+    let tail: Vec<&AgentEvent> = after
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::PermissionWithdrawn { .. } | AgentEvent::TurnCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            &AgentEvent::PermissionWithdrawn { id: asked },
+            &AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            }
+        ]
+    );
+    let sent: Vec<Value> = fake.sent_lines();
+    assert!(sent.iter().any(|v| v["type"] == "abort"));
+    assert!(!sent.iter().any(|v| v["type"] == "extension_ui_response"));
+}
+
+#[tokio::test]
 async fn pi_gate_is_answered_without_asking_under_bypass() {
     if !python_available() {
         return;
