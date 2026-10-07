@@ -271,9 +271,9 @@ async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Op
     status.ok().and_then(|s| s.code())
 }
 
-/// SIGTERM or SIGHUP to unharness. The harness processes lead sessions of
-/// their own, so neither reaches them: unharness ends them instead of
-/// dying with them still running.
+/// SIGTERM, SIGHUP or SIGQUIT to unharness. The harness processes lead
+/// sessions of their own, so none reaches them: unharness ends them
+/// instead of dying with them still running.
 pub struct EndSignals {
     #[cfg(unix)]
     signals: Vec<tokio::signal::unix::Signal>,
@@ -284,10 +284,9 @@ impl EndSignals {
     pub fn listen() -> Self {
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{SignalKind, signal};
-            let signals = [SignalKind::terminate(), SignalKind::hangup()]
+            let signals = [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT]
                 .into_iter()
-                .filter_map(|kind| signal(kind).ok())
+                .filter_map(listen_unless_ignored)
                 .collect();
             EndSignals { signals }
         }
@@ -304,6 +303,22 @@ impl EndSignals {
         }
         std::future::pending::<()>().await;
     }
+}
+
+/// A handler for `signo`, unless unharness was started with it ignored
+/// (`nohup`, a background job's SIGINT): registering one would undo that.
+#[cfg(unix)]
+pub fn listen_unless_ignored(signo: libc::c_int) -> Option<tokio::signal::unix::Signal> {
+    // SAFETY: with a null `act` sigaction only reads the disposition into
+    // `old`, which is zeroed and owned here.
+    let ignored = unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(signo, std::ptr::null(), &mut old) == 0 && old.sa_sigaction == libc::SIG_IGN
+    };
+    if ignored {
+        return None;
+    }
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(signo)).ok()
 }
 
 /// A short-lived child asked one thing on stdin, for a model or provider
@@ -692,6 +707,16 @@ mod tests {
             .unwrap();
         assert_eq!(got.last(), Some(&RawLine::Exited(None)));
         assert!(!alive(&sleeper));
+    }
+
+    // SIGUSR2 is set to be ignored for the whole test process: no other
+    // test uses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_started_ignored_stays_ignored() {
+        unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
+        assert!(listen_unless_ignored(libc::SIGUSR2).is_none());
+        assert!(listen_unless_ignored(libc::SIGUSR1).is_some());
     }
 
     #[cfg(target_os = "linux")]

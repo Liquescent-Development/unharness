@@ -598,7 +598,7 @@ impl Interrupts {
     fn new() -> Self {
         Interrupts {
             #[cfg(unix)]
-            signal: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok(),
+            signal: crate::core::process::listen_unless_ignored(libc::SIGINT),
         }
     }
 
