@@ -1107,7 +1107,7 @@ impl App {
 
     /// What the agent is doing right now, for the header.
     pub fn status_label(&self) -> String {
-        if self.modal.as_ref().is_some_and(Modal::is_prompt) {
+        if self.awaiting_answer() {
             return "Waiting for you".to_string();
         }
         if self.compacting {
@@ -3249,6 +3249,7 @@ impl App {
             self.answer_prompt(decision);
         } else {
             self.modal = None;
+            self.show_next_prompt();
         }
     }
 
@@ -3565,6 +3566,8 @@ impl App {
                 }
             }
         }
+        // A request that came while a picker was open waited behind it.
+        self.show_next_prompt();
     }
 
     // --------------------------------------------------------------- slash commands
@@ -7237,6 +7240,26 @@ pub(crate) mod tests {
             "{events:?}"
         );
         events.remove(0)
+    }
+
+    #[test]
+    fn a_request_behind_a_picker_opens_when_the_picker_closes() {
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        app.start_generation();
+        for close in [KeyCode::Esc, KeyCode::Enter] {
+            app.open_policy_picker();
+            app.on_event(pi_gate_request("g1", "cq query"));
+            // It waits, and the user is told so.
+            assert!(matches!(app.modal, Some(Modal::Policy(_))));
+            assert_eq!(app.status_label(), "Waiting for you");
+            app.handle_modal_key(key(close));
+            assert_eq!(app.modal.as_ref().and_then(Modal::request_id), Some("g1"));
+            app.handle_modal_key(key(KeyCode::Char('y')));
+            // After the policy Enter chose, if any.
+            assert!(app.take_actions().ends_with(&[allowed("g1")]));
+            assert!(!app.awaiting_answer());
+        }
     }
 
     #[test]

@@ -461,7 +461,8 @@ recorded ones. For anything else:
   the call fails with "Operation aborted" and the turn settles as any
   other (`fixtures/gate_abort.jsonl`), and pi sends nothing about the
   dialog, so the transport withdraws it (`PermissionWithdrawn`) and
-  reports the turn interrupted. Unverified: the gate's human-readable dialog in
+  reports the turn interrupted. A request that arrives while a picker is
+  open waits until the picker closes. Unverified: the gate's human-readable dialog in
   pi's own interface (`--no-tui`, `ctx.mode` other than `rpc`), tool
   calls made by a pi sub-agent or an extension that runs tools without
   `tool_call`, agy's own interface under `ask`.
