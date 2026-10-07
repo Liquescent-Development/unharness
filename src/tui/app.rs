@@ -2481,12 +2481,13 @@ impl App {
 
     /// Whether the conversation will not fit in the bridge to `next`, and
     /// the harness being left can say what it was about: it has a session,
-    /// and that session saw the whole transcript. Not while its subagents
-    /// are at work: what they ask or report would land in the summary's
-    /// turn.
+    /// live or one it can resume (a fresh one would summarize nothing), and
+    /// that session saw the whole transcript. Not while its subagents are
+    /// at work: what they ask or report would land in the summary's turn.
     fn handoff_wanted(&self, next: HarnessId) -> bool {
         self.bridge_summary == BridgeSummary::Auto
-            && (self.session_alive || self.session_ids.contains_key(&self.active))
+            && (self.session_alive
+                || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
             && self.subagents.is_empty()
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
             && self.shell.is_none()
@@ -5826,6 +5827,29 @@ pub(crate) mod tests {
         assert_eq!(app.active, HarnessId::CODEX);
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         assert_eq!(app.queued.len(), 1);
+    }
+
+    #[test]
+    fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.live_caps
+            .entry(HarnessId::CLAUDE)
+            .or_default()
+            .resume_by_id = Some(false);
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(app.take_actions().is_empty());
+
+        // One that can is resumed for it.
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
+        ));
     }
 
     #[test]
