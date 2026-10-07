@@ -13,8 +13,21 @@ use unharness::{
     doctor, init, models_cmd, runner, skills_cmd, skills_import, switch, sync, update,
 };
 
-#[tokio::main]
-async fn main() -> Result<ExitCode> {
+fn main() -> Result<ExitCode> {
+    // A harness CLI's reaper: before any thread exists (no runtime).
+    #[cfg(target_os = "linux")]
+    if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new(unharness::core::reaper::ARG))
+    {
+        unharness::core::reaper::main();
+    }
+    unharness::core::reaper::enable();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     // Before the config is read: a config that does not parse must not stand
     // between the user and the release that may fix it.

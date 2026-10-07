@@ -289,6 +289,7 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
         harness: HarnessId::CLAUDE,
         process_model: ProcessModel::LongLived,
     });
+    handle.process_slot().set(&proc);
 
     tokio::spawn(drive(proc, events_tx, cmd_rx, cfg.provider));
     Ok(handle)

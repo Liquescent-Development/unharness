@@ -33,6 +33,49 @@ pub struct LineProcess {
     pub lines: mpsc::Receiver<RawLine>,
 }
 
+/// `cmd` in the sandbox, in a session of its own, on pipes.
+fn spawn_child(
+    cmd: std::process::Command,
+    sandbox: &Sandbox,
+    input: bool,
+) -> Result<tokio::process::Child> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut wrapped = sandbox.wrap(cmd)?;
+    // After `wrap`: a backend may build a new command around this one.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe and allocates nothing.
+        unsafe {
+            wrapped.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut cmd = Command::from(wrapped);
+    cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    Ok(cmd.spawn()?)
+}
+
+/// Kills a [`LineProcess`] ([`LineProcess::stopper`]); once it is gone,
+/// or its owner has ended it and let go, this does nothing.
+#[derive(Clone)]
+pub struct Stopper(mpsc::WeakUnboundedSender<Stop>);
+
+impl Stopper {
+    pub fn kill(&self) {
+        if let Some(stop) = self.0.upgrade() {
+            let _ = stop.send(Stop::Now);
+        }
+    }
+}
+
 /// How long a CLI asked to end ([`LineProcess::end`]) has to exit by
 /// itself before what is left of it is killed.
 pub const END_GRACE: Duration = Duration::from_secs(3);
@@ -66,32 +109,24 @@ impl LineProcess {
     }
 
     fn start(cmd: Command, sandbox: &Sandbox, input: bool) -> Result<Self> {
-        #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut wrapped = sandbox.wrap(cmd.into_std())?;
-        // After `wrap`: a backend may build a new command around this one.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            // SAFETY: `setsid` is async-signal-safe and allocates nothing.
-            unsafe {
-                wrapped.pre_exec(|| {
-                    if libc::setsid() == -1 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
-        }
-        let mut cmd = Command::from(wrapped);
-        cmd.stdin(if input { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-
-        let program = cmd.as_std().get_program().to_os_string();
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn {:?}", program))?;
+        let cmd = cmd.into_std();
+        let program = cmd.get_program().to_os_string();
+        let failed = || format!("failed to spawn {program:?}");
+        // Through the reaper, inside the sandbox like the CLI.
+        #[cfg(target_os = "linux")]
+        let mut child = match super::reaper::wrap(&cmd).with_context(failed)? {
+            Some((reaper, reaped)) => match spawn_child(reaper, sandbox, input) {
+                Ok(child) => {
+                    reaped.started().with_context(failed)?;
+                    child
+                }
+                // The reaper could not be run here: the CLI goes bare.
+                Err(_) => spawn_child(cmd, sandbox, input).with_context(failed)?,
+            },
+            None => spawn_child(cmd, sandbox, input).with_context(failed)?,
+        };
+        #[cfg(not(target_os = "linux"))]
+        let mut child = spawn_child(cmd, sandbox, input).with_context(failed)?;
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("child stdout not piped")?;
         let stderr = child.stderr.take().context("child stderr not piped")?;
@@ -123,12 +158,20 @@ impl LineProcess {
         let mut owned = Owned::new(child);
         tokio::spawn(async move {
             let code = watch(&mut owned, stop_rx).await;
+            let (mut out_task, mut err_task) = (out_task, err_task);
             let drain = async {
+                let _ = (&mut out_task).await;
+                let _ = (&mut err_task).await;
+            };
+            if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+                // Something out of reach (a double fork, a session of its
+                // own when the child exited by itself) holds the pipes:
+                // they are closed on it, and it gets EPIPE from now on.
+                out_task.abort();
+                err_task.abort();
                 let _ = out_task.await;
                 let _ = err_task.await;
-            };
-            let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain).await;
-            // What it left running in its group goes with it.
+            }
             drop(owned);
             let _ = tx.send(RawLine::Exited(code)).await;
         });
@@ -190,6 +233,12 @@ impl LineProcess {
         let _ = self.stop_tx.send(Stop::Now);
     }
 
+    /// What kills this from outside its owner, also while the owner is
+    /// stuck. It does not keep it alive: dropped, this is killed as before.
+    pub fn stopper(&self) -> Stopper {
+        Stopper(self.stop_tx.downgrade())
+    }
+
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }
@@ -202,37 +251,85 @@ impl LineProcess {
     }
 }
 
-/// The child. Dropped, it kills what the child left running in its
-/// process group, and the whole tree if the child was not reaped yet (the
-/// runtime went away while the watcher waited).
+/// The child. Dropped before it was reaped (the runtime went away while
+/// the watcher waited), it kills the child's whole tree.
 struct Owned {
     child: Child,
     pid: Option<u32>,
+    /// Readable once the child has exited, while it is not reaped yet.
+    #[cfg(target_os = "linux")]
+    exit: Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
     reaped: bool,
 }
 
 impl Owned {
     fn new(child: Child) -> Self {
         live_children().send_modify(|n| *n += 1);
+        let pid = child.id();
+        unreaped().extend(pid);
         Owned {
-            pid: child.id(),
+            #[cfg(target_os = "linux")]
+            exit: pid.and_then(pidfd),
+            pid,
             child,
             reaped: false,
         }
+    }
+
+    /// Wait for the child to exit. Where it can be seen (a pidfd, Linux
+    /// 5.3 and later) it is not reaped, and `None` comes back: its pid,
+    /// and so its group's id, can then name no other process. Elsewhere,
+    /// or when the pidfd cannot be waited on, it is reaped, and its status
+    /// comes back.
+    async fn exited(&mut self) -> Option<std::io::Result<std::process::ExitStatus>> {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = &self.exit
+            && let Ok(mut ready) = fd.readable().await
+        {
+            ready.retain_ready();
+            return None;
+        }
+        Some(self.child.wait().await)
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        match self.pid {
-            Some(pid) if !self.reaped => kill_tree(pid),
-            // The group's id stays taken while a member is left, so it
-            // names no other.
-            Some(pid) => kill_group(pid),
-            None => {}
+        if let Some(pid) = self.pid
+            && !self.reaped
+        {
+            kill_tree(pid);
+            forget(pid);
         }
         live_children().send_modify(|n| *n -= 1);
     }
+}
+
+/// A pidfd for the child `pid`, which must not be reaped yet.
+#[cfg(target_os = "linux")]
+fn pidfd(pid: u32) -> Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: a plain syscall; the fd it returns is owned from here on.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is a new descriptor nothing else owns.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) };
+    tokio::io::unix::AsyncFd::with_interest(fd, tokio::io::Interest::READABLE).ok()
+}
+
+/// The pids of the `LineProcess` children not reaped yet, which name no
+/// other process while they are listed: a child leaves before it is
+/// reaped, except where its exit cannot be seen without reaping it.
+static UNREAPED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn unreaped() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    UNREAPED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn forget(pid: u32) {
+    unreaped().retain(|p| *p != pid);
 }
 
 /// How many `LineProcess` children are not reaped yet.
@@ -244,11 +341,12 @@ fn live_children() -> &'static tokio::sync::watch::Sender<usize> {
 
 /// Wait for the child. A kill request, or the `LineProcess` being dropped,
 /// kills it and its tree; a request to end kills them once its grace is
-/// up, unless the child exits first.
+/// up, unless the child exits first. What a child that exits leaves in
+/// its process group goes with it.
 async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Option<i32> {
     let mut deadline: Option<tokio::time::Instant> = None;
     let mut asking = true;
-    loop {
+    let exited = loop {
         let grace_up = async {
             match deadline {
                 Some(at) => tokio::time::sleep_until(at).await,
@@ -256,28 +354,45 @@ async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Op
             }
         };
         tokio::select! {
-            status = owned.child.wait() => {
-                owned.reaped = true;
-                return status.ok().and_then(|s| s.code());
-            }
+            reaped = owned.exited() => break Some(reaped),
             stop = stop.recv(), if asking => match stop {
                 Some(Stop::Within(grace)) => {
                     let at = tokio::time::Instant::now() + grace;
                     deadline = Some(deadline.map_or(at, |d| d.min(at)));
                 }
-                Some(Stop::Now) => break,
+                Some(Stop::Now) => break None,
                 // Dropped while it ends by itself: the grace still holds.
                 None if deadline.is_some() => asking = false,
-                None => break,
+                None => break None,
             },
-            _ = grace_up => break,
+            _ = grace_up => break None,
         }
-    }
-    if let Some(pid) = owned.pid {
-        kill_tree(pid);
-    }
-    let _ = owned.child.start_kill();
-    let status = owned.child.wait().await;
+    };
+    let status = match exited {
+        // The group's id is the child's pid, which the child gives up when
+        // it is reaped: with the group emptied too, a new process could
+        // lead a group of that id, as every harness process does. So the
+        // group is killed before the reaping where the exit can be seen
+        // without it, and right after it elsewhere.
+        Some(reaped) => {
+            if let Some(pid) = owned.pid {
+                kill_group(pid);
+                forget(pid);
+            }
+            match reaped {
+                Some(status) => status,
+                None => owned.child.wait().await,
+            }
+        }
+        None => {
+            if let Some(pid) = owned.pid {
+                kill_tree(pid);
+                forget(pid);
+            }
+            let _ = owned.child.start_kill();
+            owned.child.wait().await
+        }
+    };
     owned.reaped = true;
     status.ok().and_then(|s| s.code())
 }
@@ -310,6 +425,31 @@ impl EndSignals {
         if !self.signals.is_empty() {
             let waits = self.signals.iter_mut().map(|s| Box::pin(s.recv()));
             futures::future::select_all(waits).await;
+            return;
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Ctrl+Z (SIGTSTP) to unharness, which [`suspend`] answers.
+pub struct JobStops {
+    #[cfg(unix)]
+    signal: Option<tokio::signal::unix::Signal>,
+}
+
+impl JobStops {
+    /// Listen from now on, unless unharness was started with it ignored.
+    pub fn listen() -> Self {
+        JobStops {
+            #[cfg(unix)]
+            signal: listen_unless_ignored(libc::SIGTSTP),
+        }
+    }
+
+    pub async fn recv(&mut self) {
+        #[cfg(unix)]
+        if let Some(s) = self.signal.as_mut() {
+            s.recv().await;
             return;
         }
         std::future::pending::<()>().await;
@@ -427,10 +567,7 @@ fn live_probes() -> std::sync::MutexGuard<'static, Vec<u32>> {
 /// an error.
 fn kill_group(id: u32) {
     #[cfg(unix)]
-    // SAFETY: a plain syscall on the group created for this child.
-    unsafe {
-        libc::killpg(id as libc::pid_t, libc::SIGKILL);
-    }
+    signal_group(id, libc::SIGKILL);
     #[cfg(not(unix))]
     let _ = id;
 }
@@ -443,21 +580,7 @@ fn kill_tree(pid: u32) {
     #[cfg(target_os = "linux")]
     {
         // Stopped first, so that nothing forks while the tree is read.
-        let mut tree = vec![pid];
-        signal(pid, libc::SIGSTOP);
-        for _ in 0..16 {
-            let found: Vec<u32> = descendants(pid)
-                .into_iter()
-                .filter(|p| !tree.contains(p))
-                .collect();
-            if found.is_empty() {
-                break;
-            }
-            for &p in &found {
-                signal(p, libc::SIGSTOP);
-            }
-            tree.extend(found);
-        }
+        let tree = stop_tree(pid);
         kill_group(pid);
         for p in tree {
             signal(p, libc::SIGKILL);
@@ -467,11 +590,177 @@ fn kill_tree(pid: u32) {
     kill_group(pid);
 }
 
+/// SIGSTOP to the child `pid` and every process descended from it, read
+/// until no new one turns up. Returns them, `pid` first.
+#[cfg(target_os = "linux")]
+fn stop_tree(pid: u32) -> Vec<u32> {
+    let mut tree = vec![pid];
+    signal(pid, libc::SIGSTOP);
+    for _ in 0..16 {
+        let found: Vec<u32> = descendants(pid)
+            .into_iter()
+            .filter(|p| !tree.contains(p))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for &p in &found {
+            signal(p, libc::SIGSTOP);
+        }
+        tree.extend(found);
+    }
+    tree
+}
+
+/// Ctrl+Z, for unharness: the harness processes lead sessions of their
+/// own, so the terminal stops only unharness, and a CLI would go on with
+/// its turn. They are stopped with their process groups and, on Linux,
+/// everything descended from them, then unharness stops itself, and they
+/// are continued when it is (`fg`). Where the terminal would not have
+/// stopped unharness (its process group is orphaned) nothing stays
+/// stopped.
+#[cfg(unix)]
+pub fn suspend() {
+    // Held throughout: none is reaped meanwhile, so no pid names another.
+    let live = unreaped();
+    #[cfg(target_os = "linux")]
+    let mut stopped: Vec<u32> = Vec::new();
+    for &pid in live.iter() {
+        signal_group(pid, libc::SIGSTOP);
+        #[cfg(target_os = "linux")]
+        stopped.extend(stop_tree(pid));
+    }
+    // SAFETY: the disposition is read into, and restored from, a zeroed
+    // struct owned here; `raise` stops the process until SIGCONT.
+    unsafe {
+        let mut stop: libc::sigaction = std::mem::zeroed();
+        stop.sa_sigaction = libc::SIG_DFL;
+        let mut handler: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTSTP, &stop, &mut handler);
+        libc::raise(libc::SIGTSTP);
+        libc::sigaction(libc::SIGTSTP, &handler, std::ptr::null_mut());
+    }
+    // What was stopped, also what left the tree meanwhile (its parent
+    // killed), and what is in it now.
+    for &pid in live.iter() {
+        signal_group(pid, libc::SIGCONT);
+        #[cfg(target_os = "linux")]
+        stopped.extend(descendants(pid));
+    }
+    #[cfg(target_os = "linux")]
+    for p in stopped {
+        signal(p, libc::SIGCONT);
+    }
+}
+
+/// `sig` to the process group `id`.
+#[cfg(unix)]
+fn signal_group(id: u32, sig: libc::c_int) {
+    // SAFETY: a plain syscall; a group that is gone is not an error.
+    unsafe {
+        libc::killpg(id as libc::pid_t, sig);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn signal(pid: u32, sig: libc::c_int) {
     // SAFETY: a plain syscall; a process that is gone is not an error.
     unsafe {
         libc::kill(pid as libc::pid_t, sig);
+    }
+}
+
+/// Whether the process `pid` runs now: it exists and is not a zombie.
+#[cfg(target_os = "linux")]
+pub fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        !s.rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+/// `pid` and every process below it, held by pidfd: a signal through one
+/// reaches the process it was opened for or none, never one that took its
+/// pid since. For a child that shares unharness's process group (the
+/// prompt's editor, which needs the terminal), where a group signal would
+/// reach unharness too.
+#[cfg(target_os = "linux")]
+pub struct HeldTree(Vec<std::os::fd::OwnedFd>);
+
+#[cfg(target_os = "linux")]
+impl HeldTree {
+    pub fn of(pid: u32) -> Self {
+        use std::os::fd::FromRawFd;
+        let mut pids = vec![pid];
+        pids.extend(descendants(pid));
+        let fds = pids
+            .into_iter()
+            .filter_map(|p| {
+                // SAFETY: a plain syscall; the descriptor is owned below.
+                let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, p as libc::pid_t, 0) };
+                // SAFETY: a new descriptor nothing else owns.
+                (fd >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) })
+            })
+            .collect();
+        HeldTree(fds)
+    }
+
+    pub fn signal(&self, sig: libc::c_int) {
+        use std::os::fd::AsRawFd;
+        for fd in &self.0 {
+            // SAFETY: a plain syscall; one that has exited is not an error.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    sig,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+        }
+    }
+
+    /// Whether one of them has not exited yet.
+    pub fn any_running(&self) -> bool {
+        use std::os::fd::AsRawFd;
+        self.0.iter().any(|fd| {
+            let mut exited = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd, on a descriptor owned here; readable
+            // once the process has exited.
+            unsafe { libc::poll(&mut exited, 1, 0) == 0 }
+        })
+    }
+}
+
+/// Everything below `root`, which is not touched: stopped, so that none
+/// starts another meanwhile, then killed (the reaper, for what its CLI
+/// left).
+#[cfg(target_os = "linux")]
+pub(crate) fn kill_below(root: u32) {
+    let mut below: Vec<u32> = Vec::new();
+    for _ in 0..16 {
+        let found: Vec<u32> = descendants(root)
+            .into_iter()
+            .filter(|p| !below.contains(p))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for &p in &found {
+            signal(p, libc::SIGSTOP);
+        }
+        below.extend(found);
+    }
+    for p in below {
+        signal(p, libc::SIGKILL);
     }
 }
 
@@ -597,24 +886,12 @@ mod tests {
         assert!(matches!(got.last(), Some(RawLine::Exited(_))));
     }
 
-    /// Whether the process `pid` runs now (not gone, not a zombie).
-    #[cfg(target_os = "linux")]
-    fn running(pid: &str) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-            !s.rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
-    }
-
     /// Whether the process `pid` is still alive a moment after it was
     /// killed.
     #[cfg(target_os = "linux")]
     fn alive(pid: &str) -> bool {
         for _ in 0..50 {
-            if !running(pid) {
+            if !running(pid.parse().unwrap()) {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -644,6 +921,30 @@ mod tests {
         assert!(!alive(_sleeper));
     }
 
+    // Holding the output, the background `sleep` kept the drain waiting
+    // for its whole timeout, and was killed after it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn what_a_child_leaves_in_its_group_goes_when_it_exits() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & echo $!");
+        let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(5), drain(&mut p))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < DRAIN_TIMEOUT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(got.last(), Some(&RawLine::Exited(Some(0))));
+        let Some(RawLine::Stdout(sleeper)) = got.first() else {
+            panic!("{got:?}");
+        };
+        assert!(!alive(sleeper));
+    }
+
     #[tokio::test]
     async fn killing_a_group_kills_what_it_started() {
         let mut cmd = Command::new("sh");
@@ -664,6 +965,35 @@ mod tests {
         assert!(!alive(&_sleeper));
     }
 
+    // The grandchild left the child's tree and session: nothing kills
+    // it, but it no longer has anyone reading its output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pipes_are_closed_on_what_escaped_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name| dir.path().join(name).display().to_string();
+        let (out, go, failed) = (file("out"), file("go"), file("failed"));
+        let escaped = format!(
+            "trap '' PIPE; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done; echo late || touch {failed}"
+        );
+        let mut cmd = Command::new("sh");
+        // The child waits until it is out, or the group kill would catch it.
+        cmd.arg("-c").arg(format!(
+            "(setsid sh -c \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
+        ));
+        let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
+        // Let it go first whatever happened: it ends after one line.
+        std::fs::write(&go, "").unwrap();
+        assert_eq!(got.unwrap().last(), Some(&RawLine::Exited(Some(0))));
+        let failed = std::path::Path::new(&failed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !failed.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(failed.exists(), "its output was still read");
+    }
+
     #[tokio::test]
     async fn an_ended_child_exits_by_itself() {
         let mut cmd = Command::new("sh");
@@ -674,6 +1004,35 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.last(), Some(&RawLine::Exited(Some(4))));
+    }
+
+    #[tokio::test]
+    async fn a_stopper_kills_but_does_not_keep_alive() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 30");
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
+        p.stopper().kill();
+        let got = tokio::time::timeout(Duration::from_secs(5), drain(&mut p))
+            .await
+            .unwrap();
+        assert!(matches!(got.last(), Some(RawLine::Exited(_))), "{got:?}");
+
+        // Dropped with a stopper around, it is killed as before.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("echo $$; exec sleep 30");
+        let mut p = LineProcess::spawn(cmd, &Sandbox::off()).unwrap();
+        let Some(RawLine::Stdout(pid)) = p.lines.recv().await else {
+            panic!("no pid");
+        };
+        let stopper = p.stopper();
+        drop(p);
+        let pid: u32 = pid.trim().parse().unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            assert!(tokio::time::Instant::now() < deadline, "kept alive");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        stopper.kill();
     }
 
     // Threads of its own: the watcher runs while this one waits.
@@ -692,7 +1051,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             std::thread::sleep(Duration::from_millis(100));
-            assert!(running(&_pid), "killed before its grace was up");
+            assert!(
+                running(_pid.parse().unwrap()),
+                "killed before its grace was up"
+            );
             std::thread::sleep(Duration::from_millis(900));
             assert!(!alive(&_pid));
         }

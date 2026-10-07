@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 
 use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
+use crate::core::session::ProcessSlot;
 use crate::core::{
     AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
     SessionHandle, SessionInfo, StopReason, shutdown_queued,
@@ -66,7 +67,9 @@ pub fn start_stream(cfg: SessionConfig) -> Result<SessionHandle> {
         harness: HarnessId::AGY,
         process_model: ProcessModel::LongLived,
     });
-    tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));
+    let slot = handle.process_slot();
+    slot.set(&proc);
+    tokio::spawn(drive(proc, slot, cfg, events_tx, cmd_rx));
     Ok(handle)
 }
 
@@ -81,6 +84,7 @@ fn spawn_stream(cfg: &SessionConfig) -> Result<LineProcess> {
 
 async fn drive(
     mut proc: LineProcess,
+    slot: ProcessSlot,
     mut cfg: SessionConfig,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
@@ -124,6 +128,7 @@ async fn drive(
                             match spawn_stream(&cfg) {
                                 Ok(p) => {
                                     proc = p;
+                                    slot.set(&proc);
                                     parser = AgyParser::new(session_id.clone());
                                     let _ = events.send(AgentEvent::Notice(
                                         "agy restarted with the new settings".into(),

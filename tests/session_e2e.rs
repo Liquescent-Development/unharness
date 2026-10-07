@@ -35,6 +35,8 @@ struct Fake {
 
 impl Fake {
     fn new() -> Self {
+        // The CLIs run below a reaper, as unharness runs them.
+        unharness::core::reaper::enable_with(PathBuf::from(env!("CARGO_BIN_EXE_unharness")));
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("sent.log");
         Fake { _tmp: tmp, log }
@@ -348,17 +350,8 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     // hang (tokio runtime shutdown would wait on nothing) is the signal.
 }
 
-/// Whether `pid` is still running (not gone, not a zombie).
 #[cfg(target_os = "linux")]
-fn running(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-        !s.rsplit(')')
-            .next()
-            .unwrap_or("")
-            .trim_start()
-            .starts_with('Z')
-    })
-}
+use unharness::core::process::running;
 
 #[cfg(target_os = "linux")]
 async fn gone_within(pid: u32, within: Duration) -> bool {
@@ -1915,4 +1908,277 @@ async fn headless_runs_an_acp_agent() {
             .as_str()
             .is_some_and(|id| id.starts_with("201664ad"))
     );
+}
+
+/// A fake that replays `lines` and holds at its `# gate` until the file
+/// returned is created.
+fn gated_config(fake: &Fake, lines: &[&str]) -> (SessionConfig, PathBuf) {
+    let fixture = fake._tmp.path().join("gated.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    (cfg, gate)
+}
+
+/// Events up to the one `stop` matches.
+async fn events_until(
+    handle: &mut SessionHandle,
+    stop: impl Fn(&AgentEvent) -> bool,
+) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(handle).await;
+        let done = stop(&ev);
+        events.push(ev);
+        if done {
+            return events;
+        }
+    }
+}
+
+/// Every command sent before has been handled once this returns: an
+/// answer to no request comes back as a notice.
+async fn settle(handle: &mut SessionHandle) -> Vec<AgentEvent> {
+    handle
+        .send(SessionCommand::RespondPermission {
+            id: "settle".into(),
+            decision: PermissionDecision::Deny {
+                reason: String::new(),
+            },
+        })
+        .await
+        .unwrap();
+    events_until(handle, |e| matches!(e, AgentEvent::Notice(_))).await
+}
+
+fn interrupted(events: &[AgentEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            }
+        )
+    })
+}
+
+fn codex_app_server() -> unharness::harness::codex::CodexHarness {
+    unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    )
+}
+
+// Ctrl+C in `--print` reaches the CLI only as `Interrupt`.
+#[tokio::test]
+async fn codex_interrupts_a_turn_sent_before_it_had_an_id() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"id":1,"result":{}}"#,
+            r#">> {"method": "initialized"}"#,
+            r#">> {"method": "thread/start"}"#,
+            r#"{"id":2,"result":{"thread":{"id":"t1"}}}"#,
+            r#">> {"method": "turn/start"}"#,
+            "# gate",
+            r#"{"id":3,"result":{"turn":{"id":"u1","status":"inProgress"}}}"#,
+            r#">> {"method": "turn/interrupt"}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"u1","status":"interrupted"}}}"#,
+        ],
+    );
+    let mut handle = codex_app_server().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(4).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let before = settle(&mut handle).await;
+    assert!(!interrupted(&before), "{before:?}");
+    std::fs::write(&gate, "").unwrap();
+
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+    let sent = fake.sent_lines();
+    let interrupt = sent
+        .iter()
+        .find(|l| l["method"] == "turn/interrupt")
+        .expect("turn/interrupt");
+    assert_eq!(interrupt["params"]["turnId"], "u1");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_drops_a_turn_interrupted_while_it_waits_for_the_thread() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"id":1,"result":{}}"#,
+            r#">> {"method": "initialized"}"#,
+            r#">> {"method": "thread/start"}"#,
+            "# gate",
+            r#"{"id":2,"result":{"thread":{"id":"t1"}}}"#,
+            r#"{"method":"thread/started","params":{"thread":{"id":"t1"}}}"#,
+        ],
+    );
+    let mut handle = codex_app_server().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(3).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+
+    // The thread comes, and the turn does not go out on it.
+    std::fs::write(&gate, "").unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::ProcessExited { .. })
+    })
+    .await;
+    let sent = fake.sent_lines();
+    assert!(
+        !sent.iter().any(|l| l["method"] == "turn/start"),
+        "{sent:?}"
+    );
+}
+
+#[tokio::test]
+async fn acp_drops_a_turn_interrupted_while_it_waits_for_the_session() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            "# gate",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+        ],
+    );
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    fake.sent_lines_eventually(2).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+
+    std::fs::write(&gate, "").unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::ProcessExited { .. })
+    })
+    .await;
+    let sent = fake.sent_lines();
+    assert!(
+        !sent.iter().any(|l| l["method"] == "session/prompt"),
+        "{sent:?}"
+    );
+}
+
+/// Every line `p` writes, until it exits, and its exit code.
+#[cfg(target_os = "linux")]
+async fn run_out(mut p: unharness::core::process::LineProcess) -> (Vec<String>, Option<i32>) {
+    use unharness::core::process::RawLine;
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(10), p.lines.recv()).await {
+            Ok(Some(RawLine::Stdout(l) | RawLine::Stderr(l))) => out.push(l),
+            Ok(Some(RawLine::Exited(code))) => return (out, code),
+            other => panic!("{other:?} after {out:?}"),
+        }
+    }
+}
+
+// The reaper blocks signals to take them one at a time; what it starts
+// gets none of that, and runs below it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_cli_starts_below_its_reaper_with_no_signal_blocked() {
+    if !python_available() {
+        return;
+    }
+    let _fake = Fake::new();
+    // Not a shell: dash clears the mask it is given, python keeps it.
+    let mut cmd = tokio::process::Command::new("python3");
+    cmd.arg("-c").arg(
+        "import os\n\
+         print([l for l in open('/proc/self/status') if l.startswith('SigBlk')][0].strip())\n\
+         print(open(f'/proc/{os.getppid()}/cmdline').read().replace(chr(0), ' '))",
+    );
+    let p = unharness::core::process::LineProcess::spawn(
+        cmd,
+        &unharness::core::sandbox::Sandbox::off(),
+    )
+    .unwrap();
+    let (out, code) = run_out(p).await;
+    assert_eq!(code, Some(0), "{out:?}");
+    assert_eq!(out[0].split_whitespace().nth(1), Some("0000000000000000"));
+    assert!(
+        out.iter().any(|l| l.contains("__unharness-reap")),
+        "{out:?}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_cli_killed_by_a_signal_is_reported_so_through_its_reaper() {
+    if !python_available() {
+        return;
+    }
+    let _fake = Fake::new();
+    let mut cmd = tokio::process::Command::new("python3");
+    cmd.arg("-c")
+        .arg("import os, signal, time\nos.kill(os.getpid(), signal.SIGTERM)\ntime.sleep(5)");
+    let p = unharness::core::process::LineProcess::spawn(
+        cmd,
+        &unharness::core::sandbox::Sandbox::off(),
+    )
+    .unwrap();
+    let (out, code) = run_out(p).await;
+    assert_eq!(code, None, "{out:?}");
+}
+
+// As without the reaper: an error from the spawn, not an exit.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_cli_that_cannot_start_fails_to_spawn_also_through_its_reaper() {
+    let _fake = Fake::new();
+    let cmd = tokio::process::Command::new("/nonexistent/unharness-cli");
+    let err = unharness::core::process::LineProcess::spawn(
+        cmd,
+        &unharness::core::sandbox::Sandbox::off(),
+    )
+    .err()
+    .expect("spawned");
+    let io = err.root_cause().downcast_ref::<std::io::Error>().unwrap();
+    assert_eq!(io.kind(), std::io::ErrorKind::NotFound, "{err:#}");
 }

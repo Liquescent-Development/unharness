@@ -340,6 +340,10 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
+    /// The session's start waits for the CLI that ended the one before it
+    /// to be gone (`tui::Ending`): what would start another is refused
+    /// meanwhile, as during a turn.
+    pub start_held: bool,
     pub store: ConversationStore,
     pub conversation: Conversation,
     persist_failed: bool,
@@ -728,6 +732,7 @@ impl App {
             last_active_index,
             session_ids,
             session_alive: false,
+            start_held: false,
             store,
             conversation,
             persist_failed: false,
@@ -1567,7 +1572,7 @@ impl App {
     /// first put back to how it was before that turn.
     pub fn rewind_to(&mut self, block: usize, restore_files: bool) {
         // A rewind may start a session, which needs a policy.
-        if self.is_generating || !self.require_policy() {
+        if self.is_generating || self.refused_while_start_held() || !self.require_policy() {
             return;
         }
         let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
@@ -1660,6 +1665,19 @@ impl App {
         self.persist();
     }
 
+    /// What was held for a session start that will not come (unharness
+    /// quits): a rewind among it never reached the vendor session, which
+    /// is then not resumed with the turns the transcript dropped.
+    pub fn drop_held(&mut self, held: impl IntoIterator<Item = Action>) {
+        let rewind = held
+            .into_iter()
+            .any(|a| matches!(a, Action::Command(SessionCommand::Rewind { .. })));
+        if rewind {
+            self.forget_session(self.active);
+            self.persist();
+        }
+    }
+
     /// Stop using `harness`'s vendor session: its next turn starts a fresh
     /// one and gets the conversation so far as context.
     fn forget_session(&mut self, harness: HarnessId) {
@@ -1707,6 +1725,9 @@ impl App {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before forking");
+            return;
+        }
+        if self.refused_while_start_held() {
             return;
         }
         if !self.conversation.has_content() {
@@ -1876,6 +1897,17 @@ impl App {
         } else if !refused.is_empty() {
             self.insert_str(&refused.join(" "));
         }
+    }
+
+    /// True, with an error shown, while the session's start is held.
+    fn refused_while_start_held(&mut self) -> bool {
+        if self.start_held {
+            self.transcript.push_error(format!(
+                "the previous {} is still exiting; try again in a moment",
+                self.short_name()
+            ));
+        }
+        self.start_held
     }
 
     pub fn interrupt(&mut self) {
@@ -2454,8 +2486,10 @@ impl App {
         self.transcript.end_running_agents();
     }
 
-    /// End the active harness's session.
+    /// End the active harness's session. It is not alive from here on: a
+    /// prompt handled before the loop runs the shutdown starts the next.
     fn shutdown_session(&mut self) {
+        self.session_alive = false;
         self.drop_subagents();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
@@ -2574,6 +2608,9 @@ impl App {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before switching harness");
+            return;
+        }
+        if self.refused_while_start_held() {
             return;
         }
         if self.handoff_wanted(next) {
@@ -2849,6 +2886,9 @@ impl App {
         if self.is_generating {
             self.transcript
                 .push_error("finish or interrupt the current turn before resuming");
+            return;
+        }
+        if self.refused_while_start_held() {
             return;
         }
         let conv = match self.store.load(&id_or_prefix) {
@@ -4887,6 +4927,46 @@ pub(crate) mod tests {
         );
     }
 
+    // Held behind the start of the session it was for, the rewind is
+    // dropped when unharness quits first: that session is not resumed.
+    #[test]
+    fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
+            app.submit_prompt(prompt.into());
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+        }
+        app.session_alive = false;
+        app.take_actions();
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(
+                |b| matches!(b, super::super::transcript::Block::User { text } if text == "two"),
+            )
+            .unwrap();
+        app.rewind_to(two, false);
+        let held = app.take_actions();
+        assert!(matches!(held[0], Action::StartSession { .. }), "{held:?}");
+
+        app.drop_held(held);
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+        // Without a rewind among them, nothing is forgotten.
+        app.session_ids.insert(HarnessId::CLAUDE, "s2".into());
+        app.drop_held([Action::StartSession {
+            resume: Some("s2".into()),
+        }]);
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+    }
+
     #[test]
     fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
         use super::super::transcript::Block;
@@ -6517,12 +6597,13 @@ pub(crate) mod tests {
 
         assert!(app.set_sandbox(SandboxLevel::ReadOnly));
         assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
-        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-        app.session_alive = false;
+        // The prompt typed with it, before the loop has ended the
+        // session, starts the next one.
         app.submit_prompt("again".into());
         let actions = app.take_actions();
+        assert_eq!(actions[0], Action::Shutdown);
         assert!(
-            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+            matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
@@ -6564,12 +6645,13 @@ pub(crate) mod tests {
 
         app.set_provider("bedrock".into());
         assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
-        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-        app.session_alive = false;
+        // The prompt typed with it, before the loop has ended the
+        // session, starts the next one.
         app.submit_prompt("again".into());
         let actions = app.take_actions();
+        assert_eq!(actions[0], Action::Shutdown);
         assert!(
-            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+            matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
     }
 

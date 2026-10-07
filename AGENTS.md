@@ -111,8 +111,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   on Linux, every process descended from it (stopped first, read from
   `/proc`): Claude Code runs each command in a session of its own, which a
   group kill misses. What it left in its group goes when it exits by
-  itself, and its tree when the runtime drops the watcher. A session ends
-  the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
+  itself, killed before it is reaped (a pidfd) so that the group's id
+  names no other, and its tree when the runtime drops the watcher. A
+  session ends the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
   driver sends first, then stdin closed) and is killed only after
   `END_GRACE`, also when the handle is dropped meanwhile (a switch, a
   fork, a resume, a sandbox or provider change; `/clear` keeps the
@@ -122,7 +123,27 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
-  background job) is not listened for.
+  background job) is not listened for; one while the prompt is in
+  `$EDITOR` ends the editor and what it started (SIGTERM, SIGKILL after
+  2 s; it shares unharness's process group, for the terminal) and then
+  unharness. The TUI says when it waits, and
+  Ctrl+C, Ctrl+D or one of those signals stops the wait. The TUI resumes
+  or forks a vendor session only once the CLI that ended it is gone
+  (`tui::Ending`), so that two never write one session: one still there
+  after `END_GRACE + DRAIN_TIMEOUT + 1s` (its driver stuck) is killed
+  through the session's `ProcessSlot`; meanwhile it says so, refuses a switch,
+  resume, fork or rewind (each would take the held start for its own),
+  and an interrupt drops the prompt that waits; a rewind still held at
+  quit forgets the vendor session it was for. On Linux each CLI runs
+  below a reaper of its own (`core::reaper`: unharness's binary as
+  `__unharness-reap`, a subreaper, in the sandbox): what the CLI put in a
+  session of its own or forked away twice is adopted by it, not by init,
+  and is killed when the CLI exits, also by itself. Checked live: a
+  `setsid sleep &` from Claude Code 2.1.292, Codex 0.157.0, pi 0.87.1 and
+  agy 1.2.17 in `--print` was gone with the run (0.5.0 left Codex's), and
+  the TUI left none on `/quit` or a closed terminal. Elsewhere (macOS)
+  such a process outlives the CLI; its pipes are closed on it once the
+  drain is up.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
   (`--version`, auth) and unharness's own `git` stay outside. A model or
@@ -224,7 +245,15 @@ recorded ones. For anything else:
   steps, what agy's own interface writes to `settings.json` when a
   workspace is trusted there (`trustedWorkspaces`).
 - Codex `app-server` is marked experimental by OpenAI; `transport = "exec"`
-  in `[harnesses.codex]` forces the fallback.
+  in `[harnesses.codex]` forces the fallback. Each `exec` turn is a
+  process of its own, and what it leaves behind is killed when it exits;
+  an `app-server` process keeps what it started until the session ends.
+  For a command's background job on 0.157.0 (pty runs, `sleep 123`) the
+  difference did not show with a `cmd &` one, which did not outlive its
+  command on either transport; a `setsid cmd &` one, which outlived
+  everything before the reaper, now ends with the turn on `exec` and
+  with the session on `app-server`. What else Codex keeps between turns
+  (MCP servers) is unverified.
 - ACP (`src/harness/acp/`) is verified against
   `@agentclientprotocol/claude-agent-acp` 0.85.1 and
   `@agentclientprotocol/codex-acp` 2.1.1. The presets in `PRESETS` (gemini,
@@ -317,8 +346,8 @@ recorded ones. For anything else:
 - `!command` at the prompt (`tui/shell.rs`, `Block::Shell`,
   `BlockRecord::Shell`): `$SHELL -c` in the session's `cwd` through
   `LineProcess::spawn_no_input` under `App::session_sandbox()` (stdin
-  `/dev/null`, `setsid`, the process tree killed on Esc and on quit, the
-  group when the shell exits). No permission prompt, no rule. Refused during a
+  `/dev/null`, `setsid`, the process tree killed on Esc and on quit, and
+  on Linux what it left when the shell exits). No permission prompt, no rule. Refused during a
   turn; a prompt sent while it runs is queued. Its command, output tail
   and status go once in front of the next prompt (unsent blocks, any
   harness); a sent one is part of the bridge, and a harness switch
@@ -516,7 +545,15 @@ recorded ones. For anything else:
   stream-json with a `Write` denied under `ask`, a prompt on stdin, SIGINT
   giving exit 130: Claude ends that turn with `error_during_execution`)
   and agy 1.2.17 (`accept-edits`). Codex, pi and ACP agents run only
-  against `fake-harness.py` (`tests/session_e2e.rs`). It waits for
+  against `fake-harness.py` (`tests/session_e2e.rs`). Ctrl+C reaches the
+  CLI only as `Interrupt`: one before Codex app-server has a thread
+  drops the turn, one before its turn has an id is sent once it has one
+  (checked live on 0.157.0, the turn ended interrupted at 0.4 s and at
+  0.9 s), and an ACP turn waiting for its session is dropped. Ctrl+Z
+  stops every harness process tree, then unharness, and continues them
+  on `fg` (`process::suspend`; checked live on Claude Code 2.1.292 with
+  a Bash `sleep` running: unharness, Claude, its shell and the `sleep`
+  all stopped, and the turn ended normally after `fg`). It waits for
   subagents and, where `SubagentSupport::report_turn` is declared, counts
   one more turn end per background run of a subagent that completed or
   failed, wherever its end falls: in every single-prompt Claude recording

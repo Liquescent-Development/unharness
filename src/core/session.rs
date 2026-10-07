@@ -13,6 +13,7 @@ use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, PermissionDecision};
 use super::ids::{HarnessId, ModelRef, ProviderId};
 use super::mcp::McpServer;
+use super::process::{LineProcess, Stopper};
 use super::sandbox::Sandbox;
 
 #[derive(Debug, Clone)]
@@ -218,6 +219,32 @@ pub struct SessionHandle {
     pub info: SessionInfo,
     pub events: mpsc::Receiver<AgentEvent>,
     cmd_tx: mpsc::Sender<SessionCommand>,
+    process: ProcessSlot,
+}
+
+/// The session's CLI process, as its driver names it, so that it can be
+/// killed past a driver that is stuck ([`ProcessSlot::kill`]).
+#[derive(Clone, Default)]
+pub struct ProcessSlot(std::sync::Arc<std::sync::Mutex<Option<Stopper>>>);
+
+impl ProcessSlot {
+    /// `process` is the session's now (a driver that starts another one
+    /// says so again).
+    pub fn set(&self, process: &LineProcess) {
+        *self.lock() = Some(process.stopper());
+    }
+
+    /// Kill the session's CLI now, whatever its driver is doing; nothing
+    /// for a session whose driver named none.
+    pub fn kill(&self) {
+        if let Some(stopper) = self.lock().as_ref() {
+            stopper.kill();
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Stopper>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 impl SessionHandle {
@@ -237,6 +264,7 @@ impl SessionHandle {
                 info,
                 events: events_rx,
                 cmd_tx,
+                process: ProcessSlot::default(),
             },
             events_tx,
             cmd_rx,
@@ -254,6 +282,11 @@ impl SessionHandle {
         self.cmd_tx
             .try_send(cmd)
             .map_err(|e| anyhow!("could not send session command: {}", e))
+    }
+
+    /// Where the driver names the session's process.
+    pub fn process_slot(&self) -> ProcessSlot {
+        self.process.clone()
     }
 
     /// True while the driver task is still alive.

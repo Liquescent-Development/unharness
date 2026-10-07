@@ -18,7 +18,8 @@ use super::mcp::McpServer;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
 use super::session::{
-    Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    Attachment, ProcessModel, ProcessSlot, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo,
 };
 
 /// Mutable per-session state a protocol needs to build the next turn.
@@ -85,13 +86,15 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         harness: protocol.harness(),
         process_model: ProcessModel::PerTurn,
     });
-    tokio::spawn(drive(state, protocol, events_tx, cmd_rx));
+    let slot = handle.process_slot();
+    tokio::spawn(drive(state, protocol, slot, events_tx, cmd_rx));
     Ok(handle)
 }
 
 async fn drive(
     mut state: TurnState,
     protocol: Arc<dyn PerTurnProtocol>,
+    slot: ProcessSlot,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
@@ -144,6 +147,9 @@ async fn drive(
                         match protocol.build_turn(&state, &text, &attachments) {
                             Ok(spec) => match LineProcess::spawn(spec.command, &state.sandbox) {
                                 Ok(mut proc) => {
+                                    // Before the prompt is written, which
+                                    // a CLI that does not read can hold up.
+                                    slot.set(&proc);
                                     if let Some(input) = spec.stdin
                                         && let Err(e) = proc.write_line(&input).await
                                     {
@@ -180,7 +186,16 @@ async fn drive(
                     SessionCommand::SetEffort(e) => state.effort = e,
                     SessionCommand::SetPolicy(p) => state.policy = p,
                     SessionCommand::Shutdown => {
-                        if let Some(mut p) = current.take() { p.kill().await; }
+                        if let Some(mut p) = current.take() {
+                            p.kill().await;
+                            // Gone before it is said to be: the next
+                            // session resumes the thread it was writing.
+                            while let Some(line) = p.lines.recv().await {
+                                if matches!(line, RawLine::Exited(_)) {
+                                    break;
+                                }
+                            }
+                        }
                         let _ = events.send(AgentEvent::ProcessExited { code: Some(0) }).await;
                         return;
                     }
@@ -284,6 +299,44 @@ mod tests {
         }
     }
 
+    /// Each turn runs a CLI that never reads its stdin.
+    struct Deaf;
+    impl PerTurnProtocol for Deaf {
+        fn harness(&self) -> HarnessId {
+            HarnessId::CODEX
+        }
+        fn build_turn(
+            &self,
+            _state: &TurnState,
+            text: &str,
+            _attachments: &[Attachment],
+        ) -> Result<TurnSpec> {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            Ok(TurnSpec {
+                command,
+                stdin: Some(text.to_string()),
+            })
+        }
+        fn new_parser(&self) -> Box<dyn TurnParser> {
+            Box::new(EchoParser)
+        }
+    }
+
+    // A prompt larger than a pipe holds the driver on writing it to a CLI
+    // that does not read; the session's process can still be killed.
+    #[tokio::test]
+    async fn a_turn_stuck_on_its_prompt_can_be_killed_through_the_session() {
+        let mut h = start(cfg(), Arc::new(Deaf)).unwrap();
+        h.send(SessionCommand::turn("x".repeat(1 << 20)))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        h.process_slot().kill();
+        // The write fails, and the turn ends with its process.
+        collect_turn(&mut h).await;
+    }
+
     fn cfg() -> SessionConfig {
         SessionConfig {
             binary: PathBuf::from("sh"),
@@ -342,6 +395,46 @@ mod tests {
         h.send(SessionCommand::Shutdown).await.unwrap();
         let ev = h.events.recv().await.unwrap();
         assert!(matches!(ev, AgentEvent::ProcessExited { .. }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_turn_ended_with_its_session_is_gone_when_the_exit_is_reported() {
+        struct Pid;
+        impl PerTurnProtocol for Pid {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("echo SID:$$; exec sleep 30");
+                Ok(TurnSpec {
+                    command,
+                    stdin: None,
+                })
+            }
+            fn new_parser(&self) -> Box<dyn TurnParser> {
+                Box::new(EchoParser)
+            }
+        }
+        let mut h = start(cfg(), Arc::new(Pid)).unwrap();
+        h.send(SessionCommand::turn("x")).await.unwrap();
+        let pid = loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if let AgentEvent::SessionStarted { session_id, .. } = ev {
+                break session_id.parse::<u32>().unwrap();
+            }
+        };
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(10), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(ev, AgentEvent::ProcessExited { .. }), "{ev:?}");
+        assert!(!crate::core::process::running(pid));
     }
 
     #[tokio::test]

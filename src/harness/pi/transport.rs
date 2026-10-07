@@ -123,6 +123,7 @@ pub fn start(cfg: SessionConfig, gate: &Path) -> Result<SessionHandle> {
         harness: HarnessId::PI,
         process_model: ProcessModel::LongLived,
     });
+    handle.process_slot().set(&proc);
     let resumed = cfg.resume.is_some();
     tokio::spawn(drive(
         proc, session_id, resumed, cfg.policy, events_tx, cmd_rx,

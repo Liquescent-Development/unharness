@@ -151,6 +151,7 @@ pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Resul
         harness,
         process_model: ProcessModel::LongLived,
     });
+    handle.process_slot().set(&proc);
     tokio::spawn(drive(harness, proc, cfg, events_tx, cmd_rx));
     Ok(handle)
 }
@@ -340,7 +341,15 @@ async fn drive(
                             }
                             res
                         }
-                        None => Ok(()),
+                        // Waiting for the session: it is never sent.
+                        None => {
+                            if d.queued_turn.take().is_some() {
+                                let _ = events.send(AgentEvent::TurnCompleted {
+                                    stop_reason: StopReason::Interrupted,
+                                }).await;
+                            }
+                            Ok(())
+                        }
                     },
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
                         Some((rpc_id, options)) => {

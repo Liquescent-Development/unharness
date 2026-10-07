@@ -51,7 +51,9 @@ Exit status: `0` when the answer is complete, `130` when interrupted,
 `Ctrl+C` interrupts the running turn and ends the run. A second one, or
 one while only subagents are running, ends it at once. SIGTERM, SIGHUP
 and `Ctrl+\` (SIGQUIT) end it too, with the harness and what it
-started; under `nohup` a hangup changes nothing.
+started; under `nohup` a hangup changes nothing. `Ctrl+Z` stops the
+harness and what it started along with unharness, and `fg` continues
+them.
 
 ## Schema
 
