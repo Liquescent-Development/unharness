@@ -119,57 +119,137 @@ fn tell(blocks: &[Block], max_chars: usize) -> Option<String> {
         return None;
     }
     let first = turns.iter().position(|t| t.prompt.is_some());
-    let last = turns.len() - 1;
-    let mut details = vec![Detail::Full; turns.len()];
-    let mut texts: Vec<String> = turns
-        .iter()
-        .enumerate()
-        .map(|(i, t)| t.render(Detail::Full, Some(i) == first))
-        .collect();
+    let mut telling = Telling::new(
+        turns
+            .iter()
+            .enumerate()
+            .map(|(i, t)| t.render(Detail::Full, Some(i) == first))
+            .collect(),
+    );
+    for (i, detail) in steps(turns.len(), first) {
+        if telling.len() <= max_chars {
+            break;
+        }
+        telling.set(i, detail, turns[i].render(detail, Some(i) == first));
+    }
+    Some(cut_middle(&telling.text(), max_chars))
+}
 
-    // Oldest first, the newest turn last of all.
+/// The order in which `n` turns are told more briefly: the older ones
+/// oldest first, the newest last of all, the first prompt's turn never
+/// left out.
+fn steps(n: usize, first: Option<usize>) -> impl Iterator<Item = (usize, Detail)> {
+    let last = n - 1;
     let older = 0..last;
-    let steps = older
+    older
         .clone()
         .map(|i| (i, Detail::Compact))
         .chain(older.clone().map(|i| (i, Detail::Brief)))
         .chain([(last, Detail::Compact)])
         .chain(
             older
-                .filter(|i| Some(*i) != first)
+                .filter(move |i| Some(*i) != first)
                 .map(|i| (i, Detail::Omitted)),
         )
-        .chain([(last, Detail::Brief)]);
-    for (i, detail) in steps {
-        if assemble(&texts, &details).chars().count() <= max_chars {
-            break;
-        }
-        details[i] = detail;
-        texts[i] = turns[i].render(detail, Some(i) == first);
-    }
-    let text = assemble(&texts, &details);
-    Some(cut_middle(&text, max_chars))
+        .chain([(last, Detail::Brief)])
 }
 
-/// The turns told, with a line for each run of turns left out.
-fn assemble(texts: &[String], details: &[Detail]) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut omitted = 0usize;
-    for (text, detail) in texts.iter().zip(details) {
-        if *detail == Detail::Omitted {
-            omitted += 1;
-            continue;
+/// Between two parts of the text.
+const SEPARATOR: &str = "\n\n";
+
+/// The turns as told so far, and how long their text is, kept as each
+/// changes rather than measured on the whole text.
+struct Telling {
+    texts: Vec<String>,
+    lens: Vec<usize>,
+    details: Vec<Detail>,
+    /// The characters of the parts (turns told and omission lines).
+    chars: usize,
+    parts: usize,
+}
+
+impl Telling {
+    /// Every turn told in full.
+    fn new(texts: Vec<String>) -> Self {
+        let lens: Vec<usize> = texts.iter().map(|t| t.chars().count()).collect();
+        Telling {
+            chars: lens.iter().sum(),
+            parts: texts.len(),
+            details: vec![Detail::Full; texts.len()],
+            texts,
+            lens,
+        }
+    }
+
+    /// The length of [`Self::text`].
+    fn len(&self) -> usize {
+        self.chars + SEPARATOR.chars().count() * self.parts.saturating_sub(1)
+    }
+
+    /// Tell turn `i` at `detail`, as `text`.
+    fn set(&mut self, i: usize, detail: Detail, text: String) {
+        // Only the turns left out next to it are told differently with it.
+        let mut lo = i;
+        while lo > 0 && self.details[lo - 1] == Detail::Omitted {
+            lo -= 1;
+        }
+        let mut hi = i + 1;
+        while hi < self.details.len() && self.details[hi] == Detail::Omitted {
+            hi += 1;
+        }
+        let (chars, parts) = self.measure(lo..hi);
+        self.details[i] = detail;
+        self.lens[i] = text.chars().count();
+        self.texts[i] = text;
+        let (now_chars, now_parts) = self.measure(lo..hi);
+        self.chars = self.chars - chars + now_chars;
+        self.parts = self.parts - parts + now_parts;
+    }
+
+    /// The characters and the parts of the turns in `range`, its ends
+    /// being turns told or the ends of the conversation.
+    fn measure(&self, range: std::ops::Range<usize>) -> (usize, usize) {
+        let (mut chars, mut parts, mut omitted) = (0, 0, 0);
+        for i in range {
+            if self.details[i] == Detail::Omitted {
+                omitted += 1;
+                continue;
+            }
+            if omitted > 0 {
+                chars += omission(omitted).chars().count();
+                parts += 1;
+                omitted = 0;
+            }
+            chars += self.lens[i];
+            parts += 1;
+        }
+        if omitted > 0 {
+            chars += omission(omitted).chars().count();
+            parts += 1;
+        }
+        (chars, parts)
+    }
+
+    /// The turns told, with a line for each run of turns left out.
+    fn text(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        let mut omitted = 0usize;
+        for (text, detail) in self.texts.iter().zip(&self.details) {
+            if *detail == Detail::Omitted {
+                omitted += 1;
+                continue;
+            }
+            if omitted > 0 {
+                parts.push(omission(omitted));
+                omitted = 0;
+            }
+            parts.push(text.clone());
         }
         if omitted > 0 {
             parts.push(omission(omitted));
-            omitted = 0;
         }
-        parts.push(text.clone());
+        parts.join(SEPARATOR)
     }
-    if omitted > 0 {
-        parts.push(omission(omitted));
-    }
-    parts.join("\n\n")
 }
 
 fn omission(n: usize) -> String {
@@ -814,6 +894,42 @@ mod tests {
         assert!(text.contains("Goal: the task. Next: c."));
         assert!(text.ends_with("User: after the switch\n\nClaude: fine"));
         assert!(!text.contains("\n[…]\n"));
+    }
+
+    #[test]
+    fn the_length_kept_is_that_of_the_text_at_every_step() {
+        let mut t = Transcript::default();
+        t.append_assistant("Claude", "before any prompt");
+        t.finish_turn(Duration::ZERO);
+        turn(&mut t, &format!("the task {}", "t".repeat(500)), "first");
+        for i in 1..12 {
+            turn(
+                &mut t,
+                &format!("question {i} {}", "q".repeat(100 * i)),
+                &format!("answer {i} {}", "b".repeat(300 * i)),
+            );
+        }
+        let mut turns = split(&t.blocks);
+        turns.retain(|t| t.has_content());
+        let first = turns.iter().position(|t| t.prompt.is_some());
+        assert_eq!(first, Some(1));
+        let mut telling = Telling::new(
+            turns
+                .iter()
+                .enumerate()
+                .map(|(i, t)| t.render(Detail::Full, Some(i) == first))
+                .collect(),
+        );
+        assert_eq!(telling.len(), telling.text().chars().count());
+        for (i, detail) in steps(turns.len(), first) {
+            telling.set(i, detail, turns[i].render(detail, Some(i) == first));
+            assert_eq!(
+                telling.len(),
+                telling.text().chars().count(),
+                "{i} {detail:?}"
+            );
+        }
+        assert!(telling.text().contains("turns omitted]"));
     }
 
     #[test]
