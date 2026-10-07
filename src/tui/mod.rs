@@ -2,6 +2,7 @@
 //! the active harness session's event stream.
 
 pub mod app;
+pub mod bridge;
 pub mod clipboard;
 pub mod code;
 pub mod drop;
