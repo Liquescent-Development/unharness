@@ -64,7 +64,7 @@ change, so ignore what you do not know. Absent values are `null`.
 ### start
 
 ```json
-{"type":"start","schema":1,"version":"0.4.0","harness":"claude","policy":"ask","sandbox":"workspace-write","cwd":"/path"}
+{"type":"start","schema":1,"version":"0.5.0","harness":"claude","policy":"ask","sandbox":"workspace-write","cwd":"/path"}
 ```
 
 `policy` is the one in effect after any fallback.
