@@ -80,7 +80,12 @@ impl LineProcess {
 
     fn start(cmd: Command, sandbox: &Sandbox, input: bool) -> Result<Self> {
         #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut wrapped = sandbox.wrap(cmd.into_std())?;
+        let cmd = cmd.into_std();
+        let program = cmd.get_program().to_os_string();
+        // Through the reaper first, inside the sandbox like the CLI.
+        let reaped =
+            super::reaper::wrap(cmd).with_context(|| format!("failed to spawn {program:?}"))?;
+        let mut wrapped = sandbox.wrap(reaped)?;
         // After `wrap`: a backend may build a new command around this one.
         #[cfg(unix)]
         {
@@ -101,7 +106,6 @@ impl LineProcess {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        let program = cmd.as_std().get_program().to_os_string();
         let mut child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn {:?}", program))?;
@@ -677,6 +681,30 @@ pub fn signal_tree(pid: u32, sig: libc::c_int) -> Vec<u32> {
         }
     }
     tree
+}
+
+/// Everything below `root`, which is not touched: stopped, so that none
+/// starts another meanwhile, then killed (the reaper, for what its CLI
+/// left).
+#[cfg(target_os = "linux")]
+pub(crate) fn kill_below(root: u32) {
+    let mut below: Vec<u32> = Vec::new();
+    for _ in 0..16 {
+        let found: Vec<u32> = descendants(root)
+            .into_iter()
+            .filter(|p| !below.contains(p))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for &p in &found {
+            signal(p, libc::SIGSTOP);
+        }
+        below.extend(found);
+    }
+    for p in below {
+        signal(p, libc::SIGKILL);
+    }
 }
 
 /// Every process below `root`, read from `/proc`.

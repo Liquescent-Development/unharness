@@ -391,7 +391,7 @@ fn ctrl_z_in_print_stops_the_cli_with_unharness_and_fg_continues_it() {
     }
 }
 
-// What was stopped is continued, also once it is out of the tree.
+// What was stopped is not left so, also once it is out of the tree.
 #[test]
 fn fg_continues_what_left_the_tree_while_stopped() {
     if !python_available() {
@@ -436,9 +436,12 @@ fn fg_continues_what_left_the_tree_while_stopped() {
         state(cli).is_none_or(|s| s == 'Z')
     });
     unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
-    wait_until("the orphan runs again", Duration::from_secs(5), || {
-        state(child).is_some_and(|s| s != 'T')
-    });
+    // Continued, or gone with the CLI that left it.
+    wait_until(
+        "the orphan is not left stopped",
+        Duration::from_secs(5),
+        || state(child) != Some('T'),
+    );
 }
 
 // While a run ends, its CLI given its grace: Ctrl+Z still stops both.
@@ -540,4 +543,39 @@ fn sigterm_while_the_prompt_is_in_the_editor_ends_the_editor_and_the_tui() {
         gone_within(editor, Duration::from_secs(2)),
         "the editor runs on"
     );
+}
+
+// A CLI that exits by itself leaves nothing behind, also not what it put
+// in a session of its own, which init would otherwise adopt.
+#[test]
+fn what_a_cli_left_in_a_session_of_its_own_goes_when_it_exits_by_itself() {
+    if !python_available() {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let mut cmd = setup.command(&["--print", "hi"]);
+    cmd.env("UNHARNESS_FAKE_HANG", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut unharness = Unharness(cmd.spawn().unwrap());
+    wait_until("the CLI started its child", Duration::from_secs(20), || {
+        setup.path("pids").exists()
+    });
+    let (cli, child) = setup.pids();
+    struct Reap(u32);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: the `sleep` the fake CLI started for this test.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+    let _child = Reap(child);
+
+    assert!(
+        unharness.exit_within(Duration::from_secs(15)).is_some(),
+        "the run did not end"
+    );
+    assert!(gone_within(cli, Duration::from_secs(2)));
+    assert!(gone_within(child, Duration::from_secs(2)), "left running");
 }

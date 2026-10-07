@@ -11,6 +11,7 @@ pub mod jsonrpc;
 pub mod mcp;
 pub mod per_turn;
 pub mod process;
+pub mod reaper;
 pub mod registry;
 pub mod rules;
 pub mod sandbox;

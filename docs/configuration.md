@@ -74,7 +74,7 @@ headers = { Authorization = "Bearer …" }
 | `[sandbox]` | | See [Sandbox](sandbox.md) |
 | `[harnesses.<id>]` | | Per-harness `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args`, `sandbox_writable` |
 | `[harnesses.claude] relocate_config` | `true` | See [Sandbox](sandbox.md#things-to-know) |
-| `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental). Under `exec` every turn is a process of its own, and what it left running in its process group ends with the turn |
+| `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental). Under `exec` every turn is a process of its own, and what it left running ends with the turn (on Linux; elsewhere what it left in its process group) |
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[mcp_servers.<name>]` | | See [MCP servers](mcp.md) |
 
