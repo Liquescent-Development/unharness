@@ -85,6 +85,13 @@ pub enum Block {
         text: String,
         duration: Option<Duration>,
     },
+    /// What the harness the user switched away from wrote for the next one
+    /// (see [`super::bridge`]).
+    Handoff {
+        text: String,
+        sender: String,
+        to: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -163,6 +170,11 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
             Block::Thought { text, duration } => BlockRecord::Thought {
                 text: text.clone(),
                 secs: duration.map(|d| d.as_secs_f32()),
+            },
+            Block::Handoff { text, sender, to } => BlockRecord::Handoff {
+                text: text.clone(),
+                sender: sender.clone(),
+                to: to.clone(),
             },
             Block::Tool {
                 id,
@@ -309,6 +321,11 @@ impl Transcript {
                 BlockRecord::Thought { text, secs } => Block::Thought {
                     text: text.clone(),
                     duration: Some(Duration::from_secs_f32(secs.unwrap_or(0.0))),
+                },
+                BlockRecord::Handoff { text, sender, to } => Block::Handoff {
+                    text: text.clone(),
+                    sender: sender.clone(),
+                    to: to.clone(),
                 },
                 BlockRecord::Tool {
                     id,
@@ -695,6 +712,29 @@ impl Transcript {
                 *collapsed = !any_collapsed;
             }
         }
+    }
+
+    /// Make what the agent last said from block `start` on the handoff
+    /// summary for `to`. Returns whether it said anything.
+    pub fn mark_handoff(&mut self, start: usize, to: &str) -> bool {
+        let Some(i) = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::Assistant { text, .. } if !text.trim().is_empty()))
+        else {
+            return false;
+        };
+        if i < start {
+            return false;
+        }
+        if let Block::Assistant { text, sender, .. } = &self.blocks[i] {
+            self.blocks[i] = Block::Handoff {
+                text: text.trim().to_string(),
+                sender: sender.clone(),
+                to: to.to_string(),
+            };
+        }
+        true
     }
 
     /// Conversation text from block `from` onward, for seeding another

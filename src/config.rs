@@ -22,6 +22,10 @@ pub struct Config {
     /// Maximum characters of transcript bridged into a new harness session on switch.
     pub bridge_max_chars: Option<usize>,
 
+    /// Ask the harness the user switches away from for a handoff summary
+    /// when the conversation will not fit in the bridge. Default: auto.
+    pub bridge_summary: Option<BridgeSummary>,
+
     /// Checkpoint the working tree before each prompt (git repositories
     /// only) so `/rewind` can restore files. Default: on.
     pub file_checkpoints: Option<bool>,
@@ -47,6 +51,16 @@ pub struct Config {
     /// can take them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp_servers: BTreeMap<String, McpServerSettings>,
+}
+
+/// When a harness is asked for a handoff summary on a switch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BridgeSummary {
+    /// When the bridge to the next harness would be over its budget.
+    #[default]
+    Auto,
+    Never,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -236,6 +250,7 @@ impl Config {
             default_policy: local.default_policy.or(global.default_policy),
             auto_sync: local.auto_sync,
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
+            bridge_summary: local.bridge_summary.or(global.bridge_summary),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
             mouse: local.mouse.or(global.mouse),
             herdr: local.herdr.or(global.herdr),
@@ -297,6 +312,7 @@ mod tests {
 default_harness = "pi"
 default_policy = "accept-edits"
 bridge_max_chars = 1000
+bridge_summary = "never"
 
 [sandbox]
 level = "workspace-write"
@@ -321,6 +337,7 @@ url = "https://example.com/mcp"
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(cfg, deserialized);
+        assert_eq!(cfg.bridge_summary, Some(BridgeSummary::Never));
         assert_eq!(
             cfg.harness("pi").unwrap().default_provider.as_deref(),
             Some("anthropic")

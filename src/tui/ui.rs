@@ -314,6 +314,16 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             lines.extend(render_markdown_to_lines(text, width));
             lines.push(Line::default());
         }
+        TBlock::Handoff { text, sender, to } => {
+            lines.push(Line::from(Span::styled(
+                format!("● {sender} · handoff summary for {to}"),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            lines.extend(render_markdown_to_lines(text, width));
+            lines.push(Line::default());
+        }
         TBlock::Thought { text, duration } => {
             let title = match duration {
                 Some(d) => format!("  ┌─ 💭 Thought for {:.1}s ", d.as_secs_f32()),
@@ -610,6 +620,7 @@ fn block_key(b: &TBlock, thinking_live: bool, elapsed: f32) -> u64 {
             sender,
             duration,
         } => (text, sender, duration).hash(&mut h),
+        TBlock::Handoff { text, sender, to } => (text, sender, to).hash(&mut h),
         TBlock::Thought { text, duration } => {
             (text, duration).hash(&mut h);
             // A thought in progress shows a running clock.

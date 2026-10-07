@@ -22,6 +22,7 @@ mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to sel
 herdr            = true          # report working/blocked/idle to herdr when run in one of its panes
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
 bridge_max_chars = 24000
+bridge_summary   = "auto"        # "never": no handoff summary when the bridge is over budget
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
 
 [sandbox]
@@ -68,6 +69,7 @@ headers = { Authorization = "Bearer …" }
 | `herdr` | `true` | Inside a [herdr](tui.md#herdr) pane, report the session's state to herdr |
 | `auto_sync` | `true` | Refresh the `CLAUDE.md` / `GEMINI.md` symlinks before each run |
 | `bridge_max_chars` | `24000` | How much of the conversation seeds a newly switched-to harness |
+| `bridge_summary` | `"auto"` | Ask the harness being left for a handoff summary when the conversation is over `bridge_max_chars` (`"never"` to skip it); see [Switching harnesses](usage.md#switching-harnesses) |
 | `file_checkpoints` | `true` | [Checkpoint](tui.md#rewind-and-checkpoints) the working tree before each prompt |
 | `[sandbox]` | | See [Sandbox](sandbox.md) |
 | `[harnesses.<id>]` | | Per-harness `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args`, `sandbox_writable` |

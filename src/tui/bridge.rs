@@ -6,6 +6,11 @@
 //! (the files edited, the calls that failed and the final answer stay),
 //! then in a few lines. Turns are left out last, from the middle, and the
 //! first prompt is always kept: it is usually the task.
+//!
+//! When the conversation does not fit, a handoff summary in it (the one a
+//! harness wrote when the user switched away from it) stands in for
+//! everything before it, and only what came after is told turn by turn.
+//! When it fits, summaries are left out: they say again what is there.
 
 use serde_json::Value;
 
@@ -42,6 +47,66 @@ const BRIEF_FILES: usize = 10;
 /// The text of `blocks` for another harness, at most `max_chars` long, or
 /// `None` when there is nothing in them to tell.
 pub fn render(blocks: &[Block], max_chars: usize) -> Option<String> {
+    let whole = tell(blocks, usize::MAX);
+    if whole
+        .as_ref()
+        .is_none_or(|w| w.chars().count() <= max_chars)
+    {
+        return whole;
+    }
+    let Some(at) = last_handoff(blocks) else {
+        return tell(blocks, max_chars);
+    };
+    let head = handoff_head(blocks, at);
+    let room = max_chars.saturating_sub(head.chars().count() + 2);
+    let text = match tell(&blocks[at + 1..], room).filter(|_| room > 0) {
+        Some(rest) => format!("{head}\n\n{rest}"),
+        None => head,
+    };
+    Some(cut_middle(&text, max_chars))
+}
+
+/// Whether [`render`] would have to shorten what `blocks` say, with no
+/// handoff summary in them to stand in for what it shortens.
+pub fn needs_summary(blocks: &[Block], max_chars: usize) -> bool {
+    let len = |text: Option<String>| text.map_or(0, |t| t.chars().count());
+    if len(tell(blocks, usize::MAX)) <= max_chars {
+        return false;
+    }
+    match last_handoff(blocks) {
+        None => true,
+        Some(at) => {
+            let rest = len(tell(&blocks[at + 1..], usize::MAX));
+            handoff_head(blocks, at).chars().count() + 2 + rest > max_chars
+        }
+    }
+}
+
+fn last_handoff(blocks: &[Block]) -> Option<usize> {
+    blocks
+        .iter()
+        .rposition(|b| matches!(b, Block::Handoff { .. }))
+}
+
+/// The first prompt before the summary at `at`, and the summary.
+fn handoff_head(blocks: &[Block], at: usize) -> String {
+    let mut head = String::new();
+    if let Some(prompt) = blocks[..at].iter().find_map(|b| match b {
+        Block::User { text } => Some(text),
+        _ => None,
+    }) {
+        head.push_str(&format!("User: {prompt}\n\n"));
+    }
+    if let Block::Handoff { text, sender, .. } = &blocks[at] {
+        head.push_str(&format!(
+            "[Handoff summary {sender} wrote of the conversation up to here]\n{text}"
+        ));
+    }
+    head
+}
+
+/// [`render`] turn by turn, handoff summaries left out.
+fn tell(blocks: &[Block], max_chars: usize) -> Option<String> {
     let mut turns = split(blocks);
     turns.retain(|t| t.has_content());
     if turns.is_empty() {
@@ -691,6 +756,38 @@ mod tests {
             ["/w/x.txt"]
         );
         assert!(edited_paths("Read", &json!({"file_path": "/w/a"})).is_empty());
+    }
+
+    #[test]
+    fn a_handoff_summary_stands_in_for_what_does_not_fit() {
+        let mut t = Transcript::default();
+        turn(&mut t, "the task", &"a".repeat(3_000));
+        for i in 1..5 {
+            turn(&mut t, &format!("question {i}"), &"b".repeat(3_000));
+        }
+        t.append_assistant("Claude", "Goal: the task. Done: a, b. Next: c.");
+        assert!(t.mark_handoff(t.blocks.len() - 1, "Codex"));
+        turn(&mut t, "after the switch", "fine");
+
+        // It fits: the turns themselves, the summary left out.
+        let whole = render(&t.blocks, usize::MAX).unwrap();
+        assert!(!whole.contains("Handoff summary"));
+        assert!(whole.contains("question 4"));
+
+        assert!(!needs_summary(&t.blocks, usize::MAX));
+        assert!(!needs_summary(&t.blocks, 2_000));
+        assert!(needs_summary(&t.blocks, 100));
+        assert!(needs_summary(&t.blocks[..t.blocks.len() - 3], 2_000));
+
+        // It does not: the first prompt, the summary, what came after.
+        let text = render(&t.blocks, 2_000).unwrap();
+        assert_eq!(
+            text,
+            "User: the task\n\n\
+             [Handoff summary Claude wrote of the conversation up to here]\n\
+             Goal: the task. Done: a, b. Next: c.\n\n\
+             User: after the switch\n\nClaude: fine"
+        );
     }
 
     #[test]

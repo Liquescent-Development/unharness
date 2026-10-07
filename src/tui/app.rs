@@ -21,7 +21,7 @@ use super::modal::{
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
-use crate::config::Config;
+use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
     CheckpointRecord, Conversation, ConversationStore, ShellStatus, TurnAnchorRecord, now_rfc3339,
@@ -120,6 +120,15 @@ pub struct ShellRun {
     pub started: Instant,
     /// The user asked for it to be stopped.
     pub stopping: bool,
+}
+
+/// The harness the user is switching away from writing a summary for the
+/// next one: the switch happens when its turn ends.
+#[derive(Debug, Clone, Copy)]
+struct Handoff {
+    to: HarnessId,
+    /// Where its turn began in the transcript.
+    start: usize,
 }
 
 /// A subagent that is at work.
@@ -294,6 +303,8 @@ pub struct App {
 
     pub transcript: Transcript,
     pub bridge_max_chars: usize,
+    bridge_summary: BridgeSummary,
+    handoff: Option<Handoff>,
     /// Transcript length when each harness was last active (bridge start).
     last_active_index: HashMap<HarnessId, usize>,
     /// Session ids seen this run (or chosen via /resume), per harness.
@@ -642,6 +653,8 @@ impl App {
             git_branch,
             registry,
             bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
+            bridge_summary: config.bridge_summary.unwrap_or_default(),
+            handoff: None,
             config,
             active,
             harness_options,
@@ -1037,6 +1050,9 @@ impl App {
         if self.compacting {
             return "Compacting".to_string();
         }
+        if self.handoff.is_some() {
+            return "Writing a handoff summary".to_string();
+        }
         if let Some(super::transcript::Block::Tool {
             name, done: false, ..
         }) = self
@@ -1162,15 +1178,7 @@ impl App {
         // Bridge context from other harnesses: everything since this harness
         // was last active, or everything on its first visit. Nothing when the
         // live session already saw the whole transcript.
-        let visited = self.session_ids.contains_key(&self.active) || self.session_alive;
-        let from = if visited {
-            self.last_active_index
-                .get(&self.active)
-                .copied()
-                .unwrap_or(self.transcript.blocks.len())
-        } else {
-            0
-        };
+        let from = self.bridge_start(self.active);
         let bridge = if from >= self.transcript.blocks.len() {
             None
         } else {
@@ -1238,6 +1246,22 @@ impl App {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// Where the bridge to `harness` starts: where it was last active,
+    /// nothing when its live session saw it all, everything on its first
+    /// visit.
+    fn bridge_start(&self, harness: HarnessId) -> usize {
+        let visited = self.session_ids.contains_key(&harness)
+            || (harness == self.active && self.session_alive);
+        if visited {
+            self.last_active_index
+                .get(&harness)
+                .copied()
+                .unwrap_or(self.transcript.blocks.len())
+        } else {
+            0
+        }
     }
 
     /// Record the working tree as it is before the turn at `block` runs.
@@ -2223,6 +2247,7 @@ impl App {
                 }
                 self.check_guard();
                 self.finish_generation();
+                self.finish_handoff(done);
                 self.persist();
                 // A clean finish moves on to the next queued prompt; after an
                 // interrupt or error the user decides (Enter sends it).
@@ -2252,6 +2277,7 @@ impl App {
                     self.modal = None;
                 }
                 self.pending_prompts.clear();
+                self.finish_handoff(false);
             }
         }
     }
@@ -2281,6 +2307,26 @@ impl App {
     }
 
     fn on_permission_request(&mut self, req: PermissionRequest) {
+        if self.handoff.is_some() {
+            let decision = match &req.kind {
+                PermissionKind::ToolUse { tool, .. } => {
+                    self.transcript
+                        .push_notice(format!("denied {tool}: a handoff summary uses no tools"));
+                    PermissionDecision::Deny {
+                        reason: "The user is switching to another agent. Write the handoff \
+                                 summary from what you already know, without tools."
+                            .into(),
+                    }
+                }
+                _ => PermissionDecision::Answer(Value::Null),
+            };
+            self.actions
+                .push_back(Action::Command(SessionCommand::RespondPermission {
+                    id: req.id,
+                    decision,
+                }));
+            return;
+        }
         if let Some(rules) = self.allowing_rules(&req) {
             // Said every time: what runs unasked should not also run unseen.
             let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
@@ -2364,6 +2410,76 @@ impl App {
                 .push_error("finish or interrupt the current turn before switching harness");
             return;
         }
+        if self.handoff_wanted(next) {
+            self.ask_handoff(next);
+            return;
+        }
+        self.switch_now(next);
+    }
+
+    /// Whether the conversation will not fit in the bridge to `next`, and
+    /// the harness being left can say what it was about: it has a session,
+    /// and that session saw the whole transcript.
+    fn handoff_wanted(&self, next: HarnessId) -> bool {
+        self.bridge_summary == BridgeSummary::Auto
+            && (self.session_alive || self.session_ids.contains_key(&self.active))
+            && self.bridge_start(self.active) >= self.transcript.blocks.len()
+            && self.shell.is_none()
+            && self.effective_policy().is_some()
+            && super::bridge::needs_summary(
+                self.transcript
+                    .blocks
+                    .get(self.bridge_start(next)..)
+                    .unwrap_or_default(),
+                self.bridge_max_chars,
+            )
+    }
+
+    /// Ask the active harness for a summary for `next`, switching when its
+    /// turn ends (Esc switches without it). It is told to use no tools,
+    /// and what it asks permission for is denied.
+    fn ask_handoff(&mut self, next: HarnessId) {
+        let to = self
+            .registry
+            .get(next)
+            .map_or("another agent", |h| h.descriptor().short_name);
+        self.transcript.push_system(format!(
+            "The conversation is longer than the bridge to {to}: asking {} for a handoff summary first (Esc switches without one)",
+            self.short_name()
+        ));
+        self.handoff = Some(Handoff {
+            to: next,
+            start: self.transcript.blocks.len(),
+        });
+        self.start_generation();
+        if !self.session_alive {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+        self.actions.push_back(Action::SendTurn {
+            text: handoff_prompt(to),
+            attachments: Vec::new(),
+        });
+    }
+
+    /// The handoff turn is over, however it ended: the switch goes ahead.
+    fn finish_handoff(&mut self, done: bool) {
+        let Some(h) = self.handoff.take() else {
+            return;
+        };
+        let to = self
+            .registry
+            .get(h.to)
+            .map_or("another agent", |h| h.descriptor().short_name);
+        if !(done && self.transcript.mark_handoff(h.start, to)) {
+            self.transcript.push_notice(format!(
+                "no handoff summary; {to} gets the conversation as it is"
+            ));
+        }
+        self.switch_now(h.to);
+    }
+
+    fn switch_now(&mut self, next: HarnessId) {
         if self.session_alive {
             self.shutdown_session();
         }
@@ -4155,6 +4271,18 @@ impl App {
 }
 
 /// Current branch from `.git/HEAD` without spawning git.
+/// What the harness being left is asked for.
+fn handoff_prompt(to: &str) -> String {
+    format!(
+        "[unharness] The user is switching this conversation to {to}, another coding agent \
+         that will see only part of it. Write a handoff summary for that agent: the user's \
+         goal and constraints, the decisions made and why, what has been done (files changed, \
+         commands run and what came of them), what is unfinished or failing, and the next \
+         steps. Be specific (paths, names, error messages) and brief. Do not use any tools \
+         and do not change anything: answer from what you already know."
+    )
+}
+
 fn git_branch(root: &std::path::Path) -> Option<String> {
     let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
     let head = head.trim();
@@ -4797,6 +4925,7 @@ pub(crate) mod tests {
                 Block::User { .. } => "user".to_string(),
                 Block::Assistant { text, .. } => format!("text:{text}"),
                 Block::Thought { .. } => "thought".to_string(),
+                Block::Handoff { to, .. } => format!("handoff:{to}"),
                 Block::Tool { id, .. } => format!("tool:{id}"),
                 Block::System(_) => "system".to_string(),
                 Block::Notice(_) => "notice".to_string(),
@@ -5554,6 +5683,92 @@ pub(crate) mod tests {
         assert!(!app.is_generating);
         app.submit_prompt("again".into());
         assert_eq!(app.take_actions(), vec![Action::turn("again")]);
+    }
+
+    /// The single turn the app asked for.
+    fn sent_turn(app: &mut App) -> String {
+        match &app.take_actions()[..] {
+            [.., Action::SendTurn { text, .. }] => text.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
+        use super::super::transcript::Block;
+        use crate::core::conversations::BlockRecord;
+        let done = |app: &mut App| {
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.bridge_max_chars = 500;
+        app.submit_prompt("the task".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
+        done(&mut app);
+
+        // Claude writes it before its session is shut down.
+        app.switch_harness(HarnessId::CODEX);
+        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        // It is not to run anything.
+        app.on_event(cargo_test_requests("cargo test").remove(0));
+        assert!(app.modal.is_none());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::RespondPermission {
+                decision: PermissionDecision::Deny { .. },
+                ..
+            })]
+        ));
+        app.on_event(AgentEvent::TextDelta("Goal: the task. Next: tests.".into()));
+        done(&mut app);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+        let saved = app.store.load(&app.conversation.id).unwrap();
+        assert!(saved.blocks.iter().any(
+            |b| matches!(b, BlockRecord::Handoff { to, sender, .. } if to == "Codex" && sender == "Claude")
+        ));
+
+        // Codex gets the first prompt and the summary in place of the rest.
+        app.submit_prompt("go on".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.contains("User: the task\n\n[Handoff summary Claude wrote"),
+            "{sent}"
+        );
+        assert!(sent.contains("Goal: the task. Next: tests."));
+        assert!(!sent.contains("xxxxx"));
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("y".repeat(1_000)));
+        done(&mut app);
+
+        // Esc: the switch goes ahead without one.
+        app.switch_harness(HarnessId::CLAUDE);
+        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        app.interrupt();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, Block::Notice(n) if n == "no handoff summary; Claude gets the conversation as it is")
+        ));
+        app.take_actions();
+        app.session_alive = false;
+
+        // Off: no summary asked for.
+        app.bridge_summary = BridgeSummary::Never;
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
     }
 
     #[test]

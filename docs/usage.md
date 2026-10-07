@@ -81,6 +81,16 @@ middle: the first prompt and the newest turn are always kept. Returning
 to a harness resumes its own session and bridges only what happened
 since.
 
+When the conversation will not fit, the harness you are leaving is first
+asked for a handoff summary (one more turn, shown as "handoff summary
+for …"): the goal, the decisions, what was done, what is unfinished, the
+next steps. It is told to use no tools, and anything it asks permission
+for is denied. The next harness then gets the first prompt and the
+summary in place of everything before it, and what came after it turn by
+turn. Esc while it writes switches without one; `bridge_summary =
+"never"` turns it off. Only a harness whose session saw the whole
+conversation is asked.
+
 Policy, model and effort changes apply from the next turn on every harness:
 
 | Harness | How the change is applied |

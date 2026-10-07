@@ -33,6 +33,14 @@ pub enum BlockRecord {
         text: String,
         secs: Option<f32>,
     },
+    /// What a harness wrote for the next one when the user switched away
+    /// from it, standing in for the conversation before it in a bridge.
+    Handoff {
+        text: String,
+        sender: String,
+        /// The harness it was written for, by name.
+        to: String,
+    },
     Tool {
         id: String,
         name: String,
