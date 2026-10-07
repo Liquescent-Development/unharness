@@ -398,7 +398,7 @@ impl<'a> Renderer<'a> {
                     // Not closed yet and nothing after it: still
                     // streaming. One its container ended is complete.
                     let rest = self.source[range.end..]
-                        .trim_start_matches(|c: char| c.is_whitespace() || c == '>');
+                        .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '>');
                     let closed = !code.fenced
                         || !rest.is_empty()
                         || fence_closed(&self.source[range.clone()]);
@@ -1064,6 +1064,10 @@ mod tests {
             assert!(rows.iter().any(|r| r.contains('└')), "{rows:?}");
             assert_eq!(rows.last().unwrap(), "  Please confirm.");
         }
+        // A no-break space is no blank line to CommonMark: its paragraph
+        // ends the item.
+        let rows = table_rows("- item\n  ```\n  ls\n\u{a0}", 80);
+        assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
         for text in ["- item\n  ```bash\n  ls\n", "> ```\n> ls\n>"] {
             let lines = render_markdown_to_lines(text, 80);
             assert!(line_text(lines.last().unwrap()).contains("…"), "{text:?}");
