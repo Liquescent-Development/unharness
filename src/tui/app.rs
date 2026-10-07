@@ -386,6 +386,9 @@ pub struct App {
     pub is_generating: bool,
     pub generation_start: Option<Instant>,
     pub generation_duration: Option<Duration>,
+    /// When the running turn was asked to stop, and whether the user has
+    /// been told it has not yet.
+    interrupted: Option<(Instant, bool)>,
     pub spinner_frame: usize,
     pub turn_usage: Usage,
     pub session_usage: Usage,
@@ -490,6 +493,11 @@ const PREVIEW_PAGE: i32 = 5;
 
 /// Presses this close together on one cell count as a double or triple click.
 const MULTI_CLICK: Duration = Duration::from_millis(500);
+
+/// How long a turn has to end after an interrupt before another one ends
+/// the CLI's process instead. Every harness stopped well within it in the
+/// runs checked; pi waiting in a dialog never did (#89).
+const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// How long a status-rule message stays up.
 const FLASH: Duration = Duration::from_secs(2);
@@ -756,6 +764,7 @@ impl App {
             is_generating: false,
             generation_start: None,
             generation_duration: None,
+            interrupted: None,
             spinner_frame: 0,
             turn_usage: Usage::default(),
             session_usage,
@@ -1195,6 +1204,7 @@ impl App {
 
     fn start_generation(&mut self) {
         self.is_generating = true;
+        self.interrupted = None;
         self.transcript.begin_turn();
         self.generation_start = Some(Instant::now());
         self.generation_duration = None;
@@ -1207,6 +1217,7 @@ impl App {
             return;
         }
         self.is_generating = false;
+        self.interrupted = None;
         self.compacting = false;
         let dur = self
             .generation_start
@@ -1910,12 +1921,51 @@ impl App {
         self.start_held
     }
 
+    /// Ask the running turn to stop. Asked again once `STOP_GRACE` has
+    /// passed without the turn ending, end the CLI's process instead.
     pub fn interrupt(&mut self) {
-        if self.is_generating {
-            self.actions
-                .push_back(Action::Command(SessionCommand::Interrupt));
-            self.transcript.push_system("Interrupting…");
+        if !self.is_generating {
+            return;
         }
+        match self.interrupted {
+            None => {
+                self.actions
+                    .push_back(Action::Command(SessionCommand::Interrupt));
+                self.transcript.push_system("Interrupting…");
+                self.interrupted = Some((Instant::now(), false));
+            }
+            Some((at, told)) if at.elapsed() < STOP_GRACE => {
+                if !told {
+                    self.transcript.push_notice(format!(
+                        "waiting for {} to stop; asked again after {}s, its process is ended",
+                        self.short_name(),
+                        STOP_GRACE.as_secs()
+                    ));
+                    self.interrupted = Some((at, true));
+                }
+            }
+            Some(_) => self.end_stuck_turn(),
+        }
+    }
+
+    /// The CLI did not stop when asked: end its process and the turn. The
+    /// next prompt starts it again on the same session.
+    fn end_stuck_turn(&mut self) {
+        self.transcript.push_notice(format!(
+            "{} did not stop, so its process was ended; the next prompt resumes the session",
+            self.short_name()
+        ));
+        self.shutdown_session();
+        self.transcript.end_running_hooks();
+        self.transcript.end_running_tools();
+        self.finish_generation();
+        self.transcript.push_system("Turn interrupted.");
+        if self.modal.as_ref().is_some_and(Modal::is_prompt) {
+            self.modal = None;
+        }
+        self.pending_prompts.clear();
+        self.finish_handoff(false);
+        self.persist();
     }
 
     // ------------------------------------------------------------- `!` commands
@@ -7288,6 +7338,73 @@ pub(crate) mod tests {
             .filter(|b| matches!(b, Block::Notice(n) if n.contains("stopped waiting")))
             .count();
         assert_eq!(said, 2);
+    }
+
+    #[test]
+    fn an_interrupt_the_turn_ignores_ends_the_process() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        app.session_ids.insert(HarnessId::PI, "pi-1".into());
+        app.start_generation();
+        app.on_event(AgentEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "bash".into(),
+            input: serde_json::json!({"command": "cq query"}),
+        });
+        app.interrupt();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Interrupt)]
+        );
+        // Asked again within the grace: said once, nothing sent.
+        app.interrupt();
+        app.interrupt();
+        assert_eq!(app.take_actions(), vec![]);
+        let waiting = |app: &App| {
+            app.transcript
+                .blocks
+                .iter()
+                .filter(|b| matches!(b, Block::Notice(n) if n.starts_with("waiting for")))
+                .count()
+        };
+        assert_eq!(waiting(&app), 1);
+        assert!(app.is_generating);
+
+        // After it, the process is ended and the turn with it.
+        app.on_event(pi_gate_request("g1", "ls"));
+        app.interrupted = Some((Instant::now() - STOP_GRACE, true));
+        app.interrupt();
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.is_generating && !app.session_alive && !app.awaiting_answer());
+        assert!(matches!(
+            app.transcript
+                .blocks
+                .iter()
+                .find(|b| matches!(b, Block::Tool { .. })),
+            Some(Block::Tool {
+                done: true,
+                is_error: true,
+                ..
+            })
+        ));
+        // The next prompt resumes the session in a new process.
+        app.submit_prompt("go on".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession {
+                    resume: Some("pi-1".into())
+                },
+                Action::turn("go on")
+            ]
+        );
+        // A turn that ends when asked leaves nothing behind.
+        app.interrupt();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert!(app.interrupted.is_none());
     }
 
     #[test]

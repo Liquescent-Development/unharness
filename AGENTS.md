@@ -119,7 +119,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   fork, a resume, a sandbox or provider change; `/clear` keeps the
   session). Mid-turn a CLI that is sent nothing to stop the turn (all
   but Claude) is killed at once (`end_or_kill`): given its grace it could
-  go on with the turn where nobody sees it. Quitting waits for every CLI
+  go on with the turn where nobody sees it. A turn still running
+  `STOP_GRACE` (5 s) after an interrupt is ended with its process when the
+  user interrupts again (`App::end_stuck_turn`); the next prompt resumes
+  the session. Quitting waits for every CLI
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
