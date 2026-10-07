@@ -1665,6 +1665,19 @@ impl App {
         self.persist();
     }
 
+    /// What was held for a session start that will not come (unharness
+    /// quits): a rewind among it never reached the vendor session, which
+    /// is then not resumed with the turns the transcript dropped.
+    pub fn drop_held(&mut self, held: impl IntoIterator<Item = Action>) {
+        let rewind = held
+            .into_iter()
+            .any(|a| matches!(a, Action::Command(SessionCommand::Rewind { .. })));
+        if rewind {
+            self.forget_session(self.active);
+            self.persist();
+        }
+    }
+
     /// Stop using `harness`'s vendor session: its next turn starts a fresh
     /// one and gets the conversation so far as context.
     fn forget_session(&mut self, harness: HarnessId) {
@@ -4912,6 +4925,46 @@ pub(crate) mod tests {
             rate_limit_summary(app.rate_limit.as_ref().unwrap()),
             "five_hour 90% used"
         );
+    }
+
+    // Held behind the start of the session it was for, the rewind is
+    // dropped when unharness quits first: that session is not resumed.
+    #[test]
+    fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
+            app.submit_prompt(prompt.into());
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+        }
+        app.session_alive = false;
+        app.take_actions();
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(
+                |b| matches!(b, super::super::transcript::Block::User { text } if text == "two"),
+            )
+            .unwrap();
+        app.rewind_to(two, false);
+        let held = app.take_actions();
+        assert!(matches!(held[0], Action::StartSession { .. }), "{held:?}");
+
+        app.drop_held(held);
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+        // Without a rewind among them, nothing is forgotten.
+        app.session_ids.insert(HarnessId::CLAUDE, "s2".into());
+        app.drop_held([Action::StartSession {
+            resume: Some("s2".into()),
+        }]);
+        assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
     }
 
     #[test]

@@ -380,6 +380,7 @@ async fn event_loop(
         }
     }
 
+    app.drop_held(std::mem::take(&mut ending.held));
     if let Some(s) = session.take() {
         let _ = s.send(SessionCommand::Shutdown).await;
     }

@@ -130,7 +130,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   after `END_GRACE + DRAIN_TIMEOUT + 1s` (its driver stuck) is killed
   through the session's `ProcessSlot`; meanwhile it says so, refuses a switch,
   resume, fork or rewind (each would take the held start for its own),
-  and an interrupt drops the prompt that waits. Not caught: what left the tree
+  and an interrupt drops the prompt that waits; a rewind still held at
+  quit forgets the vendor session it was for. Not caught: what left the tree
   before the kill (a `setsid cmd &` whose shell exited, a double fork);
   its pipes are closed on it once the drain is up.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
