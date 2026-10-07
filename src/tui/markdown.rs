@@ -395,8 +395,13 @@ impl<'a> Renderer<'a> {
             }
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
-                    // Not closed yet: still streaming.
-                    let closed = !code.fenced || fence_closed(&self.source[range.clone()]);
+                    // Not closed yet and nothing after it: still
+                    // streaming. One its container ended is complete.
+                    let rest = self.source[range.end..]
+                        .trim_start_matches(|c: char| c.is_whitespace() || c == '>');
+                    let closed = !code.fenced
+                        || !rest.is_empty()
+                        || fence_closed(&self.source[range.clone()]);
                     self.code_block(code, closed);
                 }
             }
@@ -1048,6 +1053,38 @@ mod tests {
         assert!(line_text(&lines[1]).contains("• nested"));
         assert!(line_text(&lines[2]).contains("1. first"));
         assert!(line_text(lines.last().unwrap()).contains("…"));
+        // Ended by its list item and quote, not streaming: in a list item
+        // or a quote that runs to the end it still is.
+        for text in [
+            "- item\n  ```bash\n  ls\n\nPlease confirm.",
+            "> ```\n> ls\n\nPlease confirm.",
+        ] {
+            let rows = table_rows(text, 80);
+            assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
+            assert!(rows.iter().any(|r| r.contains('└')), "{rows:?}");
+            assert_eq!(rows.last().unwrap(), "  Please confirm.");
+        }
+        for text in ["- item\n  ```bash\n  ls\n", "> ```\n> ls\n>"] {
+            let lines = render_markdown_to_lines(text, 80);
+            assert!(line_text(lines.last().unwrap()).contains("…"), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_its_list_item_ends_is_complete() {
+        // The reply of #93: the plain fence closes the outer block, the
+        // last one opens an empty block the paragraph ends.
+        let rows = table_rows(
+            "- **Description:**\n  ```markdown\n  ### Command\n  ```bash\n  some-command --flag\n  ```\n  - result line\n  ```\n\nPlease confirm.",
+            80,
+        );
+        assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('└')).count(),
+            2,
+            "{rows:?}"
+        );
+        assert_eq!(rows.last().unwrap(), "  Please confirm.");
     }
 
     fn table_rows(text: &str, width: usize) -> Vec<String> {
