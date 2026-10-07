@@ -123,7 +123,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a
-  background job) is not listened for. The TUI says when it waits, and
+  background job) is not listened for; one while the prompt is in
+  `$EDITOR` ends the editor and what it started (SIGTERM, SIGKILL after
+  2 s; it shares unharness's process group, for the terminal) and then
+  unharness. The TUI says when it waits, and
   Ctrl+C, Ctrl+D or one of those signals stops the wait. The TUI resumes
   or forks a vendor session only once the CLI that ended it is gone
   (`tui::Ending`), so that two never write one session: one still there

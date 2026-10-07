@@ -368,7 +368,7 @@ async fn event_loop(
             // The editor needs the keyboard to itself: stop our reader for
             // as long as it runs.
             drop(input);
-            edit_prompt(terminal, app)?;
+            edit_prompt(terminal, app, &mut ends).await?;
             input = EventStream::new();
             needs_redraw = true;
         }
@@ -558,21 +558,27 @@ where
 
 /// Hand the terminal to `$VISUAL` / `$EDITOR` with the prompt in a file, and
 /// take back what it saved.
-fn edit_prompt(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+/// A quit signal meanwhile ends the editor, and then unharness.
+async fn edit_prompt(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+    ends: &mut crate::core::process::EndSignals,
+) -> Result<()> {
     let Some(command) = editor::command() else {
         app.transcript
             .push_notice("set $EDITOR (or $VISUAL) to edit the prompt in an editor");
         return Ok(());
     };
     restore_terminal()?;
-    let edited = editor::edit(&command, &app.input, &std::env::temp_dir());
+    let edited = editor::edit(&command, &app.input, &std::env::temp_dir(), ends.recv()).await;
     enter_terminal(&mut stdout())?;
     terminal.clear()?;
     match edited {
-        Ok(Some(text)) => app.set_input(&text),
-        Ok(None) => app.transcript.push_notice(format!(
+        Ok(editor::Edited::Saved(text)) => app.set_input(&text),
+        Ok(editor::Edited::Failed) => app.transcript.push_notice(format!(
             "`{command}` exited with an error; prompt unchanged"
         )),
+        Ok(editor::Edited::Stopped) => app.quit(),
         Err(e) => app
             .transcript
             .push_error(format!("could not edit the prompt: {e:#}")),

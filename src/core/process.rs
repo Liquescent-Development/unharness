@@ -660,6 +660,25 @@ pub fn running(pid: u32) -> bool {
     })
 }
 
+/// `sig` to `pid` and, on Linux, every process below it, which are
+/// returned: for a child that shares unharness's process group (the
+/// prompt's editor, which needs the terminal), where a group signal would
+/// reach unharness too.
+#[cfg(unix)]
+pub fn signal_tree(pid: u32, sig: libc::c_int) -> Vec<u32> {
+    #[allow(unused_mut)]
+    let mut tree = vec![pid];
+    #[cfg(target_os = "linux")]
+    tree.extend(descendants(pid));
+    for &p in &tree {
+        // SAFETY: a plain syscall; a process that is gone is not an error.
+        unsafe {
+            libc::kill(p as libc::pid_t, sig);
+        }
+    }
+    tree
+}
+
 /// Every process below `root`, read from `/proc`.
 #[cfg(target_os = "linux")]
 fn descendants(root: u32) -> Vec<u32> {

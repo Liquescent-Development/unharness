@@ -489,3 +489,55 @@ fn ctrl_z_while_print_ends_stops_the_cli_too() {
         );
     }
 }
+
+// The editor has the terminal and unharness waits for it; a quit signal
+// ends it, and then the TUI with its CLI.
+#[test]
+fn sigterm_while_the_prompt_is_in_the_editor_ends_the_editor_and_the_tui() {
+    if !python_available() {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let editor_pid = setup.path("editor-pid");
+    let mut cmd = setup.command(&[]);
+    // An editor that ignores SIGTERM, below the shell it is started from.
+    cmd.env(
+        "VISUAL",
+        format!(
+            "sh -c 'trap \"\" TERM; echo $$ > {}; while :; do sleep 0.1; done'",
+            editor_pid.display()
+        ),
+    );
+    let (mut unharness, pty) = Pty::spawn(cmd);
+    wait_until("the TUI is up", Duration::from_secs(20), || {
+        pty.shows("Welcome to unharness")
+    });
+    pty.type_keys(b"\x07");
+    wait_until("the editor runs", Duration::from_secs(10), || {
+        editor_pid.exists()
+    });
+    let editor: u32 = std::fs::read_to_string(&editor_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    struct Reap(u32);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: the editor this test started.
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+        }
+    }
+    let _reap = Reap(editor);
+
+    // SAFETY: a signal to the child this test started.
+    unsafe { libc::kill(unharness.id() as libc::pid_t, libc::SIGTERM) };
+    assert!(
+        unharness.exit_within(Duration::from_secs(15)).is_some(),
+        "the TUI did not exit"
+    );
+    assert!(
+        gone_within(editor, Duration::from_secs(2)),
+        "the editor runs on"
+    );
+}
