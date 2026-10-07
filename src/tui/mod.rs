@@ -383,16 +383,49 @@ async fn event_loop(
     if let Some(mut p) = shell.take() {
         p.kill().await;
     }
-    // Every CLI asked to end, here or by an earlier switch,
-    // has its grace and is then killed; reaped before the runtime goes.
-    let _ = tokio::time::timeout(
-        crate::core::process::END_GRACE
-            + crate::core::process::DRAIN_TIMEOUT
-            + Duration::from_secs(1),
-        LineProcess::all_ended(),
-    )
-    .await;
+    // Every CLI asked to end, here or by an earlier switch, has its grace
+    // and is then killed; reaped before the runtime goes. One that takes
+    // its time is said to be waited for, and the wait can be cut short:
+    // what is left then goes with its tree when the runtime does.
+    let ended = LineProcess::all_ended();
+    tokio::pin!(ended);
+    if tokio::time::timeout(Duration::from_millis(100), &mut ended)
+        .await
+        .is_err()
+    {
+        app.flash("Waiting for the agent to exit · Ctrl+C to stop waiting");
+        terminal.draw(|f| ui::render(f, app))?;
+        tokio::select! {
+            _ = tokio::time::timeout(
+                crate::core::process::END_GRACE
+                    + crate::core::process::DRAIN_TIMEOUT
+                    + Duration::from_secs(1),
+                ended,
+            ) => {}
+            _ = ends.recv() => {}
+            _ = quit_key(&mut input) => {}
+        }
+    }
     Ok(())
+}
+
+/// The next Ctrl+C or Ctrl+D. The stream is polled again on a tick, as
+/// the main loop's ticker does: a key that arrives after a poll that gave
+/// up (`now_or_never`) does not always wake it.
+async fn quit_key(input: &mut EventStream) {
+    loop {
+        match tokio::time::timeout(Duration::from_millis(125), input.next()).await {
+            Ok(Some(Ok(Event::Key(key))))
+                if key.kind != KeyEventKind::Release
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(key.code, KeyCode::Char('c' | 'd')) =>
+            {
+                return;
+            }
+            Ok(None) => std::future::pending().await,
+            _ => {}
+        }
+    }
 }
 
 /// Lines of a `!` command's output taken in before the screen is drawn.

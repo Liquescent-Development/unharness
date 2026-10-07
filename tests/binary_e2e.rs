@@ -1,11 +1,13 @@
 //! End-to-end tests of the `unharness` binary, with `scripts/fake-harness.py`
-//! standing in for Claude Code: how it ends on a signal, and what it
-//! leaves running.
+//! standing in for Claude Code: how it ends on a signal and at quit, and
+//! what it leaves running.
 
 #![cfg(target_os = "linux")]
 
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use unharness::core::process::running;
@@ -215,4 +217,107 @@ fn print_ends_on_sigterm_sighup_and_sigquit_with_the_cli_and_what_it_started() {
         assert!(gone_within(cli, Duration::from_secs(2)), "signal {signo}");
         assert!(gone_within(child, Duration::from_secs(2)), "signal {signo}");
     }
+}
+
+/// A terminal for the TUI: what it draws is collected, keys are written.
+struct Pty {
+    master: OwnedFd,
+    screen: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Pty {
+    fn spawn(mut cmd: Command) -> (Unharness, Pty) {
+        let (mut master, mut slave) = (0, 0);
+        let size = libc::winsize {
+            ws_row: 40,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        // SAFETY: out-pointers to locals; the fds returned are owned below.
+        let ok = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &size,
+            )
+        };
+        assert_eq!(ok, 0, "openpty");
+        // SAFETY: both are new descriptors nothing else owns.
+        let (master, slave) =
+            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        cmd.stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave.try_clone().unwrap());
+        use std::os::unix::process::CommandExt;
+        // SAFETY: async-signal-safe calls only.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                libc::ioctl(0, libc::TIOCSCTTY, 0);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().unwrap();
+        drop(slave);
+        let screen = Arc::new(Mutex::new(Vec::new()));
+        let reader = master.try_clone().unwrap();
+        let into = screen.clone();
+        std::thread::spawn(move || {
+            let mut file = std::fs::File::from(reader);
+            let mut chunk = [0u8; 65536];
+            use std::io::Read;
+            // EIO once the TUI is gone.
+            while let Ok(n @ 1..) = file.read(&mut chunk) {
+                into.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+        (Unharness(child), Pty { master, screen })
+    }
+
+    fn shows(&self, text: &str) -> bool {
+        String::from_utf8_lossy(&self.screen.lock().unwrap()).contains(text)
+    }
+
+    fn type_keys(&self, keys: &[u8]) {
+        // SAFETY: a write from a live buffer to an fd owned here.
+        let n = unsafe { libc::write(self.master.as_raw_fd(), keys.as_ptr().cast(), keys.len()) };
+        assert_eq!(n, keys.len() as isize);
+    }
+}
+
+#[test]
+fn quitting_the_tui_says_it_waits_for_the_cli_and_ctrl_c_stops_waiting() {
+    if !python_available() {
+        return;
+    }
+    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    let setup = Setup::new(&std::fs::read_to_string(fixture).unwrap());
+    let (mut unharness, pty) = Pty::spawn(setup.command(&[]));
+    wait_until("the TUI is up", Duration::from_secs(20), || {
+        pty.shows("Welcome to unharness")
+    });
+    pty.type_keys(b"hi\r");
+    wait_until("the turn is over", Duration::from_secs(20), || {
+        pty.shows("last turn")
+    });
+    let (cli, child) = setup.pids();
+
+    // Between turns the CLI has its grace, which it does not use to exit.
+    pty.type_keys(b"\x04");
+    let quit = Instant::now();
+    wait_until("the wait is shown", Duration::from_secs(5), || {
+        pty.shows("Waiting for the agent to exit")
+    });
+    pty.type_keys(b"\x03");
+    assert!(
+        unharness.exit_within(Duration::from_secs(15)).is_some(),
+        "the TUI did not exit"
+    );
+    let grace = unharness::core::process::END_GRACE;
+    assert!(quit.elapsed() < grace, "{:?}", quit.elapsed());
+    assert!(gone_within(cli, Duration::from_secs(2)));
+    assert!(gone_within(child, Duration::from_secs(2)));
 }

@@ -32,7 +32,7 @@ attached to the next prompt.
 | `Ctrl+V`, `/paste` | Attach the image on the clipboard |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Esc` | Close the autocomplete list, else interrupt the running turn, else stop the running `!` command, else clear the prompt. Never quits |
-| `Ctrl+D`, `/quit` | Quit. `Ctrl+C` also quits when idle (and stops a `!` command first) |
+| `Ctrl+D`, `/quit` | Quit. `Ctrl+C` also quits when idle (and stops a `!` command first). The agent's CLI is given a few seconds to exit; while the status line says so, `Ctrl+C`, `Ctrl+D` or a second SIGTERM stop waiting and kill it |
 
 ### Pickers
 
