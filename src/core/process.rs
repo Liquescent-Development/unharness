@@ -237,14 +237,15 @@ impl Owned {
 
     /// Wait for the child to exit. Where it can be seen (a pidfd, Linux
     /// 5.3 and later) it is not reaped, and `None` comes back: its pid,
-    /// and so its group's id, can then name no other process. Elsewhere it
-    /// is reaped, and its status comes back.
+    /// and so its group's id, can then name no other process. Elsewhere,
+    /// or when the pidfd cannot be waited on, it is reaped, and its status
+    /// comes back.
     async fn exited(&mut self) -> Option<std::io::Result<std::process::ExitStatus>> {
         #[cfg(target_os = "linux")]
-        if let Some(fd) = &self.exit {
-            if let Ok(mut ready) = fd.readable().await {
-                ready.retain_ready();
-            }
+        if let Some(fd) = &self.exit
+            && let Ok(mut ready) = fd.readable().await
+        {
+            ready.retain_ready();
             return None;
         }
         Some(self.child.wait().await)
