@@ -461,7 +461,7 @@ recorded ones. For anything else:
   turn and may change the input after the gate saw it, and the gate knows
   a read by its tool name alone. pi 1.0.4: two calls in one message are
   asked about one after the other, each after its `tool_execution_start`
-  (`tool_call` handlers run in turn); the gate passes the turn's
+  (`tool_call` handlers run in turn, `fixtures/gate_parallel.jsonl`); the gate passes the turn's
   `ctx.signal` to its dialog, because without it `abort` while the
   dialog is open went unanswered and the turn never ended (#89). With it
   the call fails with "Operation aborted" and the turn settles as any

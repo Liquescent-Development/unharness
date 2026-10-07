@@ -500,6 +500,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_gate_parallel() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "gate_parallel",
+        );
+    }
+
+    #[test]
     fn fixture_rewind() {
         assert_fixture(
             &mut PiParser::new(Some("local-session".into())),
