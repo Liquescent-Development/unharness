@@ -22,6 +22,7 @@ use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::task::Poll;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -37,7 +38,7 @@ use crossterm::{
         supports_keyboard_enhancement,
     },
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
@@ -273,9 +274,7 @@ async fn event_loop(
                 handle_event(app, event);
                 // A drag or a spin of the wheel arrives as a burst: take
                 // everything already waiting and draw once for all of it.
-                while let Some(Some(Ok(event))) = input.next().now_or_never() {
-                    handle_event(app, event);
-                }
+                take_waiting(&mut input, |event| handle_event(app, event)).await;
             }
             Some((request, result)) = lists_rx.recv() => {
                 app.on_list(request, result);
@@ -403,6 +402,20 @@ fn handle_event(app: &mut App, event: Event) {
         Event::Paste(_) => {}
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         _ => {}
+    }
+}
+
+/// Hand every event `input` already has to `handle`. Polled with the
+/// calling task's waker: `EventStream` keeps the waker it was first left
+/// pending with until an event comes, so polled with any other
+/// (`now_or_never`) it would wake nobody for the next key, which then
+/// waited for the ticker (held keys came in clumps, #75).
+async fn take_waiting<S>(input: &mut S, mut handle: impl FnMut(Event))
+where
+    S: futures::Stream<Item = std::io::Result<Event>> + Unpin,
+{
+    while let Poll::Ready(Some(Ok(event))) = futures::poll!(input.next()) {
+        handle(event);
     }
 }
 
@@ -1135,6 +1148,58 @@ mod tests {
                 _ => None,
             })
             .expect("a shell block")
+    }
+
+    #[test]
+    fn the_task_that_took_the_input_is_woken_by_the_next_key() {
+        use std::collections::VecDeque;
+        use std::pin::Pin;
+        use std::sync::atomic::AtomicUsize;
+        use std::task::{Context, Wake, Waker};
+
+        // As crossterm's `EventStream`: the waker it is first left
+        // pending with is the one woken by the next event.
+        struct Keys {
+            waiting: VecDeque<Event>,
+            waker: Option<Waker>,
+        }
+        impl futures::Stream for Keys {
+            type Item = std::io::Result<Event>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                match self.waiting.pop_front() {
+                    Some(event) => Poll::Ready(Some(Ok(event))),
+                    None => {
+                        self.waker.get_or_insert_with(|| cx.waker().clone());
+                        Poll::Pending
+                    }
+                }
+            }
+        }
+        struct Task(AtomicUsize);
+        impl Wake for Task {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let key = |c| Event::Key(crossterm::event::KeyEvent::new(KeyCode::Char(c), NONE));
+        let mut keys = Keys {
+            waiting: [key('a'), key('b')].into(),
+            waker: None,
+        };
+        let task = Arc::new(Task(AtomicUsize::new(0)));
+        let waker = Waker::from(task.clone());
+        let mut taken = 0;
+        let drained = std::pin::pin!(take_waiting(&mut keys, |_| taken += 1))
+            .poll(&mut Context::from_waker(&waker));
+        assert!(drained.is_ready());
+        assert_eq!(taken, 2);
+        // The next key.
+        keys.waker.take().expect("left pending").wake();
+        assert_eq!(task.0.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
