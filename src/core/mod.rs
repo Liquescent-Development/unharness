@@ -32,4 +32,5 @@ pub use rules::{Rule, Rules, ToolAction};
 pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{
     Attachment, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    shutdown_queued,
 };

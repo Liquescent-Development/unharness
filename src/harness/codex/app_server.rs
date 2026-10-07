@@ -16,7 +16,7 @@ use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessId, ModelRef, PermissionDecision, PermissionKind,
     PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason,
+    StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -212,6 +212,10 @@ impl Driver {
             .await?;
         Ok(())
     }
+
+    fn shut_down(&mut self) {
+        self.proc.end();
+    }
 }
 
 async fn drive(
@@ -344,7 +348,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.proc.end();
+                        d.shut_down();
                         Ok(())
                     }
                 };
@@ -513,7 +517,11 @@ async fn drive(
                             }
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
-                                    d.proc.kill().await;
+                                    if shutdown_queued(&mut cmds) {
+                                        d.shut_down();
+                                    } else {
+                                        d.proc.kill().await;
+                                    }
                                 }
                                 return;
                             }

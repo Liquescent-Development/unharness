@@ -177,6 +177,14 @@ pub enum SessionCommand {
     Shutdown,
 }
 
+/// Whether `Shutdown` is among the commands still queued, taking them.
+/// A driver that can no longer send events (the handle was dropped) asks
+/// before killing: the TUI sends `Shutdown` and then drops the handle, and
+/// the driver may have been sending an event in between.
+pub fn shutdown_queued(cmds: &mut mpsc::Receiver<SessionCommand>) -> bool {
+    std::iter::from_fn(|| cmds.try_recv().ok()).any(|c| c == SessionCommand::Shutdown)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessModel {
     /// One child process for the whole session; turns go over stdin.

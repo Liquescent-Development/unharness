@@ -12,7 +12,7 @@ use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason,
+    SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
@@ -191,7 +191,11 @@ async fn drive(
                             }
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
-                                    proc.kill().await;
+                                    if shutdown_queued(&mut cmds) {
+                                        proc.end();
+                                    } else {
+                                        proc.kill().await;
+                                    }
                                 }
                                 return;
                             }

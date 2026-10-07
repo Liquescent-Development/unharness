@@ -393,8 +393,18 @@ async fn background_pids(path: &Path) -> (u32, u32) {
 #[cfg(target_os = "linux")]
 fn lingering_claude(fake: &Fake, background: &str, linger: &str) -> (SessionHandle, PathBuf) {
     let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    lingering_claude_on(fake, &fixture, background, linger)
+}
+
+#[cfg(target_os = "linux")]
+fn lingering_claude_on(
+    fake: &Fake,
+    fixture: &Path,
+    background: &str,
+    linger: &str,
+) -> (SessionHandle, PathBuf) {
     let pids = fake._tmp.path().join("pids");
-    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
     cfg.env.push((
         "UNHARNESS_FAKE_BACKGROUND".into(),
         format!("{background}:{}", pids.display()),
@@ -433,6 +443,51 @@ async fn ending_a_session_kills_what_its_cli_left_in_a_session_of_its_own() {
     assert!(gone_within(cli, grace + Duration::from_secs(5)).await);
     assert!(gone_within(child, Duration::from_secs(5)).await);
     assert!(!fake.sent_lines().iter().any(|l| l["ended"] == true));
+}
+
+// The driver is still sending an event when the handle goes: it finds
+// the `Shutdown` queued behind it instead of killing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_shutdown_queued_behind_an_event_still_ends_the_cli_gracefully() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let delta =
+        std::fs::read_to_string(repo().join("src/harness/claude/fixtures/basic_turn.jsonl"))
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("text_delta"))
+            .unwrap()
+            .to_string();
+    let fixture = fake._tmp.path().join("chatty.jsonl");
+    let chatty = vec![delta; unharness::core::session::EVENT_CHANNEL_CAPACITY + 100];
+    std::fs::write(&fixture, chatty.join("\n") + "\n").unwrap();
+    let (handle, pids) = lingering_claude_on(&fake, &fixture, "session", "60");
+    let (cli, child) = background_pids(&pids).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while handle.events.len() < unharness::core::session::EVENT_CHANNEL_CAPACITY {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the events never filled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    let sent = fake.sent_lines_eventually(2).await;
+    assert!(
+        sent.iter().any(|l| l["request"]["subtype"] == "interrupt"),
+        "{sent:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running(cli));
+    let grace = unharness::core::process::END_GRACE;
+    assert!(gone_within(cli, grace + Duration::from_secs(5)).await);
+    assert!(gone_within(child, Duration::from_secs(5)).await);
 }
 
 #[cfg(target_os = "linux")]

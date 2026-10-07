@@ -14,6 +14,7 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
     ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    shutdown_queued,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -287,7 +288,11 @@ async fn drive(
                             }
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
-                                    proc.kill().await;
+                                    if shutdown_queued(&mut cmds) {
+                                        proc.end();
+                                    } else {
+                                        proc.kill().await;
+                                    }
                                 }
                                 return;
                             }
