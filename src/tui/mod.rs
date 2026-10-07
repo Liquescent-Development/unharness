@@ -180,6 +180,8 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;
+    // A list still being asked for is not waited for.
+    crate::core::process::ProbeProcess::kill_all();
     if let Some(h) = herdr {
         h.release().await;
     }

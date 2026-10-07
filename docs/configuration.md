@@ -84,8 +84,9 @@ one is passed on, and it overrides the harness's own choice: a
 `default_provider = "anthropic"` for Claude takes any `CLAUDE_CODE_USE_*`
 out of its environment, so a shell that exports one for Bedrock no longer
 decides. Without a choice the TUI shows the provider each session
-reports; when a session runs on another one than the choice, the status
-line says so until it is changed.
+reports. When a session runs on another provider than the chosen one,
+the status line says so until another one is chosen or a session runs
+on the chosen one.
 
 | Harness | Providers | How unharness passes one |
 |---|---|---|
@@ -111,7 +112,9 @@ Claude in the sandbox a session would get (its settings can name
 commands it runs at startup, such as `apiKeyHelper`). Bedrock without
 credentials took a minute to answer; after 15 s unharness gives up and
 `/model <name>` still sets one. The TUI asks in the background and opens
-the picker when the list arrives.
+the picker when the list arrives, unless you have moved on (another
+provider or picker, a prompt being typed or sent); a list that failed is
+asked for again only when you open the picker.
 
 Codex lists models for `openai` only: its `model/list` is OpenAI's
 catalog whichever provider is in use. On another provider choose the

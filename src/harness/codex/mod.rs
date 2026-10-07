@@ -144,6 +144,32 @@ fn with_configured(configured: &serde_json::Map<String, Value>) -> Vec<(Provider
     providers
 }
 
+/// The `[model_providers.<id>]` tables of a Codex `config.toml`, in the
+/// shape `config/read` gives them (only `name` is used).
+fn providers_in_config(config: &str) -> serde_json::Map<String, Value> {
+    config
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("model_providers")?.as_table().cloned())
+        .map(|providers| {
+            providers
+                .into_iter()
+                .map(|(id, p)| {
+                    let name = p.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                    (id, json!({ "name": name }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
 /// `model_provider` in a Codex `config.toml`, or in the profile it selects.
 fn configured_provider(config: &str) -> Option<String> {
     let table = config.parse::<toml::Table>().ok()?;
@@ -293,10 +319,15 @@ impl Harness for CodexHarness {
         binary: &Path,
         sandbox: &Sandbox,
     ) -> Result<Vec<(ProviderId, String)>> {
+        // Without an answer, the user's config.toml as it reads.
         let configured = query(binary, sandbox, "config/read", json!({}))
             .ok()
             .and_then(|r| r.pointer("/config/model_providers")?.as_object().cloned())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                std::fs::read_to_string(expand_home(&codex_home()).join("config.toml"))
+                    .map(|text| providers_in_config(&text))
+                    .unwrap_or_default()
+            });
         Ok(with_configured(&configured))
     }
 
@@ -677,6 +708,28 @@ model_provider = "lmstudio"
         assert_eq!(configured_provider(profiled).as_deref(), Some("azure"));
         let without = profiled.replace("profile = \"work\"", "profile = \"none\"");
         assert_eq!(configured_provider(&without).as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn configured_providers_are_read_from_the_file_without_codex() {
+        let config = r#"
+model = "x"
+
+[model_providers.llama]
+name = "llama-swap"
+base_url = "http://x/v1"
+
+[model_providers.amazon-bedrock.aws]
+region = "us-east-1"
+"#;
+        let providers = with_configured(&providers_in_config(config));
+        let ids: Vec<&str> = providers.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["openai", "ollama", "lmstudio", "amazon-bedrock", "llama"]
+        );
+        assert_eq!(providers[4].1, "llama-swap");
+        assert!(providers_in_config("not toml [").is_empty());
     }
 
     #[test]

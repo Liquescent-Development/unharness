@@ -207,6 +207,7 @@ impl ProbeProcess {
             cmd.process_group(0);
         }
         let mut child = cmd.spawn().context("spawn")?;
+        live_probes().push(child.id());
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().context("stdout")?;
         let (tx, lines) = std::sync::mpsc::channel();
@@ -246,13 +247,31 @@ impl ProbeProcess {
     }
 }
 
+impl ProbeProcess {
+    /// Kill every probe still running, for a quit that does not wait for
+    /// the threads asking them.
+    pub fn kill_all() {
+        for id in live_probes().drain(..) {
+            kill_group(id);
+        }
+    }
+}
+
 impl Drop for ProbeProcess {
     fn drop(&mut self) {
         self.stdin.take();
         kill_group(self.child.id());
+        live_probes().retain(|id| *id != self.child.id());
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The process groups of the probes running now.
+static LIVE_PROBES: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn live_probes() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    LIVE_PROBES.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// SIGKILL to the process group `id`. A group that is already gone is not
