@@ -19,7 +19,7 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision, PermissionKind,
     PermissionPolicy, ProcessModel, ProviderId, SessionCommand, SessionConfig, SessionHandle,
-    SessionInfo, StopReason,
+    SessionInfo, StopReason, shutdown_queued,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -322,11 +322,8 @@ async fn drive(
                 let _ = events.send(AgentEvent::Notice("claude: no initialize ack; continuing".into())).await;
             }
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    // TUI dropped the handle.
-                    proc.kill().await;
-                    break;
-                };
+                // TUI dropped the handle.
+                let Some(cmd) = cmd else { break };
                 let line = match cmd {
                     // Each turn carries a uuid of ours, so it can be rewound to later.
                     SessionCommand::SendTurn { text, attachments } => match anchored_turn(&text, &attachments) {
@@ -384,7 +381,7 @@ async fn drive(
                     ),
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        shut_down(&mut proc).await;
                         None
                     }
                 };
@@ -438,7 +435,13 @@ async fn drive(
                                 pending.insert(req.id.clone(), PendingPermission { input, is_question });
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    if shutdown_queued(&mut cmds) {
+                                        shut_down(&mut proc).await;
+                                    } else {
+                                        proc.kill().await;
+                                    }
+                                }
                                 return;
                             }
                         }
@@ -461,6 +464,16 @@ async fn drive(
     if !shutting_down {
         proc.kill().await;
     }
+}
+
+/// With only its stdin closed Claude waits for its background tasks (a
+/// Monitor for as long as it was given); `interrupt` stops them, also
+/// between turns, and it then exits (2.1.292).
+async fn shut_down(proc: &mut LineProcess) {
+    let _ = proc
+        .write_line(&control_request("interrupt", json!({})).1)
+        .await;
+    proc.end();
 }
 
 #[cfg(test)]

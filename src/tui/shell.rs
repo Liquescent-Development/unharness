@@ -50,7 +50,7 @@ pub fn user_shell(var: Option<OsString>) -> OsString {
 pub fn spawn(command: &str, cwd: &Path, sandbox: &Sandbox) -> Result<LineProcess> {
     let mut cmd = Command::new(user_shell(std::env::var_os("SHELL")));
     cmd.arg("-c").arg(command).current_dir(cwd);
-    LineProcess::spawn_group(cmd, sandbox)
+    LineProcess::spawn_no_input(cmd, sandbox)
 }
 
 /// Add a line of output, keeping `output` under `KEEP_BYTES` by dropping

@@ -12,7 +12,7 @@ use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason,
+    SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
@@ -105,10 +105,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    proc.kill().await;
-                    return;
-                };
+                let Some(cmd) = cmd else { break };
                 match cmd {
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => {}
@@ -150,11 +147,11 @@ async fn drive(
                     }
                     SessionCommand::Interrupt => {
                         // There is no interrupt event; ending the process ends
-                        // the turn, and the conversation resumes by id. A
-                        // command agy started runs on (also after SIGINT,
-                        // checked on 1.2.17).
+                        // the turn, and the conversation resumes by id. agy
+                        // leaves a command it started running after SIGINT;
+                        // the kill takes it (checked on 1.2.17).
                         let _ = events.send(AgentEvent::Notice(
-                            "agy has no interrupt: its process is stopped (a command it started runs on); the next turn resumes the conversation".into(),
+                            "agy has no interrupt: its process is stopped with what it started; the next turn resumes the conversation".into(),
                         )).await;
                         proc.kill().await;
                     }
@@ -177,7 +174,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        proc.end_or_kill(turn_open).await;
                     }
                 }
             }
@@ -193,7 +190,13 @@ async fn drive(
                                 _ => {}
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    if shutdown_queued(&mut cmds) {
+                                        proc.end_or_kill(turn_open).await;
+                                    } else {
+                                        proc.kill().await;
+                                    }
+                                }
                                 return;
                             }
                         }

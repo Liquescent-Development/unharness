@@ -348,6 +348,239 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     // hang (tokio runtime shutdown would wait on nothing) is the signal.
 }
 
+/// Whether `pid` is still running (not gone, not a zombie).
+#[cfg(target_os = "linux")]
+fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        !s.rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn gone_within(pid: u32, within: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + within;
+    while running(pid) {
+        if tokio::time::Instant::now() > deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
+/// The fake's pid and its background child's, once it wrote them
+/// (`UNHARNESS_FAKE_BACKGROUND`).
+#[cfg(target_os = "linux")]
+async fn background_pids(path: &Path) -> (u32, u32) {
+    for _ in 0..500 {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Some((cli, child)) = text.trim().split_once(' ')
+        {
+            return (cli.parse().unwrap(), child.parse().unwrap());
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the fake wrote no pids");
+}
+
+/// A fake Claude that runs a command in a session of its own and, once its
+/// stdin closes, goes on for `linger` seconds: Claude waiting for a
+/// Monitor, which it stops when asked to (`interrupt`).
+#[cfg(target_os = "linux")]
+fn lingering_claude(fake: &Fake, background: &str, linger: &str) -> (SessionHandle, PathBuf) {
+    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    lingering_claude_on(fake, &fixture, background, linger)
+}
+
+#[cfg(target_os = "linux")]
+fn lingering_claude_on(
+    fake: &Fake,
+    fixture: &Path,
+    background: &str,
+    linger: &str,
+) -> (SessionHandle, PathBuf) {
+    let (cfg, pids) = lingering_config(fake, fixture, background, linger);
+    let handle = unharness::harness::claude::ClaudeHarness::default()
+        .start_session(cfg)
+        .unwrap();
+    (handle, pids)
+}
+
+#[cfg(target_os = "linux")]
+fn lingering_config(
+    fake: &Fake,
+    fixture: &Path,
+    background: &str,
+    linger: &str,
+) -> (SessionConfig, PathBuf) {
+    let pids = fake._tmp.path().join("pids");
+    let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
+    cfg.env.push((
+        "UNHARNESS_FAKE_BACKGROUND".into(),
+        format!("{background}:{}", pids.display()),
+    ));
+    cfg.env
+        .push(("UNHARNESS_FAKE_LINGER".into(), linger.into()));
+    (cfg, pids)
+}
+
+/// A fake pi that takes `get_state` and then a prompt it never answers,
+/// and goes on for a minute once its stdin closes.
+#[cfg(target_os = "linux")]
+async fn lingering_pi(fake: &Fake) -> (SessionHandle, u32, u32) {
+    let fixture = fake._tmp.path().join("silent.jsonl");
+    std::fs::write(
+        &fixture,
+        ">> {\"type\": \"get_state\"}\n>> {\"type\": \"prompt\"}\n",
+    )
+    .unwrap();
+    let (cfg, pids) = lingering_config(fake, &fixture, "session", "60");
+    let handle = pi_harness().start_session(cfg).unwrap();
+    let (cli, child) = background_pids(&pids).await;
+    (handle, cli, child)
+}
+
+// Given its grace mid-turn, it could go on with the turn unseen.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ending_a_session_mid_turn_kills_a_cli_that_has_no_interrupt_for_it() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let (handle, cli, child) = lingering_pi(&fake).await;
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    fake.sent_lines_eventually(2).await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    let grace = unharness::core::process::END_GRACE;
+    assert!(gone_within(cli, grace / 2).await);
+    assert!(gone_within(child, Duration::from_secs(5)).await);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ending_a_session_between_turns_gives_the_cli_its_grace() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let (handle, cli, child) = lingering_pi(&fake).await;
+    fake.sent_lines_eventually(1).await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running(cli));
+    let grace = unharness::core::process::END_GRACE;
+    assert!(gone_within(cli, grace + Duration::from_secs(5)).await);
+    assert!(gone_within(child, Duration::from_secs(5)).await);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ending_a_session_kills_what_its_cli_left_in_a_session_of_its_own() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let (handle, pids) = lingering_claude(&fake, "session", "60");
+    let (cli, child) = background_pids(&pids).await;
+    // As `/clear` and a switch do: the handle goes with the request.
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    let sent = fake.sent_lines_eventually(2).await;
+    assert!(
+        sent.iter().any(|l| l["request"]["subtype"] == "interrupt"),
+        "{sent:?}"
+    );
+    // Given its grace, not killed with the handle.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running(cli));
+    let grace = unharness::core::process::END_GRACE;
+    assert!(gone_within(cli, grace + Duration::from_secs(5)).await);
+    assert!(gone_within(child, Duration::from_secs(5)).await);
+    assert!(!fake.sent_lines().iter().any(|l| l["ended"] == true));
+}
+
+// The driver is still sending an event when the handle goes: it finds
+// the `Shutdown` queued behind it instead of killing.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_shutdown_queued_behind_an_event_still_ends_the_cli_gracefully() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let delta =
+        std::fs::read_to_string(repo().join("src/harness/claude/fixtures/basic_turn.jsonl"))
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("text_delta"))
+            .unwrap()
+            .to_string();
+    let fixture = fake._tmp.path().join("chatty.jsonl");
+    let chatty = vec![delta; unharness::core::session::EVENT_CHANNEL_CAPACITY + 100];
+    std::fs::write(&fixture, chatty.join("\n") + "\n").unwrap();
+    let (handle, pids) = lingering_claude_on(&fake, &fixture, "session", "60");
+    let (cli, child) = background_pids(&pids).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while handle.events.len() < unharness::core::session::EVENT_CHANNEL_CAPACITY {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the events never filled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    let sent = fake.sent_lines_eventually(2).await;
+    assert!(
+        sent.iter().any(|l| l["request"]["subtype"] == "interrupt"),
+        "{sent:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(running(cli));
+    let grace = unharness::core::process::END_GRACE;
+    assert!(gone_within(cli, grace + Duration::from_secs(5)).await);
+    assert!(gone_within(child, Duration::from_secs(5)).await);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_cli_ending_by_itself_is_not_cut_short_and_its_group_goes_with_it() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let (handle, pids) = lingering_claude(&fake, "group", "0.5");
+    let (cli, child) = background_pids(&pids).await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    drop(handle);
+
+    // It finished what it was doing after the handle was gone.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !fake.sent_lines().iter().any(|l| l["ended"] == true) {
+        assert!(tokio::time::Instant::now() < deadline, "cut short");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(gone_within(cli, Duration::from_secs(5)).await);
+    // What it left in its process group did not outlive it.
+    assert!(gone_within(child, Duration::from_secs(5)).await);
+}
+
 /// pi with its gate extension installed in a scratch directory.
 fn pi_harness() -> unharness::harness::pi::PiHarness {
     unharness::harness::pi::PiHarness {

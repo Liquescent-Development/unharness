@@ -16,7 +16,7 @@ use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessId, ModelRef, PermissionDecision, PermissionKind,
     PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason,
+    StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -212,6 +212,18 @@ impl Driver {
             .await?;
         Ok(())
     }
+
+    /// A sub-agent's turn counts as one: it runs on with the main turn over.
+    async fn shut_down(&mut self) {
+        let turn_open = self.turn_id.is_some()
+            || !self.child_turns.is_empty()
+            || self.queued_turn.is_some()
+            || self
+                .outstanding
+                .values()
+                .any(|o| *o == Outstanding::TurnStart);
+        self.proc.end_or_kill(turn_open).await;
+    }
 }
 
 async fn drive(
@@ -252,10 +264,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    d.proc.kill().await;
-                    return;
-                };
+                let Some(cmd) = cmd else { break };
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
                     SessionCommand::Steer { text, attachments } => {
@@ -347,7 +356,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.proc.close_stdin();
+                        d.shut_down().await;
                         Ok(())
                     }
                 };
@@ -515,7 +524,13 @@ async fn drive(
                                 d.pending.insert(req.id.clone(), (rpc_id, req.kind.clone()));
                             }
                             if events.send(ev).await.is_err() {
-                                d.proc.kill().await;
+                                if !shutting_down {
+                                    if shutdown_queued(&mut cmds) {
+                                        d.shut_down().await;
+                                    } else {
+                                        d.proc.kill().await;
+                                    }
+                                }
                                 return;
                             }
                         }

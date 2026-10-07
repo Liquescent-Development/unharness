@@ -14,6 +14,7 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
     ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    shutdown_queued,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -145,6 +146,7 @@ async fn drive(
         format!("u{seq}")
     };
     let mut shutting_down = false;
+    let mut turn_open = false;
     // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
     let mut forking = false;
     let mut held_turn: Option<String> = None;
@@ -164,10 +166,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    proc.kill().await;
-                    break;
-                };
+                let Some(cmd) = cmd else { break };
                 let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
                 let line = match cmd {
                     SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
@@ -229,10 +228,11 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        proc.end_or_kill(turn_open).await;
                         None
                     }
                 };
+                turn_open |= is_turn && line.is_some();
                 if forking && is_turn {
                     held_turn = line;
                 } else if let Some(line) = line
@@ -284,12 +284,19 @@ async fn drive(
                             }
                             // Context usage is only available on request.
                             if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+                                turn_open = false;
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
                                 // The turn's user message now has an entry id to rewind to.
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    if shutdown_queued(&mut cmds) {
+                                        proc.end_or_kill(turn_open).await;
+                                    } else {
+                                        proc.kill().await;
+                                    }
+                                }
                                 return;
                             }
                         }
