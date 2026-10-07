@@ -130,6 +130,9 @@ struct Handoff {
     to: HarnessId,
     /// Where its turn began in the transcript.
     start: usize,
+    /// Prompts were held when it was asked for (after an interrupt): the
+    /// user sends those, also after the switch.
+    held: bool,
 }
 
 /// A subagent that is at work.
@@ -2304,11 +2307,13 @@ impl App {
                 }
                 self.check_guard();
                 self.finish_generation();
+                let held = self.handoff.is_some_and(|h| h.held);
                 self.finish_handoff(done);
                 self.persist();
                 // A clean finish moves on to the next queued prompt; after an
-                // interrupt or error the user decides (Enter sends it).
-                if done {
+                // interrupt or error the user decides (Enter sends it), also
+                // when a handoff summary came in between.
+                if done && !held {
                     self.send_next_queued();
                 } else if !self.queued.is_empty() {
                     self.transcript.push_notice(format!(
@@ -2510,6 +2515,7 @@ impl App {
         self.handoff = Some(Handoff {
             to: next,
             start: self.transcript.blocks.len(),
+            held: !self.queued.is_empty(),
         });
         self.start_generation();
         if !self.session_alive {
@@ -5797,6 +5803,29 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::CODEX);
         assert_eq!(app.active, HarnessId::CODEX);
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    }
+
+    #[test]
+    fn prompts_held_before_a_handoff_stay_held_after_it() {
+        let mut app = over_budget_app();
+        app.submit_prompt("second".into());
+        app.queue_prompt("later".into());
+        app.interrupt();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        app.take_actions();
+        assert_eq!(app.queued.len(), 1);
+
+        app.switch_harness(HarnessId::CODEX);
+        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        app.on_event(AgentEvent::TextDelta("Goal: the task.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.queued.len(), 1);
     }
 
     #[test]
