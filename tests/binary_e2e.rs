@@ -390,3 +390,52 @@ fn ctrl_z_in_print_stops_the_cli_with_unharness_and_fg_continues_it() {
         });
     }
 }
+
+// While a run ends, its CLI given its grace: Ctrl+Z still stops both.
+#[test]
+fn ctrl_z_while_print_ends_stops_the_cli_too() {
+    if !python_available() {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let mut cmd = setup.command(&["--print", "hi"]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    let mut unharness = Unharness(cmd.spawn().unwrap());
+    let pid = unharness.id();
+    wait_until("the turn is sent", Duration::from_secs(20), || {
+        std::fs::read_to_string(setup.path("log")).is_ok_and(|l| l.lines().count() >= 2)
+    });
+    wait_until("unharness listens", Duration::from_secs(5), || {
+        catches(pid, libc::SIGTERM) && catches(pid, libc::SIGTSTP)
+    });
+    let (cli, child) = setup.pids();
+
+    // SAFETY: signals to the child this test started.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    // The CLI, which lingers once its stdin closes, is in its grace.
+    wait_until("the CLI is asked to end", Duration::from_secs(5), || {
+        std::fs::read_to_string(setup.path("log")).is_ok_and(|l| l.contains("interrupt"))
+    });
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTSTP) };
+    for p in [pid, cli, child] {
+        wait_until("all of them are stopped", Duration::from_secs(5), || {
+            state(p) == Some('T')
+        });
+    }
+    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    assert!(
+        unharness.exit_within(Duration::from_secs(15)).is_some(),
+        "the run did not end"
+    );
+    for p in [cli, child] {
+        wait_until(
+            "the CLI and what it started are gone",
+            Duration::from_secs(5),
+            || !running(p),
+        );
+    }
+}

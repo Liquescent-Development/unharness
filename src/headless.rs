@@ -601,10 +601,19 @@ pub async fn drive<O: Write, E: Write>(
             }
         }
     };
-    tokio::select! {
-        _ = tokio::time::timeout(SHUTDOWN_GRACE, drain) => {}
-        _ = interrupts.recv() => {}
-        _ = ends.recv() => {}
+    let drain = tokio::time::timeout(SHUTDOWN_GRACE, drain);
+    tokio::pin!(drain);
+    loop {
+        tokio::select! {
+            _ = &mut drain => break,
+            _ = interrupts.recv() => break,
+            _ = ends.recv() => break,
+            // Its handler stays; the CLI is stopped with unharness here too.
+            _ = job_stops.recv() => {
+                #[cfg(unix)]
+                crate::core::process::suspend();
+            }
+        }
     }
 }
 
