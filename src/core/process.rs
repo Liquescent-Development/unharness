@@ -123,11 +123,20 @@ impl LineProcess {
         let mut owned = Owned::new(child);
         tokio::spawn(async move {
             let code = watch(&mut owned, stop_rx).await;
+            let (mut out_task, mut err_task) = (out_task, err_task);
             let drain = async {
+                let _ = (&mut out_task).await;
+                let _ = (&mut err_task).await;
+            };
+            if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
+                // Something out of reach (a double fork, a session of its
+                // own when the child exited by itself) holds the pipes:
+                // they are closed on it, and it gets EPIPE from now on.
+                out_task.abort();
+                err_task.abort();
                 let _ = out_task.await;
                 let _ = err_task.await;
-            };
-            let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain).await;
+            }
             drop(owned);
             let _ = tx.send(RawLine::Exited(code)).await;
         });
@@ -733,6 +742,35 @@ mod tests {
         assert_eq!(got.last(), Some(&RawLine::Exited(None)));
         #[cfg(target_os = "linux")]
         assert!(!alive(&_sleeper));
+    }
+
+    // The grandchild left the child's tree and session: nothing kills
+    // it, but it no longer has anyone reading its output.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_pipes_are_closed_on_what_escaped_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name| dir.path().join(name).display().to_string();
+        let (out, go, failed) = (file("out"), file("go"), file("failed"));
+        let escaped = format!(
+            "trap '' PIPE; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done; echo late || touch {failed}"
+        );
+        let mut cmd = Command::new("sh");
+        // The child waits until it is out, or the group kill would catch it.
+        cmd.arg("-c").arg(format!(
+            "(setsid sh -c \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
+        ));
+        let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
+        // Let it go first whatever happened: it ends after one line.
+        std::fs::write(&go, "").unwrap();
+        assert_eq!(got.unwrap().last(), Some(&RawLine::Exited(Some(0))));
+        let failed = std::path::Path::new(&failed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !failed.exists() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(failed.exists(), "its output was still read");
     }
 
     #[tokio::test]
