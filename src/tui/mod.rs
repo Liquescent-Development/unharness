@@ -153,6 +153,8 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         .then(|| herdr::Pane::from_env(|k| std::env::var(k).ok()))
         .flatten()
         .map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
+    // Before the terminal is taken, where an error can still be read.
+    let frames = FrameLog::from_env()?;
     let mut out = stdout();
     enter_terminal(&mut out)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
@@ -182,7 +184,14 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         default_providers,
     });
 
-    let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;
+    let res = event_loop(
+        &mut terminal,
+        &mut app,
+        initial_prompt,
+        herdr.as_mut(),
+        frames,
+    )
+    .await;
     // A list still being asked for is not waited for.
     crate::core::process::ProbeProcess::kill_all();
     if let Some(h) = herdr {
@@ -203,6 +212,7 @@ async fn event_loop(
     app: &mut App,
     initial_prompt: Option<String>,
     mut herdr: Option<&mut herdr::Reporter>,
+    mut frames: Option<FrameLog>,
 ) -> Result<()> {
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
@@ -215,7 +225,6 @@ async fn event_loop(
     // Provider and model lists, which may start the harness's CLI.
     let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut ends = crate::core::process::EndSignals::listen();
-    let mut frames = FrameLog::from_env();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -230,8 +239,9 @@ async fn event_loop(
             let started = Instant::now();
             let mut render = Duration::ZERO;
             terminal.draw(|f| {
+                let rendering = Instant::now();
                 ui::render(f, app);
-                render = started.elapsed();
+                render = rendering.elapsed();
             })?;
             if let Some(log) = frames.as_mut() {
                 log.frame(app.transcript_view.took, render, started.elapsed());
@@ -311,6 +321,7 @@ async fn event_loop(
             }
             _ = ends.recv() => app.quit(),
         }
+        let woke = Instant::now();
 
         for job in app.take_list_jobs() {
             let tx = lists_tx.clone();
@@ -357,6 +368,10 @@ async fn event_loop(
         }
 
         run_actions(app, &mut session, &mut shell).await;
+        if let Some(log) = frames.as_mut() {
+            log.wakes += 1;
+            log.after += woke.elapsed();
+        }
     }
 
     if let Some(s) = session.take() {
@@ -428,44 +443,66 @@ fn handle_event(app: &mut App, event: Event) {
 }
 
 /// With `UNHARNESS_FRAME_LOG=<file>`, a line per frame drawn: seconds
-/// since the start, the input events and harness events taken since the
-/// last frame and how long the input took, then how long the frame took
-/// to lay out the transcript, to render and to draw (render and write).
+/// since the start; since the last frame, how often the loop woke (for
+/// input, a harness event, the ticker or anything else), the input and
+/// harness events among that, how long the input took to handle and how
+/// long the work after each wake took (actions, a prompt sent, an editor
+/// while open); then how long the frame took to lay out the transcript,
+/// to render, and to draw (the render, a resize and the write).
 struct FrameLog {
     file: std::fs::File,
     start: Instant,
+    wakes: usize,
     inputs: usize,
     handling: Duration,
     events: usize,
+    after: Duration,
 }
 
 impl FrameLog {
-    fn from_env() -> Option<Self> {
-        let path = std::env::var_os("UNHARNESS_FRAME_LOG")?;
-        Some(Self {
-            file: std::fs::File::create(path).ok()?,
+    fn from_env() -> Result<Option<Self>> {
+        let Some(path) = std::env::var_os("UNHARNESS_FRAME_LOG") else {
+            return Ok(None);
+        };
+        let file = std::fs::File::create(&path).with_context(|| {
+            format!(
+                "could not create UNHARNESS_FRAME_LOG {}",
+                PathBuf::from(&path).display()
+            )
+        })?;
+        Ok(Some(Self {
+            file,
             start: Instant::now(),
+            wakes: 0,
             inputs: 0,
             handling: Duration::ZERO,
             events: 0,
-        })
+            after: Duration::ZERO,
+        }))
     }
 
     fn frame(&mut self, transcript: Duration, render: Duration, draw: Duration) {
-        let _ = writeln!(
-            self.file,
-            "{:.3} input={} handling={}us events={} transcript={}us render={}us draw={}us",
+        let line = format!(
+            "{:.3} wakes={} input={} handling={}us events={} after={}us \
+             transcript={}us render={}us draw={}us\n",
             self.start.elapsed().as_secs_f64(),
+            self.wakes,
             self.inputs,
             self.handling.as_micros(),
             self.events,
+            self.after.as_micros(),
             transcript.as_micros(),
             render.as_micros(),
             draw.as_micros(),
         );
+        // A debugging aid: a line that cannot be written is not worth
+        // stopping for.
+        let _ = self.file.write_all(line.as_bytes());
+        self.wakes = 0;
         self.inputs = 0;
         self.handling = Duration::ZERO;
         self.events = 0;
+        self.after = Duration::ZERO;
     }
 }
 
