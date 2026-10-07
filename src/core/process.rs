@@ -128,7 +128,6 @@ impl LineProcess {
                 let _ = err_task.await;
             };
             let _ = tokio::time::timeout(DRAIN_TIMEOUT, drain).await;
-            // What it left running in its group goes with it.
             drop(owned);
             let _ = tx.send(RawLine::Exited(code)).await;
         });
@@ -202,37 +201,69 @@ impl LineProcess {
     }
 }
 
-/// The child. Dropped, it kills what the child left running in its
-/// process group, and the whole tree if the child was not reaped yet (the
-/// runtime went away while the watcher waited).
+/// The child. Dropped before it was reaped (the runtime went away while
+/// the watcher waited), it kills the child's whole tree.
 struct Owned {
     child: Child,
     pid: Option<u32>,
+    /// Readable once the child has exited, while it is not reaped yet.
+    #[cfg(target_os = "linux")]
+    exit: Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>,
     reaped: bool,
 }
 
 impl Owned {
     fn new(child: Child) -> Self {
         live_children().send_modify(|n| *n += 1);
+        let pid = child.id();
         Owned {
-            pid: child.id(),
+            #[cfg(target_os = "linux")]
+            exit: pid.and_then(pidfd),
+            pid,
             child,
             reaped: false,
         }
+    }
+
+    /// Wait for the child to exit. Where it can be seen (a pidfd, Linux
+    /// 5.3 and later) it is not reaped, and `None` comes back: its pid,
+    /// and so its group's id, can then name no other process. Elsewhere it
+    /// is reaped, and its status comes back.
+    async fn exited(&mut self) -> Option<std::io::Result<std::process::ExitStatus>> {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = &self.exit {
+            if let Ok(mut ready) = fd.readable().await {
+                ready.retain_ready();
+            }
+            return None;
+        }
+        Some(self.child.wait().await)
     }
 }
 
 impl Drop for Owned {
     fn drop(&mut self) {
-        match self.pid {
-            Some(pid) if !self.reaped => kill_tree(pid),
-            // The group's id stays taken while a member is left, so it
-            // names no other.
-            Some(pid) => kill_group(pid),
-            None => {}
+        if let Some(pid) = self.pid
+            && !self.reaped
+        {
+            kill_tree(pid);
         }
         live_children().send_modify(|n| *n -= 1);
     }
+}
+
+/// A pidfd for the child `pid`, which must not be reaped yet.
+#[cfg(target_os = "linux")]
+fn pidfd(pid: u32) -> Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>> {
+    use std::os::fd::FromRawFd;
+    // SAFETY: a plain syscall; the fd it returns is owned from here on.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `fd` is a new descriptor nothing else owns.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) };
+    tokio::io::unix::AsyncFd::with_interest(fd, tokio::io::Interest::READABLE).ok()
 }
 
 /// How many `LineProcess` children are not reaped yet.
@@ -244,11 +275,12 @@ fn live_children() -> &'static tokio::sync::watch::Sender<usize> {
 
 /// Wait for the child. A kill request, or the `LineProcess` being dropped,
 /// kills it and its tree; a request to end kills them once its grace is
-/// up, unless the child exits first.
+/// up, unless the child exits first. What a child that exits leaves in
+/// its process group goes with it.
 async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Option<i32> {
     let mut deadline: Option<tokio::time::Instant> = None;
     let mut asking = true;
-    loop {
+    let exited = loop {
         let grace_up = async {
             match deadline {
                 Some(at) => tokio::time::sleep_until(at).await,
@@ -256,28 +288,43 @@ async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Op
             }
         };
         tokio::select! {
-            status = owned.child.wait() => {
-                owned.reaped = true;
-                return status.ok().and_then(|s| s.code());
-            }
+            reaped = owned.exited() => break Some(reaped),
             stop = stop.recv(), if asking => match stop {
                 Some(Stop::Within(grace)) => {
                     let at = tokio::time::Instant::now() + grace;
                     deadline = Some(deadline.map_or(at, |d| d.min(at)));
                 }
-                Some(Stop::Now) => break,
+                Some(Stop::Now) => break None,
                 // Dropped while it ends by itself: the grace still holds.
                 None if deadline.is_some() => asking = false,
-                None => break,
+                None => break None,
             },
-            _ = grace_up => break,
+            _ = grace_up => break None,
         }
-    }
-    if let Some(pid) = owned.pid {
-        kill_tree(pid);
-    }
-    let _ = owned.child.start_kill();
-    let status = owned.child.wait().await;
+    };
+    let status = match exited {
+        // The group's id is the child's pid, which the child gives up when
+        // it is reaped: with the group emptied too, a new process could
+        // lead a group of that id, as every harness process does. So the
+        // group is killed before the reaping where the exit can be seen
+        // without it, and right after it elsewhere.
+        Some(reaped) => {
+            if let Some(pid) = owned.pid {
+                kill_group(pid);
+            }
+            match reaped {
+                Some(status) => status,
+                None => owned.child.wait().await,
+            }
+        }
+        None => {
+            if let Some(pid) = owned.pid {
+                kill_tree(pid);
+            }
+            let _ = owned.child.start_kill();
+            owned.child.wait().await
+        }
+    };
     owned.reaped = true;
     status.ok().and_then(|s| s.code())
 }
@@ -642,6 +689,30 @@ mod tests {
         };
         #[cfg(target_os = "linux")]
         assert!(!alive(_sleeper));
+    }
+
+    // Holding the output, the background `sleep` kept the drain waiting
+    // for its whole timeout, and was killed after it.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn what_a_child_leaves_in_its_group_goes_when_it_exits() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("sleep 30 & echo $!");
+        let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
+        let started = std::time::Instant::now();
+        let got = tokio::time::timeout(Duration::from_secs(5), drain(&mut p))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < DRAIN_TIMEOUT / 2,
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(got.last(), Some(&RawLine::Exited(Some(0))));
+        let Some(RawLine::Stdout(sleeper)) = got.first() else {
+            panic!("{got:?}");
+        };
+        assert!(!alive(sleeper));
     }
 
     #[tokio::test]
