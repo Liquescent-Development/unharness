@@ -147,11 +147,11 @@ async fn drive(
                     }
                     SessionCommand::Interrupt => {
                         // There is no interrupt event; ending the process ends
-                        // the turn, and the conversation resumes by id. A
-                        // command agy started runs on (also after SIGINT,
-                        // checked on 1.2.17).
+                        // the turn, and the conversation resumes by id. agy
+                        // leaves a command it started running after SIGINT;
+                        // the kill takes it (checked on 1.2.17).
                         let _ = events.send(AgentEvent::Notice(
-                            "agy has no interrupt: its process is stopped (a command it started runs on); the next turn resumes the conversation".into(),
+                            "agy has no interrupt: its process is stopped with what it started; the next turn resumes the conversation".into(),
                         )).await;
                         proc.kill().await;
                     }

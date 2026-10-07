@@ -189,7 +189,8 @@ recorded ones. For anything else:
   `brain/<conversation>/implementation_plan.md` under the state directory
   and acts in the same turn, so plan mode is not declared. SIGINT gives a
   `result` with `error: "interrupted"` and exit 1, and leaves the command
-  agy started running (so does unharness's kill). Sign-in is the token
+  agy started running; unharness's kill takes it (a `--print` run's
+  `sleep` gone on Ctrl+C). Sign-in is the token
   file beside `settings.json`; whether `GEMINI_API_KEY` signs a headless
   run in is unverified, so it is not looked at.
   Headless runs did not touch `settings.json`, `~/.gemini/config/
