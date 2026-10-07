@@ -2454,8 +2454,10 @@ impl App {
         self.transcript.end_running_agents();
     }
 
-    /// End the active harness's session.
+    /// End the active harness's session. It is not alive from here on: a
+    /// prompt handled before the loop runs the shutdown starts the next.
     fn shutdown_session(&mut self) {
+        self.session_alive = false;
         self.drop_subagents();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
@@ -6517,12 +6519,13 @@ pub(crate) mod tests {
 
         assert!(app.set_sandbox(SandboxLevel::ReadOnly));
         assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
-        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-        app.session_alive = false;
+        // The prompt typed with it, before the loop has ended the
+        // session, starts the next one.
         app.submit_prompt("again".into());
         let actions = app.take_actions();
+        assert_eq!(actions[0], Action::Shutdown);
         assert!(
-            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+            matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
@@ -6564,12 +6567,13 @@ pub(crate) mod tests {
 
         app.set_provider("bedrock".into());
         assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
-        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-        app.session_alive = false;
+        // The prompt typed with it, before the loop has ended the
+        // session, starts the next one.
         app.submit_prompt("again".into());
         let actions = app.take_actions();
+        assert_eq!(actions[0], Action::Shutdown);
         assert!(
-            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+            matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
     }
 
