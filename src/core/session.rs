@@ -231,19 +231,19 @@ impl ProcessSlot {
     /// `process` is the session's now (a driver that starts another one
     /// says so again).
     pub fn set(&self, process: &LineProcess) {
-        if let Ok(mut slot) = self.0.lock() {
-            *slot = Some(process.stopper());
-        }
+        *self.lock() = Some(process.stopper());
     }
 
     /// Kill the session's CLI now, whatever its driver is doing; nothing
     /// for a session whose driver named none.
     pub fn kill(&self) {
-        if let Ok(slot) = self.0.lock()
-            && let Some(stopper) = slot.as_ref()
-        {
+        if let Some(stopper) = self.lock().as_ref() {
             stopper.kill();
         }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Stopper>> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
