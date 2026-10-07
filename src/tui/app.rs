@@ -24,8 +24,8 @@ use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    CheckpointRecord, Conversation, ConversationStore, ShellStatus, TurnAnchorRecord, now_rfc3339,
-    truncate_title,
+    CheckpointRecord, ContextWindows, Conversation, ConversationStore, ShellStatus,
+    TurnAnchorRecord, now_rfc3339, truncate_title,
 };
 use crate::core::guard::{self, Watch};
 use crate::core::mcp::{self, McpServer};
@@ -302,8 +302,11 @@ pub struct App {
     open_when_listed: Option<ListRequest>,
 
     pub transcript: Transcript,
-    pub bridge_max_chars: usize,
+    /// The bridge's budget, when the user set one.
+    pub bridge_max_chars: Option<usize>,
     bridge_summary: BridgeSummary,
+    /// What the bridge to a harness is measured against otherwise.
+    context_windows: ContextWindows,
     handoff: Option<Handoff>,
     /// Transcript length when each harness was last active (bridge start).
     last_active_index: HashMap<HarnessId, usize>,
@@ -652,7 +655,8 @@ impl App {
             workspace_root: init.workspace_root,
             git_branch,
             registry,
-            bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
+            bridge_max_chars: config.bridge_max_chars,
+            context_windows: store.context_windows(),
             bridge_summary: config.bridge_summary.unwrap_or_default(),
             handoff: None,
             config,
@@ -1182,7 +1186,8 @@ impl App {
         let bridge = if from >= self.transcript.blocks.len() {
             None
         } else {
-            self.transcript.bridge_text(from, self.bridge_max_chars)
+            self.transcript
+                .bridge_text(from, self.bridge_budget(self.active))
         };
         self.last_active_index.remove(&self.active);
         // `!` commands no agent has been told about yet (the bridge has
@@ -1246,6 +1251,43 @@ impl App {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// How long the bridge to `harness` may be: `bridge_max_chars` when
+    /// set, else a quarter of the context window its model last reported
+    /// here at about four characters a token, else the default.
+    pub fn bridge_budget(&self, harness: HarnessId) -> usize {
+        self.bridge_max_chars
+            .or_else(|| {
+                self.context_windows
+                    .get(&harness)?
+                    .get(&self.model_key(harness))
+                    .map(|w| {
+                        usize::try_from(*w).unwrap_or(usize::MAX) / BRIDGE_WINDOW_SHARE
+                            * CHARS_PER_TOKEN
+                    })
+            })
+            .unwrap_or(DEFAULT_BRIDGE_MAX_CHARS)
+    }
+
+    /// The model `harness` runs, as the context windows are kept by.
+    fn model_key(&self, harness: HarnessId) -> String {
+        self.models
+            .get(&harness)
+            .map_or_else(|| "default".to_string(), ModelRef::label)
+    }
+
+    /// Keep the window the active harness's model reported, for the next
+    /// bridge to it.
+    fn learn_context_window(&mut self, window: u64) {
+        let model = self.model_key(self.active);
+        let known = self.context_windows.entry(self.active).or_default();
+        if known.get(&model) == Some(&window) {
+            return;
+        }
+        known.insert(model, window);
+        // Only a measure: a write that fails costs a default budget later.
+        let _ = self.store.save_context_windows(&self.context_windows);
     }
 
     /// Where the bridge to `harness` starts: where it was last active,
@@ -2162,7 +2204,12 @@ impl App {
                     self.persist();
                 }
             }
-            AgentEvent::Context(c) => self.context.merge(c),
+            AgentEvent::Context(c) => {
+                if let Some(window) = c.window {
+                    self.learn_context_window(window);
+                }
+                self.context.merge(c);
+            }
             AgentEvent::RateLimit(r) => {
                 // Warn once each time a window crosses the threshold.
                 let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
@@ -2431,7 +2478,7 @@ impl App {
                     .blocks
                     .get(self.bridge_start(next)..)
                     .unwrap_or_default(),
-                self.bridge_max_chars,
+                self.bridge_budget(next),
             )
     }
 
@@ -4271,6 +4318,11 @@ impl App {
 }
 
 /// Current branch from `.git/HEAD` without spawning git.
+/// The bridge takes at most this fraction (1/n) of the window it goes to.
+const BRIDGE_WINDOW_SHARE: usize = 4;
+/// About what a token is in English prose and code.
+const CHARS_PER_TOKEN: usize = 4;
+
 /// What the harness being left is asked for.
 fn handoff_prompt(to: &str) -> String {
     format!(
@@ -5703,7 +5755,7 @@ pub(crate) mod tests {
             })
         };
         let mut app = test_app(HarnessId::CLAUDE);
-        app.bridge_max_chars = 500;
+        app.bridge_max_chars = Some(500);
         app.submit_prompt("the task".into());
         app.take_actions();
         app.session_alive = true;
@@ -5769,6 +5821,43 @@ pub(crate) mod tests {
         app.bridge_summary = BridgeSummary::Never;
         app.switch_harness(HarnessId::CODEX);
         assert_eq!(app.active, HarnessId::CODEX);
+    }
+
+    #[test]
+    fn the_bridge_is_measured_by_the_window_its_harness_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(10),
+            window: Some(200_000),
+        }));
+        // A quarter of it, at four characters a token.
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 200_000);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CODEX),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+
+        // Kept for the next run, by model.
+        let mut again = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+        assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 200_000);
+        again.models.insert(
+            HarnessId::CLAUDE,
+            ModelRef::new(HarnessId::CLAUDE, ProviderId::new("anthropic"), "opus"),
+        );
+        assert_eq!(
+            again.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+
+        // A budget the user set wins.
+        again.bridge_max_chars = Some(1_000);
+        assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 1_000);
     }
 
     #[test]

@@ -73,8 +73,10 @@ next harness starts on your next prompt and is seeded with the
 conversation so far: each prompt, what the agent said, and its tool
 calls with the part of their output that matters (none for a read or an
 edit, the end of a command's output, the last 20 lines of a call that
-failed, a subagent's report). The seed is capped by `bridge_max_chars`
-(24,000 characters by default). Over the cap, older turns are told more
+failed, a subagent's report). The seed takes at most a quarter of the
+context window the next harness's model last reported in this workspace
+(24,000 characters before it has reported one, or `bridge_max_chars`
+when that is set). Over the cap, older turns are told more
 briefly first (the files they edited, the calls that failed, the final
 answer; then a few lines), and only then are turns left out, from the
 middle: the first prompt and the newest turn are always kept. Returning

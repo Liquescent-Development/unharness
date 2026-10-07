@@ -244,6 +244,10 @@ struct Index {
     conversations: Vec<ConversationSummary>,
 }
 
+/// Harness → model (as `ModelRef::label` has it, or `default`) → context
+/// window in tokens.
+pub type ContextWindows = HashMap<HarnessId, HashMap<String, u64>>;
+
 pub struct ConversationStore {
     root: PathBuf,
 }
@@ -288,6 +292,25 @@ impl ConversationStore {
 
     fn file_for(&self, id: &str) -> PathBuf {
         self.dir().join(format!("{id}.json"))
+    }
+
+    fn windows_path(&self) -> PathBuf {
+        self.root.join("context_windows.json")
+    }
+
+    /// The context windows the harnesses reported here, by model, kept
+    /// across conversations: what the bridge to a harness is measured
+    /// against before its session has said. Empty when unreadable.
+    pub fn context_windows(&self) -> ContextWindows {
+        std::fs::read_to_string(self.windows_path())
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_context_windows(&self, windows: &ContextWindows) -> Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        write_atomic(&self.windows_path(), &serde_json::to_vec_pretty(windows)?)
     }
 
     /// Prompts sent from this workspace (the TUI's Up/Down recall).
@@ -384,6 +407,7 @@ impl ConversationStore {
         let _ = std::fs::remove_dir_all(self.dir());
         let _ = std::fs::remove_file(self.index_path());
         let _ = std::fs::remove_file(self.history_path());
+        let _ = std::fs::remove_file(self.windows_path());
         Ok(())
     }
 }

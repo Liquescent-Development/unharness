@@ -21,7 +21,7 @@ default_policy   = "ask"
 mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to select and copy; false leaves the mouse to the terminal
 herdr            = true          # report working/blocked/idle to herdr when run in one of its panes
 auto_sync        = true          # refresh CLAUDE.md/GEMINI.md symlinks before each run
-bridge_max_chars = 24000
+bridge_max_chars = 24000         # unset: measured by the next harness's context window
 bridge_summary   = "auto"        # "never": no handoff summary when the bridge is over budget
 file_checkpoints = true          # snapshot the working tree before each prompt (git projects; kept outside the repo)
 
@@ -68,7 +68,7 @@ headers = { Authorization = "Bearer …" }
 | `mouse` | `true` | unharness handles the mouse; `false` leaves it to the terminal |
 | `herdr` | `true` | Inside a [herdr](tui.md#herdr) pane, report the session's state to herdr |
 | `auto_sync` | `true` | Refresh the `CLAUDE.md` / `GEMINI.md` symlinks before each run |
-| `bridge_max_chars` | `24000` | How much of the conversation seeds a newly switched-to harness |
+| `bridge_max_chars` | unset | How much of the conversation seeds a newly switched-to harness, in characters. Unset, it is a quarter of the context window the harness's model last reported in this workspace (at four characters a token, as many characters as the window has tokens), or 24,000 before one has |
 | `bridge_summary` | `"auto"` | Ask the harness being left for a handoff summary when the conversation is over `bridge_max_chars` (`"never"` to skip it); see [Switching harnesses](usage.md#switching-harnesses) |
 | `file_checkpoints` | `true` | [Checkpoint](tui.md#rewind-and-checkpoints) the working tree before each prompt |
 | `[sandbox]` | | See [Sandbox](sandbox.md) |
