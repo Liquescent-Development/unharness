@@ -401,19 +401,23 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
             if let Some(kind) = agent.as_ref().and_then(|a| a.kind.as_deref()) {
                 summary.push_str(&format!(" ({kind})"));
             }
-            let marker = "  ⚡ ";
-            let indent = UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(name.as_str()) + 2;
-            let head_width = width.saturating_sub(indent + 11).max(10);
             // The command in the terminal's own colour, its output dimmed
             // below it, and the status on the first line: at the end of the
-            // line's width when the summary wraps, not inside the command.
-            let mut summary_lines = wrap_words(&summary, head_width).into_iter().peekable();
-            let mut first = summary_lines.next().unwrap_or_default();
-            if summary_lines.peek().is_some() {
-                let pad = head_width + 1 - UnicodeWidthStr::width(first.as_str()).min(head_width);
-                first.push_str(&" ".repeat(pad));
-            }
-            lines.push(Line::from(vec![
+            // line's width when the summary wraps, not inside the command. A
+            // name that leaves too little room beside it (an MCP tool's) has
+            // that line to itself, and the summary goes below.
+            let marker = "  ⚡ ";
+            let beside = UnicodeWidthStr::width(marker) + UnicodeWidthStr::width(name.as_str()) + 2;
+            let own_line = beside + 10 + STATUS_ROOM > width;
+            let (indent, head_width) = if own_line {
+                // Under the name.
+                let indent = UnicodeWidthStr::width(marker);
+                (indent, width.saturating_sub(indent).max(10))
+            } else {
+                (beside, width - beside - STATUS_ROOM)
+            };
+            let mut summary_lines = wrap_words(&summary, head_width).into_iter();
+            let mut first = vec![
                 Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::styled(
                     name.clone(),
@@ -421,11 +425,19 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("  "),
-                Span::raw(first),
-                status,
-            ]));
-            for seg in summary_lines {
+            ];
+            if !own_line {
+                let mut words = summary_lines.next().unwrap_or_default();
+                if summary_lines.len() > 0 {
+                    let pad =
+                        (head_width + 1).saturating_sub(UnicodeWidthStr::width(words.as_str()));
+                    words.push_str(&" ".repeat(pad));
+                }
+                first.extend([Span::raw("  "), Span::raw(words)]);
+            }
+            first.push(status);
+            lines.push(Line::from(first));
+            for seg in summary_lines.filter(|s| !s.is_empty()) {
                 lines.push(Line::from(vec![
                     Span::raw(" ".repeat(indent)),
                     Span::raw(seg),
@@ -605,6 +617,10 @@ fn shell_lines(
     close_gutter(&mut lines);
     lines
 }
+
+/// Columns kept for a tool call's status after its summary (` ⠿ running`,
+/// ` ✓ 274.0s`) and the space before it.
+const STATUS_ROOM: usize = 11;
 
 /// Blank lines between two blocks: one, except inside a run of tool calls
 /// and hooks, which stay compact (each call's gutter is closed off with `└`
@@ -2785,9 +2801,46 @@ mod tests {
             assert_eq!(style.fg, None, "{text:?}");
             assert!(!style.add_modifier.contains(Modifier::DIM), "{text:?}");
         }
+        // At the end of the first line's width, apart from the command.
+        let cells = |s: &str| UnicodeWidthStr::width(s);
+        assert_eq!(cells(&text[0]) - cells(" ✓ 0.7s"), 80 - 10, "{text:?}");
         assert_eq!(text[2], "  └ found it");
         for s in ["└", "found it"] {
             assert!(span(2, s).add_modifier.contains(Modifier::DIM), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_long_tool_name_keeps_its_status_in_view() {
+        let name = "mcp__claude_ai_Google_Sheets__copy_sheet_to_another_spreadsheet";
+        let block = |done: bool| TBlock::Tool {
+            id: "t".into(),
+            name: name.into(),
+            input: serde_json::json!({"query": "word ".repeat(30)}),
+            output: String::new(),
+            is_error: false,
+            done,
+            collapsed: true,
+            started: std::time::Instant::now(),
+            duration: Some(std::time::Duration::from_millis(700)),
+            agent: None,
+        };
+        // An 80-column terminal (text 74 wide, cut at 78), where the name
+        // leaves no room beside it.
+        for (done, status) in [(false, "⠿ running"), (true, "✓ 0.7s")] {
+            let mut lines = block_lines(&block(done), 74, false, 0.0);
+            clamp_lines(&mut lines, 78);
+            let text: Vec<String> = lines.iter().map(crate::tui::code::line_text).collect();
+            assert!(text.len() > 2, "{text:?}");
+            assert!(
+                text.iter()
+                    .all(|l| UnicodeWidthStr::width(l.as_str()) <= 78 && !l.contains('…')),
+                "{text:?}"
+            );
+            // The name and the status on a line of their own, the summary
+            // below, under the name.
+            assert_eq!(text[0], format!("  ⚡ {name} {status}"));
+            assert!(text[1].starts_with("     word word"), "{text:?}");
         }
     }
 
