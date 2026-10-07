@@ -21,11 +21,12 @@ use super::modal::{
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
-use crate::config::Config;
+use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    CheckpointRecord, Conversation, ConversationStore, ShellStatus, TurnAnchorRecord, now_rfc3339,
-    truncate_title,
+    CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, CheckpointRecord, ContextWindows, Conversation,
+    ConversationStore, ShellStatus, TurnAnchorRecord, default_context_windows_path,
+    load_context_windows, now_rfc3339, save_context_windows, truncate_title,
 };
 use crate::core::guard::{self, Watch};
 use crate::core::mcp::{self, McpServer};
@@ -120,6 +121,18 @@ pub struct ShellRun {
     pub started: Instant,
     /// The user asked for it to be stopped.
     pub stopping: bool,
+}
+
+/// The harness the user is switching away from writing a summary for the
+/// next one: the switch happens when its turn ends.
+#[derive(Debug, Clone, Copy)]
+struct Handoff {
+    to: HarnessId,
+    /// Where its turn began in the transcript.
+    start: usize,
+    /// Prompts were held when it was asked for (after an interrupt): the
+    /// user sends those, also after the switch.
+    held: bool,
 }
 
 /// A subagent that is at work.
@@ -293,7 +306,13 @@ pub struct App {
     open_when_listed: Option<ListRequest>,
 
     pub transcript: Transcript,
-    pub bridge_max_chars: usize,
+    /// The bridge's budget, when the user set one.
+    pub bridge_max_chars: Option<usize>,
+    bridge_summary: BridgeSummary,
+    /// What the bridge to a harness is measured against otherwise.
+    context_windows: ContextWindows,
+    context_windows_path: PathBuf,
+    handoff: Option<Handoff>,
     /// Transcript length when each harness was last active (bridge start).
     last_active_index: HashMap<HarnessId, usize>,
     /// Session ids seen this run (or chosen via /resume), per harness.
@@ -427,6 +446,9 @@ pub struct AppInit {
     /// Where file-checkpoint shadow repositories go; `None` = the user's
     /// state directory.
     pub checkpoint_store: Option<PathBuf>,
+    /// Where the context windows harnesses reported are kept; `None` = the
+    /// user's state directory.
+    pub context_windows: Option<PathBuf>,
     /// The user's allow rules, and where "allow always" adds to them.
     pub rules: Rules,
     /// Each harness's guess at its own provider (`Harness::default_provider`),
@@ -636,12 +658,19 @@ impl App {
         };
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
+        let context_windows_path = init
+            .context_windows
+            .unwrap_or_else(default_context_windows_path);
         let mut app = App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
             git_branch,
             registry,
-            bridge_max_chars: config.bridge_max_chars.unwrap_or(DEFAULT_BRIDGE_MAX_CHARS),
+            bridge_max_chars: config.bridge_max_chars,
+            context_windows: load_context_windows(&context_windows_path),
+            context_windows_path,
+            bridge_summary: config.bridge_summary.unwrap_or_default(),
+            handoff: None,
             config,
             active,
             harness_options,
@@ -1037,6 +1066,9 @@ impl App {
         if self.compacting {
             return "Compacting".to_string();
         }
+        if self.handoff.is_some() {
+            return "Writing a handoff summary".to_string();
+        }
         if let Some(super::transcript::Block::Tool {
             name, done: false, ..
         }) = self
@@ -1162,19 +1194,12 @@ impl App {
         // Bridge context from other harnesses: everything since this harness
         // was last active, or everything on its first visit. Nothing when the
         // live session already saw the whole transcript.
-        let visited = self.session_ids.contains_key(&self.active) || self.session_alive;
-        let from = if visited {
-            self.last_active_index
-                .get(&self.active)
-                .copied()
-                .unwrap_or(self.transcript.blocks.len())
-        } else {
-            0
-        };
+        let from = self.bridge_start(self.active);
         let bridge = if from >= self.transcript.blocks.len() {
             None
         } else {
-            self.transcript.bridge_text(from, self.bridge_max_chars)
+            self.transcript
+                .bridge_text(from, self.bridge_budget(self.active))
         };
         self.last_active_index.remove(&self.active);
         // `!` commands no agent has been told about yet (the bridge has
@@ -1238,6 +1263,60 @@ impl App {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// How long the bridge to `harness` may be: `bridge_max_chars` when
+    /// set, else a quarter of the context window its model last reported
+    /// here at about four characters a token, else the default.
+    pub fn bridge_budget(&self, harness: HarnessId) -> usize {
+        self.bridge_max_chars
+            .or_else(|| {
+                self.context_windows
+                    .get(&harness)?
+                    .get(&self.model_key(harness))
+                    .map(|w| {
+                        usize::try_from(*w).unwrap_or(usize::MAX) / BRIDGE_WINDOW_SHARE
+                            * CHARS_PER_TOKEN
+                    })
+            })
+            .unwrap_or(DEFAULT_BRIDGE_MAX_CHARS)
+    }
+
+    /// The model `harness` runs, as the context windows are kept by.
+    fn model_key(&self, harness: HarnessId) -> String {
+        self.models
+            .get(&harness)
+            .map_or_else(|| "default".to_string(), ModelRef::label)
+    }
+
+    /// Keep the window the active harness's model reported, for the next
+    /// bridge to it.
+    fn learn_context_window(&mut self, window: u64) {
+        let window = window.clamp(CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX);
+        let model = self.model_key(self.active);
+        let known = self.context_windows.entry(self.active).or_default();
+        if known.get(&model) == Some(&window) {
+            return;
+        }
+        known.insert(model, window);
+        // Only a measure: a write that fails costs a default budget later.
+        let _ = save_context_windows(&self.context_windows_path, &self.context_windows);
+    }
+
+    /// Where the bridge to `harness` starts: where it was last active,
+    /// nothing when its live session saw it all, everything on its first
+    /// visit.
+    fn bridge_start(&self, harness: HarnessId) -> usize {
+        let visited = self.session_ids.contains_key(&harness)
+            || (harness == self.active && self.session_alive);
+        if visited {
+            self.last_active_index
+                .get(&harness)
+                .copied()
+                .unwrap_or(self.transcript.blocks.len())
+        } else {
+            0
+        }
     }
 
     /// Record the working tree as it is before the turn at `block` runs.
@@ -1304,12 +1383,14 @@ impl App {
     }
 
     /// Inject a message into the running turn, where the harness can; queue it otherwise.
+    /// A handoff summary's turn is not steered: the answer to the message
+    /// would be taken for the summary. The message goes to the next harness.
     pub fn steer(&mut self, text: String) {
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
         }
-        if !self.is_generating || self.compacting {
+        if !self.is_generating || self.compacting || self.handoff.is_some() {
             self.queue_prompt(text);
             return;
         }
@@ -2138,7 +2219,12 @@ impl App {
                     self.persist();
                 }
             }
-            AgentEvent::Context(c) => self.context.merge(c),
+            AgentEvent::Context(c) => {
+                if let Some(window) = c.window {
+                    self.learn_context_window(window);
+                }
+                self.context.merge(c);
+            }
             AgentEvent::RateLimit(r) => {
                 // Warn once each time a window crosses the threshold.
                 let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
@@ -2223,10 +2309,13 @@ impl App {
                 }
                 self.check_guard();
                 self.finish_generation();
+                let held = self.handoff.is_some_and(|h| h.held);
+                self.finish_handoff(done);
                 self.persist();
                 // A clean finish moves on to the next queued prompt; after an
-                // interrupt or error the user decides (Enter sends it).
-                if done {
+                // interrupt or error the user decides (Enter sends it), also
+                // when a handoff summary came in between.
+                if done && !held {
                     self.send_next_queued();
                 } else if !self.queued.is_empty() {
                     self.transcript.push_notice(format!(
@@ -2252,6 +2341,7 @@ impl App {
                     self.modal = None;
                 }
                 self.pending_prompts.clear();
+                self.finish_handoff(false);
             }
         }
     }
@@ -2281,6 +2371,26 @@ impl App {
     }
 
     fn on_permission_request(&mut self, req: PermissionRequest) {
+        if self.handoff.is_some() {
+            let decision = match &req.kind {
+                PermissionKind::ToolUse { tool, .. } => {
+                    self.transcript
+                        .push_notice(format!("denied {tool}: a handoff summary uses no tools"));
+                    PermissionDecision::Deny {
+                        reason: "The user is switching to another agent. Write the handoff \
+                                 summary from what you already know, without tools."
+                            .into(),
+                    }
+                }
+                _ => PermissionDecision::Answer(Value::Null),
+            };
+            self.actions
+                .push_back(Action::Command(SessionCommand::RespondPermission {
+                    id: req.id,
+                    decision,
+                }));
+            return;
+        }
         if let Some(rules) = self.allowing_rules(&req) {
             // Said every time: what runs unasked should not also run unseen.
             let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
@@ -2364,6 +2474,81 @@ impl App {
                 .push_error("finish or interrupt the current turn before switching harness");
             return;
         }
+        if self.handoff_wanted(next) {
+            self.ask_handoff(next);
+            return;
+        }
+        self.switch_now(next);
+    }
+
+    /// Whether the conversation will not fit in the bridge to `next`, and
+    /// the harness being left can say what it was about: it has a session,
+    /// live or one it can resume (a fresh one would summarize nothing), and
+    /// that session saw the whole transcript. Not while its subagents are
+    /// at work: what they ask or report would land in the summary's turn.
+    fn handoff_wanted(&self, next: HarnessId) -> bool {
+        self.bridge_summary == BridgeSummary::Auto
+            && (self.session_alive
+                || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
+            && self.subagents.is_empty()
+            && self.bridge_start(self.active) >= self.transcript.blocks.len()
+            && self.shell.is_none()
+            && self.effective_policy().is_some()
+            && super::bridge::needs_summary(
+                self.transcript
+                    .blocks
+                    .get(self.bridge_start(next)..)
+                    .unwrap_or_default(),
+                self.bridge_budget(next),
+            )
+    }
+
+    /// Ask the active harness for a summary for `next`, switching when its
+    /// turn ends (Esc switches without it). It is told to use no tools,
+    /// and what it asks permission for is denied.
+    fn ask_handoff(&mut self, next: HarnessId) {
+        let to = self
+            .registry
+            .get(next)
+            .map_or("another agent", |h| h.descriptor().short_name);
+        self.transcript.push_system(format!(
+            "The conversation is longer than the bridge to {to}: asking {} for a handoff summary first (Esc switches without one)",
+            self.short_name()
+        ));
+        self.handoff = Some(Handoff {
+            to: next,
+            start: self.transcript.blocks.len(),
+            held: !self.queued.is_empty(),
+        });
+        self.start_generation();
+        if !self.session_alive {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+        self.actions.push_back(Action::SendTurn {
+            text: handoff_prompt(to, self.bridge_budget(next)),
+            attachments: Vec::new(),
+        });
+    }
+
+    /// The handoff turn is over, however it ended: the switch goes ahead.
+    fn finish_handoff(&mut self, done: bool) {
+        let Some(h) = self.handoff.take() else {
+            return;
+        };
+        let to = self
+            .registry
+            .get(h.to)
+            .map_or("another agent", |h| h.descriptor().short_name);
+        if !(done && self.transcript.mark_handoff(h.start, to)) {
+            self.transcript.push_notice(format!(
+                "no handoff summary; {to} gets the conversation as it is"
+            ));
+        }
+        self.switch_now(h.to);
+    }
+
+    fn switch_now(&mut self, next: HarnessId) {
         if self.session_alive {
             self.shutdown_session();
         }
@@ -4154,6 +4339,33 @@ impl App {
     }
 }
 
+/// The bridge takes at most this fraction (1/n) of the window it goes to.
+const BRIDGE_WINDOW_SHARE: usize = 4;
+/// About what a token is in English prose and code.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// However large the window, a summary longer than this is no longer one.
+const HANDOFF_MAX_WORDS: usize = 1_500;
+
+/// What the harness being left is asked for. It stays in that harness's
+/// session, so what it forbids is said to hold for this reply only.
+/// `budget`: the characters the bridge to `to` may take, half of which
+/// the summary is asked to stay within (in words, at about six characters
+/// a word), the rest being for the first prompt and what follows it.
+fn handoff_prompt(to: &str, budget: usize) -> String {
+    let words = (budget / 2 / 6).clamp(50, HANDOFF_MAX_WORDS);
+    format!(
+        "[unharness] The user is switching this conversation to {to}, another coding agent \
+         that will see only part of it. Write a handoff summary for that agent, in at most \
+         {words} words: the user's goal and constraints, the decisions made and why, what has \
+         been done (files changed, commands run and what came of them), what is unfinished or \
+         failing, and the next steps. Be specific (paths, names, error messages). Leave out \
+         your own setup (tools, connectors, MCP servers) unless the task depends on it. For \
+         this reply only, use no tools and change nothing: answer from what you already know. \
+         The conversation may come back to you later, with your tools as before."
+    )
+}
+
 /// Current branch from `.git/HEAD` without spawning git.
 fn git_branch(root: &std::path::Path) -> Option<String> {
     let head = std::fs::read_to_string(root.join(".git").join("HEAD")).ok()?;
@@ -4290,6 +4502,7 @@ pub(crate) mod tests {
         App::new(AppInit {
             // Tests never write to the real state directory.
             checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
+            context_windows: Some(cwd.join(".unharness/test-state/context_windows.json")),
             // Nor to the real config directory.
             rules: Rules::load_in(&cwd.join(".unharness/test-config"), Some(&cwd)).unwrap(),
             cwd: cwd.clone(),
@@ -4797,6 +5010,7 @@ pub(crate) mod tests {
                 Block::User { .. } => "user".to_string(),
                 Block::Assistant { text, .. } => format!("text:{text}"),
                 Block::Thought { .. } => "thought".to_string(),
+                Block::Handoff { to, .. } => format!("handoff:{to}"),
                 Block::Tool { id, .. } => format!("tool:{id}"),
                 Block::System(_) => "system".to_string(),
                 Block::Notice(_) => "notice".to_string(),
@@ -5554,6 +5768,268 @@ pub(crate) mod tests {
         assert!(!app.is_generating);
         app.submit_prompt("again".into());
         assert_eq!(app.take_actions(), vec![Action::turn("again")]);
+    }
+
+    /// The single turn the app asked for.
+    fn sent_turn(app: &mut App) -> String {
+        match &app.take_actions()[..] {
+            [.., Action::SendTurn { text, .. }] => text.clone(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Claude, live, after a turn too long for a bridge of 500 characters.
+    fn over_budget_app() -> App {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.bridge_max_chars = Some(500);
+        app.submit_prompt("the task".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app
+    }
+
+    #[test]
+    fn no_handoff_is_asked_for_while_subagents_are_at_work() {
+        let mut app = over_budget_app();
+        app.on_event(AgentEvent::SubagentStarted {
+            id: "agent-1".into(),
+            description: "look around".into(),
+            kind: None,
+        });
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    }
+
+    #[test]
+    fn prompts_held_before_a_handoff_stay_held_after_it() {
+        let mut app = over_budget_app();
+        app.submit_prompt("second".into());
+        app.queue_prompt("later".into());
+        app.interrupt();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        app.take_actions();
+        assert_eq!(app.queued.len(), 1);
+
+        app.switch_harness(HarnessId::CODEX);
+        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        app.on_event(AgentEvent::TextDelta("Goal: the task.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.queued.len(), 1);
+    }
+
+    #[test]
+    fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.live_caps
+            .entry(HarnessId::CLAUDE)
+            .or_default()
+            .resume_by_id = Some(false);
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(app.take_actions().is_empty());
+
+        // One that can is resumed for it.
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
+        ));
+    }
+
+    #[test]
+    fn steering_a_handoff_summary_queues_the_message_for_the_next_harness() {
+        use super::super::transcript::Block;
+        let mut app = over_budget_app();
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        app.steer("and the tests".into());
+        assert!(app.take_actions().is_empty());
+        app.on_event(AgentEvent::TextDelta("Goal: the task.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Handoff { text, .. } if text == "Goal: the task."))
+        );
+        let sent = sent_turn(&mut app);
+        assert!(sent.ends_with("and the tests"), "{sent}");
+    }
+
+    #[test]
+    fn a_handoff_prompt_forbids_tools_for_its_own_reply_only() {
+        let ask = handoff_prompt("Codex", 24_000);
+        assert!(ask.contains("For this reply only, use no tools and change nothing"));
+        assert!(ask.contains("with your tools as before"));
+        assert!(!ask.contains("Do not use any tools"));
+    }
+
+    #[test]
+    fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
+        use super::super::transcript::Block;
+        use crate::core::conversations::BlockRecord;
+        let done = |app: &mut App| {
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.bridge_max_chars = Some(500);
+        app.submit_prompt("the task".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
+        done(&mut app);
+
+        // Claude writes it before its session is shut down, short enough
+        // for the bridge.
+        app.switch_harness(HarnessId::CODEX);
+        let ask = sent_turn(&mut app);
+        assert!(ask.contains("Write a handoff summary for that agent, in at most 50 words"));
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        // It is not to run anything.
+        app.on_event(cargo_test_requests("cargo test").remove(0));
+        assert!(app.modal.is_none());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::RespondPermission {
+                decision: PermissionDecision::Deny { .. },
+                ..
+            })]
+        ));
+        app.on_event(AgentEvent::TextDelta("Goal: the task. Next: tests.".into()));
+        done(&mut app);
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+        let saved = app.store.load(&app.conversation.id).unwrap();
+        assert!(saved.blocks.iter().any(
+            |b| matches!(b, BlockRecord::Handoff { to, sender, .. } if to == "Codex" && sender == "Claude")
+        ));
+
+        // Codex gets the first prompt and the summary in place of the rest.
+        app.submit_prompt("go on".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.contains("User: the task\n\n[Handoff summary Claude wrote"),
+            "{sent}"
+        );
+        assert!(sent.contains("Goal: the task. Next: tests."));
+        assert!(!sent.contains("xxxxx"));
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("y".repeat(1_000)));
+        done(&mut app);
+
+        // Esc: the switch goes ahead without one.
+        app.switch_harness(HarnessId::CLAUDE);
+        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        app.interrupt();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, Block::Notice(n) if n == "no handoff summary; Claude gets the conversation as it is")
+        ));
+        app.take_actions();
+        app.session_alive = false;
+
+        // Off: no summary asked for.
+        app.bridge_summary = BridgeSummary::Never;
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.active, HarnessId::CODEX);
+    }
+
+    #[test]
+    fn the_bridge_is_measured_by_the_window_its_harness_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(10),
+            window: Some(200_000),
+        }));
+        // A quarter of it, at four characters a token.
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 200_000);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CODEX),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+
+        // Kept for the next run, by model.
+        let mut again = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+        assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 200_000);
+        again.models.insert(
+            HarnessId::CLAUDE,
+            ModelRef::new(HarnessId::CLAUDE, ProviderId::new("anthropic"), "opus"),
+        );
+        assert_eq!(
+            again.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+
+        // A budget the user set wins.
+        again.bridge_max_chars = Some(1_000);
+        assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 1_000);
+    }
+
+    #[test]
+    fn context_windows_are_not_taken_from_the_workspace_or_out_of_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.keep();
+        // What an agent could write: a window that would empty the bridge.
+        std::fs::create_dir_all(cwd.join(".unharness")).unwrap();
+        std::fs::write(
+            cwd.join(".unharness/context_windows.json"),
+            r#"{"claude": {"default": 1}}"#,
+        )
+        .unwrap();
+        let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+        assert_eq!(
+            app.bridge_budget(HarnessId::CLAUDE),
+            DEFAULT_BRIDGE_MAX_CHARS
+        );
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: None,
+            window: Some(1),
+        }));
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 8_000);
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: None,
+            window: Some(u64::MAX),
+        }));
+        assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 2_000_000);
     }
 
     #[test]

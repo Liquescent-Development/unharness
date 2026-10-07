@@ -33,6 +33,14 @@ pub enum BlockRecord {
         text: String,
         secs: Option<f32>,
     },
+    /// What a harness wrote for the next one when the user switched away
+    /// from it, standing in for the conversation before it in a bridge.
+    Handoff {
+        text: String,
+        sender: String,
+        /// The harness it was written for, by name.
+        to: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -236,6 +244,52 @@ struct Index {
     conversations: Vec<ConversationSummary>,
 }
 
+/// Harness → model (as `ModelRef::label` has it, or `default`) → context
+/// window in tokens.
+pub type ContextWindows = HashMap<HarnessId, HashMap<String, u64>>;
+
+/// The windows believed, in tokens: a value outside them, from the file or
+/// from a harness, is taken as the nearest end, so that it neither empties
+/// the bridge nor lifts its cap.
+pub const CONTEXT_WINDOW_MIN: u64 = 8_000;
+pub const CONTEXT_WINDOW_MAX: u64 = 2_000_000;
+
+/// Where the context windows are kept: `<state dir>/unharness/
+/// context_windows.json`. Not in the workspace, where an agent could write
+/// what decides how much of the conversation it is sent; the sandbox keeps
+/// the state directory read-only. One file, since a window belongs to a
+/// model and not to a workspace.
+pub fn default_context_windows_path() -> PathBuf {
+    dirs::state_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("unharness")
+        .join("context_windows.json")
+}
+
+/// The context windows the harnesses reported, by model, kept across
+/// conversations: what the bridge to a harness is measured against before
+/// its session has said. Empty when unreadable.
+pub fn load_context_windows(path: &Path) -> ContextWindows {
+    let mut windows: ContextWindows = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+    for models in windows.values_mut() {
+        for window in models.values_mut() {
+            *window = (*window).clamp(CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX);
+        }
+    }
+    windows
+}
+
+pub fn save_context_windows(path: &Path, windows: &ContextWindows) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    write_atomic(path, &serde_json::to_vec_pretty(windows)?)
+}
+
 pub struct ConversationStore {
     root: PathBuf,
 }
@@ -425,6 +479,31 @@ pub fn epoch_to_rfc3339(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_windows_out_of_range_or_unreadable_are_not_believed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("state/context_windows.json");
+        assert!(load_context_windows(&path).is_empty());
+
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{\"codex\": not json").unwrap();
+        assert!(load_context_windows(&path).is_empty());
+
+        std::fs::write(
+            &path,
+            r#"{"codex": {"default": 1, "big": 18446744073709551615, "gpt": 258400}}"#,
+        )
+        .unwrap();
+        let windows = load_context_windows(&path);
+        let codex = &windows[&HarnessId::CODEX];
+        assert_eq!(codex["default"], CONTEXT_WINDOW_MIN);
+        assert_eq!(codex["big"], CONTEXT_WINDOW_MAX);
+        assert_eq!(codex["gpt"], 258_400);
+
+        save_context_windows(&path, &windows).unwrap();
+        assert_eq!(load_context_windows(&path), windows);
+    }
 
     fn conv(title: &str) -> Conversation {
         let mut c = Conversation::new(HarnessId::CLAUDE);

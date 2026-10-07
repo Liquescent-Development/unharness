@@ -85,6 +85,13 @@ pub enum Block {
         text: String,
         duration: Option<Duration>,
     },
+    /// What the harness the user switched away from wrote for the next one
+    /// (see [`super::bridge`]).
+    Handoff {
+        text: String,
+        sender: String,
+        to: String,
+    },
     Tool {
         id: String,
         name: String,
@@ -163,6 +170,11 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
             Block::Thought { text, duration } => BlockRecord::Thought {
                 text: text.clone(),
                 secs: duration.map(|d| d.as_secs_f32()),
+            },
+            Block::Handoff { text, sender, to } => BlockRecord::Handoff {
+                text: text.clone(),
+                sender: sender.clone(),
+                to: to.clone(),
             },
             Block::Tool {
                 id,
@@ -309,6 +321,11 @@ impl Transcript {
                 BlockRecord::Thought { text, secs } => Block::Thought {
                     text: text.clone(),
                     duration: Some(Duration::from_secs_f32(secs.unwrap_or(0.0))),
+                },
+                BlockRecord::Handoff { text, sender, to } => Block::Handoff {
+                    text: text.clone(),
+                    sender: sender.clone(),
+                    to: to.clone(),
                 },
                 BlockRecord::Tool {
                     id,
@@ -697,95 +714,33 @@ impl Transcript {
         }
     }
 
+    /// Make what the agent last said from block `start` on the handoff
+    /// summary for `to`. Returns whether it said anything.
+    pub fn mark_handoff(&mut self, start: usize, to: &str) -> bool {
+        let Some(i) = self
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::Assistant { text, .. } if !text.trim().is_empty()))
+        else {
+            return false;
+        };
+        if i < start {
+            return false;
+        }
+        if let Block::Assistant { text, sender, .. } = &self.blocks[i] {
+            self.blocks[i] = Block::Handoff {
+                text: text.trim().to_string(),
+                sender: sender.clone(),
+                to: to.to_string(),
+            };
+        }
+        true
+    }
+
     /// Conversation text from block `from` onward, for seeding another
-    /// harness. Keeps the tail when over `max_chars`.
+    /// harness, at most `max_chars` long (see [`super::bridge`]).
     pub fn bridge_text(&self, from: usize, max_chars: usize) -> Option<String> {
-        let mut chunks: Vec<String> = Vec::new();
-        for b in self.blocks.iter().skip(from) {
-            match b {
-                Block::User { text } => chunks.push(format!("User: {text}")),
-                Block::Assistant { text, sender, .. } => chunks.push(format!("{sender}: {text}")),
-                Block::Tool {
-                    name,
-                    input,
-                    output,
-                    is_error,
-                    agent,
-                    ..
-                } => {
-                    let status = match agent.as_ref().map(|a| a.status) {
-                        Some(None) => "running",
-                        Some(Some(s)) => s.label(),
-                        None if *is_error => "error",
-                        None => "ok",
-                    };
-                    // A spawn call's own output is the launch receipt; what
-                    // the subagent reported is what matters.
-                    let out = match agent {
-                        Some(run) => last_lines(run.report(), 3),
-                        None => first_lines(output, 3),
-                    };
-                    chunks.push(format!(
-                        "[tool {} {} → {}] {}",
-                        name,
-                        tool_summary(name, input),
-                        status,
-                        out
-                    ));
-                }
-                // Once an agent has been told about it: until then it goes
-                // in front of the next prompt, whichever agent that is for.
-                Block::Shell {
-                    command,
-                    output,
-                    dropped,
-                    status,
-                    sent: true,
-                    ..
-                } if !matches!(status, ShellStatus::Running | ShellStatus::Failed { .. }) => {
-                    chunks.push(format!(
-                        "User ran a shell command:\n{}",
-                        super::shell::context_entry(
-                            command,
-                            output,
-                            *dropped,
-                            status,
-                            super::shell::CONTEXT_MAX_CHARS,
-                        )
-                    ));
-                }
-                _ => {}
-            }
-        }
-        if chunks.is_empty() {
-            return None;
-        }
-        let mut total: usize = chunks.iter().map(|c| c.chars().count() + 2).sum();
-        let mut omitted = 0usize;
-        while total > max_chars && chunks.len() > 1 {
-            let removed = chunks.remove(0);
-            total -= removed.chars().count() + 2;
-            omitted += 1;
-        }
-        if let Some(last) = chunks.last_mut()
-            && last.chars().count() > max_chars
-        {
-            let keep: String = last
-                .chars()
-                .rev()
-                .take(max_chars)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            *last = format!("…{keep}");
-        }
-        let mut text = String::new();
-        if omitted > 0 {
-            text.push_str(&format!("[… {omitted} earlier messages omitted]\n\n"));
-        }
-        text.push_str(&chunks.join("\n\n"));
-        Some(text)
+        super::bridge::render(self.blocks.get(from..).unwrap_or_default(), max_chars)
     }
 }
 
@@ -937,24 +892,6 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-fn last_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
-    let mut out = lines[lines.len().saturating_sub(n)..].join(" / ");
-    if lines.len() > n {
-        out.insert_str(0, "… ");
-    }
-    truncate_chars(&out, 200)
-}
-
-fn first_lines(s: &str, n: usize) -> String {
-    let lines: Vec<&str> = s.lines().take(n).collect();
-    let mut out = lines.join(" / ");
-    if s.lines().count() > n {
-        out.push_str(" …");
-    }
-    truncate_chars(&out, 200)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,10 +965,13 @@ mod tests {
         }
         let full = t.bridge_text(0, 1_000_000).unwrap();
         assert!(full.starts_with("User: question 0"));
+        // The first prompt and the last turn stay, the middle goes.
         let capped = t.bridge_text(0, 400).unwrap();
-        assert!(capped.starts_with("[… "));
+        assert!(capped.chars().count() <= 400);
+        assert!(capped.starts_with("User: question 0"));
+        assert!(capped.contains("turns omitted]"));
         assert!(capped.contains("answer 9"));
-        assert!(!capped.contains("question 0"));
+        assert!(!capped.contains("question 1 "));
         assert!(t.bridge_text(t.blocks.len(), 1000).is_none());
         let from_mid = t.bridge_text(18, 1000).unwrap();
         assert!(from_mid.starts_with("User: question 9"));
