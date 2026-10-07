@@ -527,6 +527,17 @@ recorded ones. For anything else:
   resumed thread does with a `modelProvider` other than its own,
   `amazon-bedrock`, `lmstudio`, a provider defined only in a project's
   `.codex/config.toml` (`config/read` is asked without a `cwd`).
+- Bridging (`tui/bridge.rs`): a switch whose bridge is over budget first
+  asks the harness being left for a handoff summary (`App::ask_handoff`,
+  `Block::Handoff`), with every permission request denied while it
+  writes. Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
+  app-server, `bridge_max_chars = 600`): Claude wrote the summary within
+  the word limit it was given, the switch followed the turn, and Codex
+  answered from the first prompt and the summary it was sent. Windows
+  reported then: Claude's default model 1,000,000, Codex's 258,400, so an
+  unset budget is about a quarter of those in characters. Unverified: a
+  summary turn on pi, agy or an ACP agent, and one in which the agent
+  asks for a tool anyway.
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

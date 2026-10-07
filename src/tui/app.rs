@@ -2504,7 +2504,7 @@ impl App {
             self.actions.push_back(Action::StartSession { resume });
         }
         self.actions.push_back(Action::SendTurn {
-            text: handoff_prompt(to),
+            text: handoff_prompt(to, self.bridge_budget(next)),
             attachments: Vec::new(),
         });
     }
@@ -4323,15 +4323,23 @@ const BRIDGE_WINDOW_SHARE: usize = 4;
 /// About what a token is in English prose and code.
 const CHARS_PER_TOKEN: usize = 4;
 
+/// However large the window, a summary longer than this is no longer one.
+const HANDOFF_MAX_WORDS: usize = 1_500;
+
 /// What the harness being left is asked for.
-fn handoff_prompt(to: &str) -> String {
+/// `budget`: the characters the bridge to `to` may take, half of which
+/// the summary is asked to stay within (in words, at about six characters
+/// a word), the rest being for the first prompt and what follows it.
+fn handoff_prompt(to: &str, budget: usize) -> String {
+    let words = (budget / 2 / 6).clamp(50, HANDOFF_MAX_WORDS);
     format!(
         "[unharness] The user is switching this conversation to {to}, another coding agent \
-         that will see only part of it. Write a handoff summary for that agent: the user's \
-         goal and constraints, the decisions made and why, what has been done (files changed, \
-         commands run and what came of them), what is unfinished or failing, and the next \
-         steps. Be specific (paths, names, error messages) and brief. Do not use any tools \
-         and do not change anything: answer from what you already know."
+         that will see only part of it. Write a handoff summary for that agent, in at most \
+         {words} words: the user's goal and constraints, the decisions made and why, what has \
+         been done (files changed, commands run and what came of them), what is unfinished or \
+         failing, and the next steps. Be specific (paths, names, error messages). Leave out \
+         your own setup (tools, connectors, MCP servers) unless the task depends on it. Do \
+         not use any tools and do not change anything: answer from what you already know."
     )
 }
 
@@ -5766,9 +5774,11 @@ pub(crate) mod tests {
         app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
         done(&mut app);
 
-        // Claude writes it before its session is shut down.
+        // Claude writes it before its session is shut down, short enough
+        // for the bridge.
         app.switch_harness(HarnessId::CODEX);
-        assert!(sent_turn(&mut app).contains("Write a handoff summary"));
+        let ask = sent_turn(&mut app);
+        assert!(ask.contains("Write a handoff summary for that agent, in at most 50 words"));
         assert_eq!(app.active, HarnessId::CLAUDE);
         // It is not to run anything.
         app.on_event(cargo_test_requests("cargo test").remove(0));
