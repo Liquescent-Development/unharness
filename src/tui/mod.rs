@@ -412,23 +412,19 @@ async fn event_loop(
     Ok(())
 }
 
-/// The next Ctrl+C or Ctrl+D. The stream is polled again on a tick, as
-/// the main loop's ticker does: a key that arrives after a poll that gave
-/// up (`now_or_never`) does not always wake it.
+/// The next Ctrl+C or Ctrl+D. Polled from the event loop's task, as the
+/// stream always is (`take_waiting`), so its waker is the one kept.
 async fn quit_key(input: &mut EventStream) {
-    loop {
-        match tokio::time::timeout(Duration::from_millis(125), input.next()).await {
-            Ok(Some(Ok(Event::Key(key))))
-                if key.kind != KeyEventKind::Release
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                    && matches!(key.code, KeyCode::Char('c' | 'd')) =>
-            {
-                return;
-            }
-            Ok(None) => std::future::pending().await,
-            _ => {}
+    while let Some(ev) = input.next().await {
+        if let Ok(Event::Key(key)) = ev
+            && key.kind != KeyEventKind::Release
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'd'))
+        {
+            return;
         }
     }
+    std::future::pending().await
 }
 
 /// Lines of a `!` command's output taken in before the screen is drawn.
