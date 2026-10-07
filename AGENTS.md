@@ -106,7 +106,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
-  bare `tokio::process::Command::spawn` in a transport. Each leads a
+  bare `tokio::process::Command::spawn` in a transport. The TUI resumes or
+  forks a vendor session only once the CLI that ended it is gone
+  (`tui::Ending`), so that two never write one session. Each leads a
   session of its own (`setsid`), and is killed with its process group and,
   on Linux, every process descended from it (stopped first, read from
   `/proc`): Claude Code runs each command in a session of its own, which a

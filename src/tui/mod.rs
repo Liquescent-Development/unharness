@@ -18,6 +18,7 @@ pub mod shell;
 pub mod transcript;
 pub mod ui;
 
+use std::collections::{HashMap, VecDeque};
 use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -217,6 +218,7 @@ async fn event_loop(
     let mut input = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(125));
     let mut session: Option<SessionHandle> = None;
+    let mut ending = Ending::new();
     // The `!` command at work.
     let mut shell: Option<LineProcess> = None;
     let mut needs_redraw = true;
@@ -228,7 +230,7 @@ async fn event_loop(
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
-        run_actions(app, &mut session, &mut shell).await;
+        run_actions(app, &mut session, &mut ending, &mut shell).await;
     }
 
     while !app.should_quit {
@@ -319,6 +321,7 @@ async fn event_loop(
                 }
                 needs_redraw = true;
             }
+            harness = ending.recv() => ending.gone(harness),
             _ = ends.recv() => app.quit(),
         }
         let woke = Instant::now();
@@ -367,7 +370,7 @@ async fn event_loop(
             needs_redraw = true;
         }
 
-        run_actions(app, &mut session, &mut shell).await;
+        run_actions(app, &mut session, &mut ending, &mut shell).await;
         if let Some(log) = frames.as_mut() {
             log.wakes += 1;
             log.after += woke.elapsed();
@@ -717,12 +720,87 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     }
 }
 
+/// Sessions asked to end whose CLI may still be running, and the actions
+/// held until one of them is gone.
+struct Ending {
+    running: HashMap<HarnessId, usize>,
+    gone_tx: tokio::sync::mpsc::UnboundedSender<HarnessId>,
+    gone_rx: tokio::sync::mpsc::UnboundedReceiver<HarnessId>,
+    held: VecDeque<Action>,
+}
+
+impl Ending {
+    fn new() -> Self {
+        let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
+        Ending {
+            running: HashMap::new(),
+            gone_tx,
+            gone_rx,
+            held: VecDeque::new(),
+        }
+    }
+
+    /// Follow `session`, which was asked to end, until its CLI is gone.
+    /// Its events are read, so that the driver sees it to the end as it
+    /// would with the handle kept, and dropped.
+    fn follow(&mut self, session: SessionHandle) {
+        let harness = session.info.harness;
+        *self.running.entry(harness).or_default() += 1;
+        let gone = self.gone_tx.clone();
+        tokio::spawn(async move {
+            // All of it: its command channel closed, the driver would
+            // stop reading the CLI and go.
+            let mut session = session;
+            let exited = async {
+                while let Some(ev) = session.events.recv().await {
+                    if matches!(ev, crate::core::AgentEvent::ProcessExited { .. }) {
+                        break;
+                    }
+                }
+            };
+            // Its grace, its kill and its drain are bounded; this is in
+            // case a driver never says.
+            let _ = tokio::time::timeout(
+                crate::core::process::END_GRACE
+                    + crate::core::process::DRAIN_TIMEOUT
+                    + Duration::from_secs(1),
+                exited,
+            )
+            .await;
+            let _ = gone.send(harness);
+        });
+    }
+
+    /// Whether a CLI of `harness` asked to end may still be running.
+    fn running(&self, harness: HarnessId) -> bool {
+        self.running.get(&harness).is_some_and(|n| *n > 0)
+    }
+
+    /// The next of them to be gone.
+    async fn recv(&mut self) -> HarnessId {
+        match self.gone_rx.recv().await {
+            Some(harness) => harness,
+            // A sender is kept here.
+            None => std::future::pending().await,
+        }
+    }
+
+    fn gone(&mut self, harness: HarnessId) {
+        if let Some(n) = self.running.get_mut(&harness) {
+            *n = n.saturating_sub(1);
+        }
+    }
+}
+
 async fn run_actions(
     app: &mut App,
     session: &mut Option<SessionHandle>,
+    ending: &mut Ending,
     shell: &mut Option<LineProcess>,
 ) {
-    for action in app.take_actions() {
+    let mut actions = std::mem::take(&mut ending.held);
+    actions.extend(app.take_actions());
+    while let Some(action) = actions.pop_front() {
         match action {
             Action::RunShell { command } => {
                 // The sandbox the active harness's next process gets: a
@@ -743,6 +821,15 @@ async fn run_actions(
             Action::StartSession { resume } => {
                 if session.is_some() {
                     continue;
+                }
+                // The CLI that ended its session last (a sandbox or
+                // provider change, a switch away, a resume) may still be
+                // writing it, or hold its lock: it is resumed, or forked,
+                // once that one is gone. What follows waits with it.
+                if resume.is_some() && ending.running(app.active) {
+                    actions.push_front(Action::StartSession { resume });
+                    ending.held = actions;
+                    return;
                 }
                 let prepared = app.harness().prepare();
                 // After `prepare`, which may itself create a watched file.
@@ -790,6 +877,7 @@ async fn run_actions(
             Action::Shutdown => {
                 if let Some(s) = session.take() {
                     let _ = s.send(SessionCommand::Shutdown).await;
+                    ending.follow(s);
                 }
                 app.session_alive = false;
             }
@@ -1241,13 +1329,67 @@ mod tests {
     /// its end, as the event loop would.
     async fn run_to_end(app: &mut App) {
         let mut session = None;
+        let mut ending = Ending::new();
         let mut shell = None;
-        run_actions(app, &mut session, &mut shell).await;
+        run_actions(app, &mut session, &mut ending, &mut shell).await;
         while shell.is_some() {
             let line = shell.as_mut().unwrap().lines.recv().await;
             take_shell_lines(app, &mut shell, line);
-            run_actions(app, &mut session, &mut shell).await;
+            run_actions(app, &mut session, &mut ending, &mut shell).await;
         }
+    }
+
+    // A sandbox change restarts the session: the prompt after it resumes
+    // the same thread, which the CLI that had it may still be writing.
+    #[tokio::test]
+    async fn a_session_is_resumed_once_the_cli_that_ended_it_is_gone() {
+        use crate::core::{AgentEvent, SessionInfo, session::ProcessModel};
+        let mut app = test_app(HarnessId::CODEX);
+        // What starts in its place exits at once, and touches nothing.
+        app.config.harnesses.insert(
+            "codex".into(),
+            crate::config::HarnessSettings {
+                binary: Some("/bin/true".into()),
+                ..Default::default()
+            },
+        );
+        let (old, events, mut cmds) = SessionHandle::channels(SessionInfo {
+            harness: HarnessId::CODEX,
+            process_model: ProcessModel::LongLived,
+        });
+        let mut session = Some(old);
+        let mut ending = Ending::new();
+        let mut shell = None;
+        app.session_alive = true;
+        app.session_ids.insert(HarnessId::CODEX, "thread-1".into());
+        app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
+        assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert_eq!(cmds.recv().await, Some(SessionCommand::Shutdown));
+        // The driver is still there to see its CLI to the end.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            cmds.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        type_text(&mut app, "go on");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert!(session.is_none(), "started beside the old CLI");
+        assert!(app.is_generating);
+
+        events
+            .send(AgentEvent::ProcessExited { code: Some(0) })
+            .await
+            .unwrap();
+        let gone = tokio::time::timeout(Duration::from_secs(5), ending.recv())
+            .await
+            .unwrap();
+        ending.gone(gone);
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert!(session.is_some());
+        assert!(ending.held.is_empty());
     }
 
     fn sent_turns(app: &mut App) -> Vec<String> {
@@ -1395,8 +1537,9 @@ mod tests {
         type_text(&mut app, "!echo started; sleep 30");
         handle_key(&mut app, NONE, KeyCode::Enter);
         let mut session = None;
+        let mut ending = Ending::new();
         let mut shell = None;
-        run_actions(&mut app, &mut session, &mut shell).await;
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         let line = shell.as_mut().unwrap().lines.recv().await;
         take_shell_lines(&mut app, &mut shell, line);
         assert_eq!(shell_block(&app).0, "started\n");
@@ -1415,7 +1558,7 @@ mod tests {
         assert!(!app.should_quit);
         let started = std::time::Instant::now();
         while shell.is_some() {
-            run_actions(&mut app, &mut session, &mut shell).await;
+            run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
             let line = shell.as_mut().unwrap().lines.recv().await;
             take_shell_lines(&mut app, &mut shell, line);
         }
