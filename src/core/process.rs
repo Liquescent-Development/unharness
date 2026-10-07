@@ -531,6 +531,18 @@ fn signal(pid: u32, sig: libc::c_int) {
     }
 }
 
+/// Whether the process `pid` runs now: it exists and is not a zombie.
+#[cfg(target_os = "linux")]
+pub fn running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+        !s.rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z')
+    })
+}
+
 /// Every process below `root`, read from `/proc`.
 #[cfg(target_os = "linux")]
 fn descendants(root: u32) -> Vec<u32> {
@@ -653,24 +665,12 @@ mod tests {
         assert!(matches!(got.last(), Some(RawLine::Exited(_))));
     }
 
-    /// Whether the process `pid` runs now (not gone, not a zombie).
-    #[cfg(target_os = "linux")]
-    fn running(pid: &str) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-            !s.rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
-    }
-
     /// Whether the process `pid` is still alive a moment after it was
     /// killed.
     #[cfg(target_os = "linux")]
     fn alive(pid: &str) -> bool {
         for _ in 0..50 {
-            if !running(pid) {
+            if !running(pid.parse().unwrap()) {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -801,7 +801,10 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             std::thread::sleep(Duration::from_millis(100));
-            assert!(running(&_pid), "killed before its grace was up");
+            assert!(
+                running(_pid.parse().unwrap()),
+                "killed before its grace was up"
+            );
             std::thread::sleep(Duration::from_millis(900));
             assert!(!alive(&_pid));
         }

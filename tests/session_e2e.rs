@@ -348,17 +348,8 @@ async fn process_exit_is_reported_and_interrupt_kills() {
     // hang (tokio runtime shutdown would wait on nothing) is the signal.
 }
 
-/// Whether `pid` is still running (not gone, not a zombie).
 #[cfg(target_os = "linux")]
-fn running(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
-        !s.rsplit(')')
-            .next()
-            .unwrap_or("")
-            .trim_start()
-            .starts_with('Z')
-    })
-}
+use unharness::core::process::running;
 
 #[cfg(target_os = "linux")]
 async fn gone_within(pid: u32, within: Duration) -> bool {
