@@ -553,6 +553,7 @@ pub async fn drive<O: Write, E: Write>(
     }
     let mut interrupts = Interrupts::new();
     let mut ends = crate::core::process::EndSignals::listen();
+    let mut job_stops = crate::core::process::JobStops::listen();
     loop {
         tokio::select! {
             ev = handle.events.recv() => match ev {
@@ -580,6 +581,10 @@ pub async fn drive<O: Write, E: Write>(
             _ = ends.recv() => {
                 run.abandon();
                 break;
+            }
+            _ = job_stops.recv() => {
+                #[cfg(unix)]
+                crate::core::process::suspend();
             }
         }
     }

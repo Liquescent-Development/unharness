@@ -522,7 +522,11 @@ recorded ones. For anything else:
   CLI only as `Interrupt`: one before Codex app-server has a thread
   drops the turn, one before its turn has an id is sent once it has one
   (checked live on 0.157.0, the turn ended interrupted at 0.4 s and at
-  0.9 s), and an ACP turn waiting for its session is dropped. It waits for
+  0.9 s), and an ACP turn waiting for its session is dropped. Ctrl+Z
+  stops every harness process tree, then unharness, and continues them
+  on `fg` (`process::suspend`; checked live on Claude Code 2.1.292 with
+  a Bash `sleep` running: unharness, Claude, its shell and the `sleep`
+  all stopped, and the turn ended normally after `fg`). It waits for
   subagents and, where `SubagentSupport::report_turn` is declared, counts
   one more turn end per background run of a subagent that completed or
   failed, wherever its end falls: in every single-prompt Claude recording

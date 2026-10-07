@@ -225,6 +225,7 @@ impl Owned {
     fn new(child: Child) -> Self {
         live_children().send_modify(|n| *n += 1);
         let pid = child.id();
+        unreaped().extend(pid);
         Owned {
             #[cfg(target_os = "linux")]
             exit: pid.and_then(pidfd),
@@ -256,6 +257,7 @@ impl Drop for Owned {
             && !self.reaped
         {
             kill_tree(pid);
+            forget(pid);
         }
         live_children().send_modify(|n| *n -= 1);
     }
@@ -273,6 +275,19 @@ fn pidfd(pid: u32) -> Option<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>> {
     // SAFETY: `fd` is a new descriptor nothing else owns.
     let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) };
     tokio::io::unix::AsyncFd::with_interest(fd, tokio::io::Interest::READABLE).ok()
+}
+
+/// The pids of the `LineProcess` children not reaped yet, which name no
+/// other process while they are listed: a child leaves before it is
+/// reaped, except where its exit cannot be seen without reaping it.
+static UNREAPED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn unreaped() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    UNREAPED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn forget(pid: u32) {
+    unreaped().retain(|p| *p != pid);
 }
 
 /// How many `LineProcess` children are not reaped yet.
@@ -320,6 +335,7 @@ async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Op
         Some(reaped) => {
             if let Some(pid) = owned.pid {
                 kill_group(pid);
+                forget(pid);
             }
             match reaped {
                 Some(status) => status,
@@ -329,6 +345,7 @@ async fn watch(owned: &mut Owned, mut stop: mpsc::UnboundedReceiver<Stop>) -> Op
         None => {
             if let Some(pid) = owned.pid {
                 kill_tree(pid);
+                forget(pid);
             }
             let _ = owned.child.start_kill();
             owned.child.wait().await
@@ -366,6 +383,31 @@ impl EndSignals {
         if !self.signals.is_empty() {
             let waits = self.signals.iter_mut().map(|s| Box::pin(s.recv()));
             futures::future::select_all(waits).await;
+            return;
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Ctrl+Z (SIGTSTP) to unharness, which [`suspend`] answers.
+pub struct JobStops {
+    #[cfg(unix)]
+    signal: Option<tokio::signal::unix::Signal>,
+}
+
+impl JobStops {
+    /// Listen from now on, unless unharness was started with it ignored.
+    pub fn listen() -> Self {
+        JobStops {
+            #[cfg(unix)]
+            signal: listen_unless_ignored(libc::SIGTSTP),
+        }
+    }
+
+    pub async fn recv(&mut self) {
+        #[cfg(unix)]
+        if let Some(s) = self.signal.as_mut() {
+            s.recv().await;
             return;
         }
         std::future::pending::<()>().await;
@@ -483,10 +525,7 @@ fn live_probes() -> std::sync::MutexGuard<'static, Vec<u32>> {
 /// an error.
 fn kill_group(id: u32) {
     #[cfg(unix)]
-    // SAFETY: a plain syscall on the group created for this child.
-    unsafe {
-        libc::killpg(id as libc::pid_t, libc::SIGKILL);
-    }
+    signal_group(id, libc::SIGKILL);
     #[cfg(not(unix))]
     let _ = id;
 }
@@ -499,21 +538,7 @@ fn kill_tree(pid: u32) {
     #[cfg(target_os = "linux")]
     {
         // Stopped first, so that nothing forks while the tree is read.
-        let mut tree = vec![pid];
-        signal(pid, libc::SIGSTOP);
-        for _ in 0..16 {
-            let found: Vec<u32> = descendants(pid)
-                .into_iter()
-                .filter(|p| !tree.contains(p))
-                .collect();
-            if found.is_empty() {
-                break;
-            }
-            for &p in &found {
-                signal(p, libc::SIGSTOP);
-            }
-            tree.extend(found);
-        }
+        let tree = stop_tree(pid);
         kill_group(pid);
         for p in tree {
             signal(p, libc::SIGKILL);
@@ -521,6 +546,75 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(target_os = "linux"))]
     kill_group(pid);
+}
+
+/// SIGSTOP to the child `pid` and every process descended from it, read
+/// until no new one turns up. Returns them, `pid` first.
+#[cfg(target_os = "linux")]
+fn stop_tree(pid: u32) -> Vec<u32> {
+    let mut tree = vec![pid];
+    signal(pid, libc::SIGSTOP);
+    for _ in 0..16 {
+        let found: Vec<u32> = descendants(pid)
+            .into_iter()
+            .filter(|p| !tree.contains(p))
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        for &p in &found {
+            signal(p, libc::SIGSTOP);
+        }
+        tree.extend(found);
+    }
+    tree
+}
+
+/// Ctrl+Z, for unharness: the harness processes lead sessions of their
+/// own, so the terminal stops only unharness, and a CLI would go on with
+/// its turn. They are stopped with their process groups and, on Linux,
+/// everything descended from them, then unharness stops itself, and they
+/// are continued when it is (`fg`). Where the terminal would not have
+/// stopped unharness (its process group is orphaned) nothing stays
+/// stopped.
+#[cfg(unix)]
+pub fn suspend() {
+    // Held throughout: none is reaped meanwhile, so no pid names another.
+    let live = unreaped();
+    for &pid in live.iter() {
+        signal_group(pid, libc::SIGSTOP);
+        #[cfg(target_os = "linux")]
+        stop_tree(pid);
+    }
+    // SAFETY: the disposition is read into, and restored from, a zeroed
+    // struct owned here; `raise` stops the process until SIGCONT.
+    unsafe {
+        let mut stop: libc::sigaction = std::mem::zeroed();
+        stop.sa_sigaction = libc::SIG_DFL;
+        let mut handler: libc::sigaction = std::mem::zeroed();
+        libc::sigaction(libc::SIGTSTP, &stop, &mut handler);
+        libc::raise(libc::SIGTSTP);
+        libc::sigaction(libc::SIGTSTP, &handler, std::ptr::null_mut());
+    }
+    for &pid in live.iter() {
+        signal_group(pid, libc::SIGCONT);
+        #[cfg(target_os = "linux")]
+        {
+            signal(pid, libc::SIGCONT);
+            for p in descendants(pid) {
+                signal(p, libc::SIGCONT);
+            }
+        }
+    }
+}
+
+/// `sig` to the process group `id`.
+#[cfg(unix)]
+fn signal_group(id: u32, sig: libc::c_int) {
+    // SAFETY: a plain syscall; a group that is gone is not an error.
+    unsafe {
+        libc::killpg(id as libc::pid_t, sig);
+    }
 }
 
 #[cfg(target_os = "linux")]

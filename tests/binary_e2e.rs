@@ -163,7 +163,11 @@ impl Drop for Unharness {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
             // SAFETY: a signal to the child this test started.
-            unsafe { libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM) };
+            // (And SIGCONT, in case it was left stopped.)
+            unsafe {
+                libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
+                libc::kill(self.0.id() as libc::pid_t, libc::SIGCONT);
+            }
             if self.exit_within(Duration::from_secs(10)).is_none() {
                 let _ = self.0.kill();
                 let _ = self.0.wait();
@@ -320,4 +324,51 @@ fn quitting_the_tui_says_it_waits_for_the_cli_and_ctrl_c_stops_waiting() {
     assert!(quit.elapsed() < grace, "{:?}", quit.elapsed());
     assert!(gone_within(cli, Duration::from_secs(2)));
     assert!(gone_within(child, Duration::from_secs(2)));
+}
+
+/// The state letter in `/proc/<pid>/stat` (`T` when stopped).
+fn state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.trim_start().chars().next()
+}
+
+// The CLI, in a session of its own, does not get the terminal's SIGTSTP.
+#[test]
+fn ctrl_z_in_print_stops_the_cli_with_unharness_and_fg_continues_it() {
+    if !python_available() {
+        return;
+    }
+    let setup = Setup::new(SILENT);
+    let mut cmd = setup.command(&["--print", "hi"]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // A group of its own, as a shell's job: one whose parent is in
+    // another group of the session, which the kernel lets stop.
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    let unharness = Unharness(cmd.spawn().unwrap());
+    let pid = unharness.id();
+    wait_until("the turn is sent", Duration::from_secs(20), || {
+        std::fs::read_to_string(setup.path("log")).is_ok_and(|l| l.lines().count() >= 2)
+    });
+    wait_until("unharness listens", Duration::from_secs(5), || {
+        catches(pid, libc::SIGTSTP)
+    });
+    let (cli, child) = setup.pids();
+
+    // SAFETY: signals to the child this test started.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTSTP) };
+    for p in [pid, cli, child] {
+        wait_until("all of them are stopped", Duration::from_secs(5), || {
+            state(p) == Some('T')
+        });
+    }
+    // `fg`: the shell continues unharness's group, which is unharness.
+    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGCONT) };
+    for p in [pid, cli, child] {
+        wait_until("all of them run again", Duration::from_secs(5), || {
+            state(p).is_some_and(|s| s != 'T')
+        });
+    }
 }
