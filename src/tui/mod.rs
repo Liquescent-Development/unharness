@@ -213,6 +213,7 @@ async fn event_loop(
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
     // Provider and model lists, which may start the harness's CLI.
     let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut ends = crate::core::process::EndSignals::listen();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -287,6 +288,7 @@ async fn event_loop(
                 }
                 needs_redraw = true;
             }
+            _ = ends.recv() => app.quit(),
         }
 
         for job in app.take_list_jobs() {
@@ -340,17 +342,17 @@ async fn event_loop(
         let _ = s.send(SessionCommand::Shutdown).await;
     }
     if let Some(mut p) = shell.take() {
-        // Killed, and reaped before the runtime goes.
         p.kill().await;
-        let _ = tokio::time::timeout(Duration::from_secs(3), async {
-            while let Some(line) = p.lines.recv().await {
-                if matches!(line, RawLine::Exited(_)) {
-                    break;
-                }
-            }
-        })
-        .await;
     }
+    // Every CLI asked to end, here or by an earlier switch,
+    // has its grace and is then killed; reaped before the runtime goes.
+    let _ = tokio::time::timeout(
+        crate::core::process::END_GRACE
+            + crate::core::process::DRAIN_TIMEOUT
+            + Duration::from_secs(1),
+        LineProcess::all_ended(),
+    )
+    .await;
     Ok(())
 }
 

@@ -292,7 +292,9 @@ async fn drive(
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else {
-                    d.proc.kill().await;
+                    if !shutting_down {
+                        d.proc.kill().await;
+                    }
                     return;
                 };
                 let res: Result<()> = match cmd {
@@ -382,7 +384,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.proc.close_stdin();
+                        d.proc.end();
                         Ok(())
                     }
                 };

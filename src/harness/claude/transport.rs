@@ -321,11 +321,8 @@ async fn drive(
                 let _ = events.send(AgentEvent::Notice("claude: no initialize ack; continuing".into())).await;
             }
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    // TUI dropped the handle.
-                    proc.kill().await;
-                    break;
-                };
+                // TUI dropped the handle.
+                let Some(cmd) = cmd else { break };
                 let line = match cmd {
                     // Each turn carries a uuid of ours, so it can be rewound to later.
                     SessionCommand::SendTurn { text, attachments } => match anchored_turn(&text, &attachments) {
@@ -381,9 +378,14 @@ async fn drive(
                     SessionCommand::SetPolicy(p) => Some(
                         control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
                     ),
+                    // With only its stdin closed Claude waits for its
+                    // background tasks (a Monitor for as long as it was
+                    // given); `interrupt` stops them, also between turns,
+                    // and it then exits (2.1.292).
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        let _ = proc.write_line(&control_request("interrupt", json!({})).1).await;
+                        proc.end();
                         None
                     }
                 };
@@ -437,7 +439,9 @@ async fn drive(
                                 pending.insert(req.id.clone(), PendingPermission { input, is_question });
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    proc.kill().await;
+                                }
                                 return;
                             }
                         }

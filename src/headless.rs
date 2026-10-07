@@ -536,6 +536,7 @@ pub async fn drive<O: Write, E: Write>(
         return;
     }
     let mut interrupts = Interrupts::new();
+    let mut ends = crate::core::process::EndSignals::listen();
     loop {
         tokio::select! {
             ev = handle.events.recv() => match ev {
@@ -560,12 +561,16 @@ pub async fn drive<O: Write, E: Write>(
                     break;
                 }
             }
+            _ = ends.recv() => {
+                run.abandon();
+                break;
+            }
         }
     }
     run.settle();
     let _ = handle.send(SessionCommand::Shutdown).await;
     // Until the process is gone, the grace is up, or Ctrl+C. Whatever is
-    // left is killed when the runtime goes (`kill_on_drop`).
+    // left is killed when the runtime goes, with what it started.
     let drain = async {
         while let Some(ev) = handle.events.recv().await {
             let exited = matches!(ev, AgentEvent::ProcessExited { .. });
@@ -578,6 +583,7 @@ pub async fn drive<O: Write, E: Write>(
     tokio::select! {
         _ = tokio::time::timeout(SHUTDOWN_GRACE, drain) => {}
         _ = interrupts.recv() => {}
+        _ = ends.recv() => {}
     }
 }
 

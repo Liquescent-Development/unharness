@@ -105,10 +105,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    proc.kill().await;
-                    return;
-                };
+                let Some(cmd) = cmd else { break };
                 match cmd {
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => {}
@@ -177,7 +174,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        proc.end();
                     }
                 }
             }
@@ -193,7 +190,9 @@ async fn drive(
                                 _ => {}
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    proc.kill().await;
+                                }
                                 return;
                             }
                         }

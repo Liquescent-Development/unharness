@@ -88,7 +88,19 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
   LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
-  bare `tokio::process::Command::spawn` in a transport.
+  bare `tokio::process::Command::spawn` in a transport. Each leads a
+  session of its own (`setsid`), and is killed with its process group and,
+  on Linux, every process descended from it (stopped first, read from
+  `/proc`): Claude Code runs each command in a session of its own, which a
+  group kill misses. What it left in its group goes when it exits by
+  itself, and its tree when the runtime drops the watcher. A session ends
+  the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
+  driver sends first, then stdin closed) and is killed only after
+  `END_GRACE`, also when the handle is dropped meanwhile (a switch, a
+  fork, a resume, a sandbox or provider change; `/clear` keeps the
+  session). Quitting waits for every CLI to be gone (`LineProcess::
+  all_ended`), and SIGTERM or SIGHUP to unharness is a quit, since
+  neither reaches a CLI in a session of its own.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
   (`--version`, auth) and unharness's own `git` stay outside. A model or
@@ -235,7 +247,16 @@ recorded ones. For anything else:
   batch after the last one. `stop_task` with the task id stops one (what
   `StopSubagent` sends) and Claude then reports it in a turn of its own;
   `interrupt` between turns stops all background tasks and starts no
-  turn. Never seen: a `failed` task (an agent cut off by `maxTurns`
+  turn. With only its stdin closed Claude (2.1.292) does not exit while a
+  background task runs (a Monitor's `tail -F` kept it for minutes), and
+  each command runs in a session of its own; `interrupt` then EOF (what
+  `Shutdown` sends), SIGTERM and SIGINT each stopped the Monitor's
+  command and ended Claude within half a second. Checked in the TUI
+  (pty, Landlock, haiku): with a Monitor's `tail -F` running, `/quit`,
+  Ctrl+D, `/switch codex` and SIGTERM to unharness each left no `tail`
+  (the build before this left it, in a session of its own), and a
+  background `sleep` in `--print` went with the run. Ctrl+C in `--print`
+  reaches Claude only as `interrupt` now (exit 130). Never seen: a `failed` task (an agent cut off by `maxTurns`
   reports `completed`), subagent `stream_event`s. Without
   `--forward-subagent-text` a blocking subagent's text was not sent (its
   tool calls were); a background one's final message arrived either way.
@@ -270,9 +291,9 @@ recorded ones. For anything else:
   50,000 file cap.
 - `!command` at the prompt (`tui/shell.rs`, `Block::Shell`,
   `BlockRecord::Shell`): `$SHELL -c` in the session's `cwd` through
-  `LineProcess::spawn_group` under `App::session_sandbox()` (stdin
-  `/dev/null`, `setsid`, the process group killed on Esc, on quit and
-  when the shell exits). No permission prompt, no rule. Refused during a
+  `LineProcess::spawn_no_input` under `App::session_sandbox()` (stdin
+  `/dev/null`, `setsid`, the process tree killed on Esc and on quit, the
+  group when the shell exits). No permission prompt, no rule. Refused during a
   turn; a prompt sent while it runs is queued. Its command, output tail
   and status go once in front of the next prompt (unsent blocks, any
   harness); a sent one is part of the bridge, and a harness switch

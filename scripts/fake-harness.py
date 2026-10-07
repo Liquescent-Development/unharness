@@ -19,13 +19,22 @@ status after the fixture is exhausted (default 0; a `# exit=N` line in the
 fixture overrides it). Set $UNHARNESS_FAKE_HANG=1
 to keep running after the fixture until stdin closes (long-lived protocols).
 
+$UNHARNESS_FAKE_BACKGROUND=<mode>:<path> starts a `sleep` in the background
+before the replay and writes "<own pid> <its pid>" to <path>: with mode
+`session` it gets a session of its own (as Claude Code runs every command),
+with `group` it stays in the fake's process group. With HANG,
+$UNHARNESS_FAKE_LINGER=<seconds> waits that long once stdin closes, then
+logs `{"ended": true}` and exits (a CLI finishing its own work first).
+
 $UNHARNESS_FAKE_PROBE makes the fake try the filesystem before it replays,
 for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
 `;`. Each result is appended to the log as `{"probe", "path", "ok"}`.
 """
 import json
 import os
+import subprocess
 import sys
+import time
 
 
 def probe(spec, log):
@@ -56,6 +65,18 @@ def main() -> int:
     exit_code = int(os.environ.get("UNHARNESS_FAKE_EXIT_CODE", "0"))
     if log and os.environ.get("UNHARNESS_FAKE_PROBE"):
         probe(os.environ["UNHARNESS_FAKE_PROBE"], log)
+    background = os.environ.get("UNHARNESS_FAKE_BACKGROUND")
+    if background:
+        mode, _, path = background.partition(":")
+        child = subprocess.Popen(
+            ["sleep", "300"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=(mode == "session"),
+        )
+        with open(path, "w") as f:
+            f.write(f"{os.getpid()} {child.pid}\n")
 
     def read_stdin_line():
         line = sys.stdin.readline()
@@ -78,7 +99,7 @@ def main() -> int:
                 continue
             if line.startswith(">>"):
                 if read_stdin_line() is None:
-                    return exit_code
+                    break
                 continue
             if line.startswith("!!"):
                 sys.stderr.write(line[2:].lstrip() + "\n")
@@ -90,6 +111,12 @@ def main() -> int:
     if hang:
         while read_stdin_line() is not None:
             pass
+        linger = os.environ.get("UNHARNESS_FAKE_LINGER")
+        if linger:
+            time.sleep(float(linger))
+            if log:
+                log.write(json.dumps({"ended": True}) + "\n")
+                log.flush()
     return exit_code
 
 

@@ -252,10 +252,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    d.proc.kill().await;
-                    return;
-                };
+                let Some(cmd) = cmd else { break };
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
                     SessionCommand::Steer { text, attachments } => {
@@ -347,7 +344,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.proc.close_stdin();
+                        d.proc.end();
                         Ok(())
                     }
                 };
@@ -515,7 +512,9 @@ async fn drive(
                                 d.pending.insert(req.id.clone(), (rpc_id, req.kind.clone()));
                             }
                             if events.send(ev).await.is_err() {
-                                d.proc.kill().await;
+                                if !shutting_down {
+                                    d.proc.kill().await;
+                                }
                                 return;
                             }
                         }

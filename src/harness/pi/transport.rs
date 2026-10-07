@@ -164,10 +164,7 @@ async fn drive(
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    proc.kill().await;
-                    break;
-                };
+                let Some(cmd) = cmd else { break };
                 let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
                 let line = match cmd {
                     SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
@@ -229,7 +226,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.close_stdin();
+                        proc.end();
                         None
                     }
                 };
@@ -289,7 +286,9 @@ async fn drive(
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
                             }
                             if events.send(ev).await.is_err() {
-                                proc.kill().await;
+                                if !shutting_down {
+                                    proc.kill().await;
+                                }
                                 return;
                             }
                         }
