@@ -87,13 +87,13 @@ When the conversation will not fit, the harness you are leaving is first
 asked for a handoff summary (one more turn, shown as "handoff summary
 for …"): the goal, the decisions, what was done, what is unfinished, the
 next steps. It is told to use no tools in that reply, and anything it
-asks permission for is denied. The next harness then gets the first prompt and the
-summary in place of everything before it, and what came after it turn by
-turn. Esc while it writes switches without one; a prompt sent meanwhile
-(Alt+Enter too) goes to the next harness. `bridge_summary =
-"never"` turns it off. Only a harness whose session saw the whole
-conversation and is still running or can be resumed is asked, and not
-while its subagents are at work.
+asks permission for is denied. The next harness then gets the first
+prompt (a long one cut to a quarter of the cap) and the summary in place
+of everything before it, and what came after it turn by turn. Esc while
+it writes switches without one; a prompt sent meanwhile (Alt+Enter too)
+goes to the next harness. `bridge_summary = "never"` turns it off. Only
+a harness whose session saw the whole conversation and is still running
+or can be resumed is asked, and not while its subagents are at work.
 
 Policy, model and effort changes apply from the next turn on every harness:
 

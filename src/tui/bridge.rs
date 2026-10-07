@@ -9,7 +9,8 @@
 //!
 //! When the conversation does not fit, a handoff summary in it (the one a
 //! harness wrote when the user switched away from it) stands in for
-//! everything before it, and only what came after is told turn by turn.
+//! everything before it but the first prompt, cut to a share of the
+//! budget, and only what came after is told turn by turn.
 //! When it fits, summaries are left out: they say again what is there.
 
 use serde_json::Value;
@@ -43,6 +44,9 @@ const FAILURE_CHARS: usize = 1_500;
 const REPORT_CHARS: usize = 1_500;
 /// Edited files listed by name in a brief turn.
 const BRIEF_FILES: usize = 10;
+/// Beside a handoff summary, the first prompt takes at most this fraction
+/// (1/n) of the budget: the summary is asked for half of it.
+const HANDOFF_PROMPT_SHARE: usize = 4;
 
 /// The text of `blocks` for another harness, at most `max_chars` long, or
 /// `None` when there is nothing in them to tell.
@@ -57,7 +61,7 @@ pub fn render(blocks: &[Block], max_chars: usize) -> Option<String> {
     let Some(at) = last_handoff(blocks) else {
         return tell(blocks, max_chars);
     };
-    let head = handoff_head(blocks, at);
+    let head = handoff_head(blocks, at, max_chars);
     let room = max_chars.saturating_sub(head.chars().count() + 2);
     let text = match tell(&blocks[at + 1..], room).filter(|_| room > 0) {
         Some(rest) => format!("{head}\n\n{rest}"),
@@ -77,7 +81,7 @@ pub fn needs_summary(blocks: &[Block], max_chars: usize) -> bool {
         None => true,
         Some(at) => {
             let rest = len(tell(&blocks[at + 1..], usize::MAX));
-            handoff_head(blocks, at).chars().count() + 2 + rest > max_chars
+            handoff_head(blocks, at, max_chars).chars().count() + 2 + rest > max_chars
         }
     }
 }
@@ -88,13 +92,15 @@ fn last_handoff(blocks: &[Block]) -> Option<usize> {
         .rposition(|b| matches!(b, Block::Handoff { .. }))
 }
 
-/// The first prompt before the summary at `at`, and the summary.
-fn handoff_head(blocks: &[Block], at: usize) -> String {
+/// The first prompt before the summary at `at`, cut to its share of
+/// `max_chars`, and the summary.
+fn handoff_head(blocks: &[Block], at: usize, max_chars: usize) -> String {
     let mut head = String::new();
     if let Some(prompt) = blocks[..at].iter().find_map(|b| match b {
         Block::User { text } => Some(text),
         _ => None,
     }) {
+        let prompt = truncate_chars(prompt, max_chars / HANDOFF_PROMPT_SHARE);
         head.push_str(&format!("User: {prompt}\n\n"));
     }
     if let Block::Handoff { text, sender, .. } = &blocks[at] {
@@ -788,6 +794,26 @@ mod tests {
              Goal: the task. Done: a, b. Next: c.\n\n\
              User: after the switch\n\nClaude: fine"
         );
+    }
+
+    #[test]
+    fn a_first_prompt_too_long_for_the_bridge_is_cut_beside_a_summary() {
+        let mut t = Transcript::default();
+        turn(&mut t, &format!("the task {}", "p".repeat(5_000)), "ok");
+        t.append_assistant("Claude", "Goal: the task. Next: c.");
+        assert!(t.mark_handoff(t.blocks.len() - 1, "Codex"));
+        turn(&mut t, "after the switch", "fine");
+
+        // A summary is worth asking for, and once there it makes room.
+        assert!(needs_summary(&t.blocks[..2], 2_000));
+        assert!(!needs_summary(&t.blocks, 2_000));
+        let text = render(&t.blocks, 2_000).unwrap();
+        assert!(text.chars().count() <= 2_000, "{}", text.chars().count());
+        assert!(text.starts_with("User: the task ppp"));
+        assert!(text.contains("p…\n\n[Handoff summary Claude wrote"));
+        assert!(text.contains("Goal: the task. Next: c."));
+        assert!(text.ends_with("User: after the switch\n\nClaude: fine"));
+        assert!(!text.contains("\n[…]\n"));
     }
 
     #[test]
