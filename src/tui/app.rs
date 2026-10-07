@@ -34,8 +34,8 @@ use crate::core::registry::Registry;
 use crate::core::rules::Scope;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
-    AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef,
-    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessCommand, HarnessId,
+    ModelRef, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
     PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, Rule, Rules, SessionCommand,
     StopReason, Usage, resolve_policy,
 };
@@ -260,6 +260,25 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/help", "Show commands and shortcuts"),
     ("/quit", "Exit unharness"),
 ];
+
+/// Names `handle_slash_command` answers to that the list leaves out.
+const HIDDEN_ALIASES: &[&str] = &["/sessions", "/exit"];
+
+/// Whether `/name` is one of unharness's own commands, which a harness's
+/// command of the same name gives way to.
+fn is_own_command(name: &str) -> bool {
+    BASE_COMMANDS.iter().any(|(c, _)| *c == name) || HIDDEN_ALIASES.contains(&name)
+}
+
+/// A harness's command as the `/` list shows it: what it takes, then the
+/// first line of what it does.
+fn describe_command(harness: &str, c: &HarnessCommand) -> String {
+    let what = c.description.lines().next().unwrap_or_default();
+    match &c.hint {
+        Some(hint) => format!("{harness}: {hint} · {what}"),
+        None => format!("{harness}: {what}"),
+    }
+}
 
 pub struct App {
     pub cwd: PathBuf,
@@ -864,6 +883,14 @@ impl App {
         self.harness().descriptor().display_name
     }
 
+    /// The commands of its own the active harness's session listed.
+    pub fn harness_commands(&self) -> &[HarnessCommand] {
+        self.live_caps
+            .get(&self.active)
+            .and_then(|u| u.commands.as_deref())
+            .unwrap_or_default()
+    }
+
     /// Declared capabilities of the active harness plus what its session reported.
     pub fn caps(&self) -> Capabilities {
         let mut caps = self.harness().capabilities();
@@ -1192,6 +1219,10 @@ impl App {
             self.first_prompt = Some(text.clone());
         }
 
+        // A command the harness runs has to start the message, so it goes
+        // alone: what would have gone in front of it waits for the next
+        // prompt.
+        let alone = text.starts_with('/') && self.caps().slash_commands;
         // Bridge context from other harnesses: everything since this harness
         // was last active, or everything on its first visit. Nothing when the
         // live session already saw the whole transcript.
@@ -1202,11 +1233,27 @@ impl App {
             self.transcript
                 .bridge_text(from, self.bridge_budget(self.active))
         };
-        self.last_active_index.remove(&self.active);
+        if alone && bridge.is_some() {
+            self.last_active_index.insert(self.active, from);
+        } else {
+            self.last_active_index.remove(&self.active);
+        }
+        let unsent_shell = self
+            .transcript
+            .blocks
+            .iter()
+            .any(|b| matches!(b, super::transcript::Block::Shell { sent: false, .. }));
+        if alone && (bridge.is_some() || unsent_shell) {
+            self.transcript.push_notice(format!(
+                "{} is told what it has not seen yet with your next prompt: a command has to start its message",
+                self.short_name()
+            ));
+        }
+        let bridge = bridge.filter(|_| !alone);
         // `!` commands no agent has been told about yet (the bridge has
         // only those one has).
         let mut shells = Vec::new();
-        for b in self.transcript.blocks.iter_mut() {
+        for b in self.transcript.blocks.iter_mut().filter(|_| !alone) {
             if let super::transcript::Block::Shell {
                 command,
                 output,
@@ -3631,15 +3678,48 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy (double click a word, triple a row)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
             "/quit" | "/exit" => self.quit(),
-            other => self
-                .transcript
-                .push_error(format!("unknown command '{other}'; /help lists commands")),
+            _ => self.pass_command(cmd, false),
         }
+    }
+
+    /// A `/command` unharness does not have, or one sent past unharness's
+    /// own with `\/` (`forced`): the active harness runs it, where it runs
+    /// commands of its own from a prompt.
+    pub fn pass_command(&mut self, text: &str, forced: bool) {
+        let text = text.trim();
+        let name = text.split_whitespace().next().unwrap_or(text);
+        let harness = self.short_name();
+        if !self.caps().slash_commands {
+            if forced {
+                self.queue_prompt(text.to_string());
+            } else {
+                self.transcript.push_error(format!(
+                    "unknown command '{name}'; /help lists commands ({harness} runs no \
+                     commands of its own from a prompt; \\{name} sends it as text)"
+                ));
+            }
+            return;
+        }
+        if name == "/" {
+            self.transcript
+                .push_error("unknown command '/'; /help lists commands");
+            return;
+        }
+        let listed = self
+            .harness_commands()
+            .iter()
+            .any(|c| name.strip_prefix('/') == Some(c.name.as_str()));
+        self.transcript.push_notice(if listed {
+            format!("{name} is {harness}'s own command: passed on")
+        } else {
+            format!("'{name}' is not an unharness command: passed to {harness} as typed")
+        });
+        self.queue_prompt(text.to_string());
     }
 
     // ------------------------------------------------------------------ suggestions
@@ -3653,7 +3733,9 @@ impl App {
     fn refresh_suggestions(&mut self, files: bool) {
         self.suggestions.clear();
         let was_completing_file = self.completing_file.take().is_some();
-        if !self.input.starts_with('/') || self.input.contains('\n') {
+        // `\/name` is the harness's command even where unharness has one.
+        let escaped = self.input.starts_with("\\/");
+        if !(self.input.starts_with('/') || escaped) || self.input.contains('\n') {
             self.selected_suggestion = 0;
             if files {
                 self.suggest_files(was_completing_file);
@@ -3661,79 +3743,107 @@ impl App {
             return;
         }
         let query = self.input.to_lowercase();
+        let query = query.strip_prefix('\\').unwrap_or(&query);
         let (cmd, sub) = match query.split_once(' ') {
             Some((c, s)) => (c.to_string(), Some(s.trim().to_string())),
-            None => (query.clone(), None),
+            None => (query.to_string(), None),
         };
         let mut out = Vec::new();
-        match (cmd.as_str(), sub.as_deref()) {
-            ("/switch" | "/harness", Some(s)) => {
-                for o in &self.harness_options {
-                    let id = o.id.as_str();
-                    if id.starts_with(s) {
-                        out.push((format!("{cmd} {id}"), o.display_name.to_string()));
+        if escaped {
+            if sub.is_none() {
+                out = self.suggest_harness_commands(&cmd, true);
+            }
+        } else {
+            match (cmd.as_str(), sub.as_deref()) {
+                ("/switch" | "/harness", Some(s)) => {
+                    for o in &self.harness_options {
+                        let id = o.id.as_str();
+                        if id.starts_with(s) {
+                            out.push((format!("{cmd} {id}"), o.display_name.to_string()));
+                        }
                     }
                 }
-            }
-            ("/policy", Some(s)) => {
-                for p in PermissionPolicy::ALL {
-                    if p.as_str().starts_with(s) {
-                        out.push((format!("/policy {p}"), p.description().to_string()));
+                ("/policy", Some(s)) => {
+                    for p in PermissionPolicy::ALL {
+                        if p.as_str().starts_with(s) {
+                            out.push((format!("/policy {p}"), p.description().to_string()));
+                        }
                     }
                 }
-            }
-            ("/sandbox", Some(s)) => {
-                for l in SandboxLevel::ALL {
-                    if l.as_str().starts_with(s) {
-                        out.push((format!("/sandbox {l}"), l.description().to_string()));
+                ("/sandbox", Some(s)) => {
+                    for l in SandboxLevel::ALL {
+                        if l.as_str().starts_with(s) {
+                            out.push((format!("/sandbox {l}"), l.description().to_string()));
+                        }
                     }
                 }
-            }
-            ("/effort" | "/think", Some(s)) => {
-                for l in self.caps().effort_levels {
-                    if l.starts_with(s) {
-                        out.push((format!("{cmd} {l}"), "Reasoning effort".to_string()));
+                ("/effort" | "/think", Some(s)) => {
+                    for l in self.caps().effort_levels {
+                        if l.starts_with(s) {
+                            out.push((format!("{cmd} {l}"), "Reasoning effort".to_string()));
+                        }
                     }
                 }
-            }
-            ("/model", Some(s)) => {
-                if let Some(p) = self.current_provider().cloned()
-                    && let Some(models) = self.cached_models(&p)
-                {
-                    for m in models {
-                        let id = m.model_ref.model.to_lowercase();
-                        if id.contains(s) || m.display_name.to_lowercase().contains(s) {
+                ("/model", Some(s)) => {
+                    if let Some(p) = self.current_provider().cloned()
+                        && let Some(models) = self.cached_models(&p)
+                    {
+                        for m in models {
+                            let id = m.model_ref.model.to_lowercase();
+                            if id.contains(s) || m.display_name.to_lowercase().contains(s) {
+                                out.push((
+                                    format!("/model {}", m.model_ref.model),
+                                    m.description.unwrap_or(m.display_name),
+                                ));
+                            }
+                        }
+                    }
+                }
+                ("/resume", Some(s)) => {
+                    for r in self.store.list() {
+                        if r.id.starts_with(s) || r.title.to_lowercase().contains(s) {
                             out.push((
-                                format!("/model {}", m.model_ref.model),
-                                m.description.unwrap_or(m.display_name),
+                                format!("/resume {}", &r.id[..8.min(r.id.len())]),
+                                format!("{}  {}", r.updated_at, r.title),
                             ));
                         }
                     }
                 }
-            }
-            ("/resume", Some(s)) => {
-                for r in self.store.list() {
-                    if r.id.starts_with(s) || r.title.to_lowercase().contains(s) {
-                        out.push((
-                            format!("/resume {}", &r.id[..8.min(r.id.len())]),
-                            format!("{}  {}", r.updated_at, r.title),
-                        ));
+                (_, None) => {
+                    for (c, d) in BASE_COMMANDS {
+                        if c.starts_with(cmd.as_str()) {
+                            out.push((c.to_string(), d.to_string()));
+                        }
                     }
+                    out.extend(self.suggest_harness_commands(&cmd, false));
                 }
+                _ => {}
             }
-            (_, None) => {
-                for (c, d) in BASE_COMMANDS {
-                    if c.starts_with(cmd.as_str()) {
-                        out.push((c.to_string(), d.to_string()));
-                    }
-                }
-            }
-            _ => {}
         }
         self.suggestions = out;
         if self.selected_suggestion >= self.suggestions.len() {
             self.selected_suggestion = 0;
         }
+    }
+
+    /// The active harness's commands that start with `typed` (`/` and
+    /// lowercase), where a prompt runs them. Unless `escaped`, those that
+    /// unharness has a command of the same name for are left out.
+    fn suggest_harness_commands(&self, typed: &str, escaped: bool) -> Vec<(String, String)> {
+        if !self.caps().slash_commands {
+            return Vec::new();
+        }
+        let harness = self.short_name();
+        self.harness_commands()
+            .iter()
+            .map(|c| (format!("/{}", c.name), c))
+            .filter(|(name, _)| name.to_lowercase().starts_with(typed))
+            .filter(|(name, _)| escaped || !is_own_command(name))
+            .map(|(name, c)| {
+                let shown = if escaped { format!("\\{name}") } else { name };
+                (shown, describe_command(harness, c))
+            })
+            .collect()
     }
 
     /// The files matching the `@` word the cursor ends, if it ends one.
@@ -3843,7 +3953,9 @@ impl App {
                 .selected_file_reference()
                 .is_some_and(|reference| reference != typed);
         }
-        if !self.input.starts_with('/') || self.suggestions.is_empty() {
+        if !(self.input.starts_with('/') || self.input.starts_with("\\/"))
+            || self.suggestions.is_empty()
+        {
             return false;
         }
         let Some((cmd, _)) = self.suggestions.get(self.selected_suggestion) else {
@@ -7383,6 +7495,185 @@ pub(crate) mod tests {
         assert_eq!(app.active, HarnessId::CODEX);
         app.handle_slash_command("/quit");
         assert!(app.should_quit);
+    }
+
+    /// Claude, its session having listed `/hello`, `/clear` and `/model`.
+    fn app_with_claude_commands() -> App {
+        let mut app = test_app(HarnessId::CLAUDE);
+        let command = |name: &str, hint: Option<&str>| {
+            HarnessCommand::new(name, Some(&format!("{name} it\nmore")), hint).unwrap()
+        };
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            commands: Some(vec![
+                command("hello", Some("<name>")),
+                command("clear", None),
+                command("model", None),
+            ]),
+            ..Default::default()
+        }));
+        app
+    }
+
+    fn notices(app: &App) -> Vec<String> {
+        use super::super::transcript::Block;
+        app.transcript
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Notice(n) | Block::Error(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_unharness_lacks_goes_to_a_harness_that_runs_its_own() {
+        let mut app = app_with_claude_commands();
+        app.handle_slash_command("/hello world");
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession { resume: None },
+                Action::turn("/hello world")
+            ]
+        );
+        assert_eq!(
+            notices(&app),
+            vec!["/hello is Claude's own command: passed on"]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        // One it did not list goes too, as typed: Claude passes an unknown
+        // one to the model.
+        app.handle_slash_command("/etc/hosts is it there?");
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::turn("/etc/hosts is it there?")]
+        );
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .contains("passed to Claude as typed")
+        );
+    }
+
+    #[test]
+    fn unharness_s_own_command_wins_unless_escaped() {
+        let mut app = app_with_claude_commands();
+        app.submit_prompt("before".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.handle_slash_command("/clear");
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.transcript.blocks.len(), 1, "cleared");
+        app.pass_command("/clear", true);
+        assert_eq!(app.take_actions(), vec![Action::turn("/clear")]);
+        assert_eq!(
+            notices(&app),
+            vec!["/clear is Claude's own command: passed on"]
+        );
+    }
+
+    #[test]
+    fn a_harness_that_runs_no_commands_is_not_sent_one() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.handle_slash_command("/review");
+        assert!(app.take_actions().is_empty());
+        assert!(notices(&app)[0].starts_with("unknown command '/review'"));
+        assert!(notices(&app)[0].contains("\\/review sends it as text"));
+        // Escaped, it is a prompt that starts with `/`.
+        app.pass_command("/review", true);
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::StartSession { resume: None },
+                Action::turn("/review")
+            ]
+        );
+        assert_eq!(notices(&app).len(), 1);
+    }
+
+    #[test]
+    fn the_list_offers_the_harness_s_commands() {
+        let mut app = app_with_claude_commands();
+        app.set_input("");
+        app.insert_char('/');
+        let shown: Vec<&str> = app.suggestions.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(shown.contains(&"/clear") && shown.contains(&"/hello"));
+        // Its `/clear` gives way to unharness's.
+        assert_eq!(shown.iter().filter(|c| **c == "/clear").count(), 1);
+        for c in "he".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.suggestions.len(), 2, "{:?}", app.suggestions);
+        let hello = app.suggestions.iter().find(|(c, _)| c == "/hello").unwrap();
+        assert_eq!(hello.1, "Claude: <name> · hello it");
+        // Escaped, its own come up, unharness's do not.
+        app.set_input("");
+        for c in "\\/cl".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(
+            app.suggestions,
+            vec![("\\/clear".to_string(), "Claude: clear it".to_string())]
+        );
+        assert!(app.should_accept_suggestion());
+        app.accept_suggestion();
+        assert_eq!(app.input, "\\/clear");
+
+        // Codex runs none, so none are offered.
+        let mut codex = test_app(HarnessId::CODEX);
+        codex.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            commands: Some(vec![HarnessCommand::new("hello", None, None).unwrap()]),
+            ..Default::default()
+        }));
+        codex.insert_char('/');
+        assert!(codex.suggestions.iter().all(|(c, _)| c != "/hello"));
+    }
+
+    /// A command has to start the message: the context of a switch waits
+    /// for the next prompt instead of going in front of it.
+    #[test]
+    fn a_command_goes_alone_and_the_bridge_waits() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+
+        app.handle_slash_command("/hello world");
+        assert_eq!(sent_turn(&mut app), "/hello world");
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .starts_with("Claude is told what it has not seen yet")
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        app.submit_prompt("next".into());
+        let next = sent_turn(&mut app);
+        assert!(next.contains("first answer"), "{next}");
+        assert!(next.ends_with("next"), "{next}");
     }
 
     #[test]

@@ -101,9 +101,9 @@ file whose name holds a control character or `\` is not projected.
 
 pi reads `.pi/prompts` only in a project it trusts (`pi --approve`, or once
 trusted from pi's own interface); unharness does not trust it for you. In
-the TUI a command the harness defines is not yet passed through
-([#17](https://git.ldllc.dev/Liquescent/unharness/issues/17)); it works with
-`--print`, `--no-tui` and the harness's own interface.
+the TUI a projected command is typed as on the harness's own interface
+(`/review`, pi's skills as `/skill:<name>`): unharness passes it on
+([Agent commands](tui.md#agent-commands)).
 
 ### Hooks
 

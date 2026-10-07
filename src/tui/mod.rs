@@ -577,6 +577,12 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             }
             let text = app.take_input();
             app.history.push(&text);
+            // `\/name`: the harness's own command, also where unharness
+            // has one of that name.
+            if let Some(command) = text.strip_prefix('\\').filter(|t| t.starts_with('/')) {
+                app.pass_command(command, true);
+                return;
+            }
             if text.starts_with('/') {
                 app.handle_slash_command(&text);
                 return;
@@ -849,6 +855,23 @@ mod tests {
         type_text(&mut app, "@c");
         handle_key(&mut app, NONE, KeyCode::Left);
         assert!(app.suggestions.is_empty());
+    }
+
+    #[test]
+    fn an_escaped_command_goes_to_the_harness_as_typed() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        // `/clear` is unharness's; `\/clear` is Claude's.
+        type_text(&mut app, "\\/clear");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        let sent: Vec<_> = app
+            .take_actions()
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::SendTurn { text, .. } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, vec!["/clear"]);
     }
 
     fn finish_turn(app: &mut App) {
