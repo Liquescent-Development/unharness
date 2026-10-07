@@ -199,7 +199,9 @@ mod tests {
         impl Drop for Reap {
             fn drop(&mut self) {
                 // SAFETY: the shell this test's editor ran in.
-                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+                if crate::core::process::running(self.0) {
+                    unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+                }
             }
         }
         let _reap = Reap(pid);

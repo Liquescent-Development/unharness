@@ -435,9 +435,11 @@ fn ctrl_z_in_print_stops_the_cli_with_unharness_and_fg_continues_it() {
     }
 }
 
-// What was stopped is not left so, also once it is out of the tree.
+// A CLI killed while Ctrl+Z had it stopped: what it started is not left
+// stopped (below the reaper it goes with the CLI; without, it would be
+// continued from the list of what was stopped).
 #[test]
-fn fg_continues_what_left_the_tree_while_stopped() {
+fn nothing_is_left_stopped_when_a_stopped_cli_dies_meanwhile() {
     if !python_available() {
         return;
     }
@@ -462,7 +464,9 @@ fn fg_continues_what_left_the_tree_while_stopped() {
     impl Drop for Reap {
         fn drop(&mut self) {
             // SAFETY: the `sleep` the fake CLI started for this test.
-            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            if running(self.0) {
+                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            }
         }
     }
     let _child = Reap(child);
@@ -572,7 +576,9 @@ fn sigterm_while_the_prompt_is_in_the_editor_ends_the_editor_and_the_tui() {
     impl Drop for Reap {
         fn drop(&mut self) {
             // SAFETY: the editor this test started.
-            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            if running(self.0) {
+                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            }
         }
     }
     let _reap = Reap(editor);
@@ -611,7 +617,9 @@ fn what_a_cli_left_in_a_session_of_its_own_goes_when_it_exits_by_itself() {
     impl Drop for Reap {
         fn drop(&mut self) {
             // SAFETY: the `sleep` the fake CLI started for this test.
-            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            if running(self.0) {
+                unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
+            }
         }
     }
     let _child = Reap(child);
