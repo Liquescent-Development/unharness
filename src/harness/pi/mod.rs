@@ -17,7 +17,7 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
-use crate::core::sandbox::SandboxPaths;
+use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
@@ -94,6 +94,7 @@ impl Harness for PiHarness {
             resume_by_id: true,
             live_model_list: true,
             multi_provider: true,
+            provider_per_process: false,
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -143,7 +144,11 @@ impl Harness for PiHarness {
         }
     }
 
-    fn list_providers(&self, binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+    fn list_providers(
+        &self,
+        binary: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
         let mut seen = Vec::new();
         for m in query_models(binary)? {
             let p = m
@@ -162,7 +167,12 @@ impl Harness for PiHarness {
         Ok(seen)
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         Ok(query_models(binary)?
             .into_iter()
             .filter(|m| m.get("provider").and_then(Value::as_str) == Some(provider.as_str()))
@@ -291,6 +301,7 @@ mod tests {
             prompt: Some("hi there".into()),
             print_mode: true,
             model: Some(ModelRef::new(HarnessId::PI, "openai", "gpt-5.5")),
+            provider: None,
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Ask),
             format: Some("json".into()),

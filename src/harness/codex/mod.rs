@@ -6,7 +6,6 @@ pub mod app_server_parse;
 pub mod exec;
 pub mod exec_parse;
 
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -21,6 +20,7 @@ use super::{
 };
 use crate::core::guard::Guarded;
 use crate::core::jsonrpc;
+use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
@@ -95,8 +95,93 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     display_name: "Codex (codex)",
     short_name: "Codex",
     binary_names: &["codex"],
-    providers: ProviderSource::Static(&[("openai", "OpenAI")]),
+    providers: ProviderSource::Static(BUILT_IN_PROVIDERS),
 };
+
+/// The providers Codex has without configuration, which a
+/// `[model_providers.<id>]` of the same name may not replace (0.157.0,
+/// "reserved built-in provider IDs"). Others come from its config.
+const BUILT_IN_PROVIDERS: &[(&str, &str)] = &[
+    ("openai", "OpenAI"),
+    ("ollama", "Ollama"),
+    ("lmstudio", "LM Studio"),
+    ("amazon-bedrock", "Amazon Bedrock"),
+];
+
+/// The `-c` value that has Codex use `provider`.
+pub fn provider_override(provider: &ProviderId) -> String {
+    format!("model_provider={}", json!(provider.as_str()))
+}
+
+/// Why the provider Codex reports (`modelProvider` in the answer to
+/// `thread/start` or `thread/resume`) is not the one chosen, if it is not.
+pub fn provider_mismatch(chosen: Option<&ProviderId>, reported: &str) -> Option<String> {
+    let chosen = chosen?;
+    (reported != chosen.as_str())
+        .then(|| format!("Codex runs on {reported}, not {chosen}, in this thread"))
+}
+
+/// The built-in providers, then the ones `model_providers` (as
+/// `config/read` gives it) adds. A built-in one appears there too when its
+/// few settable fields are set, with an empty name.
+fn with_configured(configured: &serde_json::Map<String, Value>) -> Vec<(ProviderId, String)> {
+    let mut providers: Vec<(ProviderId, String)> = BUILT_IN_PROVIDERS
+        .iter()
+        .map(|(id, name)| (ProviderId::from(*id), name.to_string()))
+        .collect();
+    for (id, provider) in configured {
+        if providers.iter().any(|(known, _)| known.as_str() == id) {
+            continue;
+        }
+        let name = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(id)
+            .to_string();
+        providers.push((ProviderId::new(id.clone()), name));
+    }
+    providers
+}
+
+/// The `[model_providers.<id>]` tables of a Codex `config.toml`, in the
+/// shape `config/read` gives them (only `name` is used).
+fn providers_in_config(config: &str) -> serde_json::Map<String, Value> {
+    config
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|t| t.get("model_providers")?.as_table().cloned())
+        .map(|providers| {
+            providers
+                .into_iter()
+                .map(|(id, p)| {
+                    let name = p.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                    (id, json!({ "name": name }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// `model_provider` in a Codex `config.toml`, or in the profile it selects.
+fn configured_provider(config: &str) -> Option<String> {
+    let table = config.parse::<toml::Table>().ok()?;
+    let in_profile = table
+        .get("profile")
+        .and_then(|p| p.as_str())
+        .and_then(|p| table.get("profiles")?.get(p)?.get("model_provider"));
+    in_profile
+        .or_else(|| table.get("model_provider"))
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+}
 
 pub const EFFORT_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
@@ -177,7 +262,9 @@ impl Harness for CodexHarness {
             effort_levels: EFFORT_LEVELS.iter().map(|s| s.to_string()).collect(),
             resume_by_id: true,
             live_model_list: app_server,
-            multi_provider: false,
+            // `-c model_provider=…` when the process starts.
+            multi_provider: true,
+            provider_per_process: true,
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
@@ -225,13 +312,53 @@ impl Harness for CodexHarness {
         Some(auth_status(binary).authenticated)
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    /// The built-in providers and the ones Codex's configuration adds
+    /// (`config/read`), else the built-in ones alone.
+    fn list_providers(
+        &self,
+        binary: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
+        // Without an answer, the user's config.toml as it reads.
+        let configured = query(binary, sandbox, "config/read", json!({}))
+            .ok()
+            .and_then(|r| r.pointer("/config/model_providers")?.as_object().cloned())
+            .unwrap_or_else(|| {
+                std::fs::read_to_string(expand_home(&codex_home()).join("config.toml"))
+                    .map(|text| providers_in_config(&text))
+                    .unwrap_or_default()
+            });
+        Ok(with_configured(&configured))
+    }
+
+    /// `model_provider` in Codex's `config.toml` (its profile's first),
+    /// else OpenAI. A thread reports the one it runs on.
+    fn default_provider(&self) -> Option<ProviderId> {
+        let home = dirs::home_dir().unwrap_or_default();
+        let dir = codex_home();
+        let dir = dir.strip_prefix("~").map(|p| home.join(p)).unwrap_or(dir);
+        let configured = std::fs::read_to_string(dir.join("config.toml"))
+            .ok()
+            .and_then(|text| configured_provider(&text));
+        Some(ProviderId::new(
+            configured.unwrap_or_else(|| "openai".into()),
+        ))
+    }
+
+    /// `model/list` is OpenAI's catalog whichever provider is configured
+    /// (0.157.0), so other providers list nothing.
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "openai" {
             return Ok(Vec::new());
         }
         let live = match self.effective_transport(binary) {
             CodexTransport::Exec => Vec::new(),
-            _ => query_models(binary).unwrap_or_default(),
+            _ => query_models(binary, sandbox).unwrap_or_default(),
         };
         if !live.is_empty() {
             return Ok(live
@@ -365,6 +492,9 @@ impl Harness for CodexHarness {
         if let Some(m) = &cfg.model {
             cmd.arg("-m").arg(&m.model);
         }
+        if let Some(p) = &cfg.provider {
+            cmd.arg("-c").arg(provider_override(p));
+        }
         if let Some(e) = &cfg.effort {
             cmd.arg("-c").arg(format!("model_reasoning_effort=\"{e}\""));
         }
@@ -497,65 +627,53 @@ fn auth_status(binary: &Path) -> AuthInfo {
 }
 
 /// Ask a throwaway `codex app-server` for `model/list`.
-pub fn query_models(binary: &Path) -> Result<Vec<Value>> {
-    let mut child = Command::new(binary)
-        .arg("app-server")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn codex app-server")?;
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let stdout = child.stdout.take().context("stdout")?;
-    writeln!(
-        stdin,
-        "{}",
-        jsonrpc::request(
-            1,
-            "initialize",
-            json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}})
-        )
-    )?;
-    stdin.flush()?;
+pub fn query_models(binary: &Path, sandbox: &Sandbox) -> Result<Vec<Value>> {
+    let result = query(binary, sandbox, "model/list", json!({}))?;
+    Ok(result
+        .get("data")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
 
+/// The result of one request to a throwaway `codex app-server`, in the
+/// sandbox a session would get: Codex reads its own configuration, which
+/// a session can write.
+fn query(binary: &Path, sandbox: &Sandbox, method: &str, params: Value) -> Result<Value> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("app-server");
+    if sandbox.is_active() {
+        // As for a session: its own sandbox cannot start inside ours.
+        cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    }
+    let mut probe = ProbeProcess::spawn(cmd, sandbox).context("start codex app-server")?;
+    probe.write_line(&jsonrpc::request(
+        1,
+        "initialize",
+        json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}}),
+    ))?;
     let deadline = Instant::now() + QUERY_TIMEOUT;
-    let mut models = Vec::new();
-    let mut found = false;
-    for line in BufReader::new(stdout).lines() {
-        if Instant::now() > deadline {
-            break;
-        }
-        let Ok(line) = line else { break };
+    loop {
+        let line = probe
+            .next_line(deadline)
+            .map_err(|_| anyhow::anyhow!("codex app-server did not answer {method}"))?;
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
         match v.get("id").and_then(Value::as_u64) {
             Some(1) if v.get("result").is_some() => {
-                writeln!(
-                    stdin,
-                    "{}",
-                    jsonrpc::notification("initialized", Value::Null)
-                )?;
-                writeln!(stdin, "{}", jsonrpc::request(2, "model/list", json!({})))?;
-                stdin.flush()?;
+                probe.write_line(&jsonrpc::notification("initialized", Value::Null))?;
+                probe.write_line(&jsonrpc::request(2, method, params.clone()))?;
             }
             Some(2) => {
-                if let Some(list) = v.pointer("/result/data").and_then(Value::as_array) {
-                    models = list.clone();
+                if let Some(err) = v.get("error") {
+                    anyhow::bail!("codex app-server: {method}: {err}");
                 }
-                found = true;
-                break;
+                return Ok(v.get("result").cloned().unwrap_or(Value::Null));
             }
             _ => {}
         }
     }
-    drop(stdin);
-    let _ = child.kill();
-    let _ = child.wait();
-    if !found {
-        anyhow::bail!("codex app-server did not answer model/list");
-    }
-    Ok(models)
 }
 
 #[cfg(test)]
@@ -571,6 +689,102 @@ mod tests {
     }
 
     #[test]
+    fn the_configured_provider_is_the_profiles_first() {
+        assert_eq!(configured_provider(""), None);
+        assert_eq!(
+            configured_provider("model_provider = \"ollama\"").as_deref(),
+            Some("ollama")
+        );
+        let profiled = r#"
+model_provider = "ollama"
+profile = "work"
+
+[profiles.work]
+model_provider = "azure"
+
+[profiles.home]
+model_provider = "lmstudio"
+"#;
+        assert_eq!(configured_provider(profiled).as_deref(), Some("azure"));
+        let without = profiled.replace("profile = \"work\"", "profile = \"none\"");
+        assert_eq!(configured_provider(&without).as_deref(), Some("ollama"));
+    }
+
+    #[test]
+    fn configured_providers_are_read_from_the_file_without_codex() {
+        let config = r#"
+model = "x"
+
+[model_providers.llama]
+name = "llama-swap"
+base_url = "http://x/v1"
+
+[model_providers.amazon-bedrock.aws]
+region = "us-east-1"
+"#;
+        let providers = with_configured(&providers_in_config(config));
+        let ids: Vec<&str> = providers.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["openai", "ollama", "lmstudio", "amazon-bedrock", "llama"]
+        );
+        assert_eq!(providers[4].1, "llama-swap");
+        assert!(providers_in_config("not toml [").is_empty());
+    }
+
+    #[test]
+    fn configured_providers_follow_the_built_in_ones_once() {
+        let configured = json!({
+            "amazon-bedrock": {"name": "", "aws": {"region": "us-east-1"}},
+            "llama": {"name": "llama-swap", "base_url": "http://x/v1"},
+            "bare": {"name": " ", "base_url": "http://y/v1"},
+        });
+        let providers = with_configured(configured.as_object().unwrap());
+        let names: Vec<String> = providers
+            .iter()
+            .map(|(id, name)| format!("{id}={name}"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "openai=OpenAI",
+                "ollama=Ollama",
+                "lmstudio=LM Studio",
+                "amazon-bedrock=Amazon Bedrock",
+                "bare=bare",
+                "llama=llama-swap"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chosen_provider_is_a_config_override() {
+        assert_eq!(
+            provider_override(&ProviderId::from("amazon-bedrock")),
+            "model_provider=\"amazon-bedrock\""
+        );
+        // Quoted as a TOML string, whatever the id holds.
+        assert_eq!(
+            provider_override(&ProviderId::from("a\"b")),
+            "model_provider=\"a\\\"b\""
+        );
+        let cfg = PrintConfig {
+            binary: PathBuf::from("/bin/codex"),
+            cwd: PathBuf::from("/tmp"),
+            print_mode: true,
+            provider: Some(ProviderId::from("ollama")),
+            ..Default::default()
+        };
+        let a = args(&CodexHarness::default().build_print_command(&cfg).unwrap());
+        assert!(a.contains("-c model_provider=\"ollama\""), "{a}");
+        assert_eq!(
+            provider_mismatch(Some(&ProviderId::from("ollama")), "openai").as_deref(),
+            Some("Codex runs on openai, not ollama, in this thread")
+        );
+        assert_eq!(provider_mismatch(None, "openai"), None);
+    }
+
+    #[test]
     fn print_and_passthrough_commands() {
         let base = PrintConfig {
             binary: PathBuf::from("/bin/codex"),
@@ -578,6 +792,7 @@ mod tests {
             prompt: Some("fix it".into()),
             print_mode: true,
             model: Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5.5")),
+            provider: None,
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::AcceptEdits),
             format: None,

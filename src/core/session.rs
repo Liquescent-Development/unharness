@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, PermissionDecision};
-use super::ids::{HarnessId, ModelRef};
+use super::ids::{HarnessId, ModelRef, ProviderId};
 use super::mcp::McpServer;
 use super::sandbox::Sandbox;
 
@@ -20,6 +20,9 @@ pub struct SessionConfig {
     pub binary: PathBuf,
     pub cwd: PathBuf,
     pub model: Option<ModelRef>,
+    /// The provider the user chose (`--provider`, `default_provider`, the
+    /// picker); `None` leaves it to the harness's own configuration.
+    pub provider: Option<ProviderId>,
     pub effort: Option<String>,
     /// Already resolved against the harness capabilities.
     pub policy: PermissionPolicy,

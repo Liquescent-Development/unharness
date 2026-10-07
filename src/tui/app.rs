@@ -38,7 +38,7 @@ use crate::core::{
     PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, Rule, Rules, SessionCommand,
     StopReason, Usage, resolve_policy,
 };
-use crate::harness::{Harness, ModelInfo, ProviderSource, resolve_binary};
+use crate::harness::{Harness, ModelInfo, resolve_binary};
 
 /// Side effects the event loop performs on the App's behalf.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +60,57 @@ pub enum Action {
     },
     /// Kill the running `!` command.
     StopShell,
+}
+
+/// A list the TUI wants from a harness. Asking may start the CLI and
+/// take seconds (Claude on Bedrock gives up after 15), so it is done off
+/// the UI thread.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ListRequest {
+    Providers(HarnessId),
+    Models(HarnessId, ProviderId),
+}
+
+#[derive(Debug, Clone)]
+pub enum ListResult {
+    Providers(Result<Vec<(ProviderId, String)>, String>),
+    Models(Result<Vec<ModelInfo>, String>),
+}
+
+/// Everything a thread needs to answer a `ListRequest`.
+pub struct ListJob {
+    pub request: ListRequest,
+    registry: Arc<Registry>,
+    binary: PathBuf,
+    sandbox: Sandbox,
+}
+
+impl ListJob {
+    pub fn run(self) -> (ListRequest, ListResult) {
+        let result = match (&self.request, self.registry.get(self.harness())) {
+            (ListRequest::Providers(_), Some(h)) => ListResult::Providers(
+                h.list_providers(&self.binary, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
+            (ListRequest::Models(_, p), Some(h)) => ListResult::Models(
+                h.list_models(&self.binary, p, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
+            (ListRequest::Providers(_), None) => {
+                ListResult::Providers(Err("not a registered harness".into()))
+            }
+            (ListRequest::Models(..), None) => {
+                ListResult::Models(Err("not a registered harness".into()))
+            }
+        };
+        (self.request, result)
+    }
+
+    fn harness(&self) -> HarnessId {
+        match &self.request {
+            ListRequest::Providers(h) | ListRequest::Models(h, _) => *h,
+        }
+    }
 }
 
 /// The `!` command at work; its output goes to the last running
@@ -222,10 +273,24 @@ pub struct App {
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
+    /// The provider of each harness: the user's choice, else a guess at
+    /// the harness's own default, corrected by what its session reports.
     pub providers: HashMap<HarnessId, ProviderId>,
+    /// Harnesses whose provider the user chose; only those are told it.
+    pub chosen_providers: HashSet<HarnessId>,
+    /// The provider a session runs on when it is not the chosen one.
+    running_providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
+    provider_cache: HashMap<HarnessId, Vec<(ProviderId, String)>>,
+    /// Lists being fetched, and the ones still to hand to a thread.
+    lists_pending: HashSet<ListRequest>,
+    /// Lists that failed since they were last asked for by the user.
+    lists_failed: HashSet<ListRequest>,
+    list_jobs: Vec<ListJob>,
+    /// The picker the user asked for, opened when its list arrives.
+    open_when_listed: Option<ListRequest>,
 
     pub transcript: Transcript,
     pub bridge_max_chars: usize,
@@ -364,6 +429,9 @@ pub struct AppInit {
     pub checkpoint_store: Option<PathBuf>,
     /// The user's allow rules, and where "allow always" adds to them.
     pub rules: Rules,
+    /// Each harness's guess at its own provider (`Harness::default_provider`),
+    /// which reads the user's vendor configuration; tests pass their own.
+    pub default_providers: HashMap<HarnessId, ProviderId>,
 }
 
 /// Transcript lines scrolled per wheel notch.
@@ -478,17 +546,17 @@ impl App {
         }
 
         let mut providers = HashMap::new();
+        let mut chosen_providers = HashSet::new();
         let mut models = HashMap::new();
         let mut efforts = HashMap::new();
         for h in registry.all() {
             let id = h.descriptor().id;
             let settings = config.harness(id.as_str());
-            let provider = settings
-                .and_then(|s| s.default_provider.clone())
-                .or_else(|| match h.descriptor().providers {
-                    ProviderSource::Static(list) => list.first().map(|(p, _)| p.to_string()),
-                    ProviderSource::Dynamic => None,
-                });
+            let chosen = settings.and_then(|s| s.default_provider.clone());
+            if chosen.is_some() {
+                chosen_providers.insert(id);
+            }
+            let provider = chosen.or_else(|| init.default_providers.get(&id).map(|p| p.0.clone()));
             if let Some(p) = provider.clone() {
                 providers.insert(id, ProviderId::new(p));
             }
@@ -504,6 +572,7 @@ impl App {
         }
         if let Some(p) = init.provider {
             providers.insert(init.harness, ProviderId::new(p));
+            chosen_providers.insert(init.harness);
         }
         if let Some(m) = init.model {
             let p = providers
@@ -582,9 +651,16 @@ impl App {
             session_sandbox_level: None,
             guard: None,
             providers,
+            chosen_providers,
+            running_providers: HashMap::new(),
             models,
             efforts,
             model_cache: HashMap::new(),
+            provider_cache: HashMap::new(),
+            lists_pending: HashSet::new(),
+            lists_failed: HashSet::new(),
+            list_jobs: Vec::new(),
+            open_when_listed: None,
             transcript,
             last_active_index,
             session_ids,
@@ -888,14 +964,31 @@ impl App {
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
         let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
-        match (sandbox, self.policy_warning()) {
-            (Some(s), Some(p)) => Some(format!("{s}; {p}")),
-            (s, p) => s.or(p),
-        }
+        let provider = self.running_providers.get(&self.active).map(|runs_on| {
+            format!(
+                "runs on {runs_on}, not the chosen {} (/provider)",
+                self.current_provider()
+                    .map(|p| p.as_str())
+                    .unwrap_or("provider")
+            )
+        });
+        let parts: Vec<String> = [sandbox, self.policy_warning(), provider]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("; "))
     }
 
     pub fn current_provider(&self) -> Option<&ProviderId> {
         self.providers.get(&self.active)
+    }
+
+    /// The provider to tell the active harness, if the user chose one.
+    pub fn chosen_provider(&self) -> Option<&ProviderId> {
+        self.chosen_providers
+            .contains(&self.active)
+            .then(|| self.current_provider())
+            .flatten()
     }
 
     pub fn current_model(&self) -> Option<&ModelRef> {
@@ -1049,6 +1142,10 @@ impl App {
         let text = text.trim().to_string();
         if text.is_empty() || self.is_generating {
             return;
+        }
+        // A picker the user asked for and moved on from stays shut.
+        if !text.starts_with('/') {
+            self.open_when_listed = None;
         }
         if self.shell.is_some() || !self.require_policy() {
             // Kept until the `!` command has ended, or a policy is chosen.
@@ -2084,10 +2181,33 @@ impl App {
                     self.transcript
                         .push_notice(format!("effort levels now: {}", levels.join(", ")));
                 }
+                // A guess at the harness's own default gives way to what
+                // it reports. A choice stays the user's, and is what the
+                // next session is told; the driver reported the mismatch
+                // and the status line keeps showing it.
+                if let Some(reported) = &update.provider {
+                    if self.chosen_providers.contains(&self.active) {
+                        if self.current_provider() == Some(reported) {
+                            self.running_providers.remove(&self.active);
+                        } else {
+                            self.running_providers.insert(self.active, reported.clone());
+                        }
+                    } else if self.current_provider() != Some(reported) {
+                        self.transcript.push_notice(format!(
+                            "{} runs on {reported}, chosen by its own configuration",
+                            self.short_name()
+                        ));
+                        self.providers.insert(self.active, reported.clone());
+                        if let Some(m) = self.models.get_mut(&self.active) {
+                            m.provider = reported.clone();
+                        }
+                    }
+                }
                 if let Some(models) = &update.models {
-                    let provider = self
-                        .current_provider()
-                        .map(|p| p.0.clone())
+                    let provider = models
+                        .first()
+                        .map(|m| m.model_ref.provider.0.clone())
+                        .or_else(|| self.current_provider().map(|p| p.0.clone()))
                         .unwrap_or_else(|| "default".into());
                     self.model_cache
                         .insert((self.active, provider), models.clone());
@@ -2145,6 +2265,8 @@ impl App {
     /// End the active harness's session.
     fn shutdown_session(&mut self) {
         self.drop_subagents();
+        // The next session reports where it runs.
+        self.running_providers.remove(&self.active);
         self.actions.push_back(Action::Shutdown);
     }
 
@@ -2350,13 +2472,42 @@ impl App {
         true
     }
 
+    /// Choose the active harness's provider. Where the provider is fixed
+    /// when the process starts, a live session is shut down and comes back
+    /// on the new one with the next prompt, resumed.
     pub fn set_provider(&mut self, provider: ProviderId) {
-        if self.current_provider() != Some(&provider) {
+        let changed = self.current_provider() != Some(&provider);
+        let restart = changed && self.session_alive && self.caps().provider_per_process;
+        if restart && self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before changing the provider");
+            return;
+        }
+        // They would end with the process.
+        if restart && !self.subagents.is_empty() {
+            self.transcript.push_error(format!(
+                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the provider",
+                self.subagents.len()
+            ));
+            return;
+        }
+        if changed {
+            self.running_providers.remove(&self.active);
             self.models.remove(&self.active);
         }
         self.providers.insert(self.active, provider.clone());
-        self.transcript
-            .push_system(format!("Provider: {provider} (pick a model with Ctrl+M)"));
+        self.chosen_providers.insert(self.active);
+        self.transcript.push_system(if restart {
+            format!(
+                "Provider: {provider} ({} restarts on it with the next prompt; pick a model with Ctrl+M)",
+                self.display_name()
+            )
+        } else {
+            format!("Provider: {provider} (pick a model with Ctrl+M)")
+        });
+        if restart {
+            self.shutdown_session();
+        }
     }
 
     pub fn set_model(&mut self, model: String) {
@@ -2491,12 +2642,14 @@ impl App {
             ));
             return;
         }
-        let Some(binary) = self.harness_binary() else {
-            self.transcript
-                .push_error(format!("{} binary not found", self.short_name()));
-            return;
-        };
-        let providers = match self.harness().list_providers(&binary) {
+        match self.provider_cache.get(&self.active).cloned() {
+            Some(providers) => self.show_provider_picker(Ok(providers)),
+            None => self.wait_for_list(ListRequest::Providers(self.active)),
+        }
+    }
+
+    fn show_provider_picker(&mut self, providers: Result<Vec<(ProviderId, String)>, String>) {
+        let providers = match providers {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
                 self.transcript
@@ -2518,20 +2671,143 @@ impl App {
         self.modal = Some(Modal::Provider(ListPicker::new(items).with_selected(idx)));
     }
 
-    fn models_for(&mut self, provider: &ProviderId) -> Result<Vec<ModelInfo>, String> {
-        let key = (self.active, provider.0.clone());
-        if let Some(m) = self.model_cache.get(&key) {
-            return Ok(m.clone());
+    /// The models of `provider` on the active harness if they are known;
+    /// otherwise they are asked for, once: after a failure only a picker
+    /// the user opens asks again.
+    fn cached_models(&mut self, provider: &ProviderId) -> Option<Vec<ModelInfo>> {
+        let request = ListRequest::Models(self.active, provider.clone());
+        let cached = self
+            .model_cache
+            .get(&(self.active, provider.0.clone()))
+            .cloned();
+        if cached.is_none() && !self.lists_failed.contains(&request) {
+            self.request_list(request);
         }
-        let binary = self
+        cached
+    }
+
+    /// Ask for `request` (once at a time) and open its picker when it comes.
+    fn wait_for_list(&mut self, request: ListRequest) {
+        let what = match &request {
+            ListRequest::Providers(_) => "providers".to_string(),
+            ListRequest::Models(_, p) => format!("models on {p}"),
+        };
+        self.lists_failed.remove(&request);
+        self.open_when_listed = Some(request.clone());
+        if self.request_list(request) {
+            self.transcript
+                .push_notice(format!("Asking {} for its {what}…", self.short_name()));
+        }
+    }
+
+    /// Queue `request` for a thread unless it is already under way.
+    /// Returns whether it was queued now.
+    fn request_list(&mut self, request: ListRequest) -> bool {
+        if self.lists_pending.contains(&request) {
+            return false;
+        }
+        let ready = self
             .harness_binary()
-            .ok_or_else(|| format!("{} binary not found", self.short_name()))?;
-        let models = self
-            .harness()
-            .list_models(&binary, provider)
-            .map_err(|e| e.to_string())?;
-        self.model_cache.insert(key, models.clone());
-        Ok(models)
+            .ok_or_else(|| format!("{} binary not found", self.short_name()))
+            .and_then(|binary| {
+                let sandbox = self.session_sandbox().map_err(|e| format!("{e:#}"))?;
+                Ok((binary, sandbox))
+            });
+        match ready {
+            Ok((binary, sandbox)) => {
+                self.lists_pending.insert(request.clone());
+                self.list_jobs.push(ListJob {
+                    request,
+                    registry: self.registry.clone(),
+                    binary,
+                    sandbox,
+                });
+                true
+            }
+            Err(why) => {
+                self.list_failed(request, why);
+                false
+            }
+        }
+    }
+
+    /// A list could not be had: noted, so that completion does not ask
+    /// again by itself, and shown if the user is waiting for it.
+    fn list_failed(&mut self, request: ListRequest, why: String) {
+        self.lists_failed.insert(request.clone());
+        if self.open_when_listed.as_ref() == Some(&request) {
+            self.open_when_listed = None;
+            self.transcript.push_error(match request {
+                ListRequest::Providers(_) => format!("list providers: {why}"),
+                ListRequest::Models(..) => format!("list models: {why}"),
+            });
+        }
+    }
+
+    /// Lists to fetch on threads of their own.
+    pub fn take_list_jobs(&mut self) -> Vec<ListJob> {
+        std::mem::take(&mut self.list_jobs)
+    }
+
+    /// A list has come back. It is kept unless it failed, and its picker
+    /// opens if the user is still waiting for it: on the same harness and
+    /// provider, with no other picker open and nothing being typed.
+    pub fn on_list(&mut self, request: ListRequest, result: ListResult) {
+        self.lists_pending.remove(&request);
+        match result {
+            ListResult::Providers(Err(why)) | ListResult::Models(Err(why)) => {
+                self.list_failed(request, why);
+            }
+            ListResult::Providers(Ok(providers)) => {
+                self.lists_failed.remove(&request);
+                let ListRequest::Providers(harness) = request else {
+                    return;
+                };
+                self.provider_cache.insert(harness, providers.clone());
+                if self.waiting_for(&request) {
+                    self.show_provider_picker(Ok(providers));
+                }
+            }
+            ListResult::Models(Ok(models)) => {
+                self.lists_failed.remove(&request);
+                let ListRequest::Models(harness, provider) = &request else {
+                    return;
+                };
+                self.model_cache
+                    .insert((*harness, provider.0.clone()), models.clone());
+                if self.completing_file.is_none() && self.input.starts_with("/model ") {
+                    self.update_suggestions();
+                }
+                if self.waiting_for(&request) {
+                    let provider = provider.clone();
+                    self.show_model_picker(&provider, Ok(models));
+                }
+            }
+        }
+    }
+
+    /// Whether the picker for `request`, which has just arrived, should
+    /// open now. Either way the user is no longer waiting for it.
+    fn waiting_for(&mut self, request: &ListRequest) -> bool {
+        if self.open_when_listed.as_ref() != Some(request) {
+            return false;
+        }
+        self.open_when_listed = None;
+        let still_there = match request {
+            ListRequest::Providers(h) => *h == self.active,
+            ListRequest::Models(h, p) => *h == self.active && self.current_provider() == Some(p),
+        };
+        if !still_there || self.modal.is_some() {
+            return false;
+        }
+        if !self.input.is_empty() {
+            self.transcript.push_notice(match request {
+                ListRequest::Providers(_) => "The providers are here: /provider".to_string(),
+                ListRequest::Models(_, p) => format!("The models on {p} are here: Ctrl+M"),
+            });
+            return false;
+        }
+        true
     }
 
     pub fn open_model_picker(&mut self) {
@@ -2544,7 +2820,18 @@ impl App {
             }
             return;
         };
-        match self.models_for(&provider) {
+        match self
+            .model_cache
+            .get(&(self.active, provider.0.clone()))
+            .cloned()
+        {
+            Some(models) => self.show_model_picker(&provider, Ok(models)),
+            None => self.wait_for_list(ListRequest::Models(self.active, provider)),
+        }
+    }
+
+    fn show_model_picker(&mut self, provider: &ProviderId, models: Result<Vec<ModelInfo>, String>) {
+        match models {
             Ok(models) if !models.is_empty() => {
                 let idx = self
                     .current_model()
@@ -3206,7 +3493,7 @@ impl App {
             }
             ("/model", Some(s)) => {
                 if let Some(p) = self.current_provider().cloned()
-                    && let Ok(models) = self.models_for(&p)
+                    && let Some(models) = self.cached_models(&p)
                 {
                     for m in models {
                         let id = m.model_ref.model.to_lowercase();
@@ -4017,6 +4304,12 @@ pub(crate) mod tests {
             effort: None,
             resume,
             harness_explicit,
+            default_providers: [
+                (HarnessId::CLAUDE, "anthropic".into()),
+                (HarnessId::CODEX, "openai".into()),
+                (HarnessId::AGY, "google".into()),
+            ]
+            .into(),
         })
     }
 
@@ -5454,6 +5747,218 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::CODEX);
         assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
         assert!(app.status_warning().is_none());
+    }
+
+    #[test]
+    fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        app.sandbox = SandboxSetup::null(None);
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        assert_eq!(app.chosen_provider(), None);
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("vertex".into()),
+            ..Default::default()
+        }));
+        assert_eq!(app.current_provider(), Some(&"vertex".into()));
+        assert_eq!(app.chosen_provider(), None);
+
+        // Not during a turn: the process is started on its provider.
+        app.set_provider("bedrock".into());
+        assert_eq!(app.current_provider(), Some(&"vertex".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+
+        app.set_provider("bedrock".into());
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.session_alive = false;
+        app.submit_prompt("again".into());
+        let actions = app.take_actions();
+        assert!(
+            matches!(&actions[0], Action::StartSession { resume: Some(id) } if id == "claude-1")
+        );
+    }
+
+    #[test]
+    fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        app.sandbox = SandboxSetup::null(None);
+        app.set_provider("bedrock".into());
+        app.session_alive = true;
+        // Claude's settings chose otherwise.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        }));
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert!(
+            app.status_warning()
+                .unwrap()
+                .contains("runs on anthropic, not the chosen bedrock")
+        );
+        // Once it runs where it was told, the warning goes.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("bedrock".into()),
+            ..Default::default()
+        }));
+        assert!(app.status_warning().is_none());
+
+        // Choosing it again changes nothing, and hides nothing.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        }));
+        app.set_provider("bedrock".into());
+        assert!(app.status_warning().is_some());
+
+        // Not while a subagent is at work: it would end with the process.
+        app.on_event(AgentEvent::SubagentStarted {
+            id: "t1".into(),
+            description: "look around".into(),
+            kind: None,
+        });
+        assert!(!app.subagents.is_empty());
+        app.set_provider("vertex".into());
+        assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+        assert!(app.take_actions().is_empty());
+    }
+
+    /// Claude with a binary that exists wherever the test runs; nothing
+    /// starts it.
+    fn app_with_a_claude_binary() -> App {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".into(),
+            crate::config::HarnessSettings {
+                binary: Some("/bin/sh".into()),
+                ..Default::default()
+            },
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        test_app_with(
+            tmp.keep(),
+            HarnessId::CLAUDE,
+            None,
+            false,
+            config,
+            test_registry(),
+        )
+    }
+
+    fn vertex_models() -> ListResult {
+        ListResult::Models(Ok(vec![ModelInfo {
+            model_ref: ModelRef::new(HarnessId::CLAUDE, "vertex", "haiku"),
+            display_name: "Haiku".into(),
+            description: None,
+            effort_levels: None,
+        }]))
+    }
+
+    #[test]
+    fn completion_asks_for_a_list_once() {
+        let mut app = app_with_a_claude_binary();
+        app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+        let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
+        app.input = "/model ha".into();
+        app.update_suggestions();
+        assert_eq!(app.take_list_jobs().len(), 1);
+        // A failure does not start it again by itself.
+        app.on_list(wanted.clone(), ListResult::Models(Err("timed out".into())));
+        app.update_suggestions();
+        assert!(app.take_list_jobs().is_empty());
+        // The picker does, and what comes is offered.
+        app.open_model_picker();
+        assert_eq!(app.take_list_jobs().len(), 1);
+        app.on_list(wanted, vertex_models());
+        assert!(app.suggestions.iter().any(|s| s.0 == "/model haiku"));
+
+        // Nor when the list cannot even be asked for (it was a stack
+        // overflow: the failure re-ran completion, which asked again).
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.sandbox = SandboxSetup {
+            explicit: Some(SandboxLevel::ReadOnly),
+            backend: Err("no kernel".into()),
+        };
+        assert!(app.session_sandbox().is_err());
+        app.input = "/model x".into();
+        app.update_suggestions();
+        app.update_suggestions();
+        assert!(app.take_list_jobs().is_empty());
+    }
+
+    #[test]
+    fn a_list_the_user_moved_on_from_does_not_open() {
+        let mut app = app_with_a_claude_binary();
+        app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+        let vertex = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
+        app.open_model_picker();
+        app.set_provider("bedrock".into());
+        app.modal = None;
+        app.on_list(vertex.clone(), vertex_models());
+        assert!(app.modal.is_none());
+
+        // Nor over a prompt being typed: it is offered instead.
+        app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+        app.model_cache.clear();
+        app.open_model_picker();
+        app.input = "half a prompt".into();
+        app.on_list(vertex, vertex_models());
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn model_lists_arrive_without_holding_the_screen() {
+        let mut app = app_with_a_claude_binary();
+        app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+        let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
+        app.open_model_picker();
+        assert!(app.modal.is_none());
+        // Asked once, however often the user presses Ctrl+M meanwhile.
+        app.open_model_picker();
+        let jobs = app.take_list_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].request, wanted);
+
+        // A failure is shown and not kept: the next Ctrl+M asks again.
+        app.on_list(wanted.clone(), ListResult::Models(Err("timed out".into())));
+        assert!(app.modal.is_none());
+        app.open_model_picker();
+        assert_eq!(app.take_list_jobs().len(), 1);
+
+        let model = ModelInfo {
+            model_ref: ModelRef::new(HarnessId::CLAUDE, "vertex", "haiku"),
+            display_name: "Haiku".into(),
+            description: None,
+            effort_levels: None,
+        };
+        app.on_list(wanted.clone(), ListResult::Models(Ok(vec![model.clone()])));
+        assert!(matches!(app.modal, Some(Modal::Model(_))));
+        app.modal = None;
+        app.open_model_picker();
+        assert!(matches!(app.modal, Some(Modal::Model(_))));
+        assert!(app.take_list_jobs().is_empty());
+
+        // One that comes after the user moved on is kept, not opened.
+        app.modal = None;
+        app.open_provider_picker();
+        let providers = ListRequest::Providers(HarnessId::CLAUDE);
+        assert_eq!(app.take_list_jobs()[0].request, providers);
+        app.switch_harness(HarnessId::CODEX);
+        app.on_list(
+            providers,
+            ListResult::Providers(Ok(vec![("anthropic".into(), "Anthropic".into())])),
+        );
+        assert!(!matches!(app.modal, Some(Modal::Provider(_))));
     }
 
     #[test]

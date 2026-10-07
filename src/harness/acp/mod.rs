@@ -18,7 +18,7 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     probe_version, resolve_binary, which,
 };
-use crate::core::sandbox::SandboxPaths;
+use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, ProviderId,
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
@@ -163,6 +163,7 @@ impl Harness for AcpHarness {
             resume_by_id: true,
             live_model_list: true,
             multi_provider: false,
+            provider_per_process: false,
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -204,7 +205,12 @@ impl Harness for AcpHarness {
 
     /// Models are a property of a live session (`configOptions`); the TUI
     /// receives them through `CapabilitiesChanged`.
-    fn list_models(&self, _binary: &Path, _provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        _binary: &Path,
+        _provider: &ProviderId,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         Ok(Vec::new())
     }
 

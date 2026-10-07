@@ -32,6 +32,7 @@ deny_read = ["~/Documents"]      # more paths no harness may read
 
 [harnesses.claude]
 # binary = "/path/to/claude"
+# default_provider = "bedrock"   # anthropic | bedrock | vertex | foundry (see Providers)
 default_model  = "opus"
 default_effort = "high"
 default_policy = "accept-edits"
@@ -74,6 +75,51 @@ headers = { Authorization = "Bearer …" }
 | `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental) |
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[mcp_servers.<name>]` | | See [MCP servers](mcp.md) |
+
+## Providers
+
+A harness uses the provider its own configuration chooses unless one is
+chosen with `--provider`, `default_provider` or `/provider`. Only a chosen
+one is passed on, and it overrides the harness's own choice: a
+`default_provider = "anthropic"` for Claude takes any `CLAUDE_CODE_USE_*`
+out of its environment, so a shell that exports one for Bedrock no longer
+decides. Without a choice the TUI shows the provider each session
+reports. When a session runs on another provider than the chosen one,
+the status line says so until another one is chosen or a session runs
+on the chosen one.
+
+| Harness | Providers | How unharness passes one |
+|---|---|---|
+| Claude Code | `anthropic`, `bedrock` (Amazon Bedrock), `vertex` (Google Vertex AI), `foundry` (Microsoft Foundry) | Sets `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY` and removes the others from Claude's environment |
+| Codex | `openai`, `ollama`, `lmstudio`, `amazon-bedrock`, and each `[model_providers.<id>]` of Codex's own `config.toml` | `-c model_provider="<id>"`, and `modelProvider` when a thread is resumed or forked |
+| pi | whatever `pi --list-models` reports | `--provider` |
+
+Credentials, region and project stay Claude Code's own (`AWS_REGION`,
+`AWS_PROFILE`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
+`ANTHROPIC_FOUNDRY_RESOURCE`, ...), from the environment or the `env` of
+Claude's settings. Two things to know:
+
+- When the `env` of Claude's settings sets a `CLAUDE_CODE_USE_*` variable,
+  that decides: Claude ignores the choice (it falls back to Anthropic's
+  API when two are set), and unharness reports the provider the session
+  runs on as an error.
+- The provider is fixed when Claude or Codex starts, so changing it in
+  the TUI restarts the session (resumed) with the next prompt. It is
+  refused while a turn or a subagent is at work.
+
+The model list is Claude's own for that provider, asked of a short-lived
+Claude in the sandbox a session would get (its settings can name
+commands it runs at startup, such as `apiKeyHelper`). Bedrock without
+credentials took a minute to answer; after 15 s unharness gives up and
+`/model <name>` still sets one. The TUI asks in the background and opens
+the picker when the list arrives, unless you have moved on (another
+provider or picker, a prompt being typed or sent); a list that failed is
+asked for again only when you open the picker.
+
+Codex lists models for `openai` only: its `model/list` is OpenAI's
+catalog whichever provider is in use. On another provider choose the
+model by name (`--model`, `/model <name>`); without one Codex picks its
+default OpenAI model there too.
 
 ## Files unharness keeps
 

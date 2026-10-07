@@ -91,9 +91,13 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   bare `tokio::process::Command::spawn` in a transport.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the
   session's `Sandbox` and `runner.rs` wraps the print command with it; probes
-  (`--version`, auth, model lists) and unharness's own `git` stay outside;
-  `doctor`'s MCP handshake does not, since what a server command runs may
-  be a file in the workspace.
+  (`--version`, auth) and unharness's own `git` stay outside. A model or
+  provider list that starts the CLI with its own configuration goes
+  through `core::process::ProbeProcess` in the session's sandbox (Claude,
+  Codex), since that configuration is writable from a session and can
+  name commands; pi's and agy's lists do not yet. `doctor`'s MCP
+  handshake runs inside too, since what a server command runs may be a
+  file in the workspace.
   The paths a vendor CLI writes are declared in `src/harness/<name>/`
   (`sandbox_paths`), found by tracing the CLI (`strace -f -e trace=file -e
   status=failed` shows what a confined run was denied), not guessed. Where
@@ -476,6 +480,53 @@ recorded ones. For anything else:
   subagent counts only when it ends after its parent (the only case
   recorded). A subagent whose end never comes holds the run until
   `Ctrl+C`. Not persisted as a conversation.
+- Claude's models (2.1.292) are the `models` of its answer to
+  `initialize` (`value`, `displayName`, `description`,
+  `supportedEffortLevels`, the first being `default`, which `--model`
+  takes); there is no command that prints them. A session reports them
+  as `CapabilitiesChanged`; `list_models` starts Claude with
+  `--safe-mode --setting-sources user` in an empty directory, so that no
+  hook, plugin, MCP server or workspace setting runs (`--safe-mode` keeps
+  the user settings' `env`), and falls back to a table when no answer
+  comes within 15 s (Anthropic only). `--safe-mode` still runs the
+  settings' `apiKeyHelper` (checked), which a sandboxed session can write
+  into `~/.claude/settings.json`, so the probe runs in the session's
+  sandbox; a probe does not seed the relocated config (`prepare` does,
+  with its notice).
+- Claude providers (2.1.292, read in the binary and run): Claude picks its
+  API from `CLAUDE_CODE_USE_BEDROCK`, `_FOUNDRY`, `_ANTHROPIC_AWS`,
+  `_ANTHROPIC_GOOGLE_CLOUD`, `_MANTLE`, `_VERTEX` (`1`, `true`, `yes`,
+  `on` in any case), and with two of them defined, whatever their values
+  and whether in the environment or its settings' `env`, it calls
+  Anthropic's; so a chosen provider sets its switch and removes the rest.
+  unharness offers the documented three. The answer to `initialize`
+  names the provider in effect (`account.apiProvider`: `firstParty`,
+  `bedrock`, `vertex`, `foundry`), which the driver checks against the
+  choice; a switch in the settings' `env` cannot be overridden. Without
+  credentials Vertex and Foundry listed their models at once, Bedrock
+  after 60 s, and a Vertex turn failed after two `api_retry` with
+  `cloud_credential_error` (`fixtures/provider_vertex.jsonl`).
+  Unverified: a turn on any of them with credentials, `_MANTLE` beside
+  `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
+  `CLAUDE_CODE_USE_GATEWAY` (left alone).
+- Codex providers (0.157.0): the built-in `openai`, `ollama`, `lmstudio`
+  and `amazon-bedrock` cannot be redefined ("reserved built-in provider
+  IDs"; Bedrock takes only a few fields), an unknown `model_provider`
+  stops Codex at startup, and `config/read` lists the configured
+  `model_providers` (with `name`) and the `model_provider` in effect.
+  `-c model_provider="<id>"` chooses one on app-server and exec, and
+  `modelProvider` goes on `thread/resume` and `thread/fork` (schema; a
+  thread keeps its own provider otherwise);
+  `thread/start` and `thread/resume` answer with `modelProvider`, which
+  the driver reports and checks against the choice. `model/list` gave
+  OpenAI's catalog under every provider tried, so only `openai` lists
+  models; with no model chosen Codex took `gpt-6-astra` on `ollama` too.
+  Checked live: a turn through a custom `[model_providers]` entry
+  (`wire_api = "responses"`, a llama.cpp server) on app-server and exec.
+  Codex retried an unreachable Ollama without end. Unverified: what a
+  resumed thread does with a `modelProvider` other than its own,
+  `amazon-bedrock`, `lmstudio`, a provider defined only in a project's
+  `.codex/config.toml` (`config/read` is asked without a `cwd`).
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

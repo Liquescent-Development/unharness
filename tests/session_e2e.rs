@@ -58,6 +58,7 @@ impl Fake {
             binary: fake_harness(),
             cwd: self._tmp.path().to_path_buf(),
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
+            provider: None,
             effort: None,
             policy,
             resume: None,
@@ -197,6 +198,35 @@ async fn claude_basic_turn_streams_tool_and_text() {
         matches!(ev, AgentEvent::ProcessExited { code: Some(0) }),
         "{ev:?}"
     );
+}
+
+/// A chosen provider reaches Claude as its switch, and a session that runs
+/// on another one (here the settings chose Vertex) says so.
+#[tokio::test]
+async fn claude_reports_running_on_another_provider() {
+    if !python_available() {
+        eprintln!("python3 not available; skipping");
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/provider_vertex.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    for (chosen, error) in [("bedrock", true), ("vertex", false)] {
+        let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+        cfg.provider = Some(chosen.into());
+        let mut handle = harness.start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("hi")).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::CapabilitiesChanged(u) if u.provider == Some("vertex".into())
+        )));
+        let reported = events.iter().any(|e| {
+            matches!(e, AgentEvent::Error(m) if m.contains(&format!("runs on vertex, not {chosen}")))
+        });
+        assert_eq!(reported, error, "{chosen}: {events:?}");
+        handle.send(SessionCommand::Shutdown).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -526,6 +556,40 @@ async fn codex_app_server_handshake_turns_and_approval() {
         next_event(&mut handle).await,
         AgentEvent::ProcessExited { .. }
     ));
+}
+
+/// A thread says which provider it runs on; a chosen one goes on the
+/// command line, and a thread on another says so.
+#[tokio::test]
+async fn codex_app_server_reports_its_provider() {
+    if !python_available() {
+        return;
+    }
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_two_turns.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    for (chosen, error) in [
+        (Some("llama"), true),
+        (Some("openai"), false),
+        (None, false),
+    ] {
+        let fake = Fake::new();
+        let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+        cfg.provider = chosen.map(Into::into);
+        let mut handle = harness.start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("pong?")).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::CapabilitiesChanged(u) if u.provider == Some("openai".into())
+        )));
+        let reported = events.iter().any(
+            |e| matches!(e, AgentEvent::Error(m) if m.starts_with("Codex runs on openai, not llama")),
+        );
+        assert_eq!(reported, error, "{chosen:?}: {events:?}");
+        handle.send(SessionCommand::Shutdown).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1300,6 +1364,8 @@ async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.resume = Some("01a103e9-859f-7680-ac4c-56b3e6512414".into());
     cfg.fork = true;
+    // A chosen provider goes with the branch, as with a resumed thread.
+    cfg.provider = Some("openai".into());
     let mut handle = harness.start_session(cfg).unwrap();
 
     handle.send(SessionCommand::turn("which?")).await.unwrap();
@@ -1314,6 +1380,8 @@ async fn codex_fork_branches_the_thread_instead_of_resuming_it() {
         sent[2]["params"]["threadId"],
         "01a103e9-859f-7680-ac4c-56b3e6512414"
     );
+    assert_eq!(sent[2]["params"]["modelProvider"], "openai");
+    assert_eq!(sent[2]["params"]["excludeTurns"], true);
     let turn = sent.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
         turn["params"]["threadId"]
@@ -1401,6 +1469,7 @@ impl Confined {
             binary: fake_harness(),
             cwd: self.root.join("ws"),
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
+            provider: None,
             effort: None,
             policy: PermissionPolicy::AcceptEdits,
             resume: None,

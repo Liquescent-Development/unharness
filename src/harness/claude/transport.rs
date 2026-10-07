@@ -18,8 +18,8 @@ use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision, PermissionKind,
-    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason,
+    PermissionPolicy, ProcessModel, ProviderId, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo, StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -252,6 +252,14 @@ pub fn control_response(request_id: &str, response: Value) -> String {
     .to_string()
 }
 
+/// A parent Claude Code session's identity, never inherited.
+pub const PARENT_SESSION_VARS: [&str; 4] = [
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+];
+
 /// `mcp_config` is the file written by [`mcp_config_file`], if any.
 pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
@@ -263,14 +271,16 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    // Never inherit a parent Claude Code session's identity.
-    for var in [
-        "CLAUDECODE",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION",
-    ] {
+    for var in PARENT_SESSION_VARS {
         cmd.env_remove(var);
+    }
+    if let Some(provider) = &cfg.provider {
+        for (key, value) in super::provider_env(provider)? {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
     }
 
     let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
@@ -279,14 +289,16 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
         process_model: ProcessModel::LongLived,
     });
 
-    tokio::spawn(drive(proc, events_tx, cmd_rx));
+    tokio::spawn(drive(proc, events_tx, cmd_rx, cfg.provider));
     Ok(handle)
 }
 
+/// `provider` is the one the user chose, if any.
 async fn drive(
     mut proc: LineProcess,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
+    provider: Option<ProviderId>,
 ) {
     let mut parser = ClaudeParser::new();
     let mut pending: HashMap<String, PendingPermission> = HashMap::new();
@@ -392,6 +404,13 @@ async fn drive(
                                     if rid.is_some() && rid == awaiting_init.as_deref() {
                                         awaiting_init = None;
                                     }
+                                    // Only the answer to `initialize` names the account.
+                                    if let Some(why) = v
+                                        .pointer("/response/response")
+                                        .and_then(|answer| super::provider_mismatch(provider.as_ref(), answer))
+                                    {
+                                        let _ = events.send(AgentEvent::Error(why)).await;
+                                    }
                                 }
                                 Some("control_cancel_request") => {
                                     if let Some(rid) = v.get("request_id").and_then(Value::as_str) {
@@ -454,6 +473,7 @@ mod tests {
             binary: PathBuf::from("claude"),
             cwd: PathBuf::from("/tmp"),
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "opus")),
+            provider: None,
             effort: Some("high".into()),
             policy,
             resume: None,

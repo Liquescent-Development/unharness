@@ -14,7 +14,7 @@ use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, ModelRef, PermissionDecision, PermissionKind,
+    AgentEvent, Attachment, CapsUpdate, HarnessId, ModelRef, PermissionDecision, PermissionKind,
     PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
     StopReason,
 };
@@ -124,6 +124,9 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
         // Without this the server probes bubblewrap at startup and warns
         // that it cannot create user namespaces.
         cmd.args(["-c", "sandbox_mode=\"danger-full-access\""]);
+    }
+    if let Some(p) = &cfg.provider {
+        cmd.arg("-c").arg(super::provider_override(p));
     }
     let mcp = super::mcp_args(&cfg.mcp_servers);
     for o in &mcp.overrides {
@@ -366,11 +369,18 @@ async fn drive(
                                         let r = match &cfg.resume {
                                             // A fork answers like a start: with the new thread.
                                             Some(id) => {
-                                                // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                // A thread keeps the provider it was started on
+                                                // unless told otherwise, and so does a fork of it.
+                                                let mut params = json!({"threadId": id});
+                                                if let Some(p) = &cfg.provider {
+                                                    params["modelProvider"] = json!(p.as_str());
+                                                }
                                                 if cfg.fork {
-                                                    d.request("thread/fork", json!({"threadId": id, "excludeTurns": true}), Outstanding::ThreadStart).await
+                                                    // (`excludeTurns`: codex deprecates returning the whole history here.)
+                                                    params["excludeTurns"] = json!(true);
+                                                    d.request("thread/fork", params, Outstanding::ThreadStart).await
                                                 } else {
-                                                    d.request("thread/resume", json!({"threadId": id}), Outstanding::ThreadStart).await
+                                                    d.request("thread/resume", params, Outstanding::ThreadStart).await
                                                 }
                                             }
                                             None => {
@@ -401,6 +411,15 @@ async fn drive(
                                                 .and_then(|r| r.pointer("/thread/id").or_else(|| r.get("threadId")))
                                                 .and_then(Value::as_str)
                                                 .map(str::to_string);
+                                            if let Some(reported) = result.as_ref().and_then(|r| r.get("modelProvider")).and_then(Value::as_str) {
+                                                if let Some(why) = super::provider_mismatch(cfg.provider.as_ref(), reported) {
+                                                    let _ = events.send(AgentEvent::Error(why)).await;
+                                                }
+                                                let _ = events.send(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                                                    provider: Some(reported.into()),
+                                                    ..Default::default()
+                                                })).await;
+                                            }
                                             if let Some((t, a)) = d.queued_turn.take()
                                                 && let Err(e) = d.start_turn(t, a).await
                                             {

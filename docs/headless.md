@@ -88,7 +88,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `subagent_progress` | `id`, `activity` |
 | `subagent_ended` | `id`, `status`: `completed`, `failed` or `cancelled`, `result` (its report; may come in a second `subagent_ended`) |
 | `sub` | `parent`: the subagent's `id`; `event`: an event of that subagent, in this same format |
-| `capabilities_changed` | any of `effort_levels`, `image_input`, `resume_by_id`, `mcp_http`, `plan_mode`, `models`: [{`id`, `provider`, `name`, `description`, `effort_levels`}] |
+| `capabilities_changed` | any of `effort_levels`, `image_input`, `resume_by_id`, `mcp_http`, `plan_mode`, `models`: [{`id`, `provider`, `name`, `description`, `effort_levels`}], `provider` (the one the session runs on) |
 | `rewind_failed` | `reason` |
 | `turn_completed` | `status`: `done`, `interrupted` or `error`; `error` |
 | `notice` | `message` |

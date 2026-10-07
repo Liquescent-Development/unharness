@@ -156,6 +156,11 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
 
     let initial_prompt = launch.initial_prompt.clone();
+    let default_providers = launch
+        .registry
+        .all()
+        .filter_map(|h| Some((h.descriptor().id, h.default_provider()?)))
+        .collect();
     let mut app = App::new(AppInit {
         cwd: launch.cwd,
         workspace_root: launch.workspace_root,
@@ -171,9 +176,12 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         harness_explicit: launch.harness_explicit,
         checkpoint_store: None,
         rules: launch.rules,
+        default_providers,
     });
 
     let res = event_loop(&mut terminal, &mut app, initial_prompt, herdr.as_mut()).await;
+    // A list still being asked for is not waited for.
+    crate::core::process::ProbeProcess::kill_all();
     if let Some(h) = herdr {
         h.release().await;
     }
@@ -201,6 +209,8 @@ async fn event_loop(
     let mut needs_redraw = true;
     // File lists for `@` completion, walked off this task.
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Provider and model lists, which may start the harness's CLI.
+    let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
 
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
@@ -264,6 +274,10 @@ async fn event_loop(
                     handle_event(app, event);
                 }
             }
+            Some((request, result)) = lists_rx.recv() => {
+                app.on_list(request, result);
+                needs_redraw = true;
+            }
             Some(paths) = files_rx.recv() => {
                 match paths {
                     Some(paths) => app.set_file_index(paths),
@@ -271,6 +285,14 @@ async fn event_loop(
                 }
                 needs_redraw = true;
             }
+        }
+
+        for job in app.take_list_jobs() {
+            let tx = lists_tx.clone();
+            // As for the file walk: quitting does not wait for it.
+            std::thread::spawn(move || {
+                let _ = tx.send(job.run());
+            });
         }
 
         if let Some(root) = app.take_file_index_request() {
@@ -664,6 +686,7 @@ fn start_session(
         binary,
         cwd: app.cwd.clone(),
         model: app.current_model().cloned(),
+        provider: app.chosen_provider().cloned(),
         effort: app.current_effort().map(str::to_string),
         policy: app
             .effective_policy()

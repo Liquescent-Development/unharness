@@ -16,7 +16,7 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
-use crate::core::sandbox::SandboxPaths;
+use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
     RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
@@ -110,6 +110,7 @@ impl Harness for AgyHarness {
             resume_by_id: true,
             live_model_list: true,
             multi_provider: false,
+            provider_per_process: false,
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -146,7 +147,12 @@ impl Harness for AgyHarness {
         Some(auth_status().authenticated)
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>> {
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>> {
         if provider.as_str() != "google" {
             return Ok(Vec::new());
         }
@@ -319,6 +325,7 @@ mod tests {
             prompt: Some("fix it".into()),
             print_mode: true,
             model: Some(ModelRef::new(HarnessId::AGY, "google", "gemini-x")),
+            provider: None,
             effort: Some("low".into()),
             policy: Some(PermissionPolicy::Bypass),
             format: Some("stream-json".into()),

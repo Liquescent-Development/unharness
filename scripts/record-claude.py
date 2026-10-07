@@ -68,7 +68,9 @@ def main() -> int:
         "--model", args.model,
     ] + (args.extra.split() if args.extra else [])
 
-    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
+    # Not a parent session's identity; the provider switches stay.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("CLAUDE") or k.startswith("CLAUDE_CODE_USE_")}
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, env=env, text=True, bufsize=1)
     out = open(args.out, "w")

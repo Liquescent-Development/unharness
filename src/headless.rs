@@ -659,6 +659,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(p) = u.plan_mode {
         v["plan_mode"] = json!(p);
     }
+    if let Some(p) = &u.provider {
+        v["provider"] = json!(p.0);
+    }
     if let Some(models) = &u.models {
         v["models"] = models
             .iter()

@@ -20,7 +20,7 @@ use crate::core::{
     HarnessId, McpServer, ModelRef, PermissionPolicy, PolicyResolution, PolicySupport, ProviderId,
     SessionConfig, resolve_policy,
 };
-use crate::harness::{Harness, PrintConfig, ProviderSource};
+use crate::harness::{Harness, PrintConfig};
 use crate::headless::{self, Headless, RunInfo};
 use crate::sync::{find_workspace_root, sync_workspace_rules};
 use crate::tui::{self, TuiLaunch};
@@ -190,14 +190,16 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
     {
         bail!("sandbox '{level}' was requested but is unavailable: {why}");
     }
-    let provider = args
+    // What the user chose goes to the harness; without a choice it uses
+    // its own configuration, and the guess at it only names a model's
+    // provider.
+    let chosen_provider = args
         .provider
         .clone()
-        .or_else(|| settings.and_then(|s| s.default_provider.clone()))
-        .or_else(|| match harness.descriptor().providers {
-            ProviderSource::Static(list) => list.first().map(|(p, _)| p.to_string()),
-            ProviderSource::Dynamic => None,
-        });
+        .or_else(|| settings.and_then(|s| s.default_provider.clone()));
+    let provider = chosen_provider
+        .clone()
+        .or_else(|| harness.default_provider().map(|p| p.0));
     let model = args
         .model
         .clone()
@@ -272,6 +274,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
             binary,
             cwd: cwd.to_path_buf(),
             model: model_ref,
+            provider: chosen_provider.clone().map(ProviderId::new),
             effort,
             policy: res.effective,
             resume: print_resume,
@@ -301,6 +304,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
             prompt,
             print_mode: args.print,
             model: model_ref,
+            provider: chosen_provider.map(ProviderId::new),
             effort,
             policy: Some(res.effective),
             format: args.format.clone(),
@@ -357,7 +361,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         harness: id,
         policy: explicit_policy(&args)?,
         sandbox: sandbox_setup,
-        provider,
+        provider: chosen_provider,
         model,
         effort,
         resume,

@@ -8,9 +8,67 @@ use std::collections::{HashMap, HashSet};
 use serde_json::Value;
 
 use crate::core::{
-    AgentEvent, ContextUsage, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question,
-    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessId, ModelInfo, ModelRef, PermissionKind,
+    PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo,
+    RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
+
+/// unharness's id for the API Claude calls, from Claude's own name for it
+/// (`account.apiProvider` in the answer to `initialize`).
+pub fn provider_id(api_provider: &str) -> ProviderId {
+    ProviderId::from(match api_provider {
+        "firstParty" => "anthropic",
+        other => other,
+    })
+}
+
+/// The models the answer to `initialize` offers, under the provider it
+/// names. They differ by provider: Bedrock's are `us.anthropic.…` ids,
+/// Vertex's carry an `@` date (2.1.292, without credentials for either).
+/// `default` is one of them, and `--model default` takes it. `None` for an
+/// empty list, as some older recordings carry.
+pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
+    let models = answer.get("models")?.as_array()?;
+    if models.is_empty() {
+        return None;
+    }
+    let provider = provider_id(
+        answer
+            .pointer("/account/apiProvider")
+            .and_then(Value::as_str)
+            .unwrap_or("firstParty"),
+    );
+    Some(
+        models
+            .iter()
+            .filter_map(|m| {
+                let id = m.get("value")?.as_str()?;
+                let name = m.get("displayName").and_then(Value::as_str).unwrap_or(id);
+                // On Anthropic's API the description leaves the name out.
+                let description = match m.get("description").and_then(Value::as_str) {
+                    Some(d) if d.starts_with(name) => d.to_string(),
+                    Some(d) => format!("{name} · {d}"),
+                    None => name.to_string(),
+                };
+                let efforts = m
+                    .get("supportedEffortLevels")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    });
+                Some(ModelInfo {
+                    model_ref: ModelRef::new(HarnessId::CLAUDE, provider.clone(), id),
+                    display_name: name.to_string(),
+                    description: Some(description),
+                    effort_levels: efforts,
+                })
+            })
+            .collect(),
+    )
+}
 
 /// What one of Claude Code's tools does, for allow rules. Also used for
 /// agents that pass Claude's tool calls on under their own names (ACP).
@@ -158,6 +216,19 @@ impl ClaudeParser {
                 // The answer to `rewind_conversation` is a "success" either
                 // way; `rewound` says whether it happened.
                 let answer = val.pointer("/response/response");
+                if let Some(answer) = answer {
+                    let update = CapsUpdate {
+                        models: initialize_models(answer),
+                        provider: answer
+                            .pointer("/account/apiProvider")
+                            .and_then(Value::as_str)
+                            .map(provider_id),
+                        ..Default::default()
+                    };
+                    if update != CapsUpdate::default() {
+                        out.push(AgentEvent::CapabilitiesChanged(update));
+                    }
+                }
                 if answer
                     .and_then(|a| a.get("rewound"))
                     .and_then(Value::as_bool)
@@ -781,6 +852,13 @@ mod tests {
         fixture("permission_and_question");
     }
 
+    /// Vertex without Google credentials (2.1.292): its own models, then
+    /// retries and a failed turn.
+    #[test]
+    fn fixture_provider_vertex() {
+        fixture("provider_vertex");
+    }
+
     #[test]
     fn fixture_ask_previews() {
         fixture("ask_previews");
@@ -944,6 +1022,27 @@ mod tests {
             }]
         );
         assert!(p.feed(r#"{"type":"control_response","response":{"subtype":"success","request_id":"r","response":{"rewound":true}}}"#).is_empty());
+    }
+
+    #[test]
+    fn initialize_lists_the_models_of_its_provider() {
+        let answer = serde_json::json!({
+            "account": {"apiProvider": "vertex"},
+            "models": [
+                {"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default", "supportedEffortLevels": ["low", "high"]},
+                {"value": "haiku", "resolvedModel": "claude-haiku-4-5@20251001", "displayName": "Haiku", "description": "Fastest"},
+            ],
+        });
+        let models = initialize_models(&answer).unwrap();
+        assert_eq!(models[0].model_ref.to_string(), "claude:vertex/default");
+        assert_eq!(
+            models[0].effort_levels,
+            Some(vec!["low".into(), "high".into()])
+        );
+        assert_eq!(models[1].description.as_deref(), Some("Haiku · Fastest"));
+        assert_eq!(models[1].effort_levels, None);
+        assert_eq!(provider_id("firstParty").as_str(), "anthropic");
+        assert_eq!(initialize_models(&serde_json::json!({"models": []})), None);
     }
 
     #[test]

@@ -61,6 +61,8 @@ pub struct PrintConfig {
     /// `true` = one-shot print mode; `false` = hand the terminal to the vendor TUI.
     pub print_mode: bool,
     pub model: Option<ModelRef>,
+    /// As `SessionConfig::provider`.
+    pub provider: Option<ProviderId>,
     pub effort: Option<String>,
     pub policy: Option<PermissionPolicy>,
     pub format: Option<String>,
@@ -92,8 +94,14 @@ pub trait Harness: Send + Sync {
         None
     }
 
-    /// Providers this harness can route to. Default: the static descriptor list.
-    fn list_providers(&self, _binary: &Path) -> Result<Vec<(ProviderId, String)>> {
+    /// Providers this harness can route to. Default: the static descriptor
+    /// list. A harness that starts its CLI for it runs it in `sandbox`, the
+    /// one its session would get.
+    fn list_providers(
+        &self,
+        _binary: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
         match self.descriptor().providers {
             ProviderSource::Static(list) => Ok(list
                 .iter()
@@ -103,7 +111,22 @@ pub trait Harness: Send + Sync {
         }
     }
 
-    fn list_models(&self, binary: &Path, provider: &ProviderId) -> Result<Vec<ModelInfo>>;
+    /// The provider this harness uses when it is told none, as far as can
+    /// be told without starting it. Default: the first static provider.
+    fn default_provider(&self) -> Option<ProviderId> {
+        match self.descriptor().providers {
+            ProviderSource::Static(list) => list.first().map(|(id, _)| ProviderId::from(*id)),
+            ProviderSource::Dynamic => None,
+        }
+    }
+
+    /// The models of `provider`; a CLI started for it runs in `sandbox`.
+    fn list_models(
+        &self,
+        binary: &Path,
+        provider: &ProviderId,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<ModelInfo>>;
 
     /// Setup this harness needs before its first process of a run. A
     /// returned line is shown to the user.
