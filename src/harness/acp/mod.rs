@@ -183,8 +183,9 @@ impl Harness for AcpHarness {
             mcp: McpSupport::via(McpChannel::Protocol, false),
             plan_mode: false,
             // The spec's commands are run by a prompt that starts with
-            // `/name`, and listed by `available_commands_update`.
-            slash_commands: true,
+            // `/name`; an agent that lists some says so
+            // (`available_commands_update`), and codex-acp 2.1.1 listed none.
+            slash_commands: false,
         }
     }
 

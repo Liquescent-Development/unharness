@@ -306,8 +306,11 @@ impl AcpParser {
             // sent it three times, the first one empty).
             "available_commands_update" => {
                 if let Some(commands) = update.get("availableCommands").and_then(Value::as_array) {
+                    let commands: Vec<HarnessCommand> =
+                        commands.iter().filter_map(command).collect();
                     out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
-                        commands: Some(commands.iter().filter_map(command).collect()),
+                        slash_commands: Some(!commands.is_empty()),
+                        commands: Some(commands),
                         ..Default::default()
                     }));
                 }

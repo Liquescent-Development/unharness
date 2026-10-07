@@ -1,7 +1,7 @@
 CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=01a1099a-a498-70f0-936c-5856bfadcb7f model=gpt-6.1-sol
 CapabilitiesChanged efforts=low,medium,high,xhigh,max,ultra plan_mode=false models=8
-CapabilitiesChanged commands=64
+CapabilitiesChanged commands=64 slash_commands=true
 ToolCallStarted id=exec-cc77e935-5ba9-4d72-b0cb-63f9cab4ec4a name=exec_command input={"description":"Read file '/WORKSPACE/notes.txt'","path":...
 ToolCallResult id=exec-cc77e935-5ba9-4d72-b0cb-63f9cab4ec4a error=false "Meeting notes\\nThe password for the demo is HERON-17.\\n"
 Context used=16444 window=258400

@@ -1,8 +1,8 @@
 CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=adf55e45-4fa9-4e1f-90ef-dc51bdd04068 model=claude-fable-5-1[1m]
 CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
-CapabilitiesChanged commands=67
-CapabilitiesChanged commands=63
+CapabilitiesChanged commands=67 slash_commands=true
+CapabilitiesChanged commands=63 slash_commands=true
 Context used=25328 window=1000000
 Context used=25509 window=1000000
 Context used=25509 window=1000000

@@ -238,6 +238,9 @@ pub struct CapsUpdate {
     /// The commands of its own the live session takes as `/name` at the
     /// start of a prompt; each list replaces the one before.
     pub commands: Option<Vec<HarnessCommand>>,
+    /// Whether a prompt that starts with `/name` runs one
+    /// (`Capabilities::slash_commands`).
+    pub slash_commands: Option<bool>,
 }
 
 /// A command a harness runs when a prompt starts with `/name`: one of its
@@ -249,6 +252,8 @@ pub struct HarnessCommand {
     pub description: String,
     /// What it takes after its name, when the harness says.
     pub hint: Option<String>,
+    /// Other names it runs under, without the `/`.
+    pub aliases: Vec<String>,
 }
 
 impl HarnessCommand {
@@ -264,7 +269,14 @@ impl HarnessCommand {
             name: name.to_string(),
             description: description.unwrap_or_default().trim().to_string(),
             hint: hint.map(str::to_string),
+            aliases: Vec::new(),
         })
+    }
+
+    /// Whether `/name` runs this command.
+    pub fn answers_to(&self, name: &str) -> bool {
+        name.strip_prefix('/')
+            .is_some_and(|n| n == self.name || self.aliases.iter().any(|a| a == n))
     }
 }
 
@@ -301,6 +313,9 @@ impl CapsUpdate {
         }
         if newer.commands.is_some() {
             self.commands = newer.commands;
+        }
+        if newer.slash_commands.is_some() {
+            self.slash_commands = newer.slash_commands;
         }
     }
 }
@@ -604,6 +619,9 @@ impl AgentEvent {
                 }
                 if let Some(c) = &u.commands {
                     parts.push(format!("commands={}", c.len()));
+                }
+                if let Some(s) = u.slash_commands {
+                    parts.push(format!("slash_commands={s}"));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

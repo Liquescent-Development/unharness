@@ -1,9 +1,9 @@
 CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
 SessionStarted id=45b5d385-0db3-4387-bde9-12ee0da39b5e model=opus
 CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
-CapabilitiesChanged commands=72
-CapabilitiesChanged commands=73
-CapabilitiesChanged commands=69
+CapabilitiesChanged commands=72 slash_commands=true
+CapabilitiesChanged commands=73 slash_commands=true
+CapabilitiesChanged commands=69 slash_commands=true
 Context used=21899 window=1000000
 TextDelta "HELLO world"
 Context used=21899 window=1000000

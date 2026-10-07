@@ -681,13 +681,23 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(p) = u.plan_mode {
         v["plan_mode"] = json!(p);
     }
+    if let Some(s) = u.slash_commands {
+        v["slash_commands"] = json!(s);
+    }
     if let Some(p) = &u.provider {
         v["provider"] = json!(p.0);
     }
     if let Some(commands) = &u.commands {
         v["commands"] = commands
             .iter()
-            .map(|c| json!({"name": c.name, "description": c.description, "hint": c.hint}))
+            .map(|c| {
+                json!({
+                    "name": c.name,
+                    "description": c.description,
+                    "hint": c.hint,
+                    "aliases": c.aliases,
+                })
+            })
             .collect();
     }
     if let Some(models) = &u.models {
@@ -975,7 +985,7 @@ mod tests {
         assert_eq!(v["type"], "capabilities_changed");
         assert_eq!(
             v["commands"],
-            json!([{"name": "review", "description": "Review it", "hint": "[pr]"}])
+            json!([{"name": "review", "description": "Review it", "hint": "[pr]", "aliases": []}])
         );
     }
 

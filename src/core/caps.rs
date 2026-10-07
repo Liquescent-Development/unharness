@@ -259,6 +259,9 @@ impl Capabilities {
         if let Some(p) = update.plan_mode {
             self.plan_mode = p;
         }
+        if let Some(s) = update.slash_commands {
+            self.slash_commands = s;
+        }
     }
 
     pub fn supports_policy(&self, policy: PermissionPolicy) -> Option<&PolicySupport> {

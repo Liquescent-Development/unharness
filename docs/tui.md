@@ -129,9 +129,9 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 A `/command` unharness does not have goes to the agent as typed, where the
 agent runs commands of its own from a prompt: Claude Code (its built-ins,
 custom commands and skills), pi (extension commands, prompt templates and
-`/skill:<name>`) and ACP agents. The transcript says it was passed on.
-Codex and Antigravity run no commands from a prompt, so there such a
-command is an error.
+`/skill:<name>`) and an ACP agent once it has listed some. The transcript
+says it was passed on. Codex and Antigravity run no commands from a
+prompt, so there such a command is an error.
 
 Once the agent's session has started, the autocomplete list offers the
 commands it reports (Claude Code's, pi's and an ACP agent's), after
@@ -142,6 +142,14 @@ unharness's own commands come first: `/clear` clears unharness's
 transcript. `\/` sends the rest as typed: `\/clear` is Claude Code's
 `/clear`, and with `\/` the list offers the agent's commands of the same
 names. On Codex and Antigravity `\/` sends a prompt that starts with `/`.
+An agent's command that does what one of unharness's does (`\/clear`,
+Claude's `/new`, `\/model`) changes its session without unharness
+knowing, which the transcript warns about: the model shown, the
+transcript and what the next switch tells the agent may not match it.
+
+A `/` prompt queued during a turn is sent only to the harness it was
+typed for. After a switch it comes back to the prompt box, since there it
+could be a command where it was text, or the other way round.
 
 A command has to start the message the agent gets, so it goes alone: the
 context of a harness switch and the output of `!` commands it has not

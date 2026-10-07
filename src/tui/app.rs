@@ -156,6 +156,9 @@ pub struct RunningSubagent {
 pub struct QueuedPrompt {
     pub text: String,
     pub attachments: Vec<Attachment>,
+    /// The harness active when it was typed: whether a `/` prompt is a
+    /// command was decided for that one.
+    pub harness: HarnessId,
 }
 
 impl Action {
@@ -1204,14 +1207,13 @@ impl App {
             return;
         }
         // A picker the user asked for and moved on from stays shut.
-        if !text.starts_with('/') {
-            self.open_when_listed = None;
-        }
+        self.open_when_listed = None;
         if self.shell.is_some() || !self.require_policy() {
             // Kept until the `!` command has ended, or a policy is chosen.
             self.queued.push_back(QueuedPrompt {
                 text,
                 attachments: std::mem::take(&mut self.attachments),
+                harness: self.active,
             });
             return;
         }
@@ -1401,6 +1403,7 @@ impl App {
         self.queued.push_back(QueuedPrompt {
             text,
             attachments: std::mem::take(&mut self.attachments),
+            harness: self.active,
         });
     }
 
@@ -1412,6 +1415,26 @@ impl App {
         let Some(q) = self.queued.pop_front() else {
             return false;
         };
+        // Whether it runs as a command depends on the harness: one typed
+        // for another goes back to the prompt box instead.
+        if q.text.starts_with('/') && q.harness != self.active {
+            self.transcript.push_notice(format!(
+                "'{}' was typed for {}; it is back in the prompt box",
+                q.text.lines().next().unwrap_or_default(),
+                self.registry
+                    .get(q.harness)
+                    .map_or(q.harness.as_str(), |h| h.descriptor().short_name)
+            ));
+            // In front of what is being typed, if anything.
+            self.cursor = q.text.chars().count();
+            self.input = if self.input.is_empty() {
+                q.text
+            } else {
+                format!("{}\n{}", q.text, self.input)
+            };
+            self.attachments.extend(q.attachments);
+            return self.send_next_queued();
+        }
         let pending = std::mem::replace(&mut self.attachments, q.attachments);
         self.submit_prompt(q.text);
         self.attachments = pending;
@@ -2627,6 +2650,12 @@ impl App {
             .iter()
             .position(|b| matches!(b, super::transcript::Block::Shell { sent: false, .. }))
             .unwrap_or(self.transcript.blocks.len());
+        // Context held back for this harness (by a command sent alone) is
+        // still to be told.
+        let seen = self
+            .last_active_index
+            .get(&self.active)
+            .map_or(seen, |held| seen.min(*held));
         self.last_active_index.insert(self.active, seen);
         self.sync_conversation();
         self.active = next;
@@ -3699,8 +3728,8 @@ impl App {
                 self.queue_prompt(text.to_string());
             } else {
                 self.transcript.push_error(format!(
-                    "unknown command '{name}'; /help lists commands ({harness} runs no \
-                     commands of its own from a prompt; \\{name} sends it as text)"
+                    "unknown command '{name}'; /help lists commands ({harness} has not \
+                     said it runs commands from a prompt; \\{name} sends it as text)"
                 ));
             }
             return;
@@ -3713,12 +3742,20 @@ impl App {
         let listed = self
             .harness_commands()
             .iter()
-            .any(|c| name.strip_prefix('/') == Some(c.name.as_str()));
-        self.transcript.push_notice(if listed {
-            format!("{name} is {harness}'s own command: passed on")
-        } else {
-            format!("'{name}' is not an unharness command: passed to {harness} as typed")
+            .find(|c| c.answers_to(name))
+            .map(|c| format!("/{}", c.name));
+        self.transcript.push_notice(match &listed {
+            Some(_) => format!("{name} is {harness}'s own command: passed on"),
+            None => format!("'{name}' is not an unharness command: passed to {harness} as typed"),
         });
+        // One that does what one of unharness's does changes the session
+        // behind unharness's back.
+        if is_own_command(name) || listed.as_deref().is_some_and(is_own_command) {
+            self.transcript.push_notice(format!(
+                "unharness does not see what {harness}'s {name} changes: the model, \
+                 transcript and context shown may no longer match its session"
+            ));
+        }
         self.queue_prompt(text.to_string());
     }
 
@@ -3961,8 +3998,9 @@ impl App {
         let Some((cmd, _)) = self.suggestions.get(self.selected_suggestion) else {
             return false;
         };
+        // The list matches regardless of case.
         let typed = self.input.trim();
-        typed != cmd && cmd.starts_with(typed)
+        typed != cmd && cmd.to_lowercase().starts_with(&typed.to_lowercase())
     }
 
     pub fn accept_suggestion(&mut self) {
@@ -7506,8 +7544,12 @@ pub(crate) mod tests {
         app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
             commands: Some(vec![
                 command("hello", Some("<name>")),
-                command("clear", None),
+                HarnessCommand {
+                    aliases: vec!["new".into(), "reset".into()],
+                    ..command("clear", None)
+                },
                 command("model", None),
+                command("Deploy", None),
             ]),
             ..Default::default()
         }));
@@ -7574,9 +7616,85 @@ pub(crate) mod tests {
         assert_eq!(app.transcript.blocks.len(), 1, "cleared");
         app.pass_command("/clear", true);
         assert_eq!(app.take_actions(), vec![Action::turn("/clear")]);
-        assert_eq!(
-            notices(&app),
-            vec!["/clear is Claude's own command: passed on"]
+        let said = notices(&app);
+        assert_eq!(said[0], "/clear is Claude's own command: passed on");
+        assert!(said[1].starts_with("unharness does not see what Claude's /clear changes"));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        // `/new` is Claude's `/clear` under another name.
+        app.handle_slash_command("/new");
+        assert_eq!(app.take_actions(), vec![Action::turn("/new")]);
+        let said = notices(&app);
+        assert_eq!(said[2], "/new is Claude's own command: passed on");
+        assert!(said[3].starts_with("unharness does not see what Claude's /new changes"));
+    }
+
+    /// Context held back by a command is still told after the user
+    /// switches away and back before the next prompt.
+    #[test]
+    fn held_context_survives_a_switch_away_and_back() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.session_alive = false;
+        app.handle_slash_command("/hello world");
+        assert_eq!(sent_turn(&mut app), "/hello world");
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        app.session_alive = false;
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.session_alive = false;
+        app.submit_prompt("next".into());
+        let next = sent_turn(&mut app);
+        assert!(next.contains("first answer"), "{next}");
+    }
+
+    /// A `/` prompt queued for one harness is not sent to another, where
+    /// it could be a command or not one.
+    #[test]
+    fn a_slash_prompt_queued_for_one_harness_comes_back_on_another() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        app.session_alive = true;
+        // Text, on Codex.
+        app.pass_command("/review the diff", true);
+        app.queue_prompt("plain".into());
+        assert_eq!(app.queued.len(), 2);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.session_alive = false;
+        app.set_input("half typed");
+        assert!(app.send_next_queued());
+        assert!(sent_turn(&mut app).ends_with("\nplain"));
+        assert_eq!(app.input, "/review the diff\nhalf typed");
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .starts_with("'/review the diff' was typed for Codex")
         );
     }
 
@@ -7626,6 +7744,16 @@ pub(crate) mod tests {
         assert!(app.should_accept_suggestion());
         app.accept_suggestion();
         assert_eq!(app.input, "\\/clear");
+
+        // The list matches regardless of case, and so does Enter.
+        app.set_input("");
+        for c in "/dep".chars() {
+            app.insert_char(c);
+        }
+        assert_eq!(app.suggestions[0].0, "/Deploy");
+        assert!(app.should_accept_suggestion());
+        app.accept_suggestion();
+        assert_eq!(app.input, "/Deploy");
 
         // Codex runs none, so none are offered.
         let mut codex = test_app(HarnessId::CODEX);

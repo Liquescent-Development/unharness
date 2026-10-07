@@ -22,11 +22,6 @@ pub fn provider_id(api_provider: &str) -> ProviderId {
     })
 }
 
-/// The models the answer to `initialize` offers, under the provider it
-/// names. They differ by provider: Bedrock's are `us.anthropic.…` ids,
-/// Vertex's carry an `@` date (2.1.292, without credentials for either).
-/// `default` is one of them, and `--model default` takes it. `None` for an
-/// empty list, as some older recordings carry.
 /// The commands in Claude's answer to `initialize` (`commands`: `name`,
 /// `description`, `argumentHint`, `aliases`). `init` names them too, some
 /// by an alias (`anthropic-skills:pdf` for `pdf`), and nothing else.
@@ -36,16 +31,30 @@ fn initialize_commands(answer: &Value) -> Option<Vec<HarnessCommand>> {
         commands
             .iter()
             .filter_map(|c| {
-                HarnessCommand::new(
+                let mut command = HarnessCommand::new(
                     c.get("name")?.as_str()?,
                     c.get("description").and_then(Value::as_str),
                     c.get("argumentHint").and_then(Value::as_str),
-                )
+                )?;
+                command.aliases = c
+                    .get("aliases")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                Some(command)
             })
             .collect(),
     )
 }
 
+/// The models the answer to `initialize` offers, under the provider it
+/// names. They differ by provider: Bedrock's are `us.anthropic.…` ids,
+/// Vertex's carry an `@` date (2.1.292, without credentials for either).
+/// `default` is one of them, and `--model default` takes it. `None` for an
+/// empty list, as some older recordings carry.
 pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
     let models = answer.get("models")?.as_array()?;
     if models.is_empty() {
@@ -1200,6 +1209,10 @@ mod tests {
         // An empty `argumentHint` is none.
         let status = commands.iter().find(|c| c.name == "cq:status").unwrap();
         assert_eq!(status.hint, None);
+        // `/new` and `/reset` are its `/clear`.
+        let clear = commands.iter().find(|c| c.answers_to("/new")).unwrap();
+        assert_eq!(clear.name, "clear");
+        assert!(clear.answers_to("/reset") && clear.answers_to("/clear"));
     }
 
     /// A `PermissionRequest` hook that denies before the host answers
