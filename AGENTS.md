@@ -121,8 +121,11 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   but Claude) is killed at once (`end_or_kill`): given its grace it could
   go on with the turn where nobody sees it. A turn still running
   `STOP_GRACE` (5 s) after an interrupt is ended with its process when the
-  user interrupts again (`App::end_stuck_turn`); the next prompt resumes
-  the session. Quitting waits for every CLI
+  user interrupts again, once told that would (`App::end_stuck_turn`);
+  what it changed in the harness's configuration is checked first, its
+  requests and owed rewind anchors are dropped, and the next prompt
+  resumes the session. A session shut down takes its open requests with
+  it. Quitting waits for every CLI
   to be gone (`LineProcess::all_ended`), and SIGTERM, SIGHUP or SIGQUIT
   to unharness is a quit, since none reaches a CLI in a session of its
   own; a signal unharness was started with ignored (`nohup`, SIGINT in a

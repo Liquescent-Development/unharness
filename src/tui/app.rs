@@ -1934,16 +1934,24 @@ impl App {
                 self.transcript.push_system("Interrupting…");
                 self.interrupted = Some((Instant::now(), false));
             }
-            Some((at, told)) if at.elapsed() < STOP_GRACE => {
-                if !told {
-                    self.transcript.push_notice(format!(
+            // Said before the process is ended, however long the wait.
+            Some((at, false)) => {
+                let notice = if at.elapsed() < STOP_GRACE {
+                    format!(
                         "waiting for {} to stop; asked again after {}s, its process is ended",
                         self.short_name(),
                         STOP_GRACE.as_secs()
-                    ));
-                    self.interrupted = Some((at, true));
-                }
+                    )
+                } else {
+                    format!(
+                        "{} has not stopped; asked again, its process is ended",
+                        self.short_name()
+                    )
+                };
+                self.transcript.push_notice(notice);
+                self.interrupted = Some((at, true));
             }
+            Some((at, true)) if at.elapsed() < STOP_GRACE => {}
             Some(_) => self.end_stuck_turn(),
         }
     }
@@ -1955,17 +1963,21 @@ impl App {
             "{} did not stop, so its process was ended; the next prompt resumes the session",
             self.short_name()
         ));
+        // What the turn changed is told before the next process is watched.
+        self.check_guard();
         self.shutdown_session();
-        self.transcript.end_running_hooks();
+        self.process_gone();
         self.transcript.end_running_tools();
         self.finish_generation();
         self.transcript.push_system("Turn interrupted.");
-        if self.modal.as_ref().is_some_and(Modal::is_prompt) {
-            self.modal = None;
-        }
-        self.pending_prompts.clear();
         self.finish_handoff(false);
         self.persist();
+        if !self.queued.is_empty() {
+            self.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
     }
 
     // ------------------------------------------------------------- `!` commands
@@ -2513,7 +2525,8 @@ impl App {
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
                 self.drop_subagents();
-                self.transcript.end_running_hooks();
+                self.check_guard();
+                self.process_gone();
                 if self.is_generating {
                     self.finish_generation();
                     self.transcript.push_error(format!(
@@ -2522,13 +2535,27 @@ impl App {
                         code.map(|c| format!(" with code {c}")).unwrap_or_default()
                     ));
                 }
-                if self.modal.as_ref().is_some_and(Modal::is_prompt) {
-                    self.modal = None;
-                }
-                self.pending_prompts.clear();
                 self.finish_handoff(false);
             }
         }
+    }
+
+    /// The session's process is gone, or going: what it was running and
+    /// would have reported on will not be.
+    fn process_gone(&mut self) {
+        self.transcript.end_running_hooks();
+        // The next process takes the messages so far as its baseline, so
+        // the anchors still owed would land on later turns (pi).
+        self.anchor_pending.clear();
+        self.drop_prompts();
+    }
+
+    /// Requests of a session that is gone: nobody can answer them now.
+    fn drop_prompts(&mut self) {
+        if self.modal.as_ref().is_some_and(Modal::is_prompt) {
+            self.modal = None;
+        }
+        self.pending_prompts.clear();
     }
 
     /// The session is going away, and whatever its subagents were doing.
@@ -2542,6 +2569,7 @@ impl App {
     fn shutdown_session(&mut self) {
         self.session_alive = false;
         self.drop_subagents();
+        self.drop_prompts();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
         self.actions.push_back(Action::Shutdown);
@@ -7313,6 +7341,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_request_of_a_session_the_picker_ends_goes_with_it() {
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        app.open_sandbox_picker();
+        // Between turns: an extension's dialog, say.
+        app.on_event(pi_gate_request("g1", "ls"));
+        if let Some(Modal::Sandbox(p)) = &mut app.modal {
+            p.selected = p
+                .items
+                .iter()
+                .position(|l| *l == SandboxLevel::Off)
+                .unwrap();
+        }
+        app.handle_modal_key(key(KeyCode::Enter));
+        // The session restarts under the new level; its request is not
+        // put to the user, since nothing could take the answer.
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(app.modal.is_none() && !app.awaiting_answer());
+    }
+
+    #[test]
     fn a_withdrawn_request_closes_unanswered() {
         use crate::tui::transcript::Block;
         let mut app = test_app(HarnessId::PI);
@@ -7342,11 +7391,18 @@ pub(crate) mod tests {
 
     #[test]
     fn an_interrupt_the_turn_ignores_ends_the_process() {
+        use crate::core::guard::{Guarded, Watch};
         use crate::tui::transcript::Block;
         let mut app = test_app(HarnessId::PI);
         app.session_alive = true;
         app.session_ids.insert(HarnessId::PI, "pi-1".into());
-        app.start_generation();
+        let config = tempfile::tempdir().unwrap();
+        app.guard = Some(Watch::begin(
+            &[Guarded::Tree(config.path().to_path_buf())],
+            None,
+        ));
+        app.submit_prompt("look".into());
+        app.take_actions();
         app.on_event(AgentEvent::ToolCallStarted {
             id: "t1".into(),
             name: "bash".into(),
@@ -7361,17 +7417,18 @@ pub(crate) mod tests {
         app.interrupt();
         app.interrupt();
         assert_eq!(app.take_actions(), vec![]);
-        let waiting = |app: &App| {
+        let notices = |app: &App, start: &str| {
             app.transcript
                 .blocks
                 .iter()
-                .filter(|b| matches!(b, Block::Notice(n) if n.starts_with("waiting for")))
+                .filter(|b| matches!(b, Block::Notice(n) if n.starts_with(start)))
                 .count()
         };
-        assert_eq!(waiting(&app), 1);
+        assert_eq!(notices(&app, "waiting for"), 1);
         assert!(app.is_generating);
 
         // After it, the process is ended and the turn with it.
+        std::fs::write(config.path().join("extension.ts"), "x").unwrap();
         app.on_event(pi_gate_request("g1", "ls"));
         app.interrupted = Some((Instant::now() - STOP_GRACE, true));
         app.interrupt();
@@ -7388,6 +7445,10 @@ pub(crate) mod tests {
                 ..
             })
         ));
+        // What the turn changed in the harness's configuration is told.
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, Block::Error(e) if e.contains("configuration changed during this turn"))
+        ));
         // The next prompt resumes the session in a new process.
         app.submit_prompt("go on".into());
         assert_eq!(
@@ -7399,12 +7460,40 @@ pub(crate) mod tests {
                 Action::turn("go on")
             ]
         );
+        // Its anchor is its own: the ended turn's will never come.
+        app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
+        let go_on = app
+            .transcript
+            .blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::User { text } if text == "go on"));
+        assert_eq!(app.anchors.last().map(|a| a.block), go_on);
         // A turn that ends when asked leaves nothing behind.
         app.interrupt();
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Interrupted,
         });
         assert!(app.interrupted.is_none());
+    }
+
+    #[test]
+    fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::PI);
+        app.session_alive = true;
+        app.submit_prompt("look".into());
+        app.take_actions();
+        app.interrupt();
+        app.take_actions();
+        app.interrupted = Some((Instant::now() - STOP_GRACE, false));
+        app.interrupt();
+        assert_eq!(app.take_actions(), vec![]);
+        assert!(app.is_generating);
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, Block::Notice(n) if n.ends_with("asked again, its process is ended"))
+        ));
+        app.interrupt();
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     }
 
     #[test]
