@@ -146,6 +146,7 @@ async fn drive(
         format!("u{seq}")
     };
     let mut shutting_down = false;
+    let mut turn_open = false;
     // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
     let mut forking = false;
     let mut held_turn: Option<String> = None;
@@ -227,10 +228,11 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.end();
+                        proc.end_or_kill(turn_open).await;
                         None
                     }
                 };
+                turn_open |= is_turn && line.is_some();
                 if forking && is_turn {
                     held_turn = line;
                 } else if let Some(line) = line
@@ -282,6 +284,7 @@ async fn drive(
                             }
                             // Context usage is only available on request.
                             if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+                                turn_open = false;
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
                                 // The turn's user message now has an entry id to rewind to.
                                 let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
@@ -289,7 +292,7 @@ async fn drive(
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
                                     if shutdown_queued(&mut cmds) {
-                                        proc.end();
+                                        proc.end_or_kill(turn_open).await;
                                     } else {
                                         proc.kill().await;
                                     }

@@ -168,6 +168,17 @@ impl LineProcess {
         self.end_within(END_GRACE);
     }
 
+    /// [`end`](Self::end) between turns, [`kill`](Self::kill) during one:
+    /// a CLI given its grace mid-turn could go on with the turn (an edit,
+    /// a command) after nobody is reading what it says.
+    pub async fn end_or_kill(&mut self, turn_open: bool) {
+        if turn_open {
+            self.kill().await;
+        } else {
+            self.end();
+        }
+    }
+
     fn end_within(&mut self, grace: Duration) {
         self.stdin.take();
         let _ = self.stop_tx.send(Stop::Within(grace));

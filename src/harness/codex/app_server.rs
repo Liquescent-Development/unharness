@@ -213,8 +213,16 @@ impl Driver {
         Ok(())
     }
 
-    fn shut_down(&mut self) {
-        self.proc.end();
+    /// A sub-agent's turn counts as one: it runs on with the main turn over.
+    async fn shut_down(&mut self) {
+        let turn_open = self.turn_id.is_some()
+            || !self.child_turns.is_empty()
+            || self.queued_turn.is_some()
+            || self
+                .outstanding
+                .values()
+                .any(|o| *o == Outstanding::TurnStart);
+        self.proc.end_or_kill(turn_open).await;
     }
 }
 
@@ -348,7 +356,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.shut_down();
+                        d.shut_down().await;
                         Ok(())
                     }
                 };
@@ -518,7 +526,7 @@ async fn drive(
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
                                     if shutdown_queued(&mut cmds) {
-                                        d.shut_down();
+                                        d.shut_down().await;
                                     } else {
                                         d.proc.kill().await;
                                     }

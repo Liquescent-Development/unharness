@@ -98,7 +98,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   driver sends first, then stdin closed) and is killed only after
   `END_GRACE`, also when the handle is dropped meanwhile (a switch, a
   fork, a resume, a sandbox or provider change; `/clear` keeps the
-  session). Quitting waits for every CLI to be gone (`LineProcess::
+  session). Mid-turn a CLI that is sent nothing to stop the turn (all
+  but Claude) is killed at once (`end_or_kill`): given its grace it could
+  go on with the turn where nobody sees it. Quitting waits for every CLI to be gone (`LineProcess::
   all_ended`), and SIGTERM or SIGHUP to unharness is a quit, since
   neither reaches a CLI in a session of its own.
 - **Harness processes are spawned sandboxed.** `LineProcess::spawn` takes the

@@ -174,7 +174,7 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        proc.end();
+                        proc.end_or_kill(turn_open).await;
                     }
                 }
             }
@@ -192,7 +192,7 @@ async fn drive(
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
                                     if shutdown_queued(&mut cmds) {
-                                        proc.end();
+                                        proc.end_or_kill(turn_open).await;
                                     } else {
                                         proc.kill().await;
                                     }

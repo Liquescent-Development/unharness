@@ -384,7 +384,9 @@ async fn drive(
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
-                        d.proc.end();
+                        let turn_open = d.queued_turn.is_some()
+                            || d.outstanding.values().any(|o| *o == Outstanding::Prompt);
+                        d.proc.end_or_kill(turn_open).await;
                         Ok(())
                     }
                 };
