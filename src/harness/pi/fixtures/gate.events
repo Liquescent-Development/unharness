@@ -1,6 +1,7 @@
 SessionStarted id=01a10d85-aa12-700f-93b3-8897982b1031 model=gpt-5.6-sol
 Context used=- window=272000
 CapabilitiesChanged image_input=true
+CapabilitiesChanged commands=3
 TurnStarted
 ThinkingDelta "**Prioritizing exact sequence execution**"
 ThinkingDelta "\\n\\n"

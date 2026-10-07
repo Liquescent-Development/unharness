@@ -605,6 +605,38 @@ recorded ones. For anything else:
   `.claude -> cfg/claude`), whose text is then a `..` short: they are
   neither replaced nor removed, and are warned about on every sync as
   linking elsewhere.
+- A harness's own slash commands (`Capabilities::slash_commands`,
+  `CapsUpdate::commands`, `App::pass_command`): a `/command` unharness
+  does not have is sent as typed where the harness runs commands from a
+  prompt, `\/` sends one unharness also has, and the `/` list offers the
+  ones the session reported. Claude Code 2.1.292 ran a project command and
+  `/context` from a stream-json prompt and passed an unknown `/name` (and
+  `/etc/hosts …`) to the model as text; its list is the `commands` of its
+  answer to `initialize` (`name`, `description`, `argumentHint`,
+  `aliases`: `/new` and `/reset` are its `/clear`), read once per process,
+  since `init`'s `slash_commands` names some by an alias
+  (`anthropic-skills:pdf` for `pdf`) and nothing else. An ACP agent is
+  taken to run commands once its `available_commands_update` lists some:
+  claude-agent-acp 0.85.1 sent it three times, the first empty, and ran
+  `/hello world` (`fixtures/claude_agent_acp_commands.jsonl`); codex-acp
+  2.1.1 listed none. pi 0.87.1 answers `get_commands` (sent after
+  `get_state`; spliced into the pi fixtures the e2e tests replay) with
+  extension commands, prompt templates and `skill:` ones, without their
+  `argument-hint`, and `prompt` ran a template and a skill
+  (`fixtures/commands.jsonl`); its interface's own commands do not run
+  over RPC (its docs). Codex passes a prompt's text on, and agy is
+  unverified: neither is declared. A command has to start the message, so
+  it goes alone and the bridge and unsent `!` output wait for the next
+  prompt, whose bridge then also tells the command's turn (a switch keeps
+  the held start). A queued `/` prompt goes only to the harness it was
+  typed for. One of the agent's that does what one of unharness's does
+  (`/clear`, `/model`, `/compact` and their aliases) is warned about, not
+  followed: unharness's model, transcript and bridge are not updated.
+  Checked in the TUI (pty): Claude ran `/hello world` and `\/context`, and
+  pi's list came from `get_commands`. Unverified: codex-acp's commands
+  (its recordings listed none, so it is not taken to run any), an unknown
+  `/name` on an ACP agent, a Claude command added during a session (not
+  listed until the next process).
 - Claude's models (2.1.292) are the `models` of its answer to
   `initialize` (`value`, `displayName`, `description`,
   `supportedEffortLevels`, the first being `default`, which `--model`

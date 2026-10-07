@@ -7,7 +7,8 @@ use serde_json::Value;
 use super::gate;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, PermissionKind, PermissionRequest, StopReason, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, PermissionKind, PermissionRequest,
+    StopReason, Usage,
 };
 
 #[derive(Debug, Default)]
@@ -406,6 +407,27 @@ impl PiParser {
                     )));
                 }
             }
+            // Extension commands, prompt templates and skills (`skill:`
+            // names); pi's own interface's commands are not among them.
+            "get_commands" => {
+                if let Some(commands) = v.pointer("/data/commands").and_then(Value::as_array) {
+                    out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                        commands: Some(
+                            commands
+                                .iter()
+                                .filter_map(|c| {
+                                    HarnessCommand::new(
+                                        c.get("name")?.as_str()?,
+                                        c.get("description").and_then(Value::as_str),
+                                        None,
+                                    )
+                                })
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    }));
+                }
+            }
             "set_model" => {
                 if let Some(m) = v.pointer("/data/model/id").and_then(Value::as_str) {
                     out.push(AgentEvent::Notice(format!("pi model: {m}")));
@@ -501,6 +523,31 @@ mod tests {
             &mut PiParser::new(Some("local-session".into())),
             &fixtures_dir(file!()),
             "session_stats",
+        );
+    }
+
+    /// `get_commands` lists a prompt template and a skill, which the next
+    /// two prompts ran (`/hello world`, `/skill:greet ami`).
+    #[test]
+    fn fixture_commands() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut PiParser::new(None), &dir, "commands");
+        let text = std::fs::read_to_string(dir.join("commands.jsonl")).unwrap();
+        let names: Vec<String> = crate::core::testing::replay(&mut PiParser::new(None), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::CapabilitiesChanged(u) => u.commands,
+                _ => None,
+            })
+            .flatten()
+            .map(|c| format!("{}: {}", c.name, c.description))
+            .collect();
+        assert!(names.contains(&"hello: Say hello".to_string()), "{names:?}");
+        assert!(
+            names.contains(
+                &"skill:greet: Greets the user in French. Use when asked to greet.".to_string()
+            ),
+            "{names:?}"
         );
     }
 

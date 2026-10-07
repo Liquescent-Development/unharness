@@ -294,6 +294,9 @@ impl Harness for CodexHarness {
             // `collaborationMode` on `turn/start` (0.157.0 schema); `exec`
             // has no such mode.
             plan_mode: app_server,
+            // Its commands are its own interface's; a prompt's text is
+            // passed on as it is (skills go as `UserInput::skill`).
+            slash_commands: false,
         }
     }
 

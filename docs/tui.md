@@ -28,6 +28,7 @@ attached to the next prompt.
 | `Ctrl+G` | Edit the prompt in `$VISUAL` / `$EDITOR`. What the editor saves comes back into the prompt, unsent |
 | `@` | Pick a file to reference ([below](#file-references)) |
 | `!command` | Run a shell command yourself ([below](#shell-commands)). `\!` at the start sends a prompt that begins with `!` |
+| `/command` | One of unharness's [slash commands](#slash-commands), else the agent's own ([Agent commands](#agent-commands)). `\/` at the start sends it to the agent as typed |
 | `Ctrl+V`, `/paste` | Attach the image on the clipboard |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
 | `Esc` | Close the autocomplete list, else interrupt the running turn, else stop the running `!` command, else clear the prompt. Never quits |
@@ -122,6 +123,37 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/allow` | List what is allowed without asking |
 | `/clear` | Clear the transcript |
 | `/help`, `/quit` | Commands and shortcuts; quit |
+
+### Agent commands
+
+A `/command` unharness does not have goes to the agent as typed, where the
+agent runs commands of its own from a prompt: Claude Code (its built-ins,
+custom commands and skills), pi (extension commands, prompt templates and
+`/skill:<name>`) and an ACP agent once it has listed some. The transcript
+says it was passed on. Codex and Antigravity run no commands from a
+prompt, so there such a command is an error.
+
+Once the agent's session has started, the autocomplete list offers the
+commands it reports (Claude Code's, pi's and an ACP agent's), after
+unharness's own and marked with the harness's name. Before the first
+prompt the list has only unharness's.
+
+unharness's own commands come first: `/clear` clears unharness's
+transcript. `\/` sends the rest as typed: `\/clear` is Claude Code's
+`/clear`, and with `\/` the list offers the agent's commands of the same
+names. On Codex and Antigravity `\/` sends a prompt that starts with `/`.
+An agent's command that does what one of unharness's does (`\/clear`,
+Claude's `/new`, `\/model`) changes its session without unharness
+knowing, which the transcript warns about: the model shown, the
+transcript and what the next switch tells the agent may not match it.
+
+A `/` prompt queued during a turn is sent only to the harness it was
+typed for. After a switch it comes back to the prompt box, since there it
+could be a command where it was text, or the other way round.
+
+A command has to start the message the agent gets, so it goes alone: the
+context of a harness switch and the output of `!` commands it has not
+seen go with the next prompt instead.
 
 ## File references
 

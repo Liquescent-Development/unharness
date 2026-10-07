@@ -154,6 +154,9 @@ async fn drive(
     let _ = proc
         .write_line(&json!({"id": next_id(), "type":"get_state"}).to_string())
         .await;
+    let _ = proc
+        .write_line(&json!({"id": next_id(), "type":"get_commands"}).to_string())
+        .await;
     if resumed {
         // Learn which user messages predate this run, so later listings
         // can tell which one is new.

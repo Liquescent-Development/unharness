@@ -114,6 +114,9 @@ impl Harness for PiHarness {
             // pi has no MCP client, and plans only through an extension.
             mcp: McpSupport::NONE,
             plan_mode: false,
+            // `prompt` runs an extension's command, a prompt template or a
+            // `skill:` one; `get_commands` lists them (0.87.1).
+            slash_commands: true,
         }
     }
 

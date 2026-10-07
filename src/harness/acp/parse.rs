@@ -16,8 +16,8 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessId, ModelInfo, ModelRef, PermissionKind,
-    PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, ModelInfo, ModelRef,
+    PermissionKind, PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
 };
 use crate::harness::claude::parse::tool_action as claude_tool_action;
 
@@ -302,8 +302,21 @@ impl AcpParser {
                     out.push(AgentEvent::CapabilitiesChanged(o.caps_update(self.harness)));
                 }
             }
-            // user_message_chunk (our own prompt echoed), available_commands_update,
-            // current_mode_update, session_info_update, and anything newer.
+            // Sent again whenever the list changes (claude-agent-acp 0.85.1
+            // sent it three times, the first one empty).
+            "available_commands_update" => {
+                if let Some(commands) = update.get("availableCommands").and_then(Value::as_array) {
+                    let commands: Vec<HarnessCommand> =
+                        commands.iter().filter_map(command).collect();
+                    out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                        slash_commands: Some(!commands.is_empty()),
+                        commands: Some(commands),
+                        ..Default::default()
+                    }));
+                }
+            }
+            // user_message_chunk (our own prompt echoed), current_mode_update,
+            // session_info_update, and anything newer.
             _ => {}
         }
         out
@@ -398,6 +411,16 @@ pub fn mcp_http(caps: &Value) -> bool {
     caps.pointer("/mcpCapabilities/http")
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// An `AvailableCommand`: `name`, `description` and `input`, whose
+/// `hint` says what goes after the name.
+fn command(c: &Value) -> Option<HarnessCommand> {
+    HarnessCommand::new(
+        c.get("name")?.as_str()?,
+        c.get("description").and_then(Value::as_str),
+        c.pointer("/input/hint").and_then(Value::as_str),
+    )
 }
 
 /// Whether a session result's `modes` offer one called `plan`; `None` when
@@ -720,6 +743,28 @@ mod tests {
             &fixtures_dir(file!()),
             "claude_agent_acp_mcp",
         );
+    }
+
+    /// Every `available_commands_update` replaces the list; a project's
+    /// command is among them, and a prompt of `/hello world` ran it.
+    #[test]
+    fn fixture_claude_agent_acp_commands() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut parser(), &dir, "claude_agent_acp_commands");
+        let text = std::fs::read_to_string(dir.join("claude_agent_acp_commands.jsonl")).unwrap();
+        let lists: Vec<Vec<HarnessCommand>> = crate::core::testing::replay(&mut parser(), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::CapabilitiesChanged(u) => u.commands,
+                _ => None,
+            })
+            .collect();
+        let last = lists.last().unwrap();
+        let hello = last.iter().find(|c| c.name == "hello").unwrap();
+        assert_eq!(hello.description, "Say hello (project)");
+        assert_eq!(hello.hint, None);
+        let model = last.iter().find(|c| c.name == "model").unwrap();
+        assert_eq!(model.hint.as_deref(), Some("<model>"));
     }
 
     #[test]

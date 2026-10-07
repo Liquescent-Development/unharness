@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::Value;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessId, HookOutcome, ModelInfo, ModelRef,
-    PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question, QuestionOption,
-    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
+    ModelRef, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question,
+    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// unharness's id for the API Claude calls, from Claude's own name for it
@@ -20,6 +20,34 @@ pub fn provider_id(api_provider: &str) -> ProviderId {
         "firstParty" => "anthropic",
         other => other,
     })
+}
+
+/// The commands in Claude's answer to `initialize` (`commands`: `name`,
+/// `description`, `argumentHint`, `aliases`). `init` names them too, some
+/// by an alias (`anthropic-skills:pdf` for `pdf`), and nothing else.
+fn initialize_commands(answer: &Value) -> Option<Vec<HarnessCommand>> {
+    let commands = answer.get("commands")?.as_array()?;
+    Some(
+        commands
+            .iter()
+            .filter_map(|c| {
+                let mut command = HarnessCommand::new(
+                    c.get("name")?.as_str()?,
+                    c.get("description").and_then(Value::as_str),
+                    c.get("argumentHint").and_then(Value::as_str),
+                )?;
+                command.aliases = c
+                    .get("aliases")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect();
+                Some(command)
+            })
+            .collect(),
+    )
 }
 
 /// The models the answer to `initialize` offers, under the provider it
@@ -288,6 +316,7 @@ impl ClaudeParser {
                 if let Some(answer) = answer {
                     let update = CapsUpdate {
                         models: initialize_models(answer),
+                        commands: initialize_commands(answer),
                         provider: answer
                             .pointer("/account/apiProvider")
                             .and_then(Value::as_str)
@@ -1159,6 +1188,31 @@ mod tests {
     #[test]
     fn fixture_hooks_json() {
         fixture("hooks_json");
+    }
+
+    /// The answer to `initialize` lists the commands, with what each takes.
+    #[test]
+    fn initialize_lists_the_commands() {
+        let text = std::fs::read_to_string(fixtures_dir(file!()).join("hooks.jsonl")).unwrap();
+        let commands: Vec<HarnessCommand> = replay(&mut ClaudeParser::new(), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::CapabilitiesChanged(u) => u.commands,
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(commands.len(), 71);
+        let debug = commands.iter().find(|c| c.name == "debug").unwrap();
+        assert_eq!(debug.hint.as_deref(), Some("[issue description]"));
+        assert!(debug.description.starts_with("Enable debug logging"));
+        // An empty `argumentHint` is none.
+        let status = commands.iter().find(|c| c.name == "cq:status").unwrap();
+        assert_eq!(status.hint, None);
+        // `/new` and `/reset` are its `/clear`.
+        let clear = commands.iter().find(|c| c.answers_to("/new")).unwrap();
+        assert_eq!(clear.name, "clear");
+        assert!(clear.answers_to("/reset") && clear.answers_to("/clear"));
     }
 
     /// A `PermissionRequest` hook that denies before the host answers

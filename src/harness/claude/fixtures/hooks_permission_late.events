@@ -1,6 +1,6 @@
 HookStarted id=992164e0-0334-4445-adc1-7f5141b555da SessionStart:startup
 HookEnded id=992164e0-0334-4445-adc1-7f5141b555da SessionStart:startup ok ""
-CapabilitiesChanged models=12 provider=anthropic
+CapabilitiesChanged models=12 provider=anthropic commands=71
 SessionStarted id=42c0d6fe-31e2-4703-bc96-64d3c7376e8f model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=22893 window=-
