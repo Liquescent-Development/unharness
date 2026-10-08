@@ -995,10 +995,12 @@ mod tests {
         let escaped = format!(
             "trap '' PIPE; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done; echo late || touch {failed}"
         );
+        // macOS has no `setsid` command; the e2e tests need python3 anyway.
+        let setsid = r#"python3 -c 'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])'"#;
         let mut cmd = Command::new("sh");
         // The child waits until it is out, or the group kill would catch it.
         cmd.arg("-c").arg(format!(
-            "(setsid sh -c \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
+            "({setsid} \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
         ));
         let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
         let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
