@@ -1075,12 +1075,11 @@ pub fn wrap_prefixed_text(
 }
 
 /// Markdown drawn as the transcript draws it, `indent` cells in instead of
-/// the renderer's two-cell margin, on `base` (which the markdown's own
-/// styles override). A line with a marker in the margin (a diff's `+`)
-/// keeps it, so the text is wrapped two cells short to leave it room.
+/// the renderer's two-cell margin, on `base`: the markdown's colours
+/// override it, its modifiers (`base`'s bold) add to it.
 fn markdown_lines(text: &str, indent: usize, max_width: usize, base: Style) -> Vec<Line<'static>> {
     let pad = " ".repeat(indent);
-    render_markdown_to_lines(text, max_width.saturating_sub(indent).max(10))
+    render_markdown_to_lines(text, (max_width + 2).saturating_sub(indent).max(10))
         .into_iter()
         .map(|line| {
             let mut spans = line.spans;
@@ -2388,19 +2387,49 @@ mod tests {
         assert_eq!(dx, label_x + 4);
         assert_eq!(buf[(dx as u16, dy as u16)].fg, Color::Gray);
         assert_eq!(buf[(dx as u16 + 9, dy as u16)].fg, Color::Yellow);
-        // A long description wraps inside the popup, every line indented.
+        // A long description wraps, every line indented.
         let (wy, wx) = find(&rows, "Keeps the current value");
         assert_eq!(wx, dx);
-        let mut wrapped = 0;
-        for row in &rows[wy..] {
-            let cells: Vec<char> = row.chars().collect();
-            if cells[dx] == ' ' {
-                break;
-            }
-            assert!(cells[label_x..dx].iter().all(|&c| c == ' '), "{row}");
-            wrapped += 1;
+        let wrapped: Vec<Vec<char>> = rows[wy..]
+            .iter()
+            .map(|r| r.chars().collect::<Vec<char>>())
+            .take_while(|c| c[dx] != ' ')
+            .collect();
+        assert!(wrapped.len() >= 2, "{}", rows.join("\n"));
+        for row in wrapped {
+            assert!(row[label_x..dx].iter().all(|&c| c == ' '), "{row:?}");
         }
-        assert!(wrapped >= 2, "{}", rows.join("\n"));
+    }
+
+    #[test]
+    fn markdown_lines_fill_the_width_and_stay_inside_it() {
+        let width = |l: &Line<'_>| l.width();
+        // Text exactly as wide as the room left after the indent is one line.
+        let lines = markdown_lines("aaaa `bb` cccc", 2, 14, Style::default());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(width(&lines[0]), 14);
+        assert_eq!(lines[0].spans[0].content, "  ");
+        // No kind of block goes past the width, whatever the indent.
+        let samples = [
+            "Some prose that is long enough to wrap more than once here.",
+            "- an item that wraps past the edge of the pane\n  - nested one",
+            "1. first item that is long\n2. second",
+            "> a quote that is long enough to wrap\n> > nested",
+            "# A heading that is quite long",
+            "```rust\nlet x = some_function_with_a_long_name(argument);\n```",
+            "@@ -1 +1 @@\n-old line that is long enough\n+new line that is long enough",
+            "| col | another column |\n|---|---|\n| a | a cell that is long |",
+            "---",
+        ];
+        for text in samples {
+            for max_width in [20, 30, 60] {
+                for indent in [0, 6] {
+                    for line in markdown_lines(text, indent, max_width, Style::default()) {
+                        assert!(width(&line) <= max_width, "{max_width} {indent}: {line}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
