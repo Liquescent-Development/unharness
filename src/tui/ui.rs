@@ -1074,6 +1074,27 @@ pub fn wrap_prefixed_text(
     lines
 }
 
+/// Markdown drawn as the transcript draws it, `indent` cells in instead of
+/// the renderer's two-cell margin, on `base` (which the markdown's own
+/// styles override). A line with a marker in the margin (a diff's `+`)
+/// keeps it, so the text is wrapped two cells short to leave it room.
+fn markdown_lines(text: &str, indent: usize, max_width: usize, base: Style) -> Vec<Line<'static>> {
+    let pad = " ".repeat(indent);
+    render_markdown_to_lines(text, max_width.saturating_sub(indent).max(10))
+        .into_iter()
+        .map(|line| {
+            let mut spans = line.spans;
+            if let Some(first) = spans.first_mut()
+                && let Some(rest) = first.content.strip_prefix("  ")
+            {
+                first.content = rest.to_string().into();
+            }
+            spans.insert(0, Span::raw(pad.clone()));
+            Line::from(spans).style(base.patch(line.style))
+        })
+        .collect()
+}
+
 /// Status rule, prompt, rule, context lines, optional warning, key hints.
 /// Returns the prompt row's rect (for the suggestions popup).
 fn render_bottom(
@@ -1866,7 +1887,7 @@ fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
         head.push(Line::default());
     }
     match m.current() {
-        Some(q) => head.extend(wrap_prefixed_text("", &q.text, width, bold)),
+        Some(q) => head.extend(markdown_lines(&q.text, 0, width, bold)),
         None => head.push(Line::from(Span::styled("Review your answers", bold))),
     }
     let previewing = m
@@ -2092,9 +2113,9 @@ fn question_option_lines(
             },
         )));
         if !opt.description.is_empty() {
-            lines.extend(wrap_prefixed_text(
-                "      ",
+            lines.extend(markdown_lines(
                 &opt.description,
+                6,
                 width,
                 Style::default().fg(Color::Gray),
             ));
@@ -2323,6 +2344,63 @@ mod tests {
             .enumerate()
             .find_map(|(y, r)| r.find(needle).map(|x| (y, r[..x].chars().count())))
             .unwrap_or_else(|| panic!("{needle:?} not on screen:\n{}", rows.join("\n")))
+    }
+
+    #[test]
+    fn question_text_and_descriptions_are_markdown() {
+        use crate::core::{Question, QuestionOption};
+        let long = "Keeps the **current** value, which is `false` unless set. ".repeat(4);
+        let mut app = question_app(vec![Question {
+            id: "q".into(),
+            header: "Flag".into(),
+            text: "Set `strict` to `true`?".into(),
+            options: vec![
+                QuestionOption::new("Yes", "Turns on `strict` mode"),
+                QuestionOption::new("No", long.trim()),
+            ],
+            allow_other: false,
+            multi: false,
+        }]);
+        let mut term = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        assert!(
+            !rows.iter().any(|r| r.contains('`') || r.contains("**")),
+            "{}",
+            rows.join("\n")
+        );
+        // Inline code in the code style, the question still bold, the
+        // description still gray and indented under its label.
+        let (qy, qx) = find(&rows, "Set strict to true?");
+        let (_, label_x) = find(&rows, "( ) Yes");
+        assert_eq!(qx, label_x - 2);
+        let strict = &buf[(qx as u16 + 4, qy as u16)];
+        assert_eq!(strict.fg, Color::Yellow);
+        assert!(strict.modifier.contains(Modifier::BOLD));
+        let (dy, dx) = find(&rows, "Turns on strict mode");
+        assert_eq!(dx, label_x + 4);
+        assert_eq!(buf[(dx as u16, dy as u16)].fg, Color::Gray);
+        assert_eq!(buf[(dx as u16 + 9, dy as u16)].fg, Color::Yellow);
+        // A long description wraps inside the popup, every line indented.
+        let (wy, wx) = find(&rows, "Keeps the current value");
+        assert_eq!(wx, dx);
+        let mut wrapped = 0;
+        for row in &rows[wy..] {
+            let cells: Vec<char> = row.chars().collect();
+            if cells[dx] == ' ' {
+                break;
+            }
+            assert!(cells[label_x..dx].iter().all(|&c| c == ' '), "{row}");
+            wrapped += 1;
+        }
+        assert!(wrapped >= 2, "{}", rows.join("\n"));
     }
 
     #[test]
