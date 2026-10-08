@@ -692,6 +692,13 @@ impl App {
         let anchors = conversation.anchors.clone();
         let file_checkpoints = conversation.checkpoints.clone();
         let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
+        // A policy named on the command line wins over the one the
+        // conversation was run with.
+        let (policy_explicit, policy_choice) = match init.policy {
+            Some(p) => (Some(p), HashMap::new()),
+            None => (conversation.policy, conversation.policy_choices.clone()),
+        };
+        let policy_from_flag = init.policy.is_some();
         let checkpoints = if config.file_checkpoints.unwrap_or(true) {
             let store = init
                 .checkpoint_store
@@ -720,8 +727,8 @@ impl App {
             config,
             active,
             harness_options,
-            policy_explicit: init.policy,
-            policy_choice: HashMap::new(),
+            policy_explicit,
+            policy_choice,
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
@@ -836,6 +843,7 @@ impl App {
                     .join(", "),
                 app.short_name()
             ));
+            app.note_resumed_policy(policy_from_flag);
         }
         app
     }
@@ -873,6 +881,14 @@ impl App {
         c.checkpoints = self.file_checkpoints.clone();
         c.fork_pending = self.fork_pending.iter().copied().collect();
         c.fork_pending.sort_by_key(|h| h.as_str());
+        c.policy = self.policy_explicit;
+        c.policy_choices = self.policy_choice.clone();
+        if self.session_alive
+            && let Some(p) = self.effective_policy()
+        {
+            self.conversation.last_policies.insert(self.active, p);
+        }
+        let c = &mut self.conversation;
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
         {
@@ -978,6 +994,33 @@ impl App {
             Ok(res) => res.warning,
             Err(e) => Some(format!("{e} (Ctrl+P)")),
         }
+    }
+
+    /// Tell the user when the active harness of a resumed conversation
+    /// runs under another policy than it last did.
+    fn note_resumed_policy(&mut self, from_flag: bool) {
+        let Some(last) = self.conversation.last_policies.get(&self.active).copied() else {
+            return;
+        };
+        let now = self.effective_policy();
+        if now == Some(last) {
+            return;
+        }
+        let wanted = self.wanted_policy();
+        let why = if from_flag {
+            "named with --policy".to_string()
+        } else if now != Some(wanted) {
+            format!("{wanted} is not available on {}", self.short_name())
+        } else if self.policy_explicit.is_some() {
+            "the policy of this run".to_string()
+        } else {
+            "the configured default".to_string()
+        };
+        self.transcript.push_notice(format!(
+            "{} last ran this conversation under {last}; it continues under {} ({why})",
+            self.short_name(),
+            self.policy_label()
+        ));
     }
 
     /// Ask for a policy where the requested one is not available. Returns
@@ -3025,6 +3068,11 @@ impl App {
         self.modal = None;
         self.pending_prompts.clear();
         self.active = active;
+        // The conversation's own policy; without one the run's holds.
+        if conv.policy.is_some() || self.policy_explicit.is_none() {
+            self.policy_explicit = conv.policy;
+            self.policy_choice = conv.policy_choices.clone();
+        }
         let summary = conv.summary();
         self.conversation = conv;
         self.transcript.push_notice(format!(
@@ -3038,6 +3086,11 @@ impl App {
                 .join(", "),
             self.short_name()
         ));
+        if let Some(w) = self.policy_warning() {
+            self.transcript.push_notice(w);
+        }
+        self.note_resumed_policy(false);
+        self.require_policy();
         self.auto_scroll = true;
     }
 
@@ -4819,7 +4872,26 @@ pub(crate) mod tests {
         config: Config,
         registry: Arc<Registry>,
     ) -> App {
-        App::new(AppInit {
+        App::new(test_init(
+            cwd,
+            harness,
+            resume,
+            harness_explicit,
+            config,
+            registry,
+        ))
+    }
+
+    /// What `test_app_with` starts an app with, for a test to change.
+    fn test_init(
+        cwd: PathBuf,
+        harness: HarnessId,
+        resume: Option<String>,
+        harness_explicit: bool,
+        config: Config,
+        registry: Arc<Registry>,
+    ) -> AppInit {
+        AppInit {
             // Tests never write to the real state directory.
             checkpoint_store: Some(cwd.join(".unharness/test-checkpoints")),
             context_windows: Some(cwd.join(".unharness/test-state/context_windows.json")),
@@ -4843,7 +4915,7 @@ pub(crate) mod tests {
                 (HarnessId::AGY, "google".into()),
             ]
             .into(),
-        })
+        }
     }
 
     pub(crate) fn test_app(harness: HarnessId) -> App {
@@ -7050,6 +7122,142 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.effective_policy(), None);
         assert!(matches!(app.modal, Some(Modal::Policy(_))));
+    }
+
+    /// Claude's configured default is `accept-edits`.
+    fn accept_edits_config() -> Config {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "claude".into(),
+            crate::config::HarnessSettings {
+                default_policy: Some("accept-edits".into()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    /// Resume the last conversation in `cwd`, with `policy` on the command
+    /// line.
+    fn resume_with(cwd: &Path, policy: Option<PermissionPolicy>) -> App {
+        let mut init = test_init(
+            cwd.to_path_buf(),
+            HarnessId::CLAUDE,
+            Some(String::new()),
+            false,
+            accept_edits_config(),
+            test_registry(),
+        );
+        init.policy = policy;
+        App::new(init)
+    }
+
+    /// A turn on Claude under `policy`, then quit.
+    fn claude_turn_under(cwd: &Path, policy: Option<PermissionPolicy>) {
+        let mut app = resume_with(cwd, None);
+        if let Some(p) = policy {
+            assert!(app.set_policy(p));
+        }
+        app.submit_prompt("hi".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.quit();
+    }
+
+    #[test]
+    fn a_resumed_conversation_keeps_the_policy_it_was_run_with() {
+        let tmp = tempfile::tempdir().unwrap();
+        claude_turn_under(tmp.path(), Some(PermissionPolicy::Auto));
+        let app = resume_with(tmp.path(), None);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
+        assert!(!notices(&app).iter().any(|n| n.contains("last ran")));
+    }
+
+    #[test]
+    fn a_policy_named_on_resume_wins_and_is_told() {
+        let tmp = tempfile::tempdir().unwrap();
+        claude_turn_under(tmp.path(), Some(PermissionPolicy::Auto));
+        let app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert!(notices(&app).iter().any(|n| n
+            == "Claude last ran this conversation under auto; it continues under ask (named with --policy)"));
+    }
+
+    #[test]
+    fn a_conversation_on_the_default_follows_the_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        claude_turn_under(tmp.path(), None);
+        let app = resume_with(tmp.path(), None);
+        assert_eq!(app.conversation.policy, None);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+
+        // The default changed since: the conversation follows, and says so.
+        let init = test_init(
+            tmp.path().to_path_buf(),
+            HarnessId::CLAUDE,
+            Some(String::new()),
+            false,
+            Config::default(),
+            test_registry(),
+        );
+        let app = App::new(init);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert!(notices(&app).iter().any(|n| n
+            == "Claude last ran this conversation under accept-edits; it continues under ask (the configured default)"));
+    }
+
+    #[test]
+    fn a_saved_policy_the_harness_lacks_is_never_loosened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let mut conv = Conversation::new(HarnessId::AGY);
+        conv.blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        conv.sessions.insert(HarnessId::AGY, "agy-1".into());
+        conv.policy = Some(PermissionPolicy::Ask);
+        store.save(&conv).unwrap();
+        let app = resume_with(tmp.path(), None);
+        assert_eq!(app.active, HarnessId::AGY);
+        assert_eq!(app.effective_policy(), None);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+    }
+
+    #[test]
+    fn resuming_in_the_tui_takes_the_conversations_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        claude_turn_under(tmp.path(), Some(PermissionPolicy::Auto));
+        let id = ConversationStore::open(Some(tmp.path()), tmp.path())
+            .last()
+            .unwrap()
+            .id;
+        let mut app = test_app_with(
+            tmp.path().to_path_buf(),
+            HarnessId::CLAUDE,
+            None,
+            false,
+            accept_edits_config(),
+            test_registry(),
+        );
+        assert!(app.set_policy(PermissionPolicy::Ask));
+        app.resume_conversation(id.clone());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
+
+        // One that never named a policy leaves the run's.
+        let mut other = Conversation::new(HarnessId::CLAUDE);
+        other
+            .blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
+        app.store.save(&other).unwrap();
+        assert!(app.set_policy(PermissionPolicy::Ask));
+        app.resume_conversation(other.id);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
     }
 
     #[test]
