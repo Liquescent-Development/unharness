@@ -1,9 +1,12 @@
 name: CI
 
-# Every branch: pull requests live on Gitea, whose branches the mirror pushes here.
+# Every branch: our pull requests live on Forgejo, whose branches the mirror
+# pushes here. Pull requests opened on GitHub come from forks, which no push
+# here reaches.
 on:
   push:
     branches: ["**"]
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
