@@ -682,6 +682,25 @@ pub fn running(pid: u32) -> bool {
     })
 }
 
+/// Whether the process `pid` runs now: it exists and is not a zombie.
+#[cfg(target_os = "macos")]
+pub fn running(pid: u32) -> bool {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: the buffer is a `proc_bsdinfo` of the size passed.
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    // SAFETY: zeroed, and filled when all of it came back.
+    got == size && unsafe { info.assume_init() }.pbi_status != libc::SZOMB
+}
+
 /// `pid` and every process below it, held by pidfd: a signal through one
 /// reaches the process it was opened for or none, never one that took its
 /// pid since. For a child that shares unharness's process group (the
