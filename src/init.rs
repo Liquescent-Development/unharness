@@ -76,7 +76,6 @@ pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
         // startup, and not every harness has `ask`.
         let cfg = Config {
             default_policy: Some("ask".to_string()),
-            auto_sync: true,
             ..Default::default()
         };
         cfg.save_workspace_in(store, cwd)?;

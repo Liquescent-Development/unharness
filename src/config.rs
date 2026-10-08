@@ -15,9 +15,8 @@ pub struct Config {
     /// Default permission policy (ask, accept-edits, auto, bypass).
     pub default_policy: Option<String>,
 
-    /// Whether to synchronize rules symlinks before running.
-    #[serde(default = "default_true")]
-    pub auto_sync: bool,
+    /// Whether to synchronize rules symlinks before running. Default: on.
+    pub auto_sync: Option<bool>,
 
     /// Maximum characters of transcript bridged into a new harness session on switch.
     pub bridge_max_chars: Option<usize>,
@@ -88,10 +87,6 @@ impl SandboxSettings {
     fn is_empty(&self) -> bool {
         *self == SandboxSettings::default()
     }
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -210,6 +205,10 @@ impl Config {
         self.harnesses.get(id)
     }
 
+    pub fn auto_sync(&self) -> bool {
+        self.auto_sync.unwrap_or(true)
+    }
+
     pub fn binary_override(&self, id: &str) -> Option<&Path> {
         self.harness(id).and_then(|h| h.binary.as_deref())
     }
@@ -248,7 +247,7 @@ impl Config {
         Self {
             default_harness: local.default_harness.or(global.default_harness),
             default_policy: local.default_policy.or(global.default_policy),
-            auto_sync: local.auto_sync,
+            auto_sync: local.auto_sync.or(global.auto_sync),
             bridge_max_chars: local.bridge_max_chars.or(global.bridge_max_chars),
             bridge_summary: local.bridge_summary.or(global.bridge_summary),
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
@@ -301,7 +300,7 @@ mod tests {
     fn test_config_defaults() {
         let cfg = Config::default();
         assert!(cfg.default_harness.is_none());
-        assert!(!cfg.auto_sync); // struct default is false; TOML default is true via default_true()
+        assert!(cfg.auto_sync());
         assert!(cfg.harness("claude").is_none());
         assert!(cfg.extra_args("claude").is_empty());
     }
@@ -407,11 +406,26 @@ url = "https://example.com/mcp"
     }
 
     #[test]
+    fn auto_sync_is_on_unless_a_file_says_otherwise() {
+        let parse = |text: &str| toml::from_str::<Config>(text).unwrap();
+        assert!(Config::default().auto_sync());
+        assert!(parse("").auto_sync());
+        // A workspace file that does not mention it keeps the global value.
+        let off = || parse("auto_sync = false\n");
+        assert!(!Config::merge(off(), parse("[sandbox]\n")).auto_sync());
+        assert!(Config::merge(off(), parse("auto_sync = true\n")).auto_sync());
+        assert!(!Config::merge(parse(""), off()).auto_sync());
+        // Saving a config that never set it does not write it.
+        let saved = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!saved.contains("auto_sync"), "{saved}");
+    }
+
+    #[test]
     fn test_config_merge() {
         let mut global = Config {
             default_harness: Some("claude".to_string()),
             default_policy: Some("ask".to_string()),
-            auto_sync: true,
+            auto_sync: Some(false),
             sandbox: SandboxSettings {
                 level: Some("off".to_string()),
                 writable: vec![PathBuf::from("~/.cache/a")],
@@ -437,7 +451,6 @@ url = "https://example.com/mcp"
 
         let mut local = Config {
             default_harness: Some("agy".to_string()),
-            auto_sync: true,
             sandbox: SandboxSettings {
                 level: Some("read-only".to_string()),
                 writable: vec![PathBuf::from("target-shared")],
@@ -493,6 +506,7 @@ url = "https://example.com/mcp"
         ); // both
         assert_eq!(merged.default_harness.as_deref(), Some("agy")); // local wins
         assert_eq!(merged.default_policy.as_deref(), Some("ask")); // inherited
+        assert!(!merged.auto_sync()); // inherited
         assert_eq!(merged.default_model("agy"), Some("global-model")); // inherited
         assert_eq!(merged.default_effort("agy"), Some("high")); // local
         assert_eq!(
