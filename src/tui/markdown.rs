@@ -23,7 +23,8 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec
     let (text, code) = close_outdented_fences(sanitize(text));
     let text = html_as_text(&text, &code);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for chunk in split_bare_diffs(&text, &code) {
+    let chunks = split_bare_diffs(&text, &code);
+    for (i, &chunk) in chunks.iter().enumerate() {
         let (Chunk::Markdown(part) | Chunk::Diff(part)) = chunk;
         // A blank line between a hunk and the text around it, which
         // neither side draws.
@@ -33,7 +34,12 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec
             lines.push(Line::default());
         }
         match chunk {
-            Chunk::Markdown(md) => lines.extend(Renderer::new(md, max_width, done).run()),
+            // Text before a hunk is all there: a fence it leaves open is
+            // ended by the hunk.
+            Chunk::Markdown(md) => {
+                let done = done || i + 1 < chunks.len();
+                lines.extend(Renderer::new(md, max_width, done).run());
+            }
             Chunk::Diff(diff) => lines.extend(diff_lines(diff, max_width.saturating_sub(2))),
         }
     }
@@ -1259,6 +1265,15 @@ mod tests {
         for fence in ["- item\n  ```\n  ls\n\n", "> ```\n> ls\n\n"] {
             let rows = table_rows(&format!("{fence}{tail}"), 80);
             assert!(rows.ends_with(&alone), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_a_bare_hunk_ends_is_complete() {
+        for fence in ["- a\n  ```\n  x\n", "> ```\n> x\n"] {
+            let rows = table_rows(&format!("{fence}@@ -1 +1 @@\n-x\n+y\n\nDone."), 80);
+            assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
+            assert!(rows.contains(&"  │ - x".to_string()), "{rows:?}");
         }
     }
 
