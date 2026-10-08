@@ -158,7 +158,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
     let ws_root = find_workspace_root(cwd);
 
     if !args.no_sync
-        && config.auto_sync
+        && config.auto_sync()
         && let Some(root) = &ws_root
     {
         let rules = sync_workspace_rules(root).map(|r| r.warnings);
