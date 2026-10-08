@@ -7,7 +7,9 @@ The transcript fills the window. The current state sits under the prompt:
   scrolls;
 - a status line with the working directory and git branch, the harness,
   provider and model, effort, policy and sandbox level, token usage and
-  cost, the session id, any capability caveat, and key hints.
+  cost, the session id, any capability caveat, and key hints. On a
+  narrow terminal the directory is shortened first, then effort, model
+  and sandbox give way; the harness and its policy always stay.
 
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it), prompts waiting in the queue, and files
