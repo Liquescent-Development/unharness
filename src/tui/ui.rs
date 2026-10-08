@@ -1307,7 +1307,7 @@ fn render_bottom(
         ),
     ];
     let right1 = fit_segments(&segments, width.saturating_sub(SPLIT_LEFT_MIN));
-    render_split(frame, rows[4], left1, right1);
+    render_split(frame, rows[4], left1, right1, true);
 
     // Line 2: usage (left) · session id (right)
     let t = &app.turn_usage;
@@ -1343,7 +1343,7 @@ fn render_bottom(
             }),
         Style::default().fg(Color::DarkGray),
     ));
-    render_split(frame, rows[5], left2, right2);
+    render_split(frame, rows[5], left2, right2, false);
 
     let mut next = 6;
     if let Some(w) = warning {
@@ -1427,9 +1427,16 @@ fn fit_segments(segments: &[(String, Style, u8)], room: usize) -> Line<'static> 
 /// Cells the left side of a split row keeps before the right side goes.
 const SPLIT_LEFT_MIN: usize = 12;
 
-/// Left text and right text on one row; the left side is shortened first,
-/// then dropped, when the terminal is too narrow for both.
-fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'static>) {
+/// Left text and right text on one row; the left side is shortened first
+/// when the terminal is too narrow for both. Then one goes: the right
+/// side where it must stay (`keep_right`), else the left.
+fn render_split(
+    frame: &mut Frame,
+    row: Rect,
+    left: Line<'static>,
+    right: Line<'static>,
+    keep_right: bool,
+) {
     let width = row.width as usize;
     let lw = left.width();
     let rw = right.width();
@@ -1458,7 +1465,7 @@ fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'
         spans.extend(right.spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     } else {
-        let mut lines = vec![left];
+        let mut lines = vec![if keep_right { right } else { left }];
         clamp_lines(&mut lines, width);
         frame.render_widget(Paragraph::new(lines.remove(0)), row);
     }
@@ -2352,7 +2359,7 @@ mod tests {
             std::path::PathBuf::from("/srv/projects/some-organisation/a-rather-long-repository");
         app.set_model("claude-a-model-with-a-long-name-20991231".into());
         assert!(app.set_policy(PermissionPolicy::Auto));
-        for width in [50, 80, 120] {
+        for width in [24, 32, 50, 80, 120] {
             let (rows, _) = screen(&mut app, width, 30);
             assert!(
                 rows.iter()
