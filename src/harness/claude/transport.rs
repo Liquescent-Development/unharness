@@ -590,15 +590,22 @@ mod tests {
         assert_eq!(ans["behavior"], "allow");
         assert_eq!(ans["updatedInput"]["answers"]["Color?"], "Red");
         assert_eq!(ans["updatedInput"]["questions"][0]["question"], "Color?");
+        // A bare `,` stays as it is (Claude splits only on `", "`); a quoted
+        // label is escaped as JSON.stringify does; free text on a
+        // multi-select question is a string and goes as it is.
         let many = encode_decision(
             &q,
-            &PermissionDecision::Answer(
-                json!({"Color?":["Red","Salt, pepper","say \"hi\""],"Size?":"Big"}),
-            ),
+            &PermissionDecision::Answer(json!({
+                "Color?": ["Red", "a,b", "Salt, pepper", r#"C:\ "x""#],
+                "Size?": "Big, or bigger",
+            })),
         );
         assert_eq!(
             many["updatedInput"]["answers"],
-            json!({"Color?":r#"Red, "Salt, pepper", "say \"hi\"""#,"Size?":"Big"})
+            json!({
+                "Color?": r#"Red, a,b, "Salt, pepper", "C:\\ \"x\"""#,
+                "Size?": "Big, or bigger",
+            })
         );
         let dismissed = encode_decision(&q, &PermissionDecision::Answer(Value::Null));
         assert_eq!(dismissed["behavior"], "deny");

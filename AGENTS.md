@@ -582,7 +582,11 @@ recorded ones. For anything else:
   2.1.293, whose tool result writes the answer with a template literal),
   so the transport sends a string joined the way Claude's own joiner
   does (read in 2.1.293): by `", "`, a label containing `", "` or `"`
-  as a JSON string. Codex 0.157.0's
+  as a JSON string. The form has to be exactly that: 2.1.293 splits the
+  string back into labels, and says the questions were answered only
+  when joining them again gives the same string and each is an option's
+  label; otherwise the model is told to read the answers carefully.
+  Codex 0.157.0's
   `ToolRequestUserInputOption` (app-server schema) has only `label` and
   `description`.
   The modal sends only from its Submit page, and only once every question
