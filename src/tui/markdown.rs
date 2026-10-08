@@ -17,10 +17,14 @@ use unicode_width::UnicodeWidthStr;
 
 use super::code::{code_lines, diff_lines, sanitize};
 
-pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'static>> {
-    let text = html_as_text(&sanitize(text));
+/// `done` when no more of `text` is coming: a fence it leaves open is
+/// then not still streaming.
+pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec<Line<'static>> {
+    let (text, code) = close_outdented_fences(sanitize(text));
+    let text = html_as_text(&text, &code);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for chunk in split_bare_diffs(&text) {
+    let chunks = split_bare_diffs(&text, &code);
+    for (i, &chunk) in chunks.iter().enumerate() {
         let (Chunk::Markdown(part) | Chunk::Diff(part)) = chunk;
         // A blank line between a hunk and the text around it, which
         // neither side draws.
@@ -30,7 +34,12 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
             lines.push(Line::default());
         }
         match chunk {
-            Chunk::Markdown(md) => lines.extend(Renderer::new(md, max_width).run()),
+            // Text before a hunk is all there: a fence it leaves open is
+            // ended by the hunk.
+            Chunk::Markdown(md) => {
+                let done = done || i + 1 < chunks.len();
+                lines.extend(Renderer::new(md, max_width, done).run());
+            }
             Chunk::Diff(diff) => lines.extend(diff_lines(diff, max_width.saturating_sub(2))),
         }
     }
@@ -51,8 +60,8 @@ enum Chunk<'a> {
 /// lists, headings and paragraphs: a run of lines from a header (`diff
 /// --git`, `--- `, `+++ `, `@@`) on while they start with `+`, `-`, a
 /// space or `\`, with an `@@` or `diff --git` among them. Fenced code is
-/// left alone.
-fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
+/// left alone: `code` says which lines are.
+fn split_bare_diffs<'a>(text: &'a str, code: &[bool]) -> Vec<Chunk<'a>> {
     let lines: Vec<(usize, &str)> = text
         .split_inclusive('\n')
         .scan(0, |at, l| {
@@ -71,14 +80,13 @@ fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
         |l: &str| header(l) || (l.starts_with(['+', '-', ' ', '\\']) && !l.trim().is_empty());
     let mut chunks = Vec::new();
     let mut from = 0;
-    let mut fences = Fences::default();
     // The end of a run already found to be no hunk: the headers inside it
     // start no hunk either.
     let mut prose_until = 0;
     let mut i = 0;
     while i < lines.len() {
         let (start, line) = lines[i];
-        if !fences.code(line) && i >= prose_until && header(line) {
+        if !code.get(i).is_some_and(|c| *c) && i >= prose_until && header(line) {
             let end = lines[i..]
                 .iter()
                 .position(|(_, l)| !hunk_line(l))
@@ -129,58 +137,153 @@ fn block_text(line: &str) -> &str {
     }
 }
 
-/// Which lines are fenced code, told a line at a time: a fence closes on
-/// the same character, at least as many of them and nothing else.
-#[derive(Default)]
-struct Fences {
-    open: Option<(char, usize)>,
-}
-
-impl Fences {
-    /// Whether `line` opens, is inside or closes a fence.
-    fn code(&mut self, line: &str) -> bool {
-        let text = block_text(line);
-        let run = |c: char| text.chars().take_while(|x| *x == c).count();
-        match self.open {
-            Some((c, n)) => {
-                if run(c) >= n && text.trim_end().chars().all(|x| x == c) {
-                    self.open = None;
-                }
-                true
-            }
-            None => match text.chars().next() {
-                Some(c @ ('`' | '~')) if run(c) >= 3 => {
-                    self.open = Some((c, run(c)));
-                    true
-                }
-                _ => false,
-            },
-        }
-    }
-}
-
 /// A terminal cannot draw HTML, and CommonMark takes a line that starts
 /// with a tag for the start of an HTML block, which can run to its closing
 /// tag and swallow the markdown after it (`<script> tags are blocked.`).
-/// Such a `<` is escaped, so the line is text; autolinks, fenced code and
-/// indented code are left alone, and a tag inside a line is still inline
-/// HTML (`<br>`).
-fn html_as_text(text: &str) -> String {
+/// Such a `<` is escaped, so the line is text; autolinks, fenced code (the
+/// lines `code` marks) and indented code are left alone, and a tag inside
+/// a line is still inline HTML (`<br>`).
+fn html_as_text(text: &str, code: &[bool]) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut fences = Fences::default();
-    for line in text.split_inclusive('\n') {
-        let rest = block_text(line);
-        let at = line.len() - rest.len();
-        let indented_code = at >= 4 && line[..at].chars().all(|c| c == ' ');
-        if !fences.code(line) && !indented_code && rest.starts_with('<') && !is_autolink(rest) {
-            out.push_str(&line[..at]);
-            out.push('\\');
-            out.push_str(rest);
-        } else {
-            out.push_str(line);
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        match tag_at(line) {
+            Some(at) if !code.get(i).is_some_and(|c| *c) => {
+                out.push_str(&line[..at]);
+                out.push('\\');
+                out.push_str(&line[at..]);
+            }
+            _ => out.push_str(line),
         }
     }
     out
+}
+
+/// Where the tag a line starts with is, unless the line is indented code
+/// or the tag an autolink.
+fn tag_at(line: &str) -> Option<usize> {
+    let rest = block_text(line);
+    let at = line.len() - rest.len();
+    let indented_code = at >= 4 && line[..at].chars().all(|c| c == ' ');
+    (!indented_code && rest.starts_with('<') && !is_autolink(rest)).then_some(at)
+}
+
+/// A model often closes a fence in a list item at column 0, which ends the
+/// item and opens a fence that swallows the rest of the message: such a
+/// line, a bare fence at column 0 of the fence's quotes right after a
+/// fence its item ended, is indented to close that fence. Returns the text
+/// and which of its lines are fenced code, as pulldown-cmark reads them
+/// once `html_as_text` has run: a list item or a quote ends a fence, which
+/// a line scanner cannot tell.
+fn close_outdented_fences(mut text: String) -> (String, Vec<bool>) {
+    // Each move parses the text again, and this runs on every render of
+    // a streaming reply: past this many, the rest are read as CommonMark
+    // has them.
+    const MOST: usize = 64;
+    // Lines up to here are settled, so each line is moved at most once.
+    let mut after = 0;
+    for moved in 0.. {
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .filter(|i| *i < text.len())
+            .collect();
+        let line_of = |at: usize| starts.partition_point(|s| *s <= at).saturating_sub(1);
+        let line = |i: usize| {
+            let end = starts.get(i + 1).copied().unwrap_or(text.len());
+            text[starts[i]..end].trim_end_matches('\n')
+        };
+        let blocks = fenced_blocks(&text);
+        let mut code = vec![false; starts.len()];
+        let mut fix = None;
+        for b in blocks {
+            let (first, last) = (line_of(b.range.start), line_of(b.range.end - 1));
+            code[first..=last].fill(true);
+            let next = last + 1;
+            if fix.is_none()
+                && b.in_item
+                && next > after
+                && next < starts.len()
+                && !fence_closed(&text[b.range], b.quotes)
+            {
+                fix =
+                    closing_indent(line(first), line(next), b.quotes).map(|indent| (next, indent));
+            }
+        }
+        let Some((i, indent)) = fix.filter(|_| moved < MOST) else {
+            return (text, code);
+        };
+        let at = line(i).len() - line(i).trim_start_matches([' ', '>']).len();
+        text.replace_range(starts[i]..starts[i] + at, &indent);
+        after = i;
+    }
+    unreachable!()
+}
+
+/// What goes in front of `line` for it to close the fence `opener` opens
+/// in `quotes` quotes: the opener's quote markers and indentation, its list
+/// markers as spaces. None unless `line` is a bare fence at column 0 of
+/// those quotes.
+fn closing_indent(opener: &str, line: &str, quotes: usize) -> Option<String> {
+    let fence = block_text(opener);
+    let c = fence.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let n = fence.chars().take_while(|x| *x == c).count();
+    let rest = unquote(line, quotes)?;
+    let rest = if quotes > 0 {
+        rest.strip_prefix(' ').unwrap_or(rest)
+    } else {
+        rest
+    };
+    is_bare_fence(rest, c, n).then(|| {
+        opener[..opener.len() - fence.len()]
+            .chars()
+            .map(|x| if x == '>' { x } else { ' ' })
+            .collect()
+    })
+}
+
+struct Fenced {
+    range: Range<usize>,
+    in_item: bool,
+    quotes: usize,
+}
+
+/// The fenced code blocks of `text`, with the tag lines `html_as_text`
+/// escapes read as the text they become.
+fn fenced_blocks(text: &str) -> Vec<Fenced> {
+    let mut plain = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        match tag_at(line) {
+            // A letter in place of the `<`, so that offsets hold.
+            Some(at) => {
+                plain.push_str(&line[..at]);
+                plain.push('x');
+                plain.push_str(&line[at + 1..]);
+            }
+            None => plain.push_str(line),
+        }
+    }
+    let mut blocks = Vec::new();
+    let (mut items, mut quotes) = (0usize, 0usize);
+    let mut fenced = false;
+    for (event, range) in Parser::new_ext(&plain, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Item) => items += 1,
+            Event::End(TagEnd::Item) => items = items.saturating_sub(1),
+            Event::Start(Tag::BlockQuote(_)) => quotes += 1,
+            Event::End(TagEnd::BlockQuote(_)) => quotes = quotes.saturating_sub(1),
+            Event::Start(Tag::CodeBlock(kind)) => {
+                fenced = matches!(kind, CodeBlockKind::Fenced(_));
+            }
+            Event::End(TagEnd::CodeBlock) if fenced && !range.is_empty() => {
+                blocks.push(Fenced {
+                    range,
+                    in_item: items > 0,
+                    quotes,
+                });
+            }
+            _ => {}
+        }
+    }
+    blocks
 }
 
 /// `<https://…>` or `<name@host>` at the start of `text`.
@@ -222,6 +325,8 @@ struct CodeBuild {
 struct Renderer<'a> {
     source: &'a str,
     width: usize,
+    /// No more of the source is coming.
+    done: bool,
     out: Vec<Line<'static>>,
     containers: Vec<Container>,
     /// The inline text of the block being read; a `\n` in it breaks the
@@ -238,14 +343,18 @@ struct Renderer<'a> {
     cursor: Option<usize>,
 }
 
+const OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS);
 const CODE: Style = Style::new().fg(Color::Yellow).bg(Color::Rgb(35, 38, 48));
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
 impl<'a> Renderer<'a> {
-    fn new(source: &'a str, width: usize) -> Self {
+    fn new(source: &'a str, width: usize, done: bool) -> Self {
         Renderer {
             source,
             width,
+            done,
             out: Vec::new(),
             containers: Vec::new(),
             inline: Vec::new(),
@@ -258,9 +367,7 @@ impl<'a> Renderer<'a> {
     }
 
     fn run(mut self) -> Vec<Line<'static>> {
-        let options =
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        for (event, range) in Parser::new_ext(self.source, options).into_offset_iter() {
+        for (event, range) in Parser::new_ext(self.source, OPTIONS).into_offset_iter() {
             match event {
                 Event::Start(tag) => self.start(tag, range.start),
                 Event::End(tag) => self.end(tag, range),
@@ -396,12 +503,14 @@ impl<'a> Renderer<'a> {
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
                     // Not closed yet and nothing after it: still
-                    // streaming. One its container ended is complete.
+                    // streaming. One its container ended is complete, as
+                    // is one the message ended.
                     let rest = self.source[range.end..]
                         .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '>');
                     let closed = !code.fenced
+                        || self.done
                         || !rest.is_empty()
-                        || fence_closed(&self.source[range.clone()]);
+                        || fence_closed(&self.source[range.clone()], self.quotes());
                     self.code_block(code, closed);
                 }
             }
@@ -477,6 +586,14 @@ impl<'a> Renderer<'a> {
     fn block_end(&mut self, end: usize) {
         let text = self.source[..end].trim_end_matches(|c: char| c.is_whitespace() || c == '>');
         self.cursor = Some(text.len());
+    }
+
+    /// How many quotes the block being read is in.
+    fn quotes(&self) -> usize {
+        self.containers
+            .iter()
+            .filter(|c| matches!(c, Container::Quote))
+            .count()
     }
 
     fn style(&self) -> Style {
@@ -671,13 +788,32 @@ fn is_br(html: &str) -> bool {
 }
 
 /// Whether a fenced block's source ends with its closing fence; one that
-/// does not is still streaming.
-/// The source starts at the opening fence and may carry quote markers.
-fn fence_closed(source: &str) -> bool {
-    let mut fences = Fences::default();
+/// does not is still streaming, or was ended by its list item or quote.
+/// The source starts at the opening fence, and its other lines with the
+/// markers of the `quotes` quotes it is in.
+fn fence_closed(source: &str, quotes: usize) -> bool {
     let mut lines = source.trim_end().lines();
-    lines.next().is_some_and(|opener| fences.code(opener))
-        && lines.fold(false, |_, l| fences.code(l) && fences.open.is_none())
+    let (Some(opener), Some(last)) = (lines.next(), lines.last()) else {
+        return false;
+    };
+    let Some(c) = opener.chars().next().filter(|c| matches!(c, '`' | '~')) else {
+        return false;
+    };
+    let n = opener.chars().take_while(|x| *x == c).count();
+    unquote(last, quotes).is_some_and(|rest| is_bare_fence(rest.trim_start_matches(' '), c, n))
+}
+
+/// `line` after the markers of `quotes` quotes, if it has as many.
+fn unquote(line: &str, quotes: usize) -> Option<&str> {
+    (0..quotes).try_fold(line, |rest, _| {
+        rest.trim_start_matches(' ').strip_prefix('>')
+    })
+}
+
+/// `c` at least `n` times and nothing else: a closing fence.
+fn is_bare_fence(text: &str, c: char, n: usize) -> bool {
+    let text = text.trim_end();
+    text.len() >= n && text.chars().all(|x| x == c)
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
@@ -916,14 +1052,14 @@ mod tests {
 
     #[test]
     fn test_render_headers() {
-        let lines = render_markdown_to_lines("# Title\n## Sub\n### Deep", 80);
+        let lines = render_markdown_to_lines("# Title\n## Sub\n### Deep", 80, false);
         assert_eq!(lines.len(), 3);
         assert!(line_text(&lines[0]).contains("# Title"));
     }
 
     #[test]
     fn test_render_diff() {
-        let lines = render_markdown_to_lines("```diff\n-old\n+new\n```", 80);
+        let lines = render_markdown_to_lines("```diff\n-old\n+new\n```", 80, false);
         // fence header, two diff lines, fence footer
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[1].spans[1].style.fg, Some(Color::Red));
@@ -933,7 +1069,7 @@ mod tests {
     #[test]
     fn test_fenced_code_is_highlighted_and_wrapped_not_truncated() {
         let long = format!("let s = \"{}\";", "a".repeat(120));
-        let lines = render_markdown_to_lines(&format!("```rust\n{long}\n```"), 60);
+        let lines = render_markdown_to_lines(&format!("```rust\n{long}\n```"), 60, false);
         let body: String = lines[1..lines.len() - 1]
             .iter()
             .map(|l| line_text(l).replace("  │ ↪ ", "").replace("  │ ", ""))
@@ -954,6 +1090,7 @@ mod tests {
         let lines = render_markdown_to_lines(
             "use `cargo test` and **now** or *later*, see [docs](https://d.example) or <https://u.example>",
             200,
+            false,
         );
         let spans = &lines[0].spans;
         assert!(
@@ -977,7 +1114,7 @@ mod tests {
             line_text(&lines[0])
         );
         // Spaces inside inline code are kept as written; a copy gets them.
-        let lines = render_markdown_to_lines("set `x  =  1` now", 80);
+        let lines = render_markdown_to_lines("set `x  =  1` now", 80, false);
         assert_eq!(line_text(&lines[0]), "  set x  =  1 now");
     }
 
@@ -1025,8 +1162,11 @@ mod tests {
 
     #[test]
     fn a_bare_hunk_is_a_diff_and_a_dash_list_is_not() {
-        let lines =
-            render_markdown_to_lines("Change:\n\n@@ -1 +1 @@\n-old\n+new\n\nDone.\n- item", 80);
+        let lines = render_markdown_to_lines(
+            "Change:\n\n@@ -1 +1 @@\n-old\n+new\n\nDone.\n- item",
+            80,
+            false,
+        );
         let rows: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(rows[0], "  Change:");
         assert_eq!(rows[1], "");
@@ -1048,7 +1188,8 @@ mod tests {
 
     #[test]
     fn test_lists_and_streaming_fence() {
-        let lines = render_markdown_to_lines("- one\n  - nested\n1. first\n```py\nprint(1)", 80);
+        let lines =
+            render_markdown_to_lines("- one\n  - nested\n1. first\n```py\nprint(1)", 80, false);
         assert!(line_text(&lines[0]).contains("• one"));
         assert!(line_text(&lines[1]).contains("• nested"));
         assert!(line_text(&lines[2]).contains("1. first"));
@@ -1069,7 +1210,7 @@ mod tests {
         let rows = table_rows("- item\n  ```\n  ls\n\u{a0}", 80);
         assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
         for text in ["- item\n  ```bash\n  ls\n", "> ```\n> ls\n>"] {
-            let lines = render_markdown_to_lines(text, 80);
+            let lines = render_markdown_to_lines(text, 80, false);
             assert!(line_text(lines.last().unwrap()).contains("…"), "{text:?}");
         }
     }
@@ -1091,8 +1232,129 @@ mod tests {
         assert_eq!(rows.last().unwrap(), "  Please confirm.");
     }
 
+    #[test]
+    fn a_fence_closed_at_column_0_in_a_list_item_closes_it() {
+        let rows = table_rows("1. Run:\n   ```bash\n   ls\n```\n\nDone.", 80);
+        assert_eq!(
+            rows,
+            [
+                "  1. Run:",
+                "     ┌─ bash ──────────────────────────────────",
+                "     │ ls",
+                "     └────────────────────────────────────────",
+                "",
+                "  Done.",
+            ]
+        );
+        // Also in a quote, with the next line right after it, and as the
+        // last line while it streams.
+        for text in [
+            "> - Run:\n>   ```\n>   ls\n> ```\nDone.",
+            "1. Run:\n   ```bash\n   ls\n```",
+        ] {
+            let rows = table_rows(text, 80);
+            assert_eq!(
+                rows.iter().filter(|r| r.contains('┌')).count(),
+                1,
+                "{rows:?}"
+            );
+            assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
+        }
+        // A fence with an info string opens a block of its own, and one
+        // at the item's indentation is read as before.
+        let rows = table_rows("1. Run:\n   ```bash\n   ls\n```sh\npwd\n```", 80);
+        assert!(rows.iter().any(|r| r.contains("─ sh ")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.ends_with("│ pwd")), "{rows:?}");
+        let rows = table_rows("1. Run:\n   ```bash\n   ls\n   ```\n```\nx", 80);
+        assert_eq!(
+            rows.iter().filter(|r| r.contains('┌')).count(),
+            2,
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn at_most_64_fences_are_moved() {
+        // Past them, the fence at column 0 opens a block of its own.
+        let step = "1. Run:\n   ```\n   ls\n```\n";
+        let opened = |n: usize| {
+            let rows = table_rows(&step.repeat(n), 80);
+            rows.iter().filter(|r| r.starts_with("  ┌")).count()
+        };
+        assert_eq!(opened(64), 0);
+        assert_eq!(opened(65), 1);
+    }
+
+    #[test]
+    fn only_a_bare_fence_at_column_0_of_its_quotes_is_moved() {
+        // An item's first line, a two-digit number, a nested list, a
+        // longer fence: each closed by the fence at column 0.
+        for text in [
+            "- ```bash\n  ls\n```\nDone.",
+            "10. Run:\n    ```bash\n    ls\n```\nDone.",
+            "- a\n  - Run:\n    ```\n    ls\n```\nDone.",
+            "- Run:\n  ```\n  ls\n`````\nDone.",
+        ] {
+            let rows = table_rows(text, 80);
+            assert_eq!(
+                rows.iter().filter(|r| r.contains('┌')).count(),
+                1,
+                "{rows:?}"
+            );
+            assert_eq!(rows.last().unwrap(), "  Done.", "{rows:?}");
+        }
+        // A quote's fence, and one in the outer item of a nested list,
+        // stay where they are.
+        let rows = table_rows("- a\n  ```\n  x\n> ```\n> quoted", 80);
+        assert!(rows.iter().any(|r| r.starts_with("  │ ┌")), "{rows:?}");
+        let rows = table_rows(
+            "- outer\n  - inner\n    ```\n    x\n  ```\n  y\n  ```\nEnd.",
+            80,
+        );
+        assert!(rows.iter().any(|r| r.contains("│ y")), "{rows:?}");
+        // A last code line that reads as a fence in a list or a quote does
+        // not close the block.
+        for line in ["- ```", "1. ```", "> ```"] {
+            let rows = table_rows(&format!("- a\n  ```\n  {line}\n```\nDone."), 80);
+            assert_eq!(rows.last().unwrap(), "  Done.", "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_its_container_ended_leaves_the_rest_markdown() {
+        // A tag line is escaped and a bare hunk cut out after it, as with
+        // no fence before them.
+        let tail =
+            "Then:\n\n<script> tags are blocked.\n\n**bold** after.\n\n@@ -1 +1 @@\n-x\n+y\n\nEnd.";
+        let alone = table_rows(tail, 80);
+        assert!(alone.contains(&"  <script> tags are blocked.".to_string()));
+        assert!(alone.contains(&"  │ - x".to_string()), "{alone:?}");
+        for fence in ["- item\n  ```\n  ls\n\n", "> ```\n> ls\n\n"] {
+            let rows = table_rows(&format!("{fence}{tail}"), 80);
+            assert!(rows.ends_with(&alone), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_a_bare_hunk_ends_is_complete() {
+        for fence in ["- a\n  ```\n  x\n", "> ```\n> x\n"] {
+            let rows = table_rows(&format!("{fence}@@ -1 +1 @@\n-x\n+y\n\nDone."), 80);
+            assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
+            assert!(rows.contains(&"  │ - x".to_string()), "{rows:?}");
+        }
+    }
+
+    #[test]
+    fn a_fence_left_open_in_a_finished_message_is_complete() {
+        let rows: Vec<String> = render_markdown_to_lines("```py\nprint(1)", 80, true)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(rows.last().unwrap().contains('└'), "{rows:?}");
+    }
+
     fn table_rows(text: &str, width: usize) -> Vec<String> {
-        render_markdown_to_lines(text, width)
+        render_markdown_to_lines(text, width, false)
             .iter()
             .map(line_text)
             .collect()
@@ -1117,7 +1379,7 @@ mod tests {
                 "  Done.",
             ]
         );
-        let lines = render_markdown_to_lines("| a | b |\n|---|---|\n| 1 | 2 |", 80);
+        let lines = render_markdown_to_lines("| a | b |\n|---|---|\n| 1 | 2 |", 80, false);
         assert!(
             lines[0]
                 .spans
@@ -1199,6 +1461,7 @@ mod tests {
         let lines = render_markdown_to_lines(
             "| Where | Note |\n|---|---|\n| `form.tsx:177-192` | `a \\| b` and **bold** |",
             80,
+            false,
         );
         let row = &lines[2];
         assert_eq!(line_text(row), "  form.tsx:177-192 │ a | b and bold");
@@ -1260,7 +1523,8 @@ mod tests {
                 "  • a item"
             ]
         );
-        let lines = render_markdown_to_lines("<li> elements need a key.\nSo **add** one.", 40);
+        let lines =
+            render_markdown_to_lines("<li> elements need a key.\nSo **add** one.", 40, false);
         assert_eq!(line_text(&lines[0]), "  <li> elements need a key.");
         assert!(
             lines[1]

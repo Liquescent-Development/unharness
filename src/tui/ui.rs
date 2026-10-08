@@ -284,9 +284,16 @@ fn fmt_tokens(n: u64) -> String {
     }
 }
 
-/// The rendered lines of one transcript block. Depends on nothing but its
-/// arguments, so the result can be kept until `block_key` changes.
-fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> Vec<Line<'static>> {
+/// The rendered lines of one transcript block, `followed` by another.
+/// Depends on nothing but its arguments, so the result can be kept until
+/// `block_key` changes.
+fn block_lines(
+    b: &TBlock,
+    width: usize,
+    followed: bool,
+    thinking_live: bool,
+    elapsed: f32,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     match b {
         TBlock::User { text } => {
@@ -312,7 +319,9 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             )));
-            lines.extend(render_markdown_to_lines(text, width));
+            // Text is added only to the last block, until the turn ends.
+            let done = followed || duration.is_some();
+            lines.extend(render_markdown_to_lines(text, width, done));
         }
         TBlock::Handoff { text, sender, to } => {
             lines.push(Line::from(Span::styled(
@@ -321,7 +330,7 @@ fn block_lines(b: &TBlock, width: usize, thinking_live: bool, elapsed: f32) -> V
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             )));
-            lines.extend(render_markdown_to_lines(text, width));
+            lines.extend(render_markdown_to_lines(text, width, true));
         }
         TBlock::Thought { text, duration } => {
             let title = match duration {
@@ -676,7 +685,7 @@ fn close_gutter(lines: &mut [Line<'static>]) {
 
 /// A fingerprint of everything `block_lines` reads from a block, and of the
 /// space above it.
-fn block_key(b: &TBlock, gap: usize, thinking_live: bool, elapsed: f32) -> u64 {
+fn block_key(b: &TBlock, gap: usize, followed: bool, thinking_live: bool, elapsed: f32) -> u64 {
     fn value<H: Hasher>(v: &serde_json::Value, h: &mut H) {
         use serde_json::Value;
         std::mem::discriminant(v).hash(h);
@@ -701,7 +710,7 @@ fn block_key(b: &TBlock, gap: usize, thinking_live: bool, elapsed: f32) -> u64 {
             text,
             sender,
             duration,
-        } => (text, sender, duration).hash(&mut h),
+        } => (text, sender, duration, followed).hash(&mut h),
         TBlock::Handoff { text, sender, to } => (text, sender, to).hash(&mut h),
         TBlock::Thought { text, duration } => {
             (text, duration).hash(&mut h);
@@ -798,7 +807,8 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         // The space above a block is laid out with it: it depends on the
         // block before, and a change there lays out this one again anyway.
         let gap = i.checked_sub(1).map_or(0, |p| block_gap(&shown[p], b));
-        let key = block_key(b, gap, thinking_live, elapsed);
+        let followed = i + 1 < shown.len();
+        let key = block_key(b, gap, followed, thinking_live, elapsed);
         if i == fresh && view.blocks.get(i).is_some_and(|k| k.key == key) {
             fresh += 1;
             continue;
@@ -810,7 +820,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             view.rendered.truncate(keep);
             view.lines.truncate(keep);
         }
-        let mut lines = block_lines(b, width, thinking_live, elapsed);
+        let mut lines = block_lines(b, width, followed, thinking_live, elapsed);
         // The gap is the only space between blocks.
         while lines.last().is_some_and(is_blank) {
             lines.pop();
@@ -1079,7 +1089,7 @@ pub fn wrap_prefixed_text(
 /// override it, its modifiers (`base`'s bold) add to it.
 fn markdown_lines(text: &str, indent: usize, max_width: usize, base: Style) -> Vec<Line<'static>> {
     let pad = " ".repeat(indent);
-    render_markdown_to_lines(text, (max_width + 2).saturating_sub(indent).max(10))
+    render_markdown_to_lines(text, (max_width + 2).saturating_sub(indent).max(10), true)
         .into_iter()
         .map(|line| {
             let mut spans = line.spans;
@@ -2168,7 +2178,7 @@ fn render_question_preview(frame: &mut Frame, m: &mut QuestionModal, area: Rect)
         .title(" Preview ");
     let inner = pane.inner(area);
     let lines = match m.preview() {
-        Some(text) => render_markdown_to_lines(text, inner.width as usize),
+        Some(text) => render_markdown_to_lines(text, inner.width as usize, true),
         None => vec![Line::from(Span::styled(
             "No preview for this option.",
             Style::default()
@@ -2771,7 +2781,7 @@ mod tests {
                 duration: Some(std::time::Duration::from_secs(274)),
                 agent: None,
             };
-            block_lines(&block, 80, false, 0.0)
+            block_lines(&block, 80, false, false, 0.0)
                 .iter()
                 .map(crate::tui::code::line_text)
                 .collect::<Vec<_>>()
@@ -2900,6 +2910,33 @@ mod tests {
     }
 
     #[test]
+    fn an_open_fence_streams_only_in_the_last_unfinished_reply() {
+        let reply = |duration| TBlock::Assistant {
+            text: "```py\nprint(1)".into(),
+            sender: "Claude".into(),
+            duration,
+        };
+        let last = |b: &TBlock, followed| {
+            let lines = block_lines(b, 80, followed, false, 0.0);
+            crate::tui::code::line_text(lines.last().unwrap())
+        };
+        assert!(last(&reply(None), false).contains('…'));
+        assert!(last(&reply(None), true).contains('└'));
+        let finished = reply(Some(std::time::Duration::from_secs(1)));
+        assert!(last(&finished, false).contains('└'));
+        assert_ne!(
+            block_key(&reply(None), 0, false, false, 0.0),
+            block_key(&reply(None), 0, true, false, 0.0)
+        );
+        // Nothing else reads it, so nothing else is drawn again for it.
+        let prompt = TBlock::User { text: "hi".into() };
+        assert_eq!(
+            block_key(&prompt, 0, false, false, 0.0),
+            block_key(&prompt, 0, true, false, 0.0)
+        );
+    }
+
+    #[test]
     fn a_call_shows_its_command_plainly_and_its_output_dimmed() {
         let block = TBlock::Tool {
             id: "t".into(),
@@ -2913,7 +2950,7 @@ mod tests {
             duration: Some(std::time::Duration::from_millis(700)),
             agent: None,
         };
-        let lines = block_lines(&block, 80, false, 0.0);
+        let lines = block_lines(&block, 80, false, false, 0.0);
         let text: Vec<String> = lines.iter().map(crate::tui::code::line_text).collect();
         // The command wraps; its status is on the first line, after its words.
         assert_eq!(text.len(), 3, "{text:?}");
@@ -2949,7 +2986,7 @@ mod tests {
             *output = "1\n2\n3\n4\n5\n6".into();
             *collapsed = true;
         }
-        let text: Vec<String> = block_lines(&block, 80, false, 0.0)
+        let text: Vec<String> = block_lines(&block, 80, false, false, 0.0)
             .iter()
             .map(crate::tui::code::line_text)
             .collect();
@@ -2972,7 +3009,7 @@ mod tests {
             agent: None,
         };
         let render = |name: &str, done: bool, width: usize| -> Vec<String> {
-            let mut lines = block_lines(&block(name, done), width, false, 0.0);
+            let mut lines = block_lines(&block(name, done), width, false, false, 0.0);
             clamp_lines(&mut lines, width + 4);
             lines.iter().map(crate::tui::code::line_text).collect()
         };
