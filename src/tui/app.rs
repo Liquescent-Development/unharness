@@ -300,6 +300,9 @@ pub struct App {
     /// What the user chose on a harness where the requested policy is not
     /// available. It holds for that harness only.
     pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
+    /// The policy named in this run (`--policy`, `/policy`): it holds over
+    /// the one a resumed conversation was run with.
+    run_policy: Option<PermissionPolicy>,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
@@ -317,10 +320,15 @@ pub struct App {
     running_providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
-    /// Harnesses whose model or effort the user chose, rather than taking
-    /// the configured default; only those are kept with the conversation.
+    /// Harnesses whose model or effort was chosen, in this run or for the
+    /// conversation, rather than configured; only those are kept with the
+    /// conversation.
     chosen_models: HashSet<HarnessId>,
     chosen_efforts: HashSet<HarnessId>,
+    /// The ones chosen in this run (`--model`, `/model`, ...): they hold
+    /// over a resumed conversation's.
+    run_models: HashSet<HarnessId>,
+    run_efforts: HashSet<HarnessId>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
     provider_cache: HashMap<HarnessId, Vec<(ProviderId, String)>>,
     /// Lists being fetched, and the ones still to hand to a thread.
@@ -470,6 +478,8 @@ pub struct AppInit {
     pub policy: Option<PermissionPolicy>,
     pub sandbox: SandboxSetup,
     pub provider: Option<String>,
+    /// The model and effort named on the command line, if they were; the
+    /// configured ones are taken from `config`.
     pub model: Option<String>,
     pub effort: Option<String>,
     /// Conversation id or prefix; empty string = most recent.
@@ -648,8 +658,19 @@ impl App {
         }
         let mut chosen_models = HashSet::new();
         let mut chosen_efforts = HashSet::new();
-        if let Some(m) = init.model {
-            chosen_models.insert(init.harness);
+        // `init.model` is only a flag: the configured model of a harness
+        // whose provider is not known yet is still given to it.
+        let configured_model = config
+            .harness(init.harness.as_str())
+            .and_then(|s| s.default_model.clone());
+        if let Some(m) = init
+            .model
+            .clone()
+            .or_else(|| configured_model.filter(|_| !models.contains_key(&init.harness)))
+        {
+            if init.model.is_some() {
+                chosen_models.insert(init.harness);
+            }
             let p = providers
                 .get(&init.harness)
                 .cloned()
@@ -700,13 +721,6 @@ impl App {
         let anchors = conversation.anchors.clone();
         let file_checkpoints = conversation.checkpoints.clone();
         let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
-        // A policy named on the command line wins over the one the
-        // conversation was run with.
-        let (policy_explicit, policy_choice) = match init.policy {
-            Some(p) => (Some(p), HashMap::new()),
-            None => (conversation.policy, conversation.policy_choices.clone()),
-        };
-        let policy_from_flag = init.policy.is_some();
         let checkpoints = if config.file_checkpoints.unwrap_or(true) {
             let store = init
                 .checkpoint_store
@@ -735,8 +749,9 @@ impl App {
             config,
             active,
             harness_options,
-            policy_explicit,
-            policy_choice,
+            policy_explicit: init.policy,
+            policy_choice: HashMap::new(),
+            run_policy: init.policy,
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
@@ -745,6 +760,8 @@ impl App {
             running_providers: HashMap::new(),
             models,
             efforts,
+            run_models: chosen_models.clone(),
+            run_efforts: chosen_efforts.clone(),
             chosen_models,
             chosen_efforts,
             model_cache: HashMap::new(),
@@ -822,13 +839,7 @@ impl App {
         };
 
         if resumed {
-            // A model or effort named on the command line wins.
-            let flagged = |chosen: &HashSet<HarnessId>| {
-                chosen.contains(&init.harness).then_some(init.harness)
-            };
-            let (model_flag, effort_flag) =
-                (flagged(&app.chosen_models), flagged(&app.chosen_efforts));
-            app.restore_model_choices(model_flag, effort_flag);
+            app.take_conversation_choices();
         }
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
@@ -850,19 +861,7 @@ impl App {
             app.transcript.push_error(e);
         }
         if resumed {
-            let summary = app.conversation.summary();
-            app.transcript.push_notice(format!(
-                "resumed conversation {} ({}); continuing on {}",
-                &summary.id[..8.min(summary.id.len())],
-                summary
-                    .harnesses
-                    .iter()
-                    .map(|h| h.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                app.short_name()
-            ));
-            app.note_resumed_policy(policy_from_flag);
+            app.announce_resume(true);
         }
         app
     }
@@ -1025,41 +1024,41 @@ impl App {
         }
     }
 
-    /// Tell the user when the active harness of a resumed conversation
-    /// runs under another policy than it last did.
-    fn note_resumed_policy(&mut self, from_flag: bool) {
-        let Some(last) = self.conversation.last_policies.get(&self.active).copied() else {
-            return;
-        };
-        let now = self.effective_policy();
-        if now == Some(last) {
-            return;
-        }
-        let wanted = self.wanted_policy();
-        let why = if from_flag {
-            "named with --policy".to_string()
-        } else if now != Some(wanted) {
-            format!("{wanted} is not available on {}", self.short_name())
-        } else if self.policy_explicit.is_some() {
-            "the policy of this run".to_string()
+    /// Take what the resumed conversation was run with, its policy, models
+    /// and efforts, except where this run named its own. What the last
+    /// conversation chose goes back to the configured default.
+    fn take_conversation_choices(&mut self) {
+        let conv = &self.conversation;
+        self.policy_explicit = self.run_policy.or(conv.policy);
+        // A choice made for want of a policy holds for the request it was
+        // made for.
+        self.policy_choice = if self.policy_explicit == conv.policy {
+            conv.policy_choices.clone()
         } else {
-            "the configured default".to_string()
+            HashMap::new()
         };
-        self.transcript.push_notice(format!(
-            "{} last ran this conversation under {last}; it continues under {} ({why})",
-            self.short_name(),
-            self.policy_label()
-        ));
-    }
 
-    /// Take the models and efforts chosen for the conversation, except on
-    /// a harness given one on the command line. A model chosen on another
-    /// provider than the harness is on now is left.
-    fn restore_model_choices(
-        &mut self,
-        model_flag: Option<HarnessId>,
-        effort_flag: Option<HarnessId>,
-    ) {
+        for h in std::mem::take(&mut self.chosen_models) {
+            if self.run_models.contains(&h) {
+                self.chosen_models.insert(h);
+            } else {
+                match self.configured_model(h) {
+                    Some(m) => self.models.insert(h, m),
+                    None => self.models.remove(&h),
+                };
+            }
+        }
+        for h in std::mem::take(&mut self.chosen_efforts) {
+            if self.run_efforts.contains(&h) {
+                self.chosen_efforts.insert(h);
+            } else {
+                match self.configured_effort(h) {
+                    Some(e) => self.efforts.insert(h, e),
+                    None => self.efforts.remove(&h),
+                };
+            }
+        }
+
         let mut models: Vec<(HarnessId, ModelRef)> = self
             .conversation
             .models
@@ -1067,11 +1066,13 @@ impl App {
             .map(|(h, m)| (*h, m.clone()))
             .collect();
         models.sort_by_key(|(h, _)| h.as_str());
+        // An effort is for the model it was chosen with.
+        let mut left = HashSet::new();
         for (h, m) in models {
             let Some(harness) = self.registry.get(h) else {
                 continue;
             };
-            if Some(h) == model_flag {
+            if self.run_models.contains(&h) {
                 continue;
             }
             match self.providers.get(&h) {
@@ -1081,6 +1082,7 @@ impl App {
                         "the model chosen for {name} in this conversation ({}) is not used: {name} is on {p} now",
                         m.label(),
                     ));
+                    left.insert(h);
                 }
                 _ => {
                     self.models.insert(h, m);
@@ -1095,12 +1097,84 @@ impl App {
             .map(|(h, e)| (*h, e.clone()))
             .collect();
         for (h, e) in efforts {
-            if Some(h) == effort_flag || self.registry.get(h).is_none() {
+            if self.run_efforts.contains(&h) || left.contains(&h) || self.registry.get(h).is_none()
+            {
                 continue;
             }
             self.efforts.insert(h, e);
             self.chosen_efforts.insert(h);
         }
+    }
+
+    /// The model the config names for `harness`.
+    fn configured_model(&self, harness: HarnessId) -> Option<ModelRef> {
+        let model = self
+            .config
+            .harness(harness.as_str())?
+            .default_model
+            .clone()?;
+        let provider = self
+            .providers
+            .get(&harness)
+            .cloned()
+            .unwrap_or_else(|| ProviderId::new("default"));
+        Some(ModelRef::new(harness, provider, model))
+    }
+
+    fn configured_effort(&self, harness: HarnessId) -> Option<String> {
+        self.config
+            .harness(harness.as_str())?
+            .default_effort
+            .clone()
+    }
+
+    /// Say which conversation was resumed, and whether its harness runs
+    /// under another policy than it last did. `at_start`: by `--resume`.
+    fn announce_resume(&mut self, at_start: bool) {
+        let summary = self.conversation.summary();
+        self.transcript.push_notice(format!(
+            "resumed conversation {} ({}); continuing on {}",
+            &summary.id[..8.min(summary.id.len())],
+            summary
+                .harnesses
+                .iter()
+                .map(|h| h.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.short_name()
+        ));
+        let Some(last) = self.conversation.last_policies.get(&self.active).copied() else {
+            return;
+        };
+        let now = self.effective_policy();
+        if now == Some(last) {
+            return;
+        }
+        let name = self.short_name();
+        let requested = self.policy_requested();
+        let why = if self.run_policy.is_some() && self.run_policy != self.conversation.policy {
+            if at_start {
+                "named with --policy".to_string()
+            } else {
+                "named in this run".to_string()
+            }
+        } else if self.wanted_policy() != requested {
+            format!("chosen where {requested} is not available on {name}")
+        } else if now != Some(requested) {
+            format!("{requested} is not available on {name}")
+        } else if self.policy_explicit.is_some() {
+            "the policy chosen for this conversation".to_string()
+        } else {
+            "the configured default".to_string()
+        };
+        self.transcript.push_notice(match now {
+            Some(now) => format!(
+                "{name} last ran this conversation under {last}; it continues under {now} ({why})"
+            ),
+            None => format!(
+                "{name} last ran this conversation under {last}; it waits for a policy ({why})"
+            ),
+        });
     }
 
     /// Ask for a policy where the requested one is not available. Returns
@@ -2977,6 +3051,7 @@ impl App {
             self.policy_choice.insert(self.active, p);
         } else {
             self.policy_explicit = Some(p);
+            self.run_policy = Some(p);
             // What was chosen in place of another request is not kept for
             // this one.
             self.policy_choice.clear();
@@ -3052,6 +3127,7 @@ impl App {
             self.running_providers.remove(&self.active);
             self.models.remove(&self.active);
             self.chosen_models.remove(&self.active);
+            self.run_models.remove(&self.active);
             self.conversation.models.remove(&self.active);
         }
         self.providers.insert(self.active, provider.clone());
@@ -3078,6 +3154,7 @@ impl App {
         self.transcript.push_system(format!("Model: {}", m.label()));
         self.models.insert(self.active, m.clone());
         self.chosen_models.insert(self.active);
+        self.run_models.insert(self.active);
         if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetModel(m)));
@@ -3105,6 +3182,7 @@ impl App {
         }
         self.efforts.insert(self.active, effort.clone());
         self.chosen_efforts.insert(self.active);
+        self.run_efforts.insert(self.active);
         self.transcript.push_system(format!("Effort: {effort}"));
         if self.session_alive {
             self.actions
@@ -3155,29 +3233,12 @@ impl App {
         self.modal = None;
         self.pending_prompts.clear();
         self.active = active;
-        // The conversation's own policy; without one the run's holds.
-        if conv.policy.is_some() || self.policy_explicit.is_none() {
-            self.policy_explicit = conv.policy;
-            self.policy_choice = conv.policy_choices.clone();
-        }
-        let summary = conv.summary();
         self.conversation = conv;
-        self.restore_model_choices(None, None);
-        self.transcript.push_notice(format!(
-            "resumed conversation {} ({}); continuing on {}",
-            &summary.id[..8.min(summary.id.len())],
-            summary
-                .harnesses
-                .iter()
-                .map(|h| h.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
-            self.short_name()
-        ));
+        self.take_conversation_choices();
+        self.announce_resume(false);
         if let Some(w) = self.policy_warning() {
             self.transcript.push_notice(w);
         }
-        self.note_resumed_policy(false);
         self.require_policy();
         self.auto_scroll = true;
     }
@@ -7321,6 +7382,40 @@ pub(crate) mod tests {
     fn resuming_in_the_tui_takes_the_conversations_policy() {
         let tmp = tempfile::tempdir().unwrap();
         claude_turn_under(tmp.path(), Some(PermissionPolicy::Auto));
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let auto = store.last().unwrap().id;
+        // One that never named a policy, last run under the default.
+        let mut plain = Conversation::new(HarnessId::CLAUDE);
+        plain
+            .blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
+        plain
+            .last_policies
+            .insert(HarnessId::CLAUDE, PermissionPolicy::AcceptEdits);
+        store.save(&plain).unwrap();
+
+        let mut app = test_app_with(
+            tmp.path().to_path_buf(),
+            HarnessId::CLAUDE,
+            None,
+            false,
+            accept_edits_config(),
+            test_registry(),
+        );
+        app.resume_conversation(auto);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
+        // What the last one ran under does not follow into the next.
+        app.resume_conversation(plain.id.clone());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(!notices(&app).iter().any(|n| n.contains("last ran")));
+        app.persist();
+        assert_eq!(store.load(&plain.id).unwrap().policy, None);
+    }
+
+    #[test]
+    fn a_policy_named_in_the_run_holds_over_a_resumed_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        claude_turn_under(tmp.path(), Some(PermissionPolicy::Bypass));
         let id = ConversationStore::open(Some(tmp.path()), tmp.path())
             .last()
             .unwrap()
@@ -7334,18 +7429,29 @@ pub(crate) mod tests {
             test_registry(),
         );
         assert!(app.set_policy(PermissionPolicy::Ask));
-        app.resume_conversation(id.clone());
-        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
-
-        // One that never named a policy leaves the run's.
-        let mut other = Conversation::new(HarnessId::CLAUDE);
-        other
-            .blocks
-            .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
-        app.store.save(&other).unwrap();
-        assert!(app.set_policy(PermissionPolicy::Ask));
-        app.resume_conversation(other.id);
+        app.resume_conversation(id);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert!(notices(&app).iter().any(|n| n
+            == "Claude last ran this conversation under bypass; it continues under ask (named in this run)"));
+    }
+
+    #[test]
+    fn the_same_policy_named_on_resume_keeps_the_choices_made_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let mut conv = Conversation::new(HarnessId::AGY);
+        conv.blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        conv.policy = Some(PermissionPolicy::Ask);
+        conv.policy_choices
+            .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        store.save(&conv).unwrap();
+        let app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(app.modal.is_none());
+        // Another one asks again.
+        let app = resume_with(tmp.path(), Some(PermissionPolicy::Auto));
+        assert_eq!(app.policy_choice, HashMap::new());
     }
 
     /// Resume the last conversation in `cwd` with `model` and `effort` on
@@ -7431,11 +7537,42 @@ pub(crate) mod tests {
     #[test]
     fn a_model_chosen_on_another_provider_is_left() {
         let tmp = tempfile::tempdir().unwrap();
-        codex_turn_choosing(tmp.path(), Some("gpt-chosen"), None);
+        codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
         let app = resume_codex_with(tmp.path(), None, None, "ollama");
         assert_eq!(codex_model(&app), Some("configured-model"));
+        // Its effort was for it.
+        assert_eq!(app.current_effort(), None);
         assert!(notices(&app).iter().any(|n| n
             == "the model chosen for Codex in this conversation (openai/gpt-chosen) is not used: Codex is on ollama now"));
+    }
+
+    #[test]
+    fn resuming_in_the_tui_does_not_carry_one_conversations_model_into_another() {
+        let tmp = tempfile::tempdir().unwrap();
+        codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let chosen = store.last().unwrap().id;
+        let mut plain = Conversation::new(HarnessId::CODEX);
+        plain
+            .blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
+        store.save(&plain).unwrap();
+
+        let mut app = resume_codex_with(tmp.path(), None, None, "openai");
+        app.resume_conversation(chosen.clone());
+        assert_eq!(codex_model(&app), Some("gpt-chosen"));
+        app.resume_conversation(plain.id.clone());
+        assert_eq!(codex_model(&app), Some("configured-model"));
+        assert_eq!(app.current_effort(), None);
+        app.persist();
+        let saved = store.load(&plain.id).unwrap();
+        assert!(saved.models.is_empty() && saved.efforts.is_empty());
+
+        // One chosen in the run holds.
+        app.set_model("gpt-run".into());
+        app.resume_conversation(chosen);
+        assert_eq!(codex_model(&app), Some("gpt-run"));
+        assert_eq!(app.current_effort(), Some("high"));
     }
 
     #[test]

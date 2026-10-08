@@ -48,10 +48,12 @@ unharness does not choose for you:
 A conversation keeps the policy you chose for it (`--policy`,
 `UNHARNESS_POLICY`, `/policy`, or the picker where that policy was not
 available), and `--resume`, `Ctrl+R` and `/resume` bring it back. A
-policy named on the resume command line wins. A conversation that never
-had a policy named follows `default_policy` as it is when you resume it.
-When the policy a harness resumes under is not the one it last ran
-under (a flag, a changed default, a fallback), the transcript says so.
+policy named in the run you resume it in wins: on the command line, or
+with `/policy` before `Ctrl+R`. A conversation that never had a policy
+named follows `default_policy` as it is when you resume it, whatever the
+conversation open before it ran under. When the policy a harness
+resumes under is not the one it last ran under (a policy named in the
+run, a changed default, a fallback), the transcript says so.
 
 ### `--print`
 
