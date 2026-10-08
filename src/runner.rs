@@ -363,8 +363,11 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         policy: explicit_policy(&args)?,
         sandbox: sandbox_setup,
         provider: chosen_provider,
-        model,
-        effort,
+        // Only what was named: the TUI takes each harness's configured
+        // model and effort itself, and keeps a named one with the
+        // conversation.
+        model: args.model.clone(),
+        effort: args.effort.clone(),
         resume,
         harness_explicit: args.harness.is_some(),
         initial_prompt: prompt,

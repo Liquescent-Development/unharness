@@ -12,8 +12,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::caps::PermissionPolicy;
 use super::event::{HookOutcome, PlanEntry, SubagentStatus, Usage};
-use super::ids::HarnessId;
+use super::ids::{HarnessId, ModelRef};
 
 /// Conversations kept in the index; older ones are deleted on save.
 pub const MAX_CONVERSATIONS: usize = 50;
@@ -187,6 +188,25 @@ pub struct Conversation {
     /// was forked from: their next session must branch it, not reattach.
     #[serde(default)]
     pub fork_pending: Vec<HarnessId>,
+    /// The policy named for every harness (`--policy`, `/policy`); `None`
+    /// when each followed its configured default.
+    #[serde(default)]
+    pub policy: Option<PermissionPolicy>,
+    /// What was chosen on a harness where the named policy was not
+    /// available.
+    #[serde(default)]
+    pub policy_choices: HashMap<HarnessId, PermissionPolicy>,
+    /// The policy each harness last ran under, to tell the user when a
+    /// resumed one runs under another.
+    #[serde(default)]
+    pub last_policies: HashMap<HarnessId, PermissionPolicy>,
+    /// The model chosen for each harness (`--model`, `/model`); a harness
+    /// on its configured default has none.
+    #[serde(default)]
+    pub models: HashMap<HarnessId, ModelRef>,
+    /// The effort chosen for each harness (`--effort`, `/effort`).
+    #[serde(default)]
+    pub efforts: HashMap<HarnessId, String>,
 }
 
 /// A file checkpoint taken just before the user block at `block` was sent.
@@ -224,6 +244,11 @@ impl Conversation {
             anchors: Vec::new(),
             checkpoints: Vec::new(),
             fork_pending: Vec::new(),
+            policy: None,
+            policy_choices: HashMap::new(),
+            last_policies: HashMap::new(),
+            models: HashMap::new(),
+            efforts: HashMap::new(),
         }
     }
 
@@ -522,6 +547,16 @@ mod tests {
         c.sessions.insert(HarnessId::CLAUDE, "claude-sess".into());
         c.sessions.insert(HarnessId::CODEX, "codex-thread".into());
         c.bookmarks.insert(HarnessId::CLAUDE, 2);
+        c.policy = Some(PermissionPolicy::Auto);
+        c.policy_choices
+            .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        c.last_policies
+            .insert(HarnessId::CLAUDE, PermissionPolicy::Auto);
+        c.models.insert(
+            HarnessId::CODEX,
+            ModelRef::new(HarnessId::CODEX, "openai", "gpt-x"),
+        );
+        c.efforts.insert(HarnessId::CODEX, "high".into());
         c.blocks.push(BlockRecord::User { text: "hi".into() });
         c.blocks.push(BlockRecord::Assistant {
             text: "hello".into(),
@@ -662,6 +697,20 @@ mod tests {
                 secs: None,
             }
         );
+    }
+
+    /// A conversation saved before the policy was kept follows the config.
+    #[test]
+    fn a_conversation_without_a_policy_loads() {
+        let c: Conversation = serde_json::from_value(serde_json::json!({
+            "id": "x", "title": "", "created_at": "", "updated_at": "",
+            "active_harness": "claude",
+        }))
+        .unwrap();
+        assert_eq!(c.policy, None);
+        assert!(c.policy_choices.is_empty());
+        assert!(c.last_policies.is_empty());
+        assert!(c.models.is_empty() && c.efforts.is_empty());
     }
 
     #[test]

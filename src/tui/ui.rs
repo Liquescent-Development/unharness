@@ -1279,28 +1279,35 @@ fn render_bottom(
         Some(e) => format!("policy {wanted}→{e}"),
         None => format!("policy {wanted} (unavailable)"),
     };
-    let right1 = Line::from(vec![
-        Span::styled(
-            format!("[{}] ", app.short_name()),
+    // Effort goes first when the row is too narrow, then the model, then
+    // the sandbox; the harness and its policy always stay.
+    let segments = [
+        (
+            format!("[{}]", app.short_name()),
             Style::default()
                 .fg(harness_color(app.active))
                 .add_modifier(Modifier::BOLD),
+            0,
         ),
-        Span::styled(app.model_label(), Style::default().fg(Color::Yellow)),
-        Span::styled(
-            format!(" · effort {}", app.current_effort().unwrap_or("default")),
+        (app.model_label(), Style::default().fg(Color::Yellow), 2),
+        (
+            format!("effort {}", app.current_effort().unwrap_or("default")),
             Style::default().fg(Color::LightBlue),
+            1,
         ),
-        Span::styled(
-            format!(" · {policy_text}"),
+        (
+            policy_text,
             Style::default().fg(effective.map_or(Color::Red, policy_color)),
+            0,
         ),
-        Span::styled(
-            format!(" · sandbox {}", sandbox_label(sandbox)),
+        (
+            format!("sandbox {}", sandbox_label(sandbox)),
             Style::default().fg(sandbox_color(sandbox)),
+            3,
         ),
-    ]);
-    render_split(frame, rows[4], left1, right1);
+    ];
+    let right1 = fit_segments(&segments, width.saturating_sub(SPLIT_LEFT_MIN));
+    render_split(frame, rows[4], left1, right1, true);
 
     // Line 2: usage (left) · session id (right)
     let t = &app.turn_usage;
@@ -1336,7 +1343,7 @@ fn render_bottom(
             }),
         Style::default().fg(Color::DarkGray),
     ));
-    render_split(frame, rows[5], left2, right2);
+    render_split(frame, rows[5], left2, right2, false);
 
     let mut next = 6;
     if let Some(w) = warning {
@@ -1386,9 +1393,50 @@ fn render_bottom(
     rows[1]
 }
 
-/// Left text and right text on one row; the right side is dropped first
-/// when the terminal is too narrow for both.
-fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'static>) {
+/// The status segments that fit in `room` cells: the first, a space, and
+/// the rest separated by ` · `. Segments are dropped in the order their
+/// number gives (0: never) until the row fits.
+fn fit_segments(segments: &[(String, Style, u8)], room: usize) -> Line<'static> {
+    let mut kept: Vec<&(String, Style, u8)> = segments.iter().collect();
+    let width = |kept: &[&(String, Style, u8)]| {
+        kept.iter().map(|(t, _, _)| t.width()).sum::<usize>()
+            + kept.len().saturating_sub(2) * 3
+            + usize::from(kept.len() > 1)
+    };
+    while width(&kept) > room {
+        let Some(i) = (0..kept.len())
+            .filter(|&i| kept[i].2 > 0)
+            .min_by_key(|&i| kept[i].2)
+        else {
+            break;
+        };
+        kept.remove(i);
+    }
+    let mut spans = Vec::new();
+    for (i, (text, style, _)) in kept.into_iter().enumerate() {
+        match i {
+            0 => {}
+            1 => spans.push(Span::raw(" ")),
+            _ => spans.push(Span::styled(" · ", *style)),
+        }
+        spans.push(Span::styled(text.clone(), *style));
+    }
+    Line::from(spans)
+}
+
+/// Cells the left side of a split row keeps before the right side goes.
+const SPLIT_LEFT_MIN: usize = 12;
+
+/// Left text and right text on one row; the left side is shortened first
+/// when the terminal is too narrow for both. Then one goes: the right
+/// side where it must stay (`keep_right`), else the left.
+fn render_split(
+    frame: &mut Frame,
+    row: Rect,
+    left: Line<'static>,
+    right: Line<'static>,
+    keep_right: bool,
+) {
     let width = row.width as usize;
     let lw = left.width();
     let rw = right.width();
@@ -1397,7 +1445,7 @@ fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'
         spans.push(Span::raw(" ".repeat(width - lw - rw)));
         spans.extend(right.spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
-    } else if rw + 12 <= width {
+    } else if rw + SPLIT_LEFT_MIN <= width {
         // Keep the right side; show the tail of the left (paths end in the
         // interesting part).
         let room = width - rw - 2;
@@ -1417,7 +1465,7 @@ fn render_split(frame: &mut Frame, row: Rect, left: Line<'static>, right: Line<'
         spans.extend(right.spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     } else {
-        let mut lines = vec![left];
+        let mut lines = vec![if keep_right { right } else { left }];
         clamp_lines(&mut lines, width);
         frame.render_widget(Paragraph::new(lines.remove(0)), row);
     }
@@ -2278,6 +2326,47 @@ mod tests {
         assert!(lines.len() >= 2);
         assert_eq!(lines[0].spans[0].content, "  ✗ ");
         assert_eq!(lines[1].spans[0].content, "    ");
+    }
+
+    #[test]
+    fn status_segments_go_in_their_order() {
+        let s = Style::default();
+        let segments = [
+            ("[h]".to_string(), s, 0),
+            ("model".to_string(), s, 2),
+            ("effort".to_string(), s, 1),
+            ("policy".to_string(), s, 0),
+            ("sandbox".to_string(), s, 3),
+        ];
+        let text = |room| {
+            fit_segments(&segments, room)
+                .spans
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        assert_eq!(text(100), "[h] model · effort · policy · sandbox");
+        assert_eq!(text(30), "[h] model · policy · sandbox");
+        assert_eq!(text(25), "[h] policy · sandbox");
+        assert_eq!(text(10), "[h] policy");
+        assert_eq!(text(0), "[h] policy");
+    }
+
+    #[test]
+    fn a_narrow_status_still_shows_the_harness_and_policy() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.cwd =
+            std::path::PathBuf::from("/srv/projects/some-organisation/a-rather-long-repository");
+        app.set_model("claude-a-model-with-a-long-name-20991231".into());
+        assert!(app.set_policy(PermissionPolicy::Auto));
+        for width in [24, 32, 50, 80, 120] {
+            let (rows, _) = screen(&mut app, width, 30);
+            assert!(
+                rows.iter()
+                    .any(|r| r.contains("[Claude]") && r.contains("policy auto")),
+                "{width}: {rows:#?}"
+            );
+        }
     }
 
     #[test]

@@ -43,6 +43,18 @@ unharness does not choose for you:
 - `--print` and `--no-tui` stop with an error naming the policies you can
   pass with `--policy`.
 
+### Resuming a conversation
+
+A conversation keeps the policy you chose for it (`--policy`,
+`UNHARNESS_POLICY`, `/policy`, or the picker where that policy was not
+available), and `--resume`, `Ctrl+R` and `/resume` bring it back. A
+policy named in the run you resume it in wins: on the command line, or
+with `/policy` before `Ctrl+R`. A conversation that never had a policy
+named follows `default_policy` as it is when you resume it, whatever the
+conversation open before it ran under. When the policy a harness
+resumes under is not the one it last ran under (a policy named in the
+run, a changed default, a fallback), the transcript says so.
+
 ### `--print`
 
 A [headless run](headless.md) has nobody to ask: what an allow rule
