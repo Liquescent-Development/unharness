@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::caps::PermissionPolicy;
 use super::event::{HookOutcome, PlanEntry, SubagentStatus, Usage};
-use super::ids::HarnessId;
+use super::ids::{HarnessId, ModelRef};
 
 /// Conversations kept in the index; older ones are deleted on save.
 pub const MAX_CONVERSATIONS: usize = 50;
@@ -200,6 +200,13 @@ pub struct Conversation {
     /// resumed one runs under another.
     #[serde(default)]
     pub last_policies: HashMap<HarnessId, PermissionPolicy>,
+    /// The model chosen for each harness (`--model`, `/model`); a harness
+    /// on its configured default has none.
+    #[serde(default)]
+    pub models: HashMap<HarnessId, ModelRef>,
+    /// The effort chosen for each harness (`--effort`, `/effort`).
+    #[serde(default)]
+    pub efforts: HashMap<HarnessId, String>,
 }
 
 /// A file checkpoint taken just before the user block at `block` was sent.
@@ -240,6 +247,8 @@ impl Conversation {
             policy: None,
             policy_choices: HashMap::new(),
             last_policies: HashMap::new(),
+            models: HashMap::new(),
+            efforts: HashMap::new(),
         }
     }
 
@@ -543,6 +552,11 @@ mod tests {
             .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
         c.last_policies
             .insert(HarnessId::CLAUDE, PermissionPolicy::Auto);
+        c.models.insert(
+            HarnessId::CODEX,
+            ModelRef::new(HarnessId::CODEX, "openai", "gpt-x"),
+        );
+        c.efforts.insert(HarnessId::CODEX, "high".into());
         c.blocks.push(BlockRecord::User { text: "hi".into() });
         c.blocks.push(BlockRecord::Assistant {
             text: "hello".into(),
@@ -696,6 +710,7 @@ mod tests {
         assert_eq!(c.policy, None);
         assert!(c.policy_choices.is_empty());
         assert!(c.last_policies.is_empty());
+        assert!(c.models.is_empty() && c.efforts.is_empty());
     }
 
     #[test]

@@ -317,6 +317,10 @@ pub struct App {
     running_providers: HashMap<HarnessId, ProviderId>,
     pub models: HashMap<HarnessId, ModelRef>,
     pub efforts: HashMap<HarnessId, String>,
+    /// Harnesses whose model or effort the user chose, rather than taking
+    /// the configured default; only those are kept with the conversation.
+    chosen_models: HashSet<HarnessId>,
+    chosen_efforts: HashSet<HarnessId>,
     model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
     provider_cache: HashMap<HarnessId, Vec<(ProviderId, String)>>,
     /// Lists being fetched, and the ones still to hand to a thread.
@@ -642,7 +646,10 @@ impl App {
             providers.insert(init.harness, ProviderId::new(p));
             chosen_providers.insert(init.harness);
         }
+        let mut chosen_models = HashSet::new();
+        let mut chosen_efforts = HashSet::new();
         if let Some(m) = init.model {
+            chosen_models.insert(init.harness);
             let p = providers
                 .get(&init.harness)
                 .cloned()
@@ -650,6 +657,7 @@ impl App {
             models.insert(init.harness, ModelRef::new(init.harness, p, m));
         }
         if let Some(e) = init.effort {
+            chosen_efforts.insert(init.harness);
             efforts.insert(init.harness, e);
         }
 
@@ -737,6 +745,8 @@ impl App {
             running_providers: HashMap::new(),
             models,
             efforts,
+            chosen_models,
+            chosen_efforts,
             model_cache: HashMap::new(),
             provider_cache: HashMap::new(),
             lists_pending: HashSet::new(),
@@ -811,6 +821,15 @@ impl App {
             actions: VecDeque::new(),
         };
 
+        if resumed {
+            // A model or effort named on the command line wins.
+            let flagged = |chosen: &HashSet<HarnessId>| {
+                chosen.contains(&init.harness).then_some(init.harness)
+            };
+            let (model_flag, effort_flag) =
+                (flagged(&app.chosen_models), flagged(&app.chosen_efforts));
+            app.restore_model_choices(model_flag, effort_flag);
+        }
         app.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
             app.display_name(),
@@ -883,6 +902,16 @@ impl App {
         c.fork_pending.sort_by_key(|h| h.as_str());
         c.policy = self.policy_explicit;
         c.policy_choices = self.policy_choice.clone();
+        for h in &self.chosen_models {
+            if let Some(m) = self.models.get(h) {
+                c.models.insert(*h, m.clone());
+            }
+        }
+        for h in &self.chosen_efforts {
+            if let Some(e) = self.efforts.get(h) {
+                c.efforts.insert(*h, e.clone());
+            }
+        }
         if self.session_alive
             && let Some(p) = self.effective_policy()
         {
@@ -1021,6 +1050,57 @@ impl App {
             self.short_name(),
             self.policy_label()
         ));
+    }
+
+    /// Take the models and efforts chosen for the conversation, except on
+    /// a harness given one on the command line. A model chosen on another
+    /// provider than the harness is on now is left.
+    fn restore_model_choices(
+        &mut self,
+        model_flag: Option<HarnessId>,
+        effort_flag: Option<HarnessId>,
+    ) {
+        let mut models: Vec<(HarnessId, ModelRef)> = self
+            .conversation
+            .models
+            .iter()
+            .map(|(h, m)| (*h, m.clone()))
+            .collect();
+        models.sort_by_key(|(h, _)| h.as_str());
+        for (h, m) in models {
+            let Some(harness) = self.registry.get(h) else {
+                continue;
+            };
+            if Some(h) == model_flag {
+                continue;
+            }
+            match self.providers.get(&h) {
+                Some(p) if *p != m.provider => {
+                    let name = harness.descriptor().short_name;
+                    self.transcript.push_notice(format!(
+                        "the model chosen for {name} in this conversation ({}) is not used: {name} is on {p} now",
+                        m.label(),
+                    ));
+                }
+                _ => {
+                    self.models.insert(h, m);
+                    self.chosen_models.insert(h);
+                }
+            }
+        }
+        let efforts: Vec<(HarnessId, String)> = self
+            .conversation
+            .efforts
+            .iter()
+            .map(|(h, e)| (*h, e.clone()))
+            .collect();
+        for (h, e) in efforts {
+            if Some(h) == effort_flag || self.registry.get(h).is_none() {
+                continue;
+            }
+            self.efforts.insert(h, e);
+            self.chosen_efforts.insert(h);
+        }
     }
 
     /// Ask for a policy where the requested one is not available. Returns
@@ -1795,6 +1875,9 @@ impl App {
         }
         let mut fork = Conversation::new(self.active);
         fork.title = self.conversation.title.clone();
+        fork.last_policies = self.conversation.last_policies.clone();
+        fork.models = self.conversation.models.clone();
+        fork.efforts = self.conversation.efforts.clone();
         self.conversation = fork;
 
         let mut branched = Vec::new();
@@ -2968,6 +3051,8 @@ impl App {
         if changed {
             self.running_providers.remove(&self.active);
             self.models.remove(&self.active);
+            self.chosen_models.remove(&self.active);
+            self.conversation.models.remove(&self.active);
         }
         self.providers.insert(self.active, provider.clone());
         self.chosen_providers.insert(self.active);
@@ -2992,6 +3077,7 @@ impl App {
         let m = ModelRef::new(self.active, provider, model);
         self.transcript.push_system(format!("Model: {}", m.label()));
         self.models.insert(self.active, m.clone());
+        self.chosen_models.insert(self.active);
         if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetModel(m)));
@@ -3018,6 +3104,7 @@ impl App {
             return;
         }
         self.efforts.insert(self.active, effort.clone());
+        self.chosen_efforts.insert(self.active);
         self.transcript.push_system(format!("Effort: {effort}"));
         if self.session_alive {
             self.actions
@@ -3075,6 +3162,7 @@ impl App {
         }
         let summary = conv.summary();
         self.conversation = conv;
+        self.restore_model_choices(None, None);
         self.transcript.push_notice(format!(
             "resumed conversation {} ({}); continuing on {}",
             &summary.id[..8.min(summary.id.len())],
@@ -7258,6 +7346,96 @@ pub(crate) mod tests {
         assert!(app.set_policy(PermissionPolicy::Ask));
         app.resume_conversation(other.id);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+    }
+
+    /// Resume the last conversation in `cwd` with `model` and `effort` on
+    /// the command line, Codex's provider configured as `provider`.
+    fn resume_codex_with(
+        cwd: &Path,
+        model: Option<&str>,
+        effort: Option<&str>,
+        provider: &str,
+    ) -> App {
+        let mut config = Config::default();
+        config.harnesses.insert(
+            "codex".into(),
+            crate::config::HarnessSettings {
+                default_provider: Some(provider.into()),
+                default_model: Some("configured-model".into()),
+                ..Default::default()
+            },
+        );
+        let mut init = test_init(
+            cwd.to_path_buf(),
+            HarnessId::CODEX,
+            Some(String::new()),
+            false,
+            config,
+            test_registry(),
+        );
+        init.model = model.map(Into::into);
+        init.effort = effort.map(Into::into);
+        App::new(init)
+    }
+
+    fn codex_model(app: &App) -> Option<&str> {
+        app.models.get(&HarnessId::CODEX).map(|m| m.model.as_str())
+    }
+
+    /// A turn on Codex after `/model` and `/effort` where given, then quit.
+    fn codex_turn_choosing(cwd: &Path, model: Option<&str>, effort: Option<&str>) {
+        let mut app = resume_codex_with(cwd, None, None, "openai");
+        if let Some(m) = model {
+            app.set_model(m.into());
+        }
+        if let Some(e) = effort {
+            app.set_effort(e.into());
+        }
+        app.submit_prompt("hi".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.quit();
+    }
+
+    #[test]
+    fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
+        let app = resume_codex_with(tmp.path(), None, None, "openai");
+        assert_eq!(codex_model(&app), Some("gpt-chosen"));
+        assert_eq!(app.current_effort(), Some("high"));
+
+        // Named on the command line, they win.
+        let app = resume_codex_with(tmp.path(), Some("gpt-flag"), Some("low"), "openai");
+        assert_eq!(codex_model(&app), Some("gpt-flag"));
+        assert_eq!(app.current_effort(), Some("low"));
+    }
+
+    #[test]
+    fn a_configured_model_is_not_kept_with_the_conversation() {
+        let tmp = tempfile::tempdir().unwrap();
+        codex_turn_choosing(tmp.path(), None, None);
+        let app = resume_codex_with(tmp.path(), None, None, "openai");
+        assert!(app.conversation.models.is_empty());
+        assert!(app.conversation.efforts.is_empty());
+        assert_eq!(codex_model(&app), Some("configured-model"));
+    }
+
+    #[test]
+    fn a_model_chosen_on_another_provider_is_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        codex_turn_choosing(tmp.path(), Some("gpt-chosen"), None);
+        let app = resume_codex_with(tmp.path(), None, None, "ollama");
+        assert_eq!(codex_model(&app), Some("configured-model"));
+        assert!(notices(&app).iter().any(|n| n
+            == "the model chosen for Codex in this conversation (openai/gpt-chosen) is not used: Codex is on ollama now"));
     }
 
     #[test]

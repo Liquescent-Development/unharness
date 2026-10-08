@@ -170,9 +170,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
 
 `core/conversations.rs` persists the merged transcript (`BlockRecord`), the
 harness → vendor session map, bridging bookmarks, per-harness usage, the
-active harness, and the policy named for it (never a configured default; a
-policy on the resume command line wins), one JSON file per conversation
-plus an index. `App::persist`
+active harness, and the policy, models and efforts chosen for it (never a
+configured default; one named on the resume command line wins), one JSON
+file per conversation plus an index. `App::persist`
 runs on session start, turn end, harness switch, `/clear`, and quit. Resume
 restores all of it; vendor sessions themselves live with the vendor. A
 block of a kind this version does not know is skipped when read; not

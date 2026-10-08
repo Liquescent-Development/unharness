@@ -59,12 +59,18 @@ A conversation is what you resume. unharness saves each one under
 - the merged transcript;
 - the vendor session id of every harness that took part;
 - the bridging bookmarks (what each harness has already seen);
-- which harness was active.
+- which harness was active;
+- the permission policy, and each harness's model and effort, where you
+  chose them (`--policy`, `--model`, `--effort` or in the TUI) rather
+  than leaving them to the config.
 
 `unharness --resume`, `/resume` and `Ctrl+R` put the transcript back in the
 pane. Each harness reattaches to its own vendor session when you
 `/harness` to it, and is bridged only what it has not seen yet. With
-`--resume`, `-H` overrides which harness continues.
+`--resume`, `-H` overrides which harness continues, and `--policy`,
+`--model` and `--effort` override what the conversation had. A model
+chosen on a provider the harness is no longer on is left, with a notice;
+see [Permissions](permissions.md#resuming-a-conversation) for the policy.
 
 ## Switching harnesses
 
