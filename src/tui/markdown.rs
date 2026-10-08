@@ -20,9 +20,11 @@ use super::code::{code_lines, diff_lines, sanitize};
 /// `done` when no more of `text` is coming: a fence it leaves open is
 /// then not still streaming.
 pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec<Line<'static>> {
-    let text = html_as_text(&sanitize(text));
+    let text = sanitize(text);
+    let code = fenced_lines(&text);
+    let text = html_as_text(&text, &code);
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for chunk in split_bare_diffs(&text) {
+    for chunk in split_bare_diffs(&text, &code) {
         let (Chunk::Markdown(part) | Chunk::Diff(part)) = chunk;
         // A blank line between a hunk and the text around it, which
         // neither side draws.
@@ -53,8 +55,8 @@ enum Chunk<'a> {
 /// lists, headings and paragraphs: a run of lines from a header (`diff
 /// --git`, `--- `, `+++ `, `@@`) on while they start with `+`, `-`, a
 /// space or `\`, with an `@@` or `diff --git` among them. Fenced code is
-/// left alone.
-fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
+/// left alone: `code` says which lines are.
+fn split_bare_diffs<'a>(text: &'a str, code: &[bool]) -> Vec<Chunk<'a>> {
     let lines: Vec<(usize, &str)> = text
         .split_inclusive('\n')
         .scan(0, |at, l| {
@@ -73,14 +75,13 @@ fn split_bare_diffs(text: &str) -> Vec<Chunk<'_>> {
         |l: &str| header(l) || (l.starts_with(['+', '-', ' ', '\\']) && !l.trim().is_empty());
     let mut chunks = Vec::new();
     let mut from = 0;
-    let mut fences = Fences::default();
     // The end of a run already found to be no hunk: the headers inside it
     // start no hunk either.
     let mut prose_until = 0;
     let mut i = 0;
     while i < lines.len() {
         let (start, line) = lines[i];
-        if !fences.code(line) && i >= prose_until && header(line) {
+        if !code.get(i).is_some_and(|c| *c) && i >= prose_until && header(line) {
             let end = lines[i..]
                 .iter()
                 .position(|(_, l)| !hunk_line(l))
@@ -131,8 +132,9 @@ fn block_text(line: &str) -> &str {
     }
 }
 
-/// Which lines are fenced code, told a line at a time: a fence closes on
-/// the same character, at least as many of them and nothing else.
+/// Which lines of one fenced block are code, told a line at a time: a
+/// fence closes on the same character, at least as many of them and
+/// nothing else.
 #[derive(Default)]
 struct Fences {
     open: Option<(char, usize)>,
@@ -164,25 +166,79 @@ impl Fences {
 /// A terminal cannot draw HTML, and CommonMark takes a line that starts
 /// with a tag for the start of an HTML block, which can run to its closing
 /// tag and swallow the markdown after it (`<script> tags are blocked.`).
-/// Such a `<` is escaped, so the line is text; autolinks, fenced code and
-/// indented code are left alone, and a tag inside a line is still inline
-/// HTML (`<br>`).
-fn html_as_text(text: &str) -> String {
+/// Such a `<` is escaped, so the line is text; autolinks, fenced code (the
+/// lines `code` marks) and indented code are left alone, and a tag inside
+/// a line is still inline HTML (`<br>`).
+fn html_as_text(text: &str, code: &[bool]) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut fences = Fences::default();
-    for line in text.split_inclusive('\n') {
-        let rest = block_text(line);
-        let at = line.len() - rest.len();
-        let indented_code = at >= 4 && line[..at].chars().all(|c| c == ' ');
-        if !fences.code(line) && !indented_code && rest.starts_with('<') && !is_autolink(rest) {
-            out.push_str(&line[..at]);
-            out.push('\\');
-            out.push_str(rest);
-        } else {
-            out.push_str(line);
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        match tag_at(line) {
+            Some(at) if !code.get(i).is_some_and(|c| *c) => {
+                out.push_str(&line[..at]);
+                out.push('\\');
+                out.push_str(&line[at..]);
+            }
+            _ => out.push_str(line),
         }
     }
     out
+}
+
+/// Where the tag a line starts with is, unless the line is indented code
+/// or the tag an autolink.
+fn tag_at(line: &str) -> Option<usize> {
+    let rest = block_text(line);
+    let at = line.len() - rest.len();
+    let indented_code = at >= 4 && line[..at].chars().all(|c| c == ' ');
+    (!indented_code && rest.starts_with('<') && !is_autolink(rest)).then_some(at)
+}
+
+/// Which lines of `text` are fenced code, as pulldown-cmark reads them
+/// once `html_as_text` has run: a list item or a quote ends a fence, which
+/// a line scanner cannot tell.
+fn fenced_lines(text: &str) -> Vec<bool> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+        .filter(|i| *i < text.len())
+        .collect();
+    let line_of = |at: usize| starts.partition_point(|s| *s <= at).saturating_sub(1);
+    let mut code = vec![false; starts.len()];
+    for range in fenced_blocks(text) {
+        let (first, last) = (line_of(range.start), line_of(range.end.saturating_sub(1)));
+        code[first..=last].fill(true);
+    }
+    code
+}
+
+/// The fenced code blocks of `text`, with the tag lines `html_as_text`
+/// escapes read as the text they become.
+fn fenced_blocks(text: &str) -> Vec<Range<usize>> {
+    let mut plain = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        match tag_at(line) {
+            // A letter in place of the `<`, so that offsets hold.
+            Some(at) => {
+                plain.push_str(&line[..at]);
+                plain.push('x');
+                plain.push_str(&line[at + 1..]);
+            }
+            None => plain.push_str(line),
+        }
+    }
+    let mut blocks = Vec::new();
+    let mut fenced = false;
+    for (event, range) in Parser::new_ext(&plain, OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                fenced = matches!(kind, CodeBlockKind::Fenced(_));
+            }
+            Event::End(TagEnd::CodeBlock) if fenced && !range.is_empty() => {
+                blocks.push(range);
+            }
+            _ => {}
+        }
+    }
+    blocks
 }
 
 /// `<https://…>` or `<name@host>` at the start of `text`.
@@ -242,6 +298,9 @@ struct Renderer<'a> {
     cursor: Option<usize>,
 }
 
+const OPTIONS: Options = Options::ENABLE_TABLES
+    .union(Options::ENABLE_STRIKETHROUGH)
+    .union(Options::ENABLE_TASKLISTS);
 const CODE: Style = Style::new().fg(Color::Yellow).bg(Color::Rgb(35, 38, 48));
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
@@ -263,9 +322,7 @@ impl<'a> Renderer<'a> {
     }
 
     fn run(mut self) -> Vec<Line<'static>> {
-        let options =
-            Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        for (event, range) in Parser::new_ext(self.source, options).into_offset_iter() {
+        for (event, range) in Parser::new_ext(self.source, OPTIONS).into_offset_iter() {
             match event {
                 Event::Start(tag) => self.start(tag, range.start),
                 Event::End(tag) => self.end(tag, range),
@@ -1101,6 +1158,21 @@ mod tests {
             "{rows:?}"
         );
         assert_eq!(rows.last().unwrap(), "  Please confirm.");
+    }
+
+    #[test]
+    fn a_fence_its_container_ended_leaves_the_rest_markdown() {
+        // A tag line is escaped and a bare hunk cut out after it, as with
+        // no fence before them.
+        let tail =
+            "Then:\n\n<script> tags are blocked.\n\n**bold** after.\n\n@@ -1 +1 @@\n-x\n+y\n\nEnd.";
+        let alone = table_rows(tail, 80);
+        assert!(alone.contains(&"  <script> tags are blocked.".to_string()));
+        assert!(alone.contains(&"  │ - x".to_string()), "{alone:?}");
+        for fence in ["- item\n  ```\n  ls\n\n", "> ```\n> ls\n\n"] {
+            let rows = table_rows(&format!("{fence}{tail}"), 80);
+            assert!(rows.ends_with(&alone), "{rows:?}");
+        }
     }
 
     #[test]
