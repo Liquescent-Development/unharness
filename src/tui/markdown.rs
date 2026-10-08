@@ -175,9 +175,13 @@ fn tag_at(line: &str) -> Option<usize> {
 /// once `html_as_text` has run: a list item or a quote ends a fence, which
 /// a line scanner cannot tell.
 fn close_outdented_fences(mut text: String) -> (String, Vec<bool>) {
+    // Each move parses the text again, and this runs on every render of
+    // a streaming reply: past this many, the rest are read as CommonMark
+    // has them.
+    const MOST: usize = 64;
     // Lines up to here are settled, so each line is moved at most once.
     let mut after = 0;
-    loop {
+    for moved in 0.. {
         let starts: Vec<usize> = std::iter::once(0)
             .chain(text.match_indices('\n').map(|(i, _)| i + 1))
             .filter(|i| *i < text.len())
@@ -204,13 +208,14 @@ fn close_outdented_fences(mut text: String) -> (String, Vec<bool>) {
                     closing_indent(line(first), line(next), b.quotes).map(|indent| (next, indent));
             }
         }
-        let Some((i, indent)) = fix else {
+        let Some((i, indent)) = fix.filter(|_| moved < MOST) else {
             return (text, code);
         };
         let at = line(i).len() - line(i).trim_start_matches([' ', '>']).len();
         text.replace_range(starts[i]..starts[i] + at, &indent);
         after = i;
     }
+    unreachable!()
 }
 
 /// What goes in front of `line` for it to close the fence `opener` opens
@@ -1266,6 +1271,18 @@ mod tests {
             2,
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn at_most_64_fences_are_moved() {
+        // Past them, the fence at column 0 opens a block of its own.
+        let step = "1. Run:\n   ```\n   ls\n```\n";
+        let opened = |n: usize| {
+            let rows = table_rows(&step.repeat(n), 80);
+            rows.iter().filter(|r| r.starts_with("  ┌")).count()
+        };
+        assert_eq!(opened(64), 0);
+        assert_eq!(opened(65), 1);
     }
 
     #[test]

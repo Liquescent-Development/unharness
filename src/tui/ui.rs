@@ -702,7 +702,7 @@ fn block_key(b: &TBlock, gap: usize, followed: bool, thinking_live: bool, elapse
         }
     }
     let mut h = DefaultHasher::new();
-    (gap, followed).hash(&mut h);
+    gap.hash(&mut h);
     std::mem::discriminant(b).hash(&mut h);
     match b {
         TBlock::User { text } => text.hash(&mut h),
@@ -710,7 +710,7 @@ fn block_key(b: &TBlock, gap: usize, followed: bool, thinking_live: bool, elapse
             text,
             sender,
             duration,
-        } => (text, sender, duration).hash(&mut h),
+        } => (text, sender, duration, followed).hash(&mut h),
         TBlock::Handoff { text, sender, to } => (text, sender, to).hash(&mut h),
         TBlock::Thought { text, duration } => {
             (text, duration).hash(&mut h);
@@ -2820,6 +2820,12 @@ mod tests {
         assert_ne!(
             block_key(&reply(None), 0, false, false, 0.0),
             block_key(&reply(None), 0, true, false, 0.0)
+        );
+        // Nothing else reads it, so nothing else is drawn again for it.
+        let prompt = TBlock::User { text: "hi".into() };
+        assert_eq!(
+            block_key(&prompt, 0, false, false, 0.0),
+            block_key(&prompt, 0, true, false, 0.0)
         );
     }
 
