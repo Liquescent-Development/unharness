@@ -577,8 +577,12 @@ recorded ones. For anything else:
   `--permission-prompt-tool stdio`; without it the model finds no such
   tool (`write_denied.jsonl` on 2.1.288, and a run on 2.1.291), which is
   why the recorder passes it. A
-  multi-select answer sent as a JSON array was read back by the model as
-  the labels joined with commas (pty run, 2.1.291). Codex 0.157.0's
+  multi-select answer sent as a JSON array reached the model as the
+  labels joined by a bare comma, unquoted (pty runs, 2.1.291 and
+  2.1.293, whose tool result writes the answer with a template literal),
+  so the transport sends a string joined the way Claude's own joiner
+  does (read in 2.1.293): by `", "`, a label containing `", "` or `"`
+  as a JSON string. Codex 0.157.0's
   `ToolRequestUserInputOption` (app-server schema) has only `label` and
   `description`.
   The modal sends only from its Submit page, and only once every question
