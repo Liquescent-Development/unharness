@@ -1445,7 +1445,7 @@ mod tests {
         app.config.harnesses.insert(
             "codex".into(),
             crate::config::HarnessSettings {
-                binary: Some("/bin/true".into()),
+                binary: crate::harness::which("true"),
                 ..Default::default()
             },
         );
