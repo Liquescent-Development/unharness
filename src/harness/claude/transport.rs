@@ -235,7 +235,7 @@ pub fn encode_decision(pending: &PendingPermission, decision: &PermissionDecisio
                     json!({"behavior":"deny","message":"User dismissed the question"})
                 } else {
                     let mut input = pending.input.clone();
-                    input["answers"] = answer.clone();
+                    input["answers"] = claude_answers(answer);
                     json!({"behavior":"allow","updatedInput": input})
                 }
             } else {
@@ -243,6 +243,38 @@ pub fn encode_decision(pending: &PendingPermission, decision: &PermissionDecisio
             }
         }
     }
+}
+
+/// Claude's `answers` take a string per question. A multi-select array
+/// sent as it is reaches the model as its labels joined by a bare comma
+/// (2.1.293 writes the answer with a template literal), so it is joined the
+/// way Claude joins one itself: by `", "`, a label containing `", "` or `"`
+/// written as a JSON string.
+fn claude_answers(answer: &Value) -> Value {
+    let Some(map) = answer.as_object() else {
+        return answer.clone();
+    };
+    let joined = map.iter().map(|(question, v)| {
+        let v = match v.as_array() {
+            Some(labels) => Value::String(
+                labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|l| {
+                        if l.contains(", ") || l.contains('"') {
+                            Value::from(l).to_string()
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            None => v.clone(),
+        };
+        (question.clone(), v)
+    });
+    Value::Object(joined.collect())
 }
 
 pub fn control_response(request_id: &str, response: Value) -> String {
@@ -558,6 +590,23 @@ mod tests {
         assert_eq!(ans["behavior"], "allow");
         assert_eq!(ans["updatedInput"]["answers"]["Color?"], "Red");
         assert_eq!(ans["updatedInput"]["questions"][0]["question"], "Color?");
+        // A bare `,` stays as it is (Claude splits only on `", "`); a quoted
+        // label is escaped as JSON.stringify does; free text on a
+        // multi-select question is a string and goes as it is.
+        let many = encode_decision(
+            &q,
+            &PermissionDecision::Answer(json!({
+                "Color?": ["Red", "a,b", "Salt, pepper", r#"C:\ "x""#],
+                "Size?": "Big, or bigger",
+            })),
+        );
+        assert_eq!(
+            many["updatedInput"]["answers"],
+            json!({
+                "Color?": r#"Red, a,b, "Salt, pepper", "C:\\ \"x\"""#,
+                "Size?": "Big, or bigger",
+            })
+        );
         let dismissed = encode_decision(&q, &PermissionDecision::Answer(Value::Null));
         assert_eq!(dismissed["behavior"], "deny");
 
