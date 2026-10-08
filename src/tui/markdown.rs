@@ -17,7 +17,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::code::{code_lines, diff_lines, sanitize};
 
-pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'static>> {
+/// `done` when no more of `text` is coming: a fence it leaves open is
+/// then not still streaming.
+pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec<Line<'static>> {
     let text = html_as_text(&sanitize(text));
     let mut lines: Vec<Line<'static>> = Vec::new();
     for chunk in split_bare_diffs(&text) {
@@ -30,7 +32,7 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize) -> Vec<Line<'stati
             lines.push(Line::default());
         }
         match chunk {
-            Chunk::Markdown(md) => lines.extend(Renderer::new(md, max_width).run()),
+            Chunk::Markdown(md) => lines.extend(Renderer::new(md, max_width, done).run()),
             Chunk::Diff(diff) => lines.extend(diff_lines(diff, max_width.saturating_sub(2))),
         }
     }
@@ -222,6 +224,8 @@ struct CodeBuild {
 struct Renderer<'a> {
     source: &'a str,
     width: usize,
+    /// No more of the source is coming.
+    done: bool,
     out: Vec<Line<'static>>,
     containers: Vec<Container>,
     /// The inline text of the block being read; a `\n` in it breaks the
@@ -242,10 +246,11 @@ const CODE: Style = Style::new().fg(Color::Yellow).bg(Color::Rgb(35, 38, 48));
 const DIM: Style = Style::new().fg(Color::DarkGray);
 
 impl<'a> Renderer<'a> {
-    fn new(source: &'a str, width: usize) -> Self {
+    fn new(source: &'a str, width: usize, done: bool) -> Self {
         Renderer {
             source,
             width,
+            done,
             out: Vec::new(),
             containers: Vec::new(),
             inline: Vec::new(),
@@ -396,10 +401,12 @@ impl<'a> Renderer<'a> {
             TagEnd::CodeBlock => {
                 if let Some(code) = self.code.take() {
                     // Not closed yet and nothing after it: still
-                    // streaming. One its container ended is complete.
+                    // streaming. One its container ended is complete, as
+                    // is one the message ended.
                     let rest = self.source[range.end..]
                         .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '>');
                     let closed = !code.fenced
+                        || self.done
                         || !rest.is_empty()
                         || fence_closed(&self.source[range.clone()]);
                     self.code_block(code, closed);
@@ -916,14 +923,14 @@ mod tests {
 
     #[test]
     fn test_render_headers() {
-        let lines = render_markdown_to_lines("# Title\n## Sub\n### Deep", 80);
+        let lines = render_markdown_to_lines("# Title\n## Sub\n### Deep", 80, false);
         assert_eq!(lines.len(), 3);
         assert!(line_text(&lines[0]).contains("# Title"));
     }
 
     #[test]
     fn test_render_diff() {
-        let lines = render_markdown_to_lines("```diff\n-old\n+new\n```", 80);
+        let lines = render_markdown_to_lines("```diff\n-old\n+new\n```", 80, false);
         // fence header, two diff lines, fence footer
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[1].spans[1].style.fg, Some(Color::Red));
@@ -933,7 +940,7 @@ mod tests {
     #[test]
     fn test_fenced_code_is_highlighted_and_wrapped_not_truncated() {
         let long = format!("let s = \"{}\";", "a".repeat(120));
-        let lines = render_markdown_to_lines(&format!("```rust\n{long}\n```"), 60);
+        let lines = render_markdown_to_lines(&format!("```rust\n{long}\n```"), 60, false);
         let body: String = lines[1..lines.len() - 1]
             .iter()
             .map(|l| line_text(l).replace("  │ ↪ ", "").replace("  │ ", ""))
@@ -954,6 +961,7 @@ mod tests {
         let lines = render_markdown_to_lines(
             "use `cargo test` and **now** or *later*, see [docs](https://d.example) or <https://u.example>",
             200,
+            false,
         );
         let spans = &lines[0].spans;
         assert!(
@@ -977,7 +985,7 @@ mod tests {
             line_text(&lines[0])
         );
         // Spaces inside inline code are kept as written; a copy gets them.
-        let lines = render_markdown_to_lines("set `x  =  1` now", 80);
+        let lines = render_markdown_to_lines("set `x  =  1` now", 80, false);
         assert_eq!(line_text(&lines[0]), "  set x  =  1 now");
     }
 
@@ -1025,8 +1033,11 @@ mod tests {
 
     #[test]
     fn a_bare_hunk_is_a_diff_and_a_dash_list_is_not() {
-        let lines =
-            render_markdown_to_lines("Change:\n\n@@ -1 +1 @@\n-old\n+new\n\nDone.\n- item", 80);
+        let lines = render_markdown_to_lines(
+            "Change:\n\n@@ -1 +1 @@\n-old\n+new\n\nDone.\n- item",
+            80,
+            false,
+        );
         let rows: Vec<String> = lines.iter().map(line_text).collect();
         assert_eq!(rows[0], "  Change:");
         assert_eq!(rows[1], "");
@@ -1048,7 +1059,8 @@ mod tests {
 
     #[test]
     fn test_lists_and_streaming_fence() {
-        let lines = render_markdown_to_lines("- one\n  - nested\n1. first\n```py\nprint(1)", 80);
+        let lines =
+            render_markdown_to_lines("- one\n  - nested\n1. first\n```py\nprint(1)", 80, false);
         assert!(line_text(&lines[0]).contains("• one"));
         assert!(line_text(&lines[1]).contains("• nested"));
         assert!(line_text(&lines[2]).contains("1. first"));
@@ -1069,7 +1081,7 @@ mod tests {
         let rows = table_rows("- item\n  ```\n  ls\n\u{a0}", 80);
         assert!(!rows.iter().any(|r| r.contains('…')), "{rows:?}");
         for text in ["- item\n  ```bash\n  ls\n", "> ```\n> ls\n>"] {
-            let lines = render_markdown_to_lines(text, 80);
+            let lines = render_markdown_to_lines(text, 80, false);
             assert!(line_text(lines.last().unwrap()).contains("…"), "{text:?}");
         }
     }
@@ -1091,8 +1103,17 @@ mod tests {
         assert_eq!(rows.last().unwrap(), "  Please confirm.");
     }
 
+    #[test]
+    fn a_fence_left_open_in_a_finished_message_is_complete() {
+        let rows: Vec<String> = render_markdown_to_lines("```py\nprint(1)", 80, true)
+            .iter()
+            .map(line_text)
+            .collect();
+        assert!(rows.last().unwrap().contains('└'), "{rows:?}");
+    }
+
     fn table_rows(text: &str, width: usize) -> Vec<String> {
-        render_markdown_to_lines(text, width)
+        render_markdown_to_lines(text, width, false)
             .iter()
             .map(line_text)
             .collect()
@@ -1117,7 +1138,7 @@ mod tests {
                 "  Done.",
             ]
         );
-        let lines = render_markdown_to_lines("| a | b |\n|---|---|\n| 1 | 2 |", 80);
+        let lines = render_markdown_to_lines("| a | b |\n|---|---|\n| 1 | 2 |", 80, false);
         assert!(
             lines[0]
                 .spans
@@ -1199,6 +1220,7 @@ mod tests {
         let lines = render_markdown_to_lines(
             "| Where | Note |\n|---|---|\n| `form.tsx:177-192` | `a \\| b` and **bold** |",
             80,
+            false,
         );
         let row = &lines[2];
         assert_eq!(line_text(row), "  form.tsx:177-192 │ a | b and bold");
@@ -1260,7 +1282,8 @@ mod tests {
                 "  • a item"
             ]
         );
-        let lines = render_markdown_to_lines("<li> elements need a key.\nSo **add** one.", 40);
+        let lines =
+            render_markdown_to_lines("<li> elements need a key.\nSo **add** one.", 40, false);
         assert_eq!(line_text(&lines[0]), "  <li> elements need a key.");
         assert!(
             lines[1]
