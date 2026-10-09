@@ -128,7 +128,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/fork` | Continue in a copy of the conversation |
 | `/skills` | List skills found in `.agents/skills` |
 | `/allow` | List what is allowed without asking |
-| `/clear` | Clear the transcript |
+| `/clear` | Start a new conversation (the previous one stays in `/resume`) |
 | `/help`, `/quit` | Commands and shortcuts; quit |
 
 ### Agent commands
@@ -152,8 +152,8 @@ Antigravity is the exception: it keeps a conversation for every process,
 so it is started with the first prompt, and unharness asks
 `agy --print=/skills` for its skills instead.
 
-unharness's own commands come first: `/clear` clears unharness's
-transcript. `\/` sends the rest as typed: `\/clear` is Claude Code's
+unharness's own commands come first: `/clear` starts a new
+conversation ([below](#clear)). `\/` sends the rest as typed: `\/clear` is Claude Code's
 `/clear`, and with `\/` the list offers the agent's commands of the same
 names. Where the agent lists no commands, `\/` sends a prompt that starts
 with `/`.
@@ -342,6 +342,17 @@ files, not ignored ones):
 unchanged. Harnesses that can branch a session do so, and the copy knows
 exactly what the original knew. The others start fresh with the
 transcript as context.
+
+## Clear
+
+`/clear` starts a new conversation in the same workspace, as a fresh
+launch would, with the same harness, policy, model, effort, provider and
+sandbox. The conversation left is saved as it was and stays in
+`/resume`. The agent's session ends and a new one starts that knows
+nothing of it, so usage and the context meter start from zero; a harness
+used before the clear starts afresh too when you switch to it. `/clear`
+waits until the turn, the subagents at work and a running `!` command
+are done.
 
 ## Hooks
 

@@ -146,7 +146,7 @@ pub struct Transcript {
     pub blocks: Vec<Block>,
     thought_start: Option<Instant>,
     /// Counts the turns begun, so a turn's hooks are known by their tag
-    /// and not by a position that `/clear` or a rewind can move.
+    /// and not by a position that a rewind can move.
     turn: u64,
 }
 

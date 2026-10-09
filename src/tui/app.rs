@@ -271,7 +271,10 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/detach", "Drop the pending attachments"),
     ("/skills", "List skills discovered in .agents/skills"),
     ("/allow", "List what is allowed without asking"),
-    ("/clear", "Clear the transcript"),
+    (
+        "/clear",
+        "Start a new conversation (the previous one stays in /resume)",
+    ),
     ("/help", "Show commands and shortcuts"),
     ("/quit", "Exit unharness"),
 ];
@@ -2118,11 +2121,8 @@ impl App {
             self.shutdown_session();
         }
         self.idle_start_paused = false;
-        let mut fork = Conversation::new(self.active);
+        let mut fork = self.successor();
         fork.title = self.conversation.title.clone();
-        fork.last_policies = self.conversation.last_policies.clone();
-        fork.models = self.conversation.models.clone();
-        fork.efforts = self.conversation.efforts.clone();
         self.conversation = fork;
 
         let mut branched = Vec::new();
@@ -2148,10 +2148,7 @@ impl App {
         }
         branched.sort_unstable();
         fresh.sort_unstable();
-        self.anchor_pending.clear();
-        self.session_usage = Usage::default();
-        self.turn_usage = Usage::default();
-        self.context = ContextUsage::default();
+        self.reset_usage();
         let mut note = format!(
             "Forked from conversation {}; the original is unchanged.",
             &original[..8.min(original.len())]
@@ -2167,6 +2164,79 @@ impl App {
         }
         self.transcript.push_system(note);
         self.persist();
+    }
+
+    /// Start a new conversation in this workspace, as a fresh launch would,
+    /// keeping the harness and what the user chose to run it with. The one
+    /// left is saved first and stays in `/resume`; its sessions stay with
+    /// it, so every harness starts afresh in the new one.
+    pub fn new_conversation(&mut self) {
+        if self.is_generating {
+            self.transcript
+                .push_error("finish or interrupt the current turn before clearing");
+            return;
+        }
+        if self.refused_while_start_held() {
+            return;
+        }
+        // They would end with the session, and report into the new one.
+        if !self.subagents.is_empty() {
+            self.transcript.push_error(format!(
+                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before clearing",
+                self.subagents.len()
+            ));
+            return;
+        }
+        if self.shell.is_some() {
+            self.transcript.push_error(
+                "stop the ! command first (Esc); its output belongs to this conversation",
+            );
+            return;
+        }
+        self.persist();
+        let had_content = self.conversation.has_content();
+        // Even one nothing was sent to may have been resumed on a session
+        // of this conversation.
+        if self.session_alive {
+            self.shutdown_session();
+        }
+        self.idle_start_paused = false;
+        self.conversation = self.successor();
+        self.transcript = Transcript::default();
+        self.session_ids.clear();
+        self.last_active_index.clear();
+        self.fork_pending.clear();
+        self.plan.clear();
+        self.queued.clear();
+        self.anchors.clear();
+        self.file_checkpoints.clear();
+        self.restore_undo = None;
+        self.first_prompt = None;
+        self.generation_duration = None;
+        self.reset_usage();
+        self.transcript.push_system(if had_content {
+            "New conversation; the previous one is in /resume."
+        } else {
+            "New conversation."
+        });
+        self.auto_scroll = true;
+    }
+
+    /// A new conversation that keeps what this one was run with.
+    fn successor(&self) -> Conversation {
+        let mut next = Conversation::new(self.active);
+        next.last_policies = self.conversation.last_policies.clone();
+        next.models = self.conversation.models.clone();
+        next.efforts = self.conversation.efforts.clone();
+        next
+    }
+
+    /// Usage and context start again with a session that knows nothing.
+    fn reset_usage(&mut self) {
+        self.anchor_pending.clear();
+        self.session_usage = Usage::default();
+        self.turn_usage = Usage::default();
+        self.context = ContextUsage::default();
     }
 
     /// Ask the harness to summarise its context now.
@@ -4456,17 +4526,7 @@ impl App {
                     ));
                 }
             }
-            "/clear" => {
-                self.transcript.clear();
-                self.plan.clear();
-                self.queued.clear();
-                self.anchors.clear();
-                self.file_checkpoints.clear();
-                self.fork_pending.clear();
-                self.anchor_pending.clear();
-                self.transcript.push_system("Transcript cleared.");
-                self.persist();
-            }
+            "/clear" => self.new_conversation(),
             "/help" => {
                 let mut help = String::from("Commands:\n");
                 for (c, d) in BASE_COMMANDS {
@@ -4517,9 +4577,15 @@ impl App {
         // One that does what one of unharness's does changes the session
         // behind unharness's back.
         if is_own_command(name) || listed.as_deref().is_some_and(is_own_command) {
+            let clears = name == "/clear" || listed.as_deref() == Some("/clear");
             self.transcript.push_notice(format!(
                 "unharness does not see what {harness}'s {name} changes: the model, \
-                 transcript and context shown may no longer match its session"
+                 transcript and context shown may no longer match its session{}",
+                if clears {
+                    " (unharness's /clear starts a new conversation)"
+                } else {
+                    ""
+                }
             ));
         }
         self.queue_prompt(text.to_string());
@@ -6099,38 +6165,128 @@ pub(crate) mod tests {
         assert_eq!(sub_state(&app), Some(HookState::Unknown));
     }
 
-    /// `/clear` during a turn moves every block: the turn's hooks after it
-    /// are still the turn's.
+    /// `/clear` starts a new conversation: the old one is saved as it was,
+    /// and no harness takes its session into the new one.
     #[test]
-    fn a_hook_after_a_clear_is_still_its_turns() {
-        use super::super::transcript::{Block, HookState};
-        let mut app = test_app(HarnessId::CLAUDE);
-        for prompt in ["one", "two"] {
-            app.submit_prompt(prompt.into());
-            app.on_event(AgentEvent::TextDelta(format!("re {prompt}")));
-            app.on_event(AgentEvent::TurnCompleted {
-                stop_reason: StopReason::Done,
-            });
-        }
-        app.submit_prompt("three".into());
+    fn clear_starts_a_new_conversation() {
+        let done = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        };
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.on_event(done());
+        app.switch_harness(HarnessId::CLAUDE);
+        app.set_model("opus".into());
+        app.submit_prompt("two".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("answer".into()));
+        app.on_event(AgentEvent::Usage(Usage {
+            input: 10,
+            output: 5,
+            ..Default::default()
+        }));
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(15),
+            window: Some(1000),
+        }));
+        app.on_event(done());
+        app.take_actions();
+        app.session_alive = true;
+        assert!(!app.last_active_index.is_empty());
+
+        let old = app.conversation.id.clone();
         app.handle_slash_command("/clear");
-        app.on_event(AgentEvent::HookStarted {
-            id: "h".into(),
-            name: "PreToolUse:Bash".into(),
-        });
+        assert_ne!(app.conversation.id, old);
+        assert!(app.session_ids.is_empty());
+        assert!(app.last_active_index.is_empty());
+        assert_eq!(app.session_usage, Usage::default());
+        assert_eq!(app.context, ContextUsage::default());
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert_eq!(app.models[&HarnessId::CLAUDE].model, "opus");
+        assert_eq!(
+            app.transcript.blocks.len(),
+            1,
+            "only the new conversation's notice"
+        );
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_alive);
+
+        // The next session knows nothing of the old one.
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
+
+        // The old conversation is in the store as it was.
+        let saved = app.store.load(&old).unwrap();
+        assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
+        assert_eq!(saved.sessions[&HarnessId::CODEX], "codex-1");
+        assert!(saved.blocks.iter().any(
+            |b| matches!(b, crate::core::conversations::BlockRecord::Assistant { text, .. } if text == "answer")
+        ));
+
+        // A harness used before the clear starts afresh too.
+        app.session_alive = false;
+        app.switch_harness(HarnessId::CODEX);
+        app.submit_prompt("three".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }, Action::turn("three")]
+        );
+    }
+
+    /// Nothing is saved for a conversation nothing was sent in, the old one
+    /// or the new one.
+    #[test]
+    fn clear_of_nothing_saves_nothing() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        let old = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_ne!(app.conversation.id, old);
+        assert!(app.store.list().is_empty());
+        assert!(matches!(
+            app.transcript.blocks.as_slice(),
+            [super::super::transcript::Block::System(s)] if s == "New conversation."
+        ));
+    }
+
+    /// Not while something of the conversation is still at work: what it
+    /// does would land in the new one.
+    #[test]
+    fn clear_is_refused_while_busy() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(notices(&app).last().unwrap().contains("current turn"));
+
+        spawn(&mut app, "spawn", "look around", None);
         app.on_event(AgentEvent::TurnCompleted {
-            stop_reason: StopReason::Interrupted,
+            stop_reason: StopReason::Done,
         });
-        let states: Vec<_> = app
-            .transcript
-            .blocks
-            .iter()
-            .filter_map(|b| match b {
-                Block::Hook { state, .. } => Some(*state),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(states, [HookState::Unknown]);
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .contains("subagent(s) still at work")
+        );
+
+        app.subagents.clear();
+        app.run_shell("sleep 5");
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(notices(&app).last().unwrap().contains("! command"));
     }
 
     /// A sub-agent's hooks (a Codex child thread's `hook/*`) belong to its
@@ -9211,13 +9367,15 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
         app.handle_slash_command("/clear");
-        assert!(app.take_actions().is_empty());
-        assert_eq!(app.transcript.blocks.len(), 1, "cleared");
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.transcript.blocks.len(), 1, "a new conversation");
+        app.session_alive = true;
         app.pass_command("/clear", true);
         assert_eq!(app.take_actions(), vec![Action::turn("/clear")]);
         let said = notices(&app);
         assert_eq!(said[0], "/clear is Claude's own command: passed on");
         assert!(said[1].starts_with("unharness does not see what Claude's /clear changes"));
+        assert!(said[1].ends_with("(unharness's /clear starts a new conversation)"));
         app.on_event(AgentEvent::TurnCompleted {
             stop_reason: StopReason::Done,
         });
@@ -9228,6 +9386,7 @@ pub(crate) mod tests {
         let said = notices(&app);
         assert_eq!(said[2], "/new is Claude's own command: passed on");
         assert!(said[3].starts_with("unharness does not see what Claude's /new changes"));
+        assert!(said[3].ends_with("(unharness's /clear starts a new conversation)"));
     }
 
     /// Context held back by a command is still told after the user
