@@ -380,6 +380,8 @@ impl Harness for ClaudeHarness {
             // skills, and an unknown `/name` reaches the model as text
             // (2.1.292); `initialize` answers with the list.
             slash_commands: true,
+            // Checked on 2.1.295: quit unprompted, no session was written.
+            start_unprompted: true,
         }
     }
 

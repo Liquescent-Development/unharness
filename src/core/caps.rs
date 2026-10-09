@@ -157,6 +157,10 @@ pub struct Capabilities {
     /// does not have itself is passed on. Which ones there are comes with
     /// `CapsUpdate::commands`, where the harness lists them.
     pub slash_commands: bool,
+    /// A session can be started before anything is sent to it and leave
+    /// nothing behind, so the TUI starts it as soon as it is idle without
+    /// one, to have what it reports (its commands) before the first prompt.
+    pub start_unprompted: bool,
 }
 
 /// Whether a harness takes MCP server definitions for one session, without

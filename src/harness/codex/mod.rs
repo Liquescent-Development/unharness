@@ -297,6 +297,9 @@ impl Harness for CodexHarness {
             // Its commands are its own interface's; a prompt's text is
             // passed on as it is (skills go as `UserInput::skill`).
             slash_commands: false,
+            // Checked on 0.157.0 (app-server): quit unprompted, no thread
+            // was written.
+            start_unprompted: true,
         }
     }
 

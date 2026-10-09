@@ -142,6 +142,10 @@ impl Harness for AgyHarness {
             // Not seen to read a `/name` prompt as a command (unverified),
             // and it lists none.
             slash_commands: false,
+            // 1.3.2 writes a conversation for every process as it starts
+            // (`init` comes then, not after the first message): one
+            // started early would leave an empty one behind.
+            start_unprompted: false,
         }
     }
 

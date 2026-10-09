@@ -1576,6 +1576,7 @@ impl App {
             || self.is_generating
             || self.handoff.is_some()
             || self.idle_start_paused
+            || !self.caps().start_unprompted
             || self.effective_policy().is_none()
         {
             return;
@@ -9224,13 +9225,34 @@ pub(crate) mod tests {
     #[test]
     fn nothing_starts_before_a_policy_is_chosen() {
         let tmp = tempfile::tempdir().unwrap();
-        // agy has no `ask`, and nothing below it.
-        let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+        // Codex's `exec` has no `ask`, and nothing below it.
+        let registry = Arc::new(Registry::empty().with(Box::new(
+            crate::harness::codex::CodexHarness::new(crate::harness::codex::CodexTransport::Exec),
+        )));
+        let mut app = test_app_with(
+            tmp.keep(),
+            HarnessId::CODEX,
+            None,
+            false,
+            Config::default(),
+            registry,
+        );
         app.start_when_idle();
         assert!(app.take_actions().is_empty());
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         app.start_when_idle();
         assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn a_harness_that_leaves_a_session_behind_starts_with_the_first_prompt() {
+        // agy writes a conversation for every process.
+        let mut app = test_app(HarnessId::AGY);
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.submit_prompt("hello".into());
+        assert_eq!(starts(&app.take_actions()), 1);
+        assert!(!app.session_blank);
     }
 
     #[test]

@@ -215,7 +215,9 @@ recorded ones. For anything else:
   anything without `event` ends the process with an error naming the
   field, and every other event name is ignored with a warning (so there is
   no interrupt, steer or permission answer). `init` comes once per
-  process, after the first message. Steps are `user_input`,
+  process, after the first message on 1.2.17 and as the process starts
+  on 1.3.2, which then has written a conversation (its database and
+  brain directory) with nothing sent. Steps are `user_input`,
   `agent_response`, `tool` and `system_message`; a tool's two updates
   (`ACTIVE`, `DONE`) share only their `step_index`, its `parameters` are
   cut down (a write shows its path, not its content), and neither a failed
@@ -745,7 +747,10 @@ recorded ones. For anything else:
   included, and Claude's `SessionStart` hook now runs at launch (again
   on such a restart); Codex 0.157.0 (app-server) and pi 1.1.0 quit
   unprompted left no session file and no saved conversation (pi says it
-  creates the session it was given at launch).
+  creates the session it was given at launch). agy is started with the
+  first prompt as before (`Capabilities::start_unprompted`): 1.3.2 writes
+  a conversation for every process, and its `init` had opened a turn
+  that never ended, behind which the first prompt waited.
 - Claude's models (2.1.292) are the `models` of its answer to
   `initialize` (`value`, `displayName`, `description`,
   `supportedEffortLevels`, the first being `default`, which `--model`
