@@ -721,11 +721,36 @@ recorded ones. For anything else:
   extension commands, prompt templates and `skill:` ones, without their
   `argument-hint`, and `prompt` ran a template and a skill
   (`fixtures/commands.jsonl`); its interface's own commands do not run
-  over RPC (its docs). Codex passes a prompt's text on, and agy is
-  unverified: neither is declared. A command has to start the message, so
-  it goes alone and the bridge and unsent `!` output wait for the next
-  prompt, whose bridge then also tells the command's turn (a switch keeps
-  the held start). A queued `/` prompt goes only to the harness it was
+  over RPC (its docs). Codex's commands are its interface's own; on
+  app-server (0.157.0) `skills/list` (`cwds`) answers each skill's
+  `name` (`plugin:skill` for a plugin's), `description`, `path`,
+  `enabled`, and `skills/changed` says to ask again. A turn's input takes
+  `{"type": "skill", "name", "path"}`: with a workspace skill whose
+  instructions were a fixed answer, `$name args` as text, the text with
+  the item and plain text with the item each got that answer with no tool
+  call (`fixtures/app_server_skill.jsonl`). The driver asks once the
+  thread is there, with a string id so that recorded answers keep theirs,
+  holds a `/` prompt until the answer, and sends `/name args` for a listed
+  skill as `$name args` with the item, as Codex's interface does, so that
+  skills are `/name` on every harness. `exec` lists none. agy 1.3.2 runs
+  a skill from a `/name` prompt on stream-json input (no tool call) and
+  refuses its own commands there ("answered by the CLI itself"), `init`
+  lists no skills, and `/skills` on stream-json input is refused;
+  `agy --print=/skills` (since 1.1.11, by its changelog: no turn, no
+  quota, no conversation) prints `name<TAB>description` per skill in
+  about 3 s. Since agy is not started before the first prompt, the TUI
+  asks for that (`Harness::list_commands`, a `ListRequest`) in the
+  session's sandbox, only from an agy whose `--version` is three numbers
+  at least 1.1.11. In a process group of its own in the TUI's session it
+  was stopped for good (agy looks at the terminal), which is why a
+  `ProbeProcess` now leads a session of its own. Checked in the TUI (pty,
+  Landlock, Codex 0.157.0 app-server and agy 1.3.2): `/pine` before the
+  first prompt listed the workspace's `pineapple` skill, and
+  `/pineapple hello there` got its fixed answer. Unverified: Codex skills
+  on `exec`, agy's plugin skills, a skill with `disable-slash-command`.
+  A command has to start the message, so it goes alone and the bridge and
+  unsent `!` output wait for the next prompt, whose bridge then also tells
+  the command's turn (a switch keeps the held start). A queued `/` prompt goes only to the harness it was
   typed for. One of the agent's that does what one of unharness's does
   (`/clear`, `/model`, `/compact` and their aliases) is warned about, not
   followed: unharness's model, transcript and bridge are not updated.

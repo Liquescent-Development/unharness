@@ -475,9 +475,11 @@ pub fn listen_unless_ignored(signo: libc::c_int) -> Option<tokio::signal::unix::
 /// A short-lived child asked one thing on stdin, for a model or provider
 /// list: confined by `sandbox`, since the CLI reads its own configuration,
 /// which a sandboxed session can write and which may name commands to run
-/// (Claude's `apiKeyHelper`). It leads a process group of its own, and
-/// the whole group is killed and reaped when this is dropped, so a helper
-/// it started does not outlive it.
+/// (Claude's `apiKeyHelper`). It leads a session of its own, so that it
+/// has no terminal to be stopped at (agy's print mode looks at the
+/// terminal, and in a background group of the TUI's session it was stopped
+/// for good), and the whole group is killed and reaped when this is
+/// dropped, so a helper it started does not outlive it.
 pub struct ProbeProcess {
     child: std::process::Child,
     stdin: Option<std::process::ChildStdin>,
@@ -493,7 +495,15 @@ impl ProbeProcess {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
+            // SAFETY: `setsid` is async-signal-safe and allocates nothing.
+            unsafe {
+                cmd.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
         let mut child = cmd.spawn().context("spawn")?;
         live_probes().push(child.id());

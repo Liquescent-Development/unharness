@@ -130,22 +130,28 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 
 A `/command` unharness does not have goes to the agent as typed, where the
 agent runs commands of its own from a prompt: Claude Code (its built-ins,
-custom commands and skills), pi (extension commands, prompt templates and
-`/skill:<name>`) and an ACP agent once it has listed some. The transcript
-says it was passed on. Codex and Antigravity run no commands from a
-prompt, so there such a command is an error.
+custom commands and skills), Codex (its skills), pi (extension commands,
+prompt templates and `/skill:<name>`), Antigravity (its skills) and an ACP
+agent once it has listed some. The transcript says it was passed on.
+Skills are `/name` on every harness: Codex's own interface names one
+`$name`, and unharness sends `/name` for a Codex skill that way. Where the
+agent has listed none (Codex's `exec` transport, an ACP agent that lists
+nothing) such a command is an error.
 
-Once the agent's session has started, the autocomplete list offers the
-commands it reports (Claude Code's, pi's and an ACP agent's), after
+The autocomplete list offers the commands the agent has, after
 unharness's own and marked with the harness's name. The harness is
 started as soon as unharness is (and after a switch or a resume), before
 anything is sent to it, so its commands are there before the first
 prompt; a list opened while it starts takes them in when they come.
+Antigravity is the exception: it keeps a conversation for every process,
+so it is started with the first prompt, and unharness asks
+`agy --print=/skills` for its skills instead.
 
 unharness's own commands come first: `/clear` clears unharness's
 transcript. `\/` sends the rest as typed: `\/clear` is Claude Code's
 `/clear`, and with `\/` the list offers the agent's commands of the same
-names. On Codex and Antigravity `\/` sends a prompt that starts with `/`.
+names. Where the agent lists no commands, `\/` sends a prompt that starts
+with `/`.
 An agent's command that does what one of unharness's does (`\/clear`,
 Claude's `/new`, `\/model`) changes its session without unharness
 knowing, which the transcript warns about: the model shown, the

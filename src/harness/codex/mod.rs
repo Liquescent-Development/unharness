@@ -294,8 +294,10 @@ impl Harness for CodexHarness {
             // `collaborationMode` on `turn/start` (0.157.0 schema); `exec`
             // has no such mode.
             plan_mode: app_server,
-            // Its commands are its own interface's; a prompt's text is
-            // passed on as it is (skills go as `UserInput::skill`).
+            // Its commands are its own interface's. Its skills are, on
+            // app-server, what `skills/list` answers, and the session
+            // reports them; `/name` for one goes as `$name` with the skill
+            // (`app_server::skill_call`). `exec` lists none.
             slash_commands: false,
             // Checked on 0.157.0 (app-server): quit unprompted, no thread
             // was written.

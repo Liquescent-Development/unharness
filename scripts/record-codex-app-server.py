@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Record a `codex app-server` JSON-RPC session as a parser fixture.
 
-Performs initialize → initialized → thread/start → turn/start for each
-prompt, auto-accepts approval requests, asks for model/list at the end, and
+Performs initialize → initialized → thread/start → skills/list → turn/start
+for each prompt (one that starts with `/name` for a listed skill goes as
+`$name …` with the skill, as unharness sends it), auto-accepts approval requests, asks for model/list at the end, and
 writes both directions to OUT.jsonl (`>>` = sent, `!!` = stderr). Sub-agent
 threads report on the same stream and can outlive the turn that spawned
 them; the recording goes on until they have all finished.
@@ -108,6 +109,16 @@ def main() -> int:
 
     threading.Thread(target=pump_stdout, daemon=True).start()
 
+    skills = {}
+
+    def turn_items(text):
+        items = [{"type": "text", "text": text}]
+        name = text[1:].split(None, 1)[0] if text.startswith("/") and len(text) > 1 else None
+        if name in skills:
+            items = [{"type": "text", "text": "$" + text[1:]},
+                     {"type": "skill", "name": name, "path": skills[name]}]
+        return items
+
     init_id = request("initialize", {"clientInfo": {"name": "unharness", "version": "0.2.0"}})
     thread_id = None
     pending_start = None
@@ -186,7 +197,16 @@ def main() -> int:
                     sys.stderr.write(f"[thread/start failed] {json.dumps(obj)[:300]}\n")
                     proc.stdin.close()
                     break
-                items = [{"type": "text", "text": prompts.pop(0)}]
+                # unharness asks for the skills (with a string id) once the
+                # thread is there.
+                send({"jsonrpc": "2.0", "id": "skills", "method": "skills/list", "params": {"cwds": [cwd]}})
+                phase = "skills"
+            elif rid == "skills":
+                for entry in (obj.get("result") or {}).get("data", []):
+                    for skill in entry.get("skills", []):
+                        if skill.get("enabled", True):
+                            skills.setdefault(skill["name"], skill["path"])
+                items = turn_items(prompts.pop(0))
                 if args.image:
                     items.append({"type": "localImage", "path": os.path.abspath(args.image)})
                 request("turn/start", {"threadId": thread_id, "input": items})
@@ -196,7 +216,7 @@ def main() -> int:
                 break
             elif rid == revert_id:
                 revert_id = None
-                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+                request("turn/start", {"threadId": thread_id, "input": turn_items(prompts.pop(0))})
             continue
 
         params = obj.get("params") or {}
@@ -229,7 +249,7 @@ def main() -> int:
                 rewound = True
                 revert_id = request("thread/revert", {"threadId": thread_id, "beforeTurnId": turn_ids[1]})
             elif prompts:
-                request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompts.pop(0)}]})
+                request("turn/start", {"threadId": thread_id, "input": turn_items(prompts.pop(0))})
             elif args.compact and compact_id is None:
                 # Compaction runs as a turn of its own and ends with turn/completed.
                 compact_id = request("thread/compact/start", {"threadId": thread_id})

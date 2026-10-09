@@ -1,0 +1,15 @@
+SessionStarted id=01a11eb0-2800-7650-8b38-8aa62c19c5da model=gpt-6-astra
+TurnStarted
+HookStarted id=session-start:0:/HOME/.codex/hooks.json sessionStart
+HookEnded id=session-start:0:/HOME/.codex/hooks.json sessionStart ok ""
+TextDelta "P"
+TextDelta "INE"
+TextDelta "APPLE"
+TextDelta "-"
+TextDelta "42"
+TextDelta " hello"
+TextDelta " there"
+Usage in=16471 out=34 cache_read=12160 cache_write=0 cost=- cumulative=false
+Context used=16505 window=258400
+RateLimit status=- 7d=3%
+TurnCompleted Done

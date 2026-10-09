@@ -17,10 +17,11 @@ use super::{
     probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
+use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
-    RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
+    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Default)]
@@ -139,8 +140,9 @@ impl Harness for AgyHarness {
             // `--mode plan` makes agy write a plan file under its state
             // directory and then act in the same turn: nothing waits.
             plan_mode: false,
-            // Not seen to read a `/name` prompt as a command (unverified),
-            // and it lists none.
+            // A `/name` prompt for a skill runs it on stream-json input
+            // (1.3.2); which there are comes from `list_commands`. Its own
+            // commands are refused there.
             slash_commands: false,
             // 1.3.2 writes a conversation for every process as it starts
             // (`init` comes then, not after the first message): one
@@ -188,6 +190,15 @@ impl Harness for AgyHarness {
                 effort_levels: None,
             })
             .collect())
+    }
+
+    fn list_commands(
+        &self,
+        binary: &Path,
+        cwd: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<Option<Vec<HarnessCommand>>> {
+        query_skills(binary, cwd, sandbox)
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
@@ -283,6 +294,62 @@ pub fn query_models(binary: &Path) -> Result<Vec<(String, String)>> {
     }
 }
 
+/// The first agy whose print mode answers `/skills` itself, "without
+/// starting an agent turn, spending quota, or leaving a conversation
+/// behind" (its changelog); before it the prompt went to the model.
+const PRINT_SKILLS_SINCE: [u64; 3] = [1, 1, 11];
+
+/// Whether `agy --version` (`1.3.2`) names one that answers `/skills` in
+/// print mode. Anything but three numbers is not taken for a version.
+fn answers_skills(version: &str) -> bool {
+    let parts: Option<Vec<u64>> = version.trim().split('.').map(|p| p.parse().ok()).collect();
+    parts.is_some_and(|p| p.len() == 3 && p[..] >= PRINT_SKILLS_SINCE[..])
+}
+
+/// The skills agy offers in `cwd`, which a prompt runs as `/name`:
+/// `agy --print=/skills` prints one `name<TAB>description` line each
+/// (1.3.2). It is refused on stream-json input, so it is a process of its
+/// own, in the session's sandbox: the workspace's skills are among what it
+/// reads, and a session can write them. `None` for an agy that would send
+/// it to the model.
+pub fn query_skills(
+    binary: &Path,
+    cwd: &Path,
+    sandbox: &Sandbox,
+) -> Result<Option<Vec<HarnessCommand>>> {
+    if !probe_version(binary).is_some_and(|v| answers_skills(&v)) {
+        return Ok(None);
+    }
+    let mut cmd = Command::new(binary);
+    cmd.arg("--print=/skills").current_dir(cwd);
+    let probe = ProbeProcess::spawn(cmd, sandbox).context("start agy")?;
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let mut lines = Vec::new();
+    loop {
+        match probe.next_line(deadline) {
+            Ok(line) => lines.push(line),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!(
+                    "agy did not list its skills within {}s",
+                    QUERY_TIMEOUT.as_secs()
+                )
+            }
+        }
+    }
+    Ok(Some(parse_skills(&lines)))
+}
+
+fn parse_skills(lines: &[String]) -> Vec<HarnessCommand> {
+    lines
+        .iter()
+        .filter_map(|l| {
+            let (name, description) = l.split_once('\t')?;
+            HarnessCommand::new(name, Some(description), None)
+        })
+        .collect()
+}
+
 /// One object on stdout (a progress line goes to stderr), with the list at
 /// `command.data.models`.
 fn parse_models(stdout: &str) -> Result<Vec<(String, String)>> {
@@ -305,6 +372,56 @@ fn parse_models(stdout: &str) -> Result<Vec<(String, String)>> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn skills_output() {
+        // agy 1.3.2, `--print=/skills` in a workspace with one skill.
+        let out = include_str!("fixtures/print_skills.txt");
+        let lines: Vec<String> = out.lines().map(str::to_string).collect();
+        let skills = parse_skills(&lines);
+        let names: Vec<&str> = skills.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["agy-customizations", "antigravity-guide", "pineapple"]
+        );
+        assert_eq!(
+            skills[2].description,
+            "Answers with a fixed code word. Only use when explicitly invoked."
+        );
+        assert!(parse_skills(&["no tab here".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn only_an_agy_that_answers_skills_itself_is_asked() {
+        assert!(answers_skills("1.3.2\n"));
+        assert!(answers_skills("1.1.11"));
+        assert!(!answers_skills("1.1.10"));
+        assert!(!answers_skills("0.9.99"));
+        // What a stand-in printed is not a version.
+        assert!(!answers_skills("{\"event\":\"init\"}"));
+        assert!(!answers_skills("1.3"));
+        assert!(!answers_skills("1.3.2-beta"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skills_are_asked_for_in_print_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let agy = dir.path().join("agy");
+        std::fs::write(
+            &agy,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo 1.3.2; exit 0; }\n\
+             [ \"$1\" = --print=/skills ] && printf 'one\\tThe first\\ntwo\\tThe second\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let skills = query_skills(&agy, dir.path(), &Sandbox::off())
+            .unwrap()
+            .unwrap();
+        let names: Vec<&str> = skills.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["one", "two"]);
+    }
 
     #[test]
     fn models_output() {

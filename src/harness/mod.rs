@@ -15,8 +15,8 @@ use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
 use crate::core::{
-    Capabilities, HarnessId, McpServer, ModelRef, PermissionPolicy, PolicySupport, ProviderId,
-    SessionConfig, SessionHandle,
+    Capabilities, HarnessCommand, HarnessId, McpServer, ModelRef, PermissionPolicy, PolicySupport,
+    ProviderId, SessionConfig, SessionHandle,
 };
 
 /// Where a harness's provider list comes from.
@@ -109,6 +109,19 @@ pub trait Harness: Send + Sync {
                 .collect()),
             ProviderSource::Dynamic => Ok(Vec::new()),
         }
+    }
+
+    /// The commands a prompt runs as `/name` in `cwd`, for a harness whose
+    /// session does not say before the first prompt
+    /// (`Capabilities::start_unprompted`); a CLI started for it runs in
+    /// `sandbox`. `None` when it cannot be told this way. Default: `None`.
+    fn list_commands(
+        &self,
+        _binary: &Path,
+        _cwd: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Option<Vec<HarnessCommand>>> {
+        Ok(None)
     }
 
     /// The provider this harness uses when it is told none, as far as can

@@ -70,12 +70,15 @@ pub enum Action {
 pub enum ListRequest {
     Providers(HarnessId),
     Models(HarnessId, ProviderId),
+    /// Its commands, where no session says before the first prompt.
+    Commands(HarnessId),
 }
 
 #[derive(Debug, Clone)]
 pub enum ListResult {
     Providers(Result<Vec<(ProviderId, String)>, String>),
     Models(Result<Vec<ModelInfo>, String>),
+    Commands(Result<Option<Vec<HarnessCommand>>, String>),
 }
 
 /// Everything a thread needs to answer a `ListRequest`.
@@ -83,6 +86,7 @@ pub struct ListJob {
     pub request: ListRequest,
     registry: Arc<Registry>,
     binary: PathBuf,
+    cwd: PathBuf,
     sandbox: Sandbox,
 }
 
@@ -97,11 +101,18 @@ impl ListJob {
                 h.list_models(&self.binary, p, &self.sandbox)
                     .map_err(|e| format!("{e:#}")),
             ),
+            (ListRequest::Commands(_), Some(h)) => ListResult::Commands(
+                h.list_commands(&self.binary, &self.cwd, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
             (ListRequest::Providers(_), None) => {
                 ListResult::Providers(Err("not a registered harness".into()))
             }
             (ListRequest::Models(..), None) => {
                 ListResult::Models(Err("not a registered harness".into()))
+            }
+            (ListRequest::Commands(_), None) => {
+                ListResult::Commands(Err("not a registered harness".into()))
             }
         };
         (self.request, result)
@@ -109,7 +120,7 @@ impl ListJob {
 
     fn harness(&self) -> HarnessId {
         match &self.request {
-            ListRequest::Providers(h) | ListRequest::Models(h, _) => *h,
+            ListRequest::Providers(h) | ListRequest::Models(h, _) | ListRequest::Commands(h) => *h,
         }
     }
 }
@@ -1576,14 +1587,30 @@ impl App {
             || self.is_generating
             || self.handoff.is_some()
             || self.idle_start_paused
-            || !self.caps().start_unprompted
             || self.effective_policy().is_none()
         {
+            return;
+        }
+        if !self.caps().start_unprompted {
+            self.list_commands();
             return;
         }
         let resume = self.session_ids.get(&self.active).cloned();
         self.actions.push_back(Action::StartSession { resume });
         self.session_blank = true;
+    }
+
+    /// Ask the active harness for its commands without a session, once,
+    /// where the session would not say before the first prompt.
+    fn list_commands(&mut self) {
+        let request = ListRequest::Commands(self.active);
+        let listed = self
+            .live_caps
+            .get(&self.active)
+            .is_some_and(|c| c.commands.is_some());
+        if !listed && !self.lists_failed.contains(&request) {
+            self.request_list(request);
+        }
     }
 
     /// The session could not be started. The next prompt tries again.
@@ -3483,6 +3510,7 @@ impl App {
         let what = match &request {
             ListRequest::Providers(_) => "providers".to_string(),
             ListRequest::Models(_, p) => format!("models on {p}"),
+            ListRequest::Commands(_) => "commands".to_string(),
         };
         self.lists_failed.remove(&request);
         self.open_when_listed = Some(request.clone());
@@ -3512,6 +3540,7 @@ impl App {
                     request,
                     registry: self.registry.clone(),
                     binary,
+                    cwd: self.cwd.clone(),
                     sandbox,
                 });
                 true
@@ -3527,11 +3556,23 @@ impl App {
     /// again by itself, and shown if the user is waiting for it.
     fn list_failed(&mut self, request: ListRequest, why: String) {
         self.lists_failed.insert(request.clone());
+        // Asked for by itself, and nothing else would say why the list
+        // has none of the harness's commands.
+        if let ListRequest::Commands(harness) = request {
+            let name = self
+                .registry
+                .get(harness)
+                .map_or("the harness", |h| h.descriptor().short_name);
+            self.transcript
+                .push_notice(format!("{name}'s commands could not be listed: {why}"));
+            return;
+        }
         if self.open_when_listed.as_ref() == Some(&request) {
             self.open_when_listed = None;
             self.transcript.push_error(match request {
                 ListRequest::Providers(_) => format!("list providers: {why}"),
                 ListRequest::Models(..) => format!("list models: {why}"),
+                ListRequest::Commands(_) => format!("list commands: {why}"),
             });
         }
     }
@@ -3547,8 +3588,30 @@ impl App {
     pub fn on_list(&mut self, request: ListRequest, result: ListResult) {
         self.lists_pending.remove(&request);
         match result {
-            ListResult::Providers(Err(why)) | ListResult::Models(Err(why)) => {
+            ListResult::Providers(Err(why))
+            | ListResult::Models(Err(why))
+            | ListResult::Commands(Err(why)) => {
                 self.list_failed(request, why);
+            }
+            // It cannot be told this way: not asked again.
+            ListResult::Commands(Ok(None)) => {
+                self.lists_failed.insert(request);
+            }
+            ListResult::Commands(Ok(Some(commands))) => {
+                let ListRequest::Commands(harness) = request else {
+                    return;
+                };
+                self.live_caps
+                    .entry(harness)
+                    .or_default()
+                    .merge(CapsUpdate {
+                        slash_commands: Some(!commands.is_empty()),
+                        commands: Some(commands),
+                        ..Default::default()
+                    });
+                if harness == self.active {
+                    self.commands_arrived();
+                }
             }
             ListResult::Providers(Ok(providers)) => {
                 self.lists_failed.remove(&request);
@@ -3588,6 +3651,7 @@ impl App {
         let still_there = match request {
             ListRequest::Providers(h) => *h == self.active,
             ListRequest::Models(h, p) => *h == self.active && self.current_provider() == Some(p),
+            ListRequest::Commands(_) => false,
         };
         if !still_there || self.modal.is_some() {
             return false;
@@ -3596,6 +3660,7 @@ impl App {
             self.transcript.push_notice(match request {
                 ListRequest::Providers(_) => "The providers are here: /provider".to_string(),
                 ListRequest::Models(_, p) => format!("The models on {p} are here: Ctrl+M"),
+                ListRequest::Commands(_) => return false,
             });
             return false;
         }
@@ -9242,6 +9307,47 @@ pub(crate) mod tests {
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         app.start_when_idle();
         assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn a_harness_started_with_the_first_prompt_is_asked_for_its_commands() {
+        let mut app = test_app(HarnessId::AGY);
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        let jobs = app.take_list_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].request, ListRequest::Commands(HarnessId::AGY));
+        app.start_when_idle();
+        assert!(app.take_list_jobs().is_empty(), "asked twice");
+
+        app.input = "/pine".into();
+        app.update_suggestions();
+        assert!(app.suggestions.is_empty());
+        let skill = HarnessCommand::new("pineapple", Some("A code word"), None).unwrap();
+        app.on_list(
+            ListRequest::Commands(HarnessId::AGY),
+            ListResult::Commands(Ok(Some(vec![skill]))),
+        );
+        assert!(app.caps().slash_commands);
+        assert_eq!(app.suggestions[0].0, "/pineapple");
+        app.start_when_idle();
+        assert!(app.take_list_jobs().is_empty(), "asked again once listed");
+
+        // One that failed says why, once, and is not asked again.
+        let mut app = test_app(HarnessId::AGY);
+        app.start_when_idle();
+        app.take_list_jobs();
+        app.on_list(
+            ListRequest::Commands(HarnessId::AGY),
+            ListResult::Commands(Err("timed out".into())),
+        );
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("could not be listed: timed out"))
+        );
+        app.start_when_idle();
+        assert!(app.take_list_jobs().is_empty());
     }
 
     #[test]

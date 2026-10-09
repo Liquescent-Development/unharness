@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use unharness::core::{
-    AgentEvent, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision, PermissionKind,
-    PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
+    AgentEvent, CapsUpdate, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision,
+    PermissionKind, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
 };
 use unharness::harness::Harness;
 
@@ -828,8 +828,11 @@ async fn codex_app_server_handshake_turns_and_approval() {
     assert_eq!(sent[1]["method"], "initialized");
     assert_eq!(sent[2]["method"], "thread/start");
     assert_eq!(sent[2]["params"]["approvalPolicy"], "untrusted");
-    assert_eq!(sent[3]["method"], "turn/start");
-    assert_eq!(sent[3]["params"]["input"][0]["text"], "pong?");
+    // The skills are asked for once there is a thread.
+    assert_eq!(sent[3]["method"], "skills/list");
+    assert_eq!(sent[3]["id"], "skills");
+    assert_eq!(sent[4]["method"], "turn/start");
+    assert_eq!(sent[4]["params"]["input"][0]["text"], "pong?");
     let approval = sent
         .iter()
         .find(|v| v["id"] == 0 && v.get("result").is_some())
@@ -841,6 +844,57 @@ async fn codex_app_server_handshake_turns_and_approval() {
         next_event(&mut handle).await,
         AgentEvent::ProcessExited { .. }
     ));
+}
+
+/// Codex's skills are listed once there is a thread, and `/name` for one
+/// goes as its own interface sends it: `$name` with the skill. A prompt
+/// sent before the list came waits for it.
+#[tokio::test]
+async fn codex_app_server_lists_skills_and_runs_one_from_a_slash() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_skill.jsonl");
+    let mut handle = codex_app_server()
+        .start_session(fake.config(&fixture, PermissionPolicy::Bypass, true))
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("/pineapple hello there"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let listed = events.iter().find_map(|e| match e {
+        AgentEvent::CapabilitiesChanged(CapsUpdate {
+            commands: Some(c),
+            slash_commands,
+            ..
+        }) => Some((c.clone(), *slash_commands)),
+        _ => None,
+    });
+    let (commands, slash) = listed.expect("skills listed");
+    assert_eq!(slash, Some(true));
+    assert!(
+        commands
+            .iter()
+            .any(|c| c.name == "superpowers:brainstorming")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "42"))
+    );
+
+    let sent = fake.sent_lines();
+    let turn = sent.iter().find(|v| v["method"] == "turn/start").unwrap();
+    assert_eq!(
+        turn["params"]["input"],
+        serde_json::json!([
+            {"type": "text", "text": "$pineapple hello there"},
+            {"type": "skill", "name": "pineapple", "path": "/WORKSPACE/.agents/skills/pineapple/SKILL.md"},
+        ])
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
 /// A thread says which provider it runs on; a chosen one goes on the
@@ -2098,6 +2152,7 @@ async fn codex_interrupts_a_turn_sent_before_it_had_an_id() {
             r#">> {"method": "initialized"}"#,
             r#">> {"method": "thread/start"}"#,
             r#"{"id":2,"result":{"thread":{"id":"t1"}}}"#,
+            r#">> {"method": "skills/list"}"#,
             r#">> {"method": "turn/start"}"#,
             "# gate",
             r#"{"id":3,"result":{"turn":{"id":"u1","status":"inProgress"}}}"#,
@@ -2107,7 +2162,7 @@ async fn codex_interrupts_a_turn_sent_before_it_had_an_id() {
     );
     let mut handle = codex_app_server().start_session(cfg).unwrap();
     handle.send(SessionCommand::turn("x")).await.unwrap();
-    fake.sent_lines_eventually(4).await;
+    fake.sent_lines_eventually(5).await;
     handle.send(SessionCommand::Interrupt).await.unwrap();
     let before = settle(&mut handle).await;
     assert!(!interrupted(&before), "{before:?}");
