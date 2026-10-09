@@ -352,6 +352,13 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
+    /// The live or starting session was started before anything was sent
+    /// to it (so that its commands are listed): until the first prompt it
+    /// is not part of the conversation.
+    session_blank: bool,
+    /// The id (and model) such a session reported, committed with the
+    /// first prompt.
+    blank_session: Option<(String, Option<String>)>,
     /// The session's start waits for the CLI that ended the one before it
     /// to be gone (`tui::Ending`): what would start another is refused
     /// meanwhile, as during a turn.
@@ -774,6 +781,8 @@ impl App {
             last_active_index,
             session_ids,
             session_alive: false,
+            session_blank: false,
+            blank_session: None,
             start_held: false,
             store,
             conversation,
@@ -911,7 +920,7 @@ impl App {
                 c.efforts.insert(*h, e.clone());
             }
         }
-        if self.session_alive
+        if self.session_seen()
             && let Some(p) = self.effective_policy()
         {
             self.conversation.last_policies.insert(self.active, p);
@@ -1530,14 +1539,63 @@ impl App {
             )
         };
 
-        if !self.session_alive {
-            let resume = self.session_ids.get(&self.active).cloned();
-            self.actions.push_back(Action::StartSession { resume });
-        }
+        self.ensure_session();
+        self.mark_prompted();
         self.actions.push_back(Action::SendTurn {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// A session for the active harness, unless it has one or one is on
+    /// its way.
+    fn ensure_session(&mut self) {
+        if !self.session_alive && !self.start_pending() {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+    }
+
+    /// A start is queued, or held until the CLI before it is gone.
+    fn start_pending(&self) -> bool {
+        self.start_held
+            || self
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::StartSession { .. }))
+    }
+
+    /// Whether the live session has been sent something: one started
+    /// early has seen nothing of the conversation.
+    fn session_seen(&self) -> bool {
+        self.session_alive && !self.session_blank
+    }
+
+    /// Something goes to the session: from here on it is the
+    /// conversation's.
+    fn mark_prompted(&mut self) {
+        self.session_blank = false;
+        if let Some((id, model)) = self.blank_session.take() {
+            self.commit_session(id, model);
+        }
+    }
+
+    /// `id` is the active harness's session in this conversation.
+    fn commit_session(&mut self, session_id: String, model: Option<String>) {
+        let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+        // A branch of the forked-from session now exists under its own id.
+        if is_new {
+            self.fork_pending.remove(&self.active);
+        }
+        self.session_ids.insert(self.active, session_id.clone());
+        self.persist();
+        if is_new {
+            self.transcript.push_notice(format!(
+                "session {} ({})",
+                session_id,
+                model.unwrap_or_else(|| "default model".into())
+            ));
+        }
     }
 
     /// How long the bridge to `harness` may be: `bridge_max_chars` when
@@ -1583,7 +1641,7 @@ impl App {
     /// visit.
     fn bridge_start(&self, harness: HarnessId) -> usize {
         let visited = self.session_ids.contains_key(&harness)
-            || (harness == self.active && self.session_alive);
+            || (harness == self.active && self.session_seen());
         if visited {
             self.last_active_index
                 .get(&harness)
@@ -1829,10 +1887,7 @@ impl App {
         match &native {
             Some(anchor) => {
                 // A session that is not running is reattached first.
-                if !self.session_alive {
-                    let resume = self.session_ids.get(&active).cloned();
-                    self.actions.push_back(Action::StartSession { resume });
-                }
+                self.ensure_session();
                 self.actions
                     .push_back(Action::Command(SessionCommand::Rewind {
                         anchor: anchor.clone(),
@@ -2010,7 +2065,7 @@ impl App {
                 .push_error(format!("{} cannot compact on request", self.short_name()));
             return;
         }
-        if !self.session_alive {
+        if !self.session_seen() {
             self.transcript
                 .push_notice("no live session to compact; send a prompt first");
             return;
@@ -2476,19 +2531,12 @@ impl App {
         let sender = self.short_name().to_string();
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
-                let is_new = self.session_ids.get(&self.active) != Some(&session_id);
-                // A branch of the forked-from session now exists under its own id.
-                if is_new {
-                    self.fork_pending.remove(&self.active);
-                }
-                self.session_ids.insert(self.active, session_id.clone());
-                self.persist();
-                if is_new {
-                    self.transcript.push_notice(format!(
-                        "session {} ({})",
-                        session_id,
-                        model.unwrap_or_else(|| "default model".into())
-                    ));
+                // A new session nobody has prompted is not saved, nor is
+                // the conversation for it.
+                if self.session_blank && !self.session_ids.contains_key(&self.active) {
+                    self.blank_session = Some((session_id, model));
+                } else {
+                    self.commit_session(session_id, model);
                 }
             }
             AgentEvent::TurnStarted => {
@@ -2724,6 +2772,8 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                self.session_blank = false;
+                self.blank_session = None;
                 self.drop_subagents();
                 self.check_guard();
                 self.process_gone();
@@ -2768,6 +2818,8 @@ impl App {
     /// prompt handled before the loop runs the shutdown starts the next.
     fn shutdown_session(&mut self) {
         self.session_alive = false;
+        self.session_blank = false;
+        self.blank_session = None;
         self.drop_subagents();
         self.drop_prompts();
         // The next session reports where it runs.
@@ -2928,7 +2980,7 @@ impl App {
     /// at work: what they ask or report would land in the summary's turn.
     fn handoff_wanted(&self, next: HarnessId) -> bool {
         self.bridge_summary == BridgeSummary::Auto
-            && (self.session_alive
+            && (self.session_seen()
                 || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
             && self.subagents.is_empty()
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
@@ -2961,10 +3013,8 @@ impl App {
             held: !self.queued.is_empty(),
         });
         self.start_generation();
-        if !self.session_alive {
-            let resume = self.session_ids.get(&self.active).cloned();
-            self.actions.push_back(Action::StartSession { resume });
-        }
+        self.ensure_session();
+        self.mark_prompted();
         self.actions.push_back(Action::SendTurn {
             text: handoff_prompt(to, self.bridge_budget(next)),
             attachments: Vec::new(),
@@ -8942,5 +8992,84 @@ pub(crate) mod tests {
         assert!(app.session_mcp_servers().is_empty());
         assert!(app.session_mcp_servers().is_empty());
         assert_eq!(notices(&app), 1);
+    }
+
+    /// A session started before anything was sent to it, as the event loop
+    /// starts one.
+    fn blank_session(app: &mut App) {
+        app.session_alive = true;
+        app.session_blank = true;
+    }
+
+    #[test]
+    fn an_unprompted_session_is_not_saved_until_the_first_prompt() {
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        assert!(app.session_ids.is_empty());
+        assert!(app.store.list().is_empty());
+        assert!(!notices(&app).iter().any(|n| n.contains("codex-1")));
+        app.quit();
+        assert!(app.store.list().is_empty(), "quitting saved nothing");
+
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.submit_prompt("hello".into());
+        assert_eq!(app.take_actions(), vec![Action::turn("hello")]);
+        assert_eq!(
+            app.session_ids.get(&HarnessId::CODEX).map(String::as_str),
+            Some("codex-1")
+        );
+        assert_eq!(app.store.list().len(), 1);
+    }
+
+    #[test]
+    fn an_unprompted_session_is_sent_the_whole_bridge() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        // Away and back before it was prompted: it still saw nothing.
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        blank_session(&mut app);
+        app.submit_prompt("second question".into());
+        let text = sent_turn(&mut app);
+        assert!(text.contains("first question"), "{text}");
+        assert!(text.contains("first answer"), "{text}");
+        assert!(text.ends_with("second question"), "{text}");
+    }
+
+    #[test]
+    fn a_prompt_while_a_start_is_queued_starts_no_second_session() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.actions.push_back(Action::StartSession { resume: None });
+        app.session_blank = true;
+        app.submit_prompt("hello".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }, Action::turn("hello")]
+        );
+        assert!(!app.session_blank);
     }
 }
