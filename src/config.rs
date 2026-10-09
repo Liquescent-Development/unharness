@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::checkpoints::project_key;
 use crate::core::mcp::{self, McpServer, McpServerSettings};
+use crate::core::sandbox;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
@@ -73,7 +74,8 @@ pub struct SandboxSettings {
     pub writable: Vec<PathBuf>,
     /// Credential paths a harness may read although they are denied by
     /// default (e.g. `~/.config/gh`), and paths that stay readable inside a
-    /// `deny_read` one.
+    /// `deny_read` one. In a workspace's settings, also a path the global
+    /// `deny_read` names, which it lifts for that workspace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readable: Vec<PathBuf>,
     /// More paths no harness may read, besides the built-in credential
@@ -253,14 +255,36 @@ impl Config {
             file_checkpoints: local.file_checkpoints.or(global.file_checkpoints),
             mouse: local.mouse.or(global.mouse),
             herdr: local.herdr.or(global.herdr),
-            sandbox: SandboxSettings {
-                level: local.sandbox.level.or(global.sandbox.level),
-                writable: [global.sandbox.writable, local.sandbox.writable].concat(),
-                readable: [global.sandbox.readable, local.sandbox.readable].concat(),
-                deny_read: [global.sandbox.deny_read, local.sandbox.deny_read].concat(),
-            },
+            sandbox: Self::merge_sandbox(
+                global.sandbox,
+                local.sandbox,
+                dirs::home_dir().as_deref(),
+            ),
             harnesses,
             mcp_servers,
+        }
+    }
+
+    /// The lists are joined, except that a global `deny_read` path the
+    /// workspace names in `readable` is lifted for that workspace. Only
+    /// that way round, and only for the same path as written (`~`
+    /// expanded): any other overlap is refused when the sandbox is set up.
+    fn merge_sandbox(
+        global: SandboxSettings,
+        local: SandboxSettings,
+        home: Option<&Path>,
+    ) -> SandboxSettings {
+        let expand = |p: &PathBuf| sandbox::expand_home(p, home);
+        let lifted: Vec<PathBuf> = local.readable.iter().map(expand).collect();
+        let global_deny = global
+            .deny_read
+            .into_iter()
+            .filter(|d| !lifted.contains(&expand(d)));
+        SandboxSettings {
+            level: local.level.or(global.level),
+            writable: [global.writable, local.writable].concat(),
+            readable: [global.readable, local.readable].concat(),
+            deny_read: global_deny.chain(local.deny_read).collect(),
         }
     }
 
@@ -418,6 +442,50 @@ url = "https://example.com/mcp"
         // Saving a config that never set it does not write it.
         let saved = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(!saved.contains("auto_sync"), "{saved}");
+    }
+
+    #[test]
+    fn a_workspace_readable_lifts_only_a_global_deny_it_names() {
+        let home = Path::new("/home/u");
+        let lists = |readable: &[&str], deny_read: &[&str]| SandboxSettings {
+            readable: readable.iter().map(PathBuf::from).collect(),
+            deny_read: deny_read.iter().map(PathBuf::from).collect(),
+            ..Default::default()
+        };
+        let merged = Config::merge_sandbox(
+            lists(
+                &[],
+                &["~/.config/demo/push.token", "~/.config/demo/other.token"],
+            ),
+            lists(&["/home/u/.config/demo/push.token"], &[]),
+            Some(home),
+        );
+        assert_eq!(
+            merged.deny_read,
+            [PathBuf::from("~/.config/demo/other.token")]
+        );
+        assert_eq!(
+            merged.readable,
+            [PathBuf::from("/home/u/.config/demo/push.token")]
+        );
+
+        // Not a directory around it, not a global readable over a
+        // workspace deny, not both in one file: those stay for the
+        // sandbox to refuse.
+        for (global, local) in [
+            (
+                lists(&[], &["~/.config/demo/push.token"]),
+                lists(&["~/.config/demo"], &[]),
+            ),
+            (lists(&["~/.config/gh"], &[]), lists(&[], &["~/.config/gh"])),
+            (lists(&[], &[]), lists(&["~/.config/gh"], &["~/.config/gh"])),
+        ] {
+            let denied = [global.deny_read.clone(), local.deny_read.clone()].concat();
+            assert_eq!(
+                Config::merge_sandbox(global, local, Some(home)).deny_read,
+                denied
+            );
+        }
     }
 
     #[test]

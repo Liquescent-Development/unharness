@@ -316,4 +316,43 @@ mod tests {
             Some(0)
         );
     }
+
+    #[test]
+    fn a_denied_file_leaves_its_neighbour_readable() {
+        if let Err(why) = Landlock::detect() {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        // What a workspace that lifted one of two global denies gets.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("ws")).unwrap();
+        std::fs::create_dir_all(root.join("demo")).unwrap();
+        std::fs::write(root.join("demo/push.token"), "p").unwrap();
+        std::fs::write(root.join("demo/other.token"), "o").unwrap();
+        let profile = SandboxProfile {
+            level: SandboxLevel::WorkspaceWrite,
+            workspace: root.join("ws"),
+            writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            deny_read: vec![root.join("demo/other.token")],
+            allow_read: vec![root.join("ws"), root.join("demo/push.token")],
+            protected: vec![],
+        };
+        let at = |p: &str| root.join(p).display().to_string();
+
+        assert_eq!(
+            run(
+                &profile,
+                &format!("cat {} > /dev/null", at("demo/push.token"))
+            ),
+            Some(0)
+        );
+        assert_ne!(
+            run(
+                &profile,
+                &format!("cat {} 2>/dev/null", at("demo/other.token"))
+            ),
+            Some(0)
+        );
+    }
 }

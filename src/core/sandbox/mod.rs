@@ -489,7 +489,7 @@ fn canonical(p: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(p).ok()
 }
 
-fn expand_home(p: &Path, home: Option<&Path>) -> PathBuf {
+pub fn expand_home(p: &Path, home: Option<&Path>) -> PathBuf {
     match (p.strip_prefix("~"), home) {
         (Ok(rest), Some(home)) => home.join(rest),
         _ => p.to_path_buf(),
@@ -702,6 +702,28 @@ mod tests {
             err.contains(".env") && err.contains("cannot be enforced"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_deny_on_a_readable_path_is_refused() {
+        // Whichever file each came from: a workspace lifting a global deny
+        // is settled by `Config::merge` before this.
+        let w = world();
+        let demo = w.home.join(".config/demo");
+        std::fs::create_dir_all(&demo).unwrap();
+        std::fs::write(demo.join("push.token"), "t").unwrap();
+        let deny = [PathBuf::from("~/.config/demo/push.token")];
+        for readable in [demo.join("push.token"), PathBuf::from("~/.config/demo")] {
+            let readable = [readable];
+            let mut req = request(&w, None);
+            req.extra_deny_read = &deny;
+            req.extra_readable = &readable;
+            let err = resolve(&req, &available(), &w.env).unwrap_err().to_string();
+            assert!(
+                err.contains("push.token") && err.contains("cannot be enforced"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
