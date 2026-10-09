@@ -28,7 +28,7 @@ file_checkpoints = true          # snapshot the working tree before each prompt 
 [sandbox]
 level    = "workspace-write"     # read-only | workspace-write | off
 writable = ["~/.local/share/my-mcp"]  # extra writable paths (relative ones are under the workspace)
-readable = ["~/.config/gh"]      # credential paths to allow reading; also reopens paths inside deny_read
+readable = ["~/.config/gh"]      # credential paths to allow reading; also reopens paths inside deny_read, and lifts a deny_read path it names
 deny_read = ["~/Documents"]      # more paths no harness may read
 
 [harnesses.claude]

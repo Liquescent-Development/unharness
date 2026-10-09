@@ -324,8 +324,9 @@ pub struct SandboxRequest<'a> {
     pub harness: &'a SandboxPaths,
     /// `[sandbox].writable`.
     pub extra_writable: &'a [PathBuf],
-    /// `[sandbox].readable`: exemptions from `DEFAULT_DENY_READ`, and paths
-    /// that stay readable inside a `deny_read` one.
+    /// `[sandbox].readable`: exemptions from `DEFAULT_DENY_READ` and from a
+    /// `deny_read` path named exactly, and paths that stay readable inside a
+    /// `deny_read` one.
     pub extra_readable: &'a [PathBuf],
     /// `[sandbox].deny_read`: more paths no harness process may read.
     pub extra_deny_read: &'a [PathBuf],
@@ -444,6 +445,11 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         let Some(path) = canonical(&expand(extra)) else {
             continue;
         };
+        // Naming the path itself under `readable` lifts the deny, as it does
+        // a built-in one: a workspace's settings can reopen a global one.
+        if readable.contains(&path) {
+            continue;
+        }
         // Reading is granted per subtree, so a path inside a readable one
         // cannot be taken out of it again.
         if let Some(around) = allow_read.iter().find(|a| path.starts_with(a)) {
@@ -700,6 +706,38 @@ mod tests {
         let err = resolve(&req, &available(), &w.env).unwrap_err().to_string();
         assert!(
             err.contains(".env") && err.contains("cannot be enforced"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_readable_path_lifts_a_deny_read_path_it_names() {
+        let w = world();
+        let demo = w.home.join(".config/demo");
+        std::fs::create_dir_all(&demo).unwrap();
+        std::fs::write(demo.join("push.token"), "t").unwrap();
+        std::fs::write(demo.join("other.token"), "o").unwrap();
+        // Spelled differently in each list, as a global and a workspace
+        // file may.
+        let deny = [
+            PathBuf::from("~/.config/demo/push.token"),
+            PathBuf::from("~/.config/demo/other.token"),
+        ];
+        let readable = [demo.join("push.token")];
+        let mut req = request(&w, None);
+        req.extra_deny_read = &deny;
+        req.extra_readable = &readable;
+        let p = active(resolve(&req, &available(), &w.env).unwrap());
+        assert!(!p.deny_read.contains(&demo.join("push.token")));
+        assert!(p.allow_read.contains(&demo.join("push.token")));
+        assert!(p.deny_read.contains(&demo.join("other.token")));
+
+        // A readable directory around it does not lift it.
+        let readable = [PathBuf::from("~/.config/demo")];
+        req.extra_readable = &readable;
+        let err = resolve(&req, &available(), &w.env).unwrap_err().to_string();
+        assert!(
+            err.contains("push.token") && err.contains("cannot be enforced"),
             "{err}"
         );
     }

@@ -72,8 +72,8 @@ pub struct SandboxSettings {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writable: Vec<PathBuf>,
     /// Credential paths a harness may read although they are denied by
-    /// default (e.g. `~/.config/gh`), and paths that stay readable inside a
-    /// `deny_read` one.
+    /// default (e.g. `~/.config/gh`) or by a `deny_read` entry naming the
+    /// same path, and paths that stay readable inside a `deny_read` one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub readable: Vec<PathBuf>,
     /// More paths no harness may read, besides the built-in credential
