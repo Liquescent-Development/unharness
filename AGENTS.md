@@ -881,4 +881,6 @@ recorded ones. For anything else:
 ## Commit style
 
 Conventional commits (`feat:`, `fix:`, `refactor:`, `docs:`), one logical
-change per commit, tree green (fmt, clippy, tests) at every commit.
+change per commit, tree green (fmt, clippy, tests) at every commit. A
+release bumps the version and adds its notes to `CHANGELOG.md` (the steps
+are under Releases in `CONTRIBUTING.md`).

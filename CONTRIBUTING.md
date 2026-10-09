@@ -98,6 +98,21 @@ with the shell installer, and updates the formula in
 After changing `dist-workspace.toml`, run `dist generate` to refresh
 `.github/workflows/release.yml`.
 
+The release's notes are the section of [CHANGELOG.md](CHANGELOG.md) for its
+version, which dist puts at the top of the GitHub Release. To cut one:
+
+1. Bump the version in `Cargo.toml` (`cargo build` updates `Cargo.lock`)
+   and in the `start` example of `docs/headless.md`.
+2. Add a `## X.Y.Z - YYYY-MM-DD` section at the top of `CHANGELOG.md`,
+   written for users from `git log vPREV..`: `### Added` and `### Fixed`
+   (and `### Changed` for anything that behaves differently), leaving out
+   tests, refactors and fixes to things that never shipped. Link a public
+   issue as `([#N](https://github.com/Liquescent-Development/unharness/issues/N))`,
+   and docs by their full GitHub URL, since relative links do not resolve
+   on a release page. A test fails until the section is there.
+3. Commit as `chore: release X.Y.Z`, tag it with `git tag -s vX.Y.Z -m
+   "unharness X.Y.Z"`, and push `main`, then the tag.
+
 ## License
 
 By contributing you agree that your contributions are licensed under the
