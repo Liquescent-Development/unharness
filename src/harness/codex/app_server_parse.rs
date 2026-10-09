@@ -892,6 +892,15 @@ mod tests {
     }
 
     #[test]
+    fn fixture_app_server_skill() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_skill",
+        );
+    }
+
+    #[test]
     fn fixture_app_server_two_turns() {
         assert_fixture(
             &mut CodexAppServerParser::new(),

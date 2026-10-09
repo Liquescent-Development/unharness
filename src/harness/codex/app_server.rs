@@ -14,9 +14,9 @@ use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, HarnessId, ModelRef, PermissionDecision, PermissionKind,
-    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason, shutdown_queued,
+    AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, PermissionDecision,
+    PermissionKind, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo, StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -26,6 +26,62 @@ pub fn turn_input(text: &str, attachments: &[Attachment]) -> Value {
         items.push(json!({"type":"localImage","path": a.path()}));
     }
     Value::Array(items)
+}
+
+/// The id of a `skills/list` request. A string, so that the numbered
+/// requests keep the ids they had before it was sent.
+const SKILLS_ID: &str = "skills";
+
+/// The enabled skills in an answer to `skills/list` (0.157.0: `data[]`,
+/// one entry per `cwd`, each with `skills[]` of `name`, `description`,
+/// `path`, `enabled`), with the path a turn names each by. The first of a
+/// name wins.
+pub fn listed_skills(answer: &Value) -> Vec<(HarnessCommand, String)> {
+    let mut skills: Vec<(HarnessCommand, String)> = Vec::new();
+    let listed = answer
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("skills")?.as_array())
+        .flatten();
+    for skill in listed {
+        if skill.get("enabled").and_then(Value::as_bool) == Some(false) {
+            continue;
+        }
+        let description = skill
+            .pointer("/interface/shortDescription")
+            .or_else(|| skill.get("shortDescription"))
+            .and_then(Value::as_str)
+            .filter(|d| !d.trim().is_empty())
+            .or_else(|| skill.get("description").and_then(Value::as_str));
+        let (Some(name), Some(path)) = (
+            skill.get("name").and_then(Value::as_str),
+            skill.get("path").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let Some(command) = HarnessCommand::new(name, description, None) else {
+            continue;
+        };
+        if !skills.iter().any(|(c, _)| c.name == command.name) {
+            skills.push((command, path.to_string()));
+        }
+    }
+    skills
+}
+
+/// A prompt that starts with `/name` for one of `skills`: the text Codex
+/// is sent, with `$name` (how its own interface names a skill), and the
+/// skill's name and path for the `skill` input item.
+pub fn skill_call<'a>(
+    text: &str,
+    skills: &'a [(HarnessCommand, String)],
+) -> Option<(String, &'a str, &'a str)> {
+    let rest = text.strip_prefix('/')?;
+    let name = rest.split_whitespace().next()?;
+    let (command, path) = skills.iter().find(|(c, _)| c.name == name)?;
+    Some((format!("${rest}"), command.name.as_str(), path.as_str()))
 }
 
 /// `turn/start` sandbox policy object.
@@ -180,6 +236,11 @@ struct Driver {
     queued_turn: Option<(String, Vec<Attachment>)>,
     /// Interrupt the turn asked for as soon as it has an id.
     interrupt_wanted: bool,
+    /// The skills the last `skills/list` answered with.
+    skills: Vec<(HarnessCommand, String)>,
+    /// A `skills/list` is unanswered: a `/` prompt waits for it, since it
+    /// may name one.
+    skills_pending: bool,
 }
 
 impl Driver {
@@ -193,14 +254,41 @@ impl Driver {
         Ok(id)
     }
 
+    async fn list_skills(&mut self, cwd: &std::path::Path) -> Result<()> {
+        self.skills_pending = true;
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": SKILLS_ID,
+            "method": "skills/list",
+            "params": {"cwds": [cwd]},
+        });
+        self.proc.write_line(&line.to_string()).await
+    }
+
+    /// A turn's input items; `/name` for a skill goes as Codex's own
+    /// interface sends it, `$name` and the skill.
+    fn input(&self, text: &str, attachments: &[Attachment]) -> Value {
+        let Some((text, name, path)) = skill_call(text, &self.skills) else {
+            return turn_input(text, attachments);
+        };
+        let mut items = turn_input(&text, attachments);
+        if let Some(items) = items.as_array_mut() {
+            items.push(json!({"type": "skill", "name": name, "path": path}));
+        }
+        items
+    }
+
     async fn start_turn(&mut self, text: String, attachments: Vec<Attachment>) -> Result<()> {
-        let Some(thread_id) = self.thread_id.clone() else {
-            self.queued_turn = Some((text, attachments));
-            return Ok(());
+        let thread_id = match self.thread_id.clone() {
+            Some(t) if !(self.skills_pending && text.starts_with('/')) => t,
+            _ => {
+                self.queued_turn = Some((text, attachments));
+                return Ok(());
+            }
         };
         let mut params = json!({
             "threadId": thread_id,
-            "input": turn_input(&text, &attachments),
+            "input": self.input(&text, &attachments),
         });
         if let Some(m) = &self.model {
             params["model"] = json!(m.model);
@@ -266,6 +354,8 @@ async fn drive(
         own_sandbox: OwnSandbox::for_session(&cfg.sandbox),
         queued_turn: None,
         interrupt_wanted: false,
+        skills: Vec::new(),
+        skills_pending: false,
     };
     let mut shutting_down = false;
 
@@ -292,7 +382,7 @@ async fn drive(
                                 let params = json!({
                                     "threadId": t,
                                     "expectedTurnId": turn,
-                                    "input": turn_input(&text, &attachments),
+                                    "input": d.input(&text, &attachments),
                                 });
                                 d.request("turn/steer", params, Outstanding::Other).await.map(|_| ())
                             }
@@ -399,6 +489,25 @@ async fn drive(
                     Some(RawLine::Stdout(line)) => {
                         let msg = RpcMessage::parse(&line);
                         match &msg {
+                            // An older Codex without `skills/list` answers with an
+                            // error, which is not the user's: no skills, and the
+                            // parser does not see it.
+                            Some(RpcMessage::Response { id, result, .. }) if id.as_str() == Some(SKILLS_ID) => {
+                                d.skills_pending = false;
+                                d.skills = result.as_ref().map(listed_skills).unwrap_or_default();
+                                let commands: Vec<HarnessCommand> = d.skills.iter().map(|(c, _)| c.clone()).collect();
+                                let _ = events.send(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                                    slash_commands: Some(!commands.is_empty()),
+                                    commands: Some(commands),
+                                    ..Default::default()
+                                })).await;
+                                if let Some((t, a)) = d.queued_turn.take()
+                                    && let Err(e) = d.start_turn(t, a).await
+                                {
+                                    let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                                }
+                                continue;
+                            }
                             Some(RpcMessage::Response { id, result, error }) => {
                                 let kind = id.as_u64().and_then(|i| d.outstanding.remove(&i));
                                 match kind {
@@ -459,6 +568,9 @@ async fn drive(
                                                     ..Default::default()
                                                 })).await;
                                             }
+                                            if let Err(e) = d.list_skills(&cfg.cwd).await {
+                                                let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                                            }
                                             if let Some((t, a)) = d.queued_turn.take()
                                                 && let Err(e) = d.start_turn(t, a).await
                                             {
@@ -514,6 +626,12 @@ async fn drive(
                                         d.interrupt_wanted = false;
                                     }
                                     _ => {}
+                                }
+                            }
+                            // Its skill files changed: what it lists now.
+                            Some(RpcMessage::Notification { method, .. }) if method == "skills/changed" => {
+                                if let Err(e) = d.list_skills(&cfg.cwd).await {
+                                    let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
                                 }
                             }
                             // A sub-agent's turn is what stopping it interrupts.
@@ -607,6 +725,73 @@ mod tests {
             turn_input("hi", &[a]),
             json!([{"type":"text","text":"hi"},{"type":"localImage","path":"/w/a.png"}])
         );
+    }
+
+    /// The answer to `skills/list` in `fixtures/app_server_skill.jsonl`.
+    fn recorded_skills() -> Vec<(HarnessCommand, String)> {
+        let fixture = include_str!("fixtures/app_server_skill.jsonl");
+        let line = fixture
+            .lines()
+            .find(|l| l.starts_with(r#"{"id":"skills""#))
+            .unwrap();
+        let answer: Value = serde_json::from_str(line).unwrap();
+        listed_skills(&answer["result"])
+    }
+
+    #[test]
+    fn skills_are_listed_with_their_paths() {
+        let skills = recorded_skills();
+        let names: Vec<&str> = skills.iter().map(|(c, _)| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "pineapple",
+                "cq",
+                "sites:sites-building",
+                "superpowers:brainstorming",
+                "imagegen",
+                "openai-docs"
+            ]
+        );
+        assert_eq!(skills[0].1, "/WORKSPACE/.agents/skills/pineapple/SKILL.md");
+        assert!(
+            skills[0]
+                .0
+                .description
+                .starts_with("Answers with a fixed code word")
+        );
+        // The short description of its interface, where it has one.
+        let docs = &skills[5].0;
+        assert!(docs.description.len() < 120, "{}", docs.description);
+
+        let disabled = json!({"data": [{"cwd": "/w", "errors": [], "skills": [
+            {"name": "off", "description": "", "path": "/p", "scope": "user", "enabled": false},
+            {"name": "on", "description": "d", "path": "/q", "scope": "user", "enabled": true},
+            {"name": "on", "description": "again", "path": "/r", "scope": "repo", "enabled": true},
+        ]}]});
+        let skills = listed_skills(&disabled);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].1, "/q");
+    }
+
+    #[test]
+    fn a_slash_for_a_skill_goes_as_codex_names_one() {
+        let skills = recorded_skills();
+        assert_eq!(
+            skill_call("/pineapple hello there", &skills),
+            Some((
+                "$pineapple hello there".to_string(),
+                "pineapple",
+                "/WORKSPACE/.agents/skills/pineapple/SKILL.md"
+            ))
+        );
+        assert_eq!(
+            skill_call("/superpowers:brainstorming", &skills).map(|c| c.0),
+            Some("$superpowers:brainstorming".to_string())
+        );
+        assert_eq!(skill_call("/nope x", &skills), None);
+        assert_eq!(skill_call("pineapple", &skills), None);
+        assert_eq!(skill_call("/", &skills), None);
     }
 
     #[test]
