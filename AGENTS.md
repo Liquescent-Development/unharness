@@ -116,8 +116,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   session ends the way its CLI expects (`Shutdown`, `LineProcess::end`: what the
   driver sends first, then stdin closed) and is killed only after
   `END_GRACE`, also when the handle is dropped meanwhile (a switch, a
-  fork, a resume, a sandbox or provider change; `/clear` keeps the
-  session). Mid-turn a CLI that is sent nothing to stop the turn (all
+  fork, a resume, `/clear`, a sandbox or provider change). Mid-turn a CLI that is sent nothing to stop the turn (all
   but Claude) is killed at once (`end_or_kill`): given its grace it could
   go on with the turn where nobody sees it. A turn still running
   `STOP_GRACE` (5 s) after an interrupt is ended with its process when the
@@ -138,7 +137,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   (`tui::Ending`), so that two never write one session: one still there
   after `END_GRACE + DRAIN_TIMEOUT + 1s` (its driver stuck) is killed
   through the session's `ProcessSlot`; meanwhile it says so, refuses a switch,
-  resume, fork or rewind (each would take the held start for its own),
+  resume, fork, rewind or `/clear` (each would take the held start for
+  its own),
   and an interrupt drops the prompt that waits; a rewind still held at
   quit forgets the vendor session it was for. On Linux each CLI runs
   below a reaper of its own (`core::reaper`: unharness's binary as
@@ -173,7 +173,9 @@ harness → vendor session map, bridging bookmarks, per-harness usage, the
 active harness, and the policy, models and efforts chosen for it (never a
 configured default; one named in the run resuming it wins), one JSON
 file per conversation plus an index. `App::persist`
-runs on session start, turn end, harness switch, `/clear`, and quit; a
+runs on session start, turn end, harness switch, `/clear` (which then
+starts a new conversation with the same harness and run choices and no
+sessions, the way a launch does), and quit; a
 session nothing has been sent to yet is not saved, nor its id. Resume
 restores all of it; vendor sessions themselves live with the vendor. A
 block of a kind this version does not know is skipped when read; not
