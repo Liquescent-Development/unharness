@@ -106,7 +106,7 @@ Claude's settings. Two things to know:
   API when two are set), and unharness reports the provider the session
   runs on as an error.
 - The provider is fixed when Claude or Codex starts, so changing it in
-  the TUI restarts the session (resumed) with the next prompt. It is
+  the TUI restarts the session (resumed). It is
   refused while a turn or a subagent is at work.
 
 The model list is Claude's own for that provider, asked of a short-lived

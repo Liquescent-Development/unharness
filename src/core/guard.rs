@@ -97,7 +97,7 @@ impl Change {
     /// The line shown to the user.
     pub fn describe(&self, harness: &str) -> String {
         let mut line = format!(
-            "{harness} configuration changed during this turn: {}",
+            "{harness} configuration changed while it ran: {}",
             self.path.display()
         );
         match &self.saved {

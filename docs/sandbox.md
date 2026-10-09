@@ -36,8 +36,8 @@ Set the level with `--sandbox <level>`, `UNHARNESS_SANDBOX`,
 of its own: the default applies under every policy, `bypass` included,
 and no policy picks a level. The level is shown on the status line and
 holds for the run on every harness. A change in the TUI applies to the
-next harness process, so the session restarts with the next prompt
-(resumed where the harness can; nothing changes during a turn).
+next harness process, so the session restarts under it (resumed where
+the harness can; nothing changes during a turn).
 
 ## Hiding more
 

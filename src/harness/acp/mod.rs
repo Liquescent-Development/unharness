@@ -186,6 +186,9 @@ impl Harness for AcpHarness {
             // `/name`; an agent that lists some says so
             // (`available_commands_update`), and codex-acp 2.1.1 listed none.
             slash_commands: false,
+            // Its commands come only from a session. Unverified: whether
+            // an agent keeps a session nothing was sent to.
+            start_unprompted: true,
         }
     }
 

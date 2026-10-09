@@ -352,6 +352,16 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
+    /// The live or starting session was started before anything was sent
+    /// to it (so that its commands are listed): until the first prompt it
+    /// is not part of the conversation.
+    session_blank: bool,
+    /// The id (and model) such a session reported, committed with the
+    /// first prompt.
+    blank_session: Option<(String, Option<String>)>,
+    /// The last session ended by itself or could not start: the next
+    /// one waits for the user (a prompt, a switch, a resume).
+    idle_start_paused: bool,
     /// The session's start waits for the CLI that ended the one before it
     /// to be gone (`tui::Ending`): what would start another is refused
     /// meanwhile, as during a turn.
@@ -454,6 +464,9 @@ pub struct App {
     rules: Rules,
     pub suggestions: Vec<(String, String)>,
     pub selected_suggestion: usize,
+    /// The list was closed (Esc, a recalled prompt, a pick) and not
+    /// opened again by typing: commands that arrive do not reopen it.
+    suggestions_closed: bool,
     /// The list is of files, for the `@` at this char index of the input,
     /// instead of slash commands.
     pub completing_file: Option<usize>,
@@ -774,6 +787,9 @@ impl App {
             last_active_index,
             session_ids,
             session_alive: false,
+            session_blank: false,
+            blank_session: None,
+            idle_start_paused: false,
             start_held: false,
             store,
             conversation,
@@ -829,6 +845,7 @@ impl App {
             rules: init.rules,
             suggestions: Vec::new(),
             selected_suggestion: 0,
+            suggestions_closed: false,
             completing_file: None,
             file_index: Vec::new(),
             // Listed once at the start, so that the first `@` has files.
@@ -911,7 +928,7 @@ impl App {
                 c.efforts.insert(*h, e.clone());
             }
         }
-        if self.session_alive
+        if self.session_seen()
             && let Some(p) = self.effective_policy()
         {
             self.conversation.last_policies.insert(self.active, p);
@@ -1530,14 +1547,108 @@ impl App {
             )
         };
 
-        if !self.session_alive {
-            let resume = self.session_ids.get(&self.active).cloned();
-            self.actions.push_back(Action::StartSession { resume });
-        }
+        self.ensure_session();
+        self.mark_prompted();
         self.actions.push_back(Action::SendTurn {
             text: outgoing,
             attachments,
         });
+    }
+
+    /// A session for the active harness, unless it has one or one is on
+    /// its way.
+    fn ensure_session(&mut self) {
+        if !self.session_alive && !self.start_pending() {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+    }
+
+    /// Start the active harness's session before anything is sent to it,
+    /// so that what it reports (its commands above all) is there before the
+    /// first prompt. The event loop calls this before it runs the actions;
+    /// nothing starts while a policy is still to be chosen, during a turn,
+    /// or after a session ended by itself or failed to start.
+    pub fn start_when_idle(&mut self) {
+        if self.should_quit
+            || self.session_alive
+            || self.start_pending()
+            || self.is_generating
+            || self.handoff.is_some()
+            || self.idle_start_paused
+            || !self.caps().start_unprompted
+            || self.effective_policy().is_none()
+        {
+            return;
+        }
+        let resume = self.session_ids.get(&self.active).cloned();
+        self.actions.push_back(Action::StartSession { resume });
+        self.session_blank = true;
+    }
+
+    /// The session could not be started. The next prompt tries again.
+    pub fn start_failed(&mut self, why: String) {
+        self.session_blank = false;
+        self.blank_session = None;
+        self.idle_start_paused = true;
+        if self.is_generating {
+            self.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(why),
+            });
+        } else {
+            self.transcript.push_error(why);
+        }
+    }
+
+    /// The session's driver stopped taking commands.
+    pub fn driver_gone(&mut self) {
+        self.transcript.push_error("session driver is gone");
+        self.session_alive = false;
+        self.session_blank = false;
+        self.blank_session = None;
+        self.idle_start_paused = true;
+    }
+
+    /// A start is queued, or held until the CLI before it is gone.
+    fn start_pending(&self) -> bool {
+        self.start_held
+            || self
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::StartSession { .. }))
+    }
+
+    /// Whether the live session has been sent something: one started
+    /// early has seen nothing of the conversation.
+    fn session_seen(&self) -> bool {
+        self.session_alive && !self.session_blank
+    }
+
+    /// Something goes to the session: from here on it is the
+    /// conversation's.
+    fn mark_prompted(&mut self) {
+        self.session_blank = false;
+        if let Some((id, model)) = self.blank_session.take() {
+            self.commit_session(id, model);
+        }
+    }
+
+    /// `id` is the active harness's session in this conversation.
+    fn commit_session(&mut self, session_id: String, model: Option<String>) {
+        let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+        // A branch of the forked-from session now exists under its own id.
+        if is_new {
+            self.fork_pending.remove(&self.active);
+        }
+        self.session_ids.insert(self.active, session_id.clone());
+        self.persist();
+        if is_new {
+            self.transcript.push_notice(format!(
+                "session {} ({})",
+                session_id,
+                model.unwrap_or_else(|| "default model".into())
+            ));
+        }
     }
 
     /// How long the bridge to `harness` may be: `bridge_max_chars` when
@@ -1583,7 +1694,7 @@ impl App {
     /// visit.
     fn bridge_start(&self, harness: HarnessId) -> usize {
         let visited = self.session_ids.contains_key(&harness)
-            || (harness == self.active && self.session_alive);
+            || (harness == self.active && self.session_seen());
         if visited {
             self.last_active_index
                 .get(&harness)
@@ -1829,14 +1940,14 @@ impl App {
         match &native {
             Some(anchor) => {
                 // A session that is not running is reattached first.
-                if !self.session_alive {
-                    let resume = self.session_ids.get(&active).cloned();
-                    self.actions.push_back(Action::StartSession { resume });
-                }
+                self.ensure_session();
                 self.actions
                     .push_back(Action::Command(SessionCommand::Rewind {
                         anchor: anchor.clone(),
                     }));
+                // Rewound, it is the conversation's: a restart now would
+                // resume it from before the rewind.
+                self.mark_prompted();
             }
             None => self.forget_session(active),
         }
@@ -1947,6 +2058,7 @@ impl App {
         if self.session_alive {
             self.shutdown_session();
         }
+        self.idle_start_paused = false;
         let mut fork = Conversation::new(self.active);
         fork.title = self.conversation.title.clone();
         fork.last_policies = self.conversation.last_policies.clone();
@@ -2010,7 +2122,7 @@ impl App {
                 .push_error(format!("{} cannot compact on request", self.short_name()));
             return;
         }
-        if !self.session_alive {
+        if !self.session_seen() {
             self.transcript
                 .push_notice("no live session to compact; send a prompt first");
             return;
@@ -2166,6 +2278,8 @@ impl App {
         // What the turn changed is told before the next process is watched.
         self.check_guard();
         self.shutdown_session();
+        // Not started again before the next prompt.
+        self.idle_start_paused = true;
         self.process_gone();
         self.transcript.end_running_tools();
         self.finish_generation();
@@ -2476,19 +2590,13 @@ impl App {
         let sender = self.short_name().to_string();
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
-                let is_new = self.session_ids.get(&self.active) != Some(&session_id);
-                // A branch of the forked-from session now exists under its own id.
-                if is_new {
-                    self.fork_pending.remove(&self.active);
-                }
-                self.session_ids.insert(self.active, session_id.clone());
-                self.persist();
-                if is_new {
-                    self.transcript.push_notice(format!(
-                        "session {} ({})",
-                        session_id,
-                        model.unwrap_or_else(|| "default model".into())
-                    ));
+                // A session nobody has prompted is not saved, nor is the
+                // conversation for it: not a new one, not a fork made at its
+                // start, not one that replaced a session it could not resume.
+                if self.session_blank {
+                    self.blank_session = Some((session_id, model));
+                } else {
+                    self.commit_session(session_id, model);
                 }
             }
             AgentEvent::TurnStarted => {
@@ -2683,7 +2791,21 @@ impl App {
                     self.model_cache
                         .insert((self.active, provider), models.clone());
                 }
+                let commands = update.commands.is_some() || update.slash_commands.is_some();
                 self.live_caps.entry(self.active).or_default().merge(update);
+                if commands {
+                    self.commands_arrived();
+                }
+            }
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(e),
+            } if self.session_blank && !self.is_generating => {
+                // A session started early failed before anything was sent
+                // to it (Codex's thread, an ACP agent's session/new): a
+                // prompt would wait on it for good.
+                self.transcript.push_error(e);
+                self.shutdown_session();
+                self.idle_start_paused = true;
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 let done = stop_reason == StopReason::Done;
@@ -2724,6 +2846,17 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                if self.session_blank {
+                    self.transcript.push_notice(format!(
+                        "{} exited{} before any prompt; your next prompt starts it again",
+                        self.short_name(),
+                        code.map(|c| format!(" with code {c}")).unwrap_or_default()
+                    ));
+                }
+                self.session_blank = false;
+                self.blank_session = None;
+                // It is not started again until the user does something.
+                self.idle_start_paused = true;
                 self.drop_subagents();
                 self.check_guard();
                 self.process_gone();
@@ -2767,7 +2900,15 @@ impl App {
     /// End the active harness's session. It is not alive from here on: a
     /// prompt handled before the loop runs the shutdown starts the next.
     fn shutdown_session(&mut self) {
+        // What it changed since the last turn ended, or since it started
+        // when it never had one, is told before the next process is watched.
+        if self.session_alive {
+            self.check_guard();
+        }
         self.session_alive = false;
+        self.session_blank = false;
+        self.blank_session = None;
+        self.idle_start_paused = false;
         self.drop_subagents();
         self.drop_prompts();
         // The next session reports where it runs.
@@ -2928,7 +3069,7 @@ impl App {
     /// at work: what they ask or report would land in the summary's turn.
     fn handoff_wanted(&self, next: HarnessId) -> bool {
         self.bridge_summary == BridgeSummary::Auto
-            && (self.session_alive
+            && (self.session_seen()
                 || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
             && self.subagents.is_empty()
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
@@ -2961,10 +3102,8 @@ impl App {
             held: !self.queued.is_empty(),
         });
         self.start_generation();
-        if !self.session_alive {
-            let resume = self.session_ids.get(&self.active).cloned();
-            self.actions.push_back(Action::StartSession { resume });
-        }
+        self.ensure_session();
+        self.mark_prompted();
         self.actions.push_back(Action::SendTurn {
             text: handoff_prompt(to, self.bridge_budget(next)),
             attachments: Vec::new(),
@@ -2992,6 +3131,7 @@ impl App {
         if self.session_alive {
             self.shutdown_session();
         }
+        self.idle_start_paused = false;
         // What this harness saw: everything but the `!` commands run since
         // its last prompt, which it is told about when it comes back.
         let seen = self
@@ -3061,7 +3201,11 @@ impl App {
         if let Some(w) = res.warning {
             self.transcript.push_notice(w);
         }
-        if self.session_alive {
+        self.idle_start_paused = false;
+        if self.session_alive && self.session_blank {
+            // Started with the policy it had: started again with this one.
+            self.shutdown_session();
+        } else if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetPolicy(res.effective)));
         }
@@ -3073,8 +3217,8 @@ impl App {
 
     /// Choose the sandbox level for the run. Returns whether it could be
     /// set. The sandbox is applied when a process is spawned, so a live
-    /// session is shut down and comes back under the new level with the
-    /// next prompt, resumed where the harness can.
+    /// session is shut down and comes back under the new level, resumed
+    /// where the harness can.
     pub fn set_sandbox(&mut self, level: SandboxLevel) -> bool {
         if self.is_generating {
             self.transcript
@@ -3089,10 +3233,11 @@ impl App {
             return false;
         }
         self.sandbox.explicit = Some(level);
+        self.idle_start_paused = false;
         let restart = self.session_alive && self.session_sandbox_level != Some(level);
         self.transcript.push_system(if restart {
             format!(
-                "Sandbox: {level} ({} restarts under it with the next prompt)",
+                "Sandbox: {level} ({} restarts under it)",
                 self.display_name()
             )
         } else {
@@ -3106,7 +3251,7 @@ impl App {
 
     /// Choose the active harness's provider. Where the provider is fixed
     /// when the process starts, a live session is shut down and comes back
-    /// on the new one with the next prompt, resumed.
+    /// on the new one, resumed.
     pub fn set_provider(&mut self, provider: ProviderId) {
         let changed = self.current_provider() != Some(&provider);
         let restart = changed && self.session_alive && self.caps().provider_per_process;
@@ -3132,9 +3277,10 @@ impl App {
         }
         self.providers.insert(self.active, provider.clone());
         self.chosen_providers.insert(self.active);
+        self.idle_start_paused = false;
         self.transcript.push_system(if restart {
             format!(
-                "Provider: {provider} ({} restarts on it with the next prompt; pick a model with Ctrl+M)",
+                "Provider: {provider} ({} restarts on it; pick a model with Ctrl+M)",
                 self.display_name()
             )
         } else {
@@ -3155,7 +3301,11 @@ impl App {
         self.models.insert(self.active, m.clone());
         self.chosen_models.insert(self.active);
         self.run_models.insert(self.active);
-        if self.session_alive {
+        self.idle_start_paused = false;
+        if self.session_alive && self.session_blank {
+            // Nothing was sent to it: it starts again with the model.
+            self.shutdown_session();
+        } else if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetModel(m)));
         }
@@ -3184,7 +3334,12 @@ impl App {
         self.chosen_efforts.insert(self.active);
         self.run_efforts.insert(self.active);
         self.transcript.push_system(format!("Effort: {effort}"));
-        if self.session_alive {
+        self.idle_start_paused = false;
+        if self.session_alive && self.session_blank {
+            // Claude would take the change as a turn: it starts again with
+            // the effort instead.
+            self.shutdown_session();
+        } else if self.session_alive {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetEffort(Some(effort))));
         }
@@ -3210,6 +3365,7 @@ impl App {
         if self.session_alive {
             self.shutdown_session();
         }
+        self.idle_start_paused = false;
         self.persist();
         let active = if self.registry.get(conv.active_harness).is_some() {
             conv.active_harness
@@ -4127,6 +4283,7 @@ impl App {
     /// was typed does, one that came in a paste or from the editor does not.
     fn refresh_suggestions(&mut self, files: bool) {
         self.suggestions.clear();
+        self.suggestions_closed = false;
         let was_completing_file = self.completing_file.take().is_some();
         // `\/name` is the harness's command even where unharness has one.
         let escaped = self.input.starts_with("\\/");
@@ -4277,11 +4434,25 @@ impl App {
         }
         // An open list takes the new files in, without moving the selection
         // off the file it is on.
+        self.refresh_keeping_selection();
+    }
+
+    fn refresh_keeping_selection(&mut self) {
         let selected = self.suggestions.get(self.selected_suggestion).cloned();
         self.update_suggestions();
         self.selected_suggestion = selected
             .and_then(|s| self.suggestions.iter().position(|o| *o == s))
             .unwrap_or(0);
+    }
+
+    /// The session listed its commands: a `/` being typed has them now
+    /// (the session may have started after the `/`).
+    fn commands_arrived(&mut self) {
+        let typing_command = (self.input.starts_with('/') || self.input.starts_with("\\/"))
+            && !self.input.contains('\n');
+        if typing_command && self.completing_file.is_none() && !self.suggestions_closed {
+            self.refresh_keeping_selection();
+        }
     }
 
     /// Listing the files came to nothing: the last list stays.
@@ -4303,6 +4474,7 @@ impl App {
     pub fn close_suggestions(&mut self) {
         self.suggestions.clear();
         self.completing_file = None;
+        self.suggestions_closed = true;
     }
 
     /// A list of files belongs to the word the cursor ends: it goes when
@@ -7970,7 +8142,7 @@ pub(crate) mod tests {
         ));
         // What the turn changed in the harness's configuration is told.
         assert!(app.transcript.blocks.iter().any(
-            |b| matches!(b, Block::Error(e) if e.contains("configuration changed during this turn"))
+            |b| matches!(b, Block::Error(e) if e.contains("configuration changed while it ran"))
         ));
         // The next prompt resumes the session in a new process.
         app.submit_prompt("go on".into());
@@ -8942,5 +9114,398 @@ pub(crate) mod tests {
         assert!(app.session_mcp_servers().is_empty());
         assert!(app.session_mcp_servers().is_empty());
         assert_eq!(notices(&app), 1);
+    }
+
+    /// A session started before anything was sent to it, as the event loop
+    /// starts one.
+    fn blank_session(app: &mut App) {
+        app.session_alive = true;
+        app.session_blank = true;
+    }
+
+    #[test]
+    fn an_unprompted_session_is_not_saved_until_the_first_prompt() {
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        assert!(app.session_ids.is_empty());
+        assert!(app.store.list().is_empty());
+        assert!(!notices(&app).iter().any(|n| n.contains("codex-1")));
+        app.quit();
+        assert!(app.store.list().is_empty(), "quitting saved nothing");
+
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        app.submit_prompt("hello".into());
+        assert_eq!(app.take_actions(), vec![Action::turn("hello")]);
+        assert_eq!(
+            app.session_ids.get(&HarnessId::CODEX).map(String::as_str),
+            Some("codex-1")
+        );
+        assert_eq!(app.store.list().len(), 1);
+    }
+
+    #[test]
+    fn an_unprompted_session_is_sent_the_whole_bridge() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("first question".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TextDelta("first answer".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "codex-1".into(),
+            model: None,
+        });
+        // Away and back before it was prompted: it still saw nothing.
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        app.switch_harness(HarnessId::CODEX);
+        app.take_actions();
+        blank_session(&mut app);
+        app.submit_prompt("second question".into());
+        let text = sent_turn(&mut app);
+        assert!(text.contains("first question"), "{text}");
+        assert!(text.contains("first answer"), "{text}");
+        assert!(text.ends_with("second question"), "{text}");
+    }
+
+    #[test]
+    fn a_prompt_while_a_start_is_queued_starts_no_second_session() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.actions.push_back(Action::StartSession { resume: None });
+        app.session_blank = true;
+        app.submit_prompt("hello".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }, Action::turn("hello")]
+        );
+        assert!(!app.session_blank);
+    }
+
+    fn starts(actions: &[Action]) -> usize {
+        actions
+            .iter()
+            .filter(|a| matches!(a, Action::StartSession { .. }))
+            .count()
+    }
+
+    #[test]
+    fn an_idle_harness_is_started_once_before_the_first_prompt() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.start_when_idle();
+        app.start_when_idle();
+        assert_eq!(app.actions, [Action::StartSession { resume: None }]);
+        // A prompt typed before the start ran does not start another, and
+        // takes the session for the conversation.
+        app.submit_prompt("hello".into());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }, Action::turn("hello")]
+        );
+        assert!(!app.session_blank);
+        // Running: nothing more to start.
+        app.session_alive = true;
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+    }
+
+    #[test]
+    fn nothing_starts_before_a_policy_is_chosen() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Codex's `exec` has no `ask`, and nothing below it.
+        let registry = Arc::new(Registry::empty().with(Box::new(
+            crate::harness::codex::CodexHarness::new(crate::harness::codex::CodexTransport::Exec),
+        )));
+        let mut app = test_app_with(
+            tmp.keep(),
+            HarnessId::CODEX,
+            None,
+            false,
+            Config::default(),
+            registry,
+        );
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        app.start_when_idle();
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn a_harness_that_leaves_a_session_behind_starts_with_the_first_prompt() {
+        // agy writes a conversation for every process.
+        let mut app = test_app(HarnessId::AGY);
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.submit_prompt("hello".into());
+        assert_eq!(starts(&app.take_actions()), 1);
+        assert!(!app.session_blank);
+    }
+
+    #[test]
+    fn a_switch_starts_the_next_harness_on_its_session() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_ids.insert(HarnessId::CODEX, "codex-1".into());
+        blank_session(&mut app);
+        app.switch_harness(HarnessId::CODEX);
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession {
+                resume: Some("codex-1".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn a_session_that_ends_by_itself_waits_for_the_user() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.start_when_idle();
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("exited with code 1 before any prompt"))
+        );
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty(), "started again by itself");
+        // A prompt starts it, as does a switch.
+        app.submit_prompt("hello".into());
+        assert_eq!(starts(&app.take_actions()), 1);
+
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.start_failed("could not start claude: not found".into());
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        assert_eq!(
+            notices(&app)
+                .iter()
+                .filter(|n| n.contains("not found"))
+                .count(),
+            1
+        );
+        app.switch_harness(HarnessId::CODEX);
+        app.start_when_idle();
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn an_early_session_that_fails_its_handshake_is_ended() {
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error("thread/start failed".into()),
+        });
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(notices(&app).iter().any(|n| n == "thread/start failed"));
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.submit_prompt("hello".into());
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn a_choice_before_the_first_prompt_starts_the_session_again_with_it() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        blank_session(&mut app);
+        app.set_effort("high".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.start_when_idle();
+        assert_eq!(starts(&app.take_actions()), 1);
+        app.session_alive = true;
+        app.set_model("opus".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+
+        // Once prompted, the session is told.
+        app.start_when_idle();
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.set_model("sonnet".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::SetModel(_))]
+        ));
+    }
+
+    #[test]
+    fn a_model_chosen_after_a_failed_start_starts_the_session() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.start_failed("thread/start failed: unknown model".into());
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.set_model("gpt-5".into());
+        app.start_when_idle();
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn what_an_unprompted_session_changed_is_told_when_it_ends() {
+        use crate::core::guard::{Guarded, Watch};
+        let config = tempfile::tempdir().unwrap();
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.guard = Some(Watch::begin(
+            &[Guarded::Tree(config.path().to_path_buf())],
+            None,
+        ));
+        blank_session(&mut app);
+        std::fs::write(config.path().join("settings.json"), "{}").unwrap();
+        app.set_model("opus".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("configuration changed while it ran")),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.session_alive = false;
+        app.fork_conversation();
+        app.take_actions();
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession {
+                resume: Some("claude-1".into())
+            }]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        // The branch is not taken until something is sent to it.
+        assert!(app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-1");
+        let copy = app.store.load(&app.conversation.id).unwrap();
+        assert_eq!(copy.sessions[&HarnessId::CLAUDE], "claude-1");
+        assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
+        // Started again, it branches again from the original.
+        app.set_model("opus".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession {
+                resume: Some("claude-1".into())
+            }]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-3".into(),
+            model: None,
+        });
+        app.submit_prompt("two".into());
+        assert!(!app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-3");
+    }
+
+    #[test]
+    fn a_rewound_session_is_the_conversation_s() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
+            app.submit_prompt(prompt.into());
+            app.session_alive = true;
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: "s1".into(),
+                model: None,
+            });
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+        }
+        app.take_actions();
+        // As after a resume: started early on its session.
+        app.session_alive = false;
+        app.start_when_idle();
+        app.take_actions();
+        app.session_alive = true;
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(|b| matches!(b, Block::User { text } if text == "two"))
+            .unwrap();
+        app.rewind_to(two, false);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Rewind {
+                anchor: "a2".into()
+            })]
+        );
+        // Restarting it would resume it from before the rewind.
+        app.set_model("opus".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::SetModel(_))]
+        ));
+    }
+
+    #[test]
+    fn commands_that_arrive_while_a_slash_is_typed_are_listed() {
+        let command = |name: &str| HarnessCommand::new(name, None, None).unwrap();
+        let listed = |commands| {
+            AgentEvent::CapabilitiesChanged(CapsUpdate {
+                commands: Some(commands),
+                ..Default::default()
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.input = "/he".into();
+        app.update_suggestions();
+        assert_eq!(app.suggestions.len(), 1, "{:?}", app.suggestions);
+        app.selected_suggestion = 0;
+        let selected = app.suggestions[0].clone();
+        app.on_event(listed(vec![command("hello"), command("hey")]));
+        let names: Vec<&str> = app.suggestions.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(
+            names.contains(&"/hello") && names.contains(&"/hey"),
+            "{names:?}"
+        );
+        assert_eq!(app.suggestions[app.selected_suggestion], selected);
+
+        // Not after Esc closed it.
+        app.close_suggestions();
+        app.on_event(listed(vec![command("hello")]));
+        assert!(app.suggestions.is_empty());
+        // Typing opens it again.
+        app.input = "/hel".into();
+        app.update_suggestions();
+        assert!(app.suggestions.iter().any(|(c, _)| c == "/hello"));
     }
 }

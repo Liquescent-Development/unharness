@@ -78,7 +78,7 @@ the policy.
 ## Switching harnesses
 
 `/harness` (or `/switch`, or `Ctrl+H`) shuts the current session down. The
-next harness starts on your next prompt and is seeded with the
+next harness starts at once, and your next prompt to it is seeded with the
 conversation so far: each prompt, what the agent said, and its tool
 calls with the part of their output that matters (none for a read or an
 edit, the end of a command's output, the last 20 lines of a call that
@@ -117,4 +117,4 @@ Antigravity has no separate effort setting. The effort is the last part
 of its model ids, and `--effort` is never passed to it.
 
 A sandbox change (`/sandbox`) applies to the process, so the harness is
-restarted on its session with the next prompt.
+restarted on its session.

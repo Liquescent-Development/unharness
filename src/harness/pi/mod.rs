@@ -117,6 +117,8 @@ impl Harness for PiHarness {
             // `prompt` runs an extension's command, a prompt template or a
             // `skill:` one; `get_commands` lists them (0.87.1).
             slash_commands: true,
+            // Checked on 1.1.0: quit unprompted, no session file was left.
+            start_unprompted: true,
         }
     }
 

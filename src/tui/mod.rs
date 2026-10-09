@@ -228,10 +228,13 @@ async fn event_loop(
     let (lists_tx, mut lists_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut ends = crate::core::process::EndSignals::listen();
 
+    // The session starts before the first prompt, so that the `/` list
+    // has the harness's own commands.
+    app.start_when_idle();
     if let Some(p) = initial_prompt {
         app.submit_prompt(p);
-        run_actions(app, &mut session, &mut ending, &mut shell).await;
     }
+    run_actions(app, &mut session, &mut ending, &mut shell).await;
 
     // An error (the terminal gone, say) still ends the session the
     // orderly way below, and is returned after.
@@ -386,6 +389,8 @@ async fn event_loop(
             }
         }
 
+        // Not in `run_actions`: the start is for the harness active now.
+        app.start_when_idle();
         run_actions(app, &mut session, &mut ending, &mut shell).await;
         if let Some(log) = frames.as_mut() {
             log.wakes += 1;
@@ -936,12 +941,7 @@ async fn run_actions(
                         app.session_sandbox_level = Some(app.sandbox_level().0);
                     }
                     Err(e) => {
-                        app.on_event(crate::core::AgentEvent::TurnCompleted {
-                            stop_reason: crate::core::StopReason::Error(format!(
-                                "could not start {}: {e:#}",
-                                app.short_name()
-                            )),
-                        });
+                        app.start_failed(format!("could not start {}: {e:#}", app.short_name()));
                     }
                 }
             }
@@ -960,8 +960,7 @@ async fn run_actions(
                 if let Some(s) = session.as_ref()
                     && s.send(cmd).await.is_err()
                 {
-                    app.transcript.push_error("session driver is gone");
-                    app.session_alive = false;
+                    app.driver_gone();
                     *session = None;
                 }
             }
@@ -1550,6 +1549,46 @@ mod tests {
         assert!(app.transcript.blocks.iter().any(
             |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("still exiting"))
         ));
+    }
+
+    // The early start after a sandbox change waits for the CLI that had
+    // the session; a prompt typed meanwhile goes with it, not with a
+    // start of its own.
+    #[tokio::test]
+    async fn a_prompt_waits_with_the_early_start_it_finds_held() {
+        use crate::core::{SessionInfo, session::ProcessModel};
+        let mut app = test_app(HarnessId::CODEX);
+        let (old, _events, mut cmds) = SessionHandle::channels(SessionInfo {
+            harness: HarnessId::CODEX,
+            process_model: ProcessModel::LongLived,
+        });
+        let mut session = Some(old);
+        let mut ending = Ending::new();
+        let mut shell = None;
+        app.session_alive = true;
+        app.session_ids.insert(HarnessId::CODEX, "thread-1".into());
+        app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
+        assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
+        app.start_when_idle();
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert_eq!(cmds.recv().await, Some(SessionCommand::Shutdown));
+        assert!(session.is_none() && app.start_held);
+
+        type_text(&mut app, "go on");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.start_when_idle();
+        run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
+        assert!(
+            matches!(
+                &ending.held.iter().collect::<Vec<_>>()[..],
+                [
+                    Action::StartSession { resume: Some(id) },
+                    Action::SendTurn { text, .. },
+                ] if id == "thread-1" && text == "go on"
+            ),
+            "{:?}",
+            ending.held
+        );
     }
 
     fn sent_turns(app: &mut App) -> Vec<String> {

@@ -174,10 +174,9 @@ impl AgyParser {
     pub fn feed_value(&mut self, v: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match str_of(v, "event") {
-            "init" => {
-                self.session(v, &mut out);
-                self.open_turn(&mut out);
-            }
+            // The process's, not a turn's: 1.3.2 sends it as it starts,
+            // 1.2.17 after the first message.
+            "init" => self.session(v, &mut out),
             "step_update" => {
                 let Some(step) = v.get("step_update") else {
                     return out;

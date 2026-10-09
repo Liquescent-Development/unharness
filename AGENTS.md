@@ -95,7 +95,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   same way. No rule reaches unharness's own config and state directories.
 - **A change to a harness's own configuration is never silent.** The files
   that decide a CLI's next run are declared in `src/harness/<name>/`
-  (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
+  (`guarded`) and compared after every turn and when a session ends (`core/guard.rs`). What a CLI
   rewrites by itself is projected away there (Claude's counters in
   `.claude.json`, Codex's trust entry for the workspace), found by running
   it, so that a warning means something.
@@ -173,7 +173,8 @@ harness → vendor session map, bridging bookmarks, per-harness usage, the
 active harness, and the policy, models and efforts chosen for it (never a
 configured default; one named in the run resuming it wins), one JSON
 file per conversation plus an index. `App::persist`
-runs on session start, turn end, harness switch, `/clear`, and quit. Resume
+runs on session start, turn end, harness switch, `/clear`, and quit; a
+session nothing has been sent to yet is not saved, nor its id. Resume
 restores all of it; vendor sessions themselves live with the vendor. A
 block of a kind this version does not know is skipped when read; not
 handled: an older unharness that rewrites such a conversation drops it.
@@ -214,7 +215,9 @@ recorded ones. For anything else:
   anything without `event` ends the process with an error naming the
   field, and every other event name is ignored with a warning (so there is
   no interrupt, steer or permission answer). `init` comes once per
-  process, after the first message. Steps are `user_input`,
+  process, after the first message on 1.2.17 and as the process starts
+  on 1.3.2, which then has written a conversation (its database and
+  brain directory) with nothing sent. Steps are `user_input`,
   `agent_response`, `tool` and `system_message`; a tool's two updates
   (`ACTIVE`, `DONE`) share only their `step_index`, its `parameters` are
   cut down (a write shows its path, not its content), and neither a failed
@@ -731,6 +734,23 @@ recorded ones. For anything else:
   (its recordings listed none, so it is not taken to run any), an unknown
   `/name` on an ACP agent, a Claude command added during a session (not
   listed until the next process).
+  The TUI starts the active harness's session whenever it is idle with
+  none and a policy is chosen (launch, a switch, a resume, a sandbox or
+  provider change), not with the first prompt, so that the list is there
+  before it (#118). Until a prompt goes to it the session is not the
+  conversation's (`App::session_blank`: nothing saved, its id held back,
+  the bridge sent whole); a model, effort or policy chosen meanwhile
+  starts it again with the choice, and one that exits, fails to start or
+  fails its handshake waits for the user. Checked in the TUI (pty, Claude
+  Code 2.1.295): `/cq` typed before the session was up filled in with the
+  `cq:` plugin skills, `cq:reflect` (which the model cannot invoke)
+  included, and Claude's `SessionStart` hook now runs at launch (again
+  on such a restart); Codex 0.157.0 (app-server) and pi 1.1.0 quit
+  unprompted left no session file and no saved conversation (pi says it
+  creates the session it was given at launch). agy is started with the
+  first prompt as before (`Capabilities::start_unprompted`): 1.3.2 writes
+  a conversation for every process, and its `init` had opened a turn
+  that never ended, behind which the first prompt waited.
 - Claude's models (2.1.292) are the `models` of its answer to
   `initialize` (`value`, `displayName`, `description`,
   `supportedEffortLevels`, the first being `default`, which `--model`
