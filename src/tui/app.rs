@@ -464,6 +464,9 @@ pub struct App {
     rules: Rules,
     pub suggestions: Vec<(String, String)>,
     pub selected_suggestion: usize,
+    /// The list was closed (Esc, a recalled prompt, a pick) and not
+    /// opened again by typing: commands that arrive do not reopen it.
+    suggestions_closed: bool,
     /// The list is of files, for the `@` at this char index of the input,
     /// instead of slash commands.
     pub completing_file: Option<usize>,
@@ -842,6 +845,7 @@ impl App {
             rules: init.rules,
             suggestions: Vec::new(),
             selected_suggestion: 0,
+            suggestions_closed: false,
             completing_file: None,
             file_index: Vec::new(),
             // Listed once at the start, so that the first `@` has files.
@@ -2782,7 +2786,11 @@ impl App {
                     self.model_cache
                         .insert((self.active, provider), models.clone());
                 }
+                let commands = update.commands.is_some() || update.slash_commands.is_some();
                 self.live_caps.entry(self.active).or_default().merge(update);
+                if commands {
+                    self.commands_arrived();
+                }
             }
             AgentEvent::TurnCompleted {
                 stop_reason: StopReason::Error(e),
@@ -4263,6 +4271,7 @@ impl App {
     /// was typed does, one that came in a paste or from the editor does not.
     fn refresh_suggestions(&mut self, files: bool) {
         self.suggestions.clear();
+        self.suggestions_closed = false;
         let was_completing_file = self.completing_file.take().is_some();
         // `\/name` is the harness's command even where unharness has one.
         let escaped = self.input.starts_with("\\/");
@@ -4413,11 +4422,25 @@ impl App {
         }
         // An open list takes the new files in, without moving the selection
         // off the file it is on.
+        self.refresh_keeping_selection();
+    }
+
+    fn refresh_keeping_selection(&mut self) {
         let selected = self.suggestions.get(self.selected_suggestion).cloned();
         self.update_suggestions();
         self.selected_suggestion = selected
             .and_then(|s| self.suggestions.iter().position(|o| *o == s))
             .unwrap_or(0);
+    }
+
+    /// The session listed its commands: a `/` being typed has them now
+    /// (the session may have started after the `/`).
+    fn commands_arrived(&mut self) {
+        let typing_command = (self.input.starts_with('/') || self.input.starts_with("\\/"))
+            && !self.input.contains('\n');
+        if typing_command && self.completing_file.is_none() && !self.suggestions_closed {
+            self.refresh_keeping_selection();
+        }
     }
 
     /// Listing the files came to nothing: the last list stays.
@@ -4439,6 +4462,7 @@ impl App {
     pub fn close_suggestions(&mut self) {
         self.suggestions.clear();
         self.completing_file = None;
+        self.suggestions_closed = true;
     }
 
     /// A list of files belongs to the word the cursor ends: it goes when
@@ -9288,5 +9312,38 @@ pub(crate) mod tests {
             &app.take_actions()[..],
             [Action::Command(SessionCommand::SetModel(_))]
         ));
+    }
+
+    #[test]
+    fn commands_that_arrive_while_a_slash_is_typed_are_listed() {
+        let command = |name: &str| HarnessCommand::new(name, None, None).unwrap();
+        let listed = |commands| {
+            AgentEvent::CapabilitiesChanged(CapsUpdate {
+                commands: Some(commands),
+                ..Default::default()
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.input = "/he".into();
+        app.update_suggestions();
+        assert_eq!(app.suggestions.len(), 1, "{:?}", app.suggestions);
+        app.selected_suggestion = 0;
+        let selected = app.suggestions[0].clone();
+        app.on_event(listed(vec![command("hello"), command("hey")]));
+        let names: Vec<&str> = app.suggestions.iter().map(|(c, _)| c.as_str()).collect();
+        assert!(
+            names.contains(&"/hello") && names.contains(&"/hey"),
+            "{names:?}"
+        );
+        assert_eq!(app.suggestions[app.selected_suggestion], selected);
+
+        // Not after Esc closed it.
+        app.close_suggestions();
+        app.on_event(listed(vec![command("hello")]));
+        assert!(app.suggestions.is_empty());
+        // Typing opens it again.
+        app.input = "/hel".into();
+        app.update_suggestions();
+        assert!(app.suggestions.iter().any(|(c, _)| c == "/hello"));
     }
 }
