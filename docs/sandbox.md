@@ -55,9 +55,10 @@ inside a denied path. So `deny_read = ["~"]` with a `readable` list of your
 toolchains (and the agent's own binary, if it is installed under your home
 directory) gives a strict mode.
 
-A `readable` entry that names a `deny_read` path itself lifts it. So one
-workspace's settings can reopen a file the global `deny_read` hides, and
-every other workspace still cannot read it:
+A workspace's settings can reopen a path the global `deny_read` hides by
+naming the same path, written the same way (`~` and the full home path
+count as the same), in their `readable` list. Every other workspace still
+cannot read it:
 
 ```toml
 # ~/.config/unharness/config.toml
@@ -69,9 +70,10 @@ deny_read = ["~/.config/demo/push.token"]
 readable = ["~/.config/demo/push.token"]
 ```
 
-A `deny_read` path inside a readable or writable one, such as a file in
-the workspace or anything under `/tmp`, cannot be enforced and is refused
-at startup. On Linux the names inside a denied directory can still be
+Only that way round: a workspace's `deny_read` does not take back a
+global `readable` path. A `deny_read` path that is also readable, or lies
+inside a readable or writable path (a file in the workspace, anything
+under `/tmp`), cannot be enforced and is refused at startup. On Linux the names inside a denied directory can still be
 listed, but their contents cannot be read.
 
 ## Backends
