@@ -21,7 +21,8 @@ use crate::core::{
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
     match policy {
-        PermissionPolicy::Ask => vec![],
+        // Not declared (`--mode plan` does not wait); never sent one.
+        PermissionPolicy::Plan | PermissionPolicy::Ask => vec![],
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => vec!["--mode", "accept-edits"],
         PermissionPolicy::Bypass => vec!["--dangerously-skip-permissions"],
     }

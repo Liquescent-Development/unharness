@@ -54,7 +54,8 @@ ToolCallStarted id=toolu_01UznuUXE9GN7E9Aky4d6wXy name=ToolSearch input={"max_re
 ToolCallResult id=toolu_01UznuUXE9GN7E9Aky4d6wXy error=false "[tool_reference]"
 Context used=31551 window=-
 ToolCallStarted id=toolu_01U1u39yjt3UKU7JQi24W7dp name=ExitPlanMode input={"plan":"## Plan\n\nIn `/WORKSPACE/greet.py` line 2, chan...
-PermissionRequest id=2833d145-727b-4590-a7b4-a6e17a6549f3 ToolUse ExitPlanMode [other]
+PermissionRequest id=2833d145-727b-4590-a7b4-a6e17a6549f3 PlanApproval "## Plan\\n\\nIn `/WORKSPACE/greet.py` line 2, change `retur..." file=/HOME/.claude/plans/in-greet-py-change-the-ancient-anchor.md
+PolicyChanged accept-edits
 ToolCallResult id=toolu_01U1u39yjt3UKU7JQi24W7dp error=false "User has approved your plan. You can now start coding. St..."
 Context used=31885 window=-
 ToolCallDelta id=toolu_013nGrQH5wTvJ48HW1aa6fGJ name=Edit "{\"file_path\": \"/mn"

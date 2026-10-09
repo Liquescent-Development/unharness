@@ -14,6 +14,7 @@ ToolCallResult id=toolu_01Ew6Q9L4mosm2mVwivZrwT5 error=false "[tool_reference]\\
 RateLimit status=allowed five_hour=7% seven_day=30%
 Context used=27868 window=-
 ToolCallStarted id=toolu_01S1ry6mixaMj8hbLpRUcpDh name=EnterPlanMode input={}
+PolicyChanged plan
 ToolCallResult id=toolu_01S1ry6mixaMj8hbLpRUcpDh error=false "Entered plan mode. You should now focus on exploring the ..."
 Context used=33641 window=-
 ToolCallDelta id=toolu_01JbdLjBs6fL3HuyKB6Fb9QD name=Bash "{\"command\": \"find /m"
@@ -67,7 +68,8 @@ ToolCallStarted id=toolu_016g2Q4MShwMRFMV9sSWknis name=Write input={"content":"#
 ToolCallResult id=toolu_016g2Q4MShwMRFMV9sSWknis error=false "File created successfully at: /HOME/.claude/plans/bright-..."
 Context used=34252 window=-
 ToolCallStarted id=toolu_01Ng6YNwEMScNZ7YRHdqEWdc name=ExitPlanMode input={"plan":"# Plan: Change greeting from Hello to Hi\n\n**Co...
-PermissionRequest id=9ce58b7e-38c2-4eb4-b911-271213b01730 ToolUse ExitPlanMode [other]
+PermissionRequest id=9ce58b7e-38c2-4eb4-b911-271213b01730 PlanApproval "# Plan: Change greeting from Hello to Hi\\n\\n**Context:** ..." file=/HOME/.claude/plans/bright-moseying-catmull.md
+PolicyChanged ask
 ToolCallResult id=toolu_01Ng6YNwEMScNZ7YRHdqEWdc error=false "User has approved your plan. You can now start coding. St..."
 Context used=34643 window=-
 ToolCallDelta id=toolu_01C2FicPAeLVucqQrXzcng8U name=Edit "{\"file_path\": \"/WORKSPACE/"

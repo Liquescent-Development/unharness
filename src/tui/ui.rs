@@ -19,7 +19,9 @@ use super::code::{
     sanitize, wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{AlwaysDraft, ListPicker, Modal, PolicyPicker, QuestionModal, takes_text};
+use super::modal::{
+    AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, takes_text,
+};
 use super::prompt;
 use super::transcript::{
     Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
@@ -78,6 +80,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &mut app.modal {
         // Drawing it settles how far its preview can scroll.
         Some(Modal::Question(m)) => render_question(frame, m, area),
+        Some(Modal::Plan(m)) => render_plan(frame, m, area),
         Some(_) => render_modal(frame, app, area),
         None => {}
     }
@@ -250,6 +253,7 @@ fn harness_color(id: HarnessId) -> Color {
 
 fn policy_color(p: PermissionPolicy) -> Color {
     match p {
+        PermissionPolicy::Plan => Color::Magenta,
         PermissionPolicy::Ask => Color::Green,
         PermissionPolicy::AcceptEdits => Color::Cyan,
         PermissionPolicy::Auto => Color::Yellow,
@@ -2113,6 +2117,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             )
         }
         Modal::Question(_) => return, // `render_question`
+        Modal::Plan(_) => return,     // `render_plan`
         Modal::Confirm(m) => {
             let popup = centered_rect(60, 30, area);
             let width = (popup.width.saturating_sub(6)).max(20) as usize;
@@ -2258,6 +2263,116 @@ fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
             render_question_options(frame, m, body);
         }
     }
+}
+
+/// The agent's plan, scrollable, over the policies to carry it out under
+/// and the row that keeps it planning.
+fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
+    let popup = centered_rect(90, 85, area);
+    let block = modal_block(" The agent has a plan ".into(), Color::Magenta);
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    let width = inner.width as usize;
+
+    let mut rows = Vec::new();
+    for (i, p) in m.policies.iter().enumerate() {
+        let on = i == m.cursor;
+        rows.push(Line::from(vec![
+            Span::raw(if on { "› " } else { "  " }),
+            Span::styled(
+                format!("Approve, then {p}"),
+                Style::default().fg(policy_color(*p)).add_modifier(if on {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            ),
+            Span::styled(
+                format!("  {}", p.description()),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+    let on = m.current().is_none();
+    rows.push(Line::from(vec![
+        Span::raw(if on { "› " } else { "  " }),
+        Span::styled(
+            "Keep planning",
+            Style::default().add_modifier(if on {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
+        ),
+        Span::styled(
+            "  tell the agent what to change",
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
+    if m.editing || !m.feedback.is_empty() {
+        let cursor = if m.editing { "▏" } else { "" };
+        rows.extend(wrap_prefixed_text(
+            "    Feedback: ",
+            &format!("{}{cursor}", m.feedback),
+            width,
+            Style::default(),
+        ));
+    }
+    let hint = if m.editing {
+        "type what to change · Enter send · Esc stop typing"
+    } else if m.current().is_some() {
+        "↑/↓ select · Enter approve · PgUp/PgDn plan · Esc keep planning"
+    } else {
+        "↑/↓ select · Enter type feedback · PgUp/PgDn plan · Esc keep planning"
+    };
+    let hint = wrap_prefixed_text("", hint, width, Style::default().fg(Color::Gray));
+
+    let row_count = (rows.len() as u16).min(inner.height.saturating_sub(5).max(1));
+    let hint_rows = (hint.len() as u16).min(2);
+    let parts = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(3),
+        Constraint::Length(1),
+        Constraint::Length(row_count),
+        Constraint::Length(1),
+        Constraint::Length(hint_rows),
+    ])
+    .split(inner);
+
+    let title = match &m.plan_file {
+        Some(path) => format!(" Plan · {path} "),
+        None => " Plan ".to_string(),
+    };
+    let pane = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(title);
+    let plan = pane.inner(parts[1]);
+    let lines = render_markdown_to_lines(&m.plan, plan.width as usize, true);
+    let max = lines.len().saturating_sub(plan.height as usize) as u16;
+    m.scroll_max = max;
+    m.scroll = m.scroll.min(max);
+    let pane = if max > 0 {
+        let more = if m.scroll < max { "↓" } else { "↑" };
+        pane.title(
+            Line::from(format!(" {more} {}/{} ", m.scroll + 1, max + 1))
+                .alignment(Alignment::Right),
+        )
+    } else {
+        pane
+    };
+    frame.render_widget(
+        Paragraph::new(lines).scroll((m.scroll, 0)).block(pane),
+        parts[1],
+    );
+    frame.render_widget(Paragraph::new(rows), parts[3]);
+    frame.render_widget(Paragraph::new(hint), parts[5]);
 }
 
 /// The keys that work on the current page.

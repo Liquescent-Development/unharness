@@ -32,7 +32,7 @@ use crate::core::conversations::{
 use crate::core::guard::{self, Watch};
 use crate::core::mcp::{self, McpServer};
 use crate::core::registry::Registry;
-use crate::core::rules::Scope;
+use crate::core::rules::{Scope, ToolAction};
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessCommand, HarnessId,
@@ -320,6 +320,9 @@ pub struct App {
     /// What was chosen in this run: it holds over a resumed conversation's
     /// choice for the same harness.
     run_choices: HashMap<HarnessId, PermissionPolicy>,
+    /// The policy each harness ran under before it went into plan mode:
+    /// the one its plan approval offers first.
+    pre_plan: HashMap<HarnessId, PermissionPolicy>,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
@@ -809,6 +812,7 @@ impl App {
             policy_choice: HashMap::new(),
             run_policy: init.policy,
             run_choices: HashMap::new(),
+            pre_plan: HashMap::new(),
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
@@ -2912,6 +2916,7 @@ impl App {
                     self.anchors.push(TurnAnchorRecord { block, harness, id });
                 }
             }
+            AgentEvent::PolicyChanged(p) => self.on_policy_changed(p),
             AgentEvent::CapabilitiesChanged(update) => {
                 if let Some(levels) = &update.effort_levels
                     && self.caps().effort_levels != *levels
@@ -3078,9 +3083,15 @@ impl App {
     }
 
     /// The allow rules that answer a request, if the user has them for it.
+    /// While the agent plans only a read is answered by a rule: Claude asks
+    /// before anything else in plan mode, and what it asks for then is not
+    /// what the user allowed the rule for.
     fn allowing_rules(&self, req: &PermissionRequest) -> Option<Vec<&Rule>> {
         match &req.kind {
-            PermissionKind::ToolUse { tool, action, .. } => {
+            PermissionKind::ToolUse { tool, action, .. }
+                if self.effective_policy() != Some(PermissionPolicy::Plan)
+                    || matches!(action, ToolAction::Read { .. }) =>
+            {
                 self.rules.allows(tool, action, &self.cwd)
             }
             _ => None,
@@ -3099,6 +3110,12 @@ impl App {
                             .into(),
                     }
                 }
+                // Never approved unseen.
+                PermissionKind::PlanApproval { .. } => PermissionDecision::Deny {
+                    reason: "The user is switching to another agent. Do not carry out the \
+                             plan; write the handoff summary."
+                        .into(),
+                },
                 _ => PermissionDecision::Answer(Value::Null),
             };
             self.actions
@@ -3126,7 +3143,15 @@ impl App {
             return;
         }
         if self.modal.is_none() {
-            self.modal = Some(Modal::for_request(req));
+            let mut modal = Modal::for_request(req);
+            if let Modal::Plan(m) = &mut modal {
+                let preferred = self.pre_plan.get(&self.active).copied();
+                m.set_policies(
+                    self.plan_policies(),
+                    preferred.unwrap_or(PermissionPolicy::Ask),
+                );
+            }
+            self.modal = Some(modal);
         } else {
             self.pending_prompts.push_back(req);
         }
@@ -3340,6 +3365,12 @@ impl App {
         let Some(res) = self.offered(p) else {
             return false;
         };
+        if res.effective == PermissionPolicy::Plan
+            && let Some(was) = self.effective_policy()
+            && was != PermissionPolicy::Plan
+        {
+            self.pre_plan.insert(self.active, was);
+        }
         // Only a prompt that waited for this choice is sent by it.
         let was_waiting = self.effective_policy().is_none();
         // For this harness only: the others keep theirs.
@@ -3362,6 +3393,43 @@ impl App {
             self.send_next_queued();
         }
         true
+    }
+
+    /// The session runs under `p` now. One it moved to by itself (the
+    /// agent went into plan mode, or left a mode it could not keep) becomes
+    /// the harness's policy, so that what is shown, saved and started again
+    /// is what runs.
+    fn on_policy_changed(&mut self, p: PermissionPolicy) {
+        let was = self.effective_policy();
+        if was == Some(p) {
+            return;
+        }
+        if p == PermissionPolicy::Plan
+            && let Some(was) = was
+        {
+            self.pre_plan.insert(self.active, was);
+        }
+        self.policy_choice.insert(self.active, p);
+        self.run_choices.insert(self.active, p);
+        let name = self.display_name();
+        self.transcript.push_notice(match p {
+            PermissionPolicy::Plan => {
+                format!(
+                    "{name} went into plan mode: it asks you to approve its plan before it acts"
+                )
+            }
+            _ => format!("{name} now runs under policy {p}"),
+        });
+    }
+
+    /// The policies a plan can be carried out under: those the harness has,
+    /// but not bypass, which Claude refuses to switch to in a session that
+    /// was not started with it (`bypass_not_launched`, 2.1.296).
+    fn plan_policies(&self) -> Vec<PermissionPolicy> {
+        self.offered_policies()
+            .into_iter()
+            .filter(|p| !matches!(p, PermissionPolicy::Plan | PermissionPolicy::Bypass))
+            .collect()
     }
 
     /// Save `p` as the active harness's default policy in the settings of
@@ -4228,6 +4296,51 @@ impl App {
                     QuestionStep::Dismiss => Some(Some(ModalChoice::Dismiss)),
                 }
             }
+            // Enter on a policy approves the plan under it; on the last row
+            // it starts the feedback, and Enter again sends it.
+            Modal::Plan(m) if m.editing => match key.code {
+                KeyCode::Enter => Some(Some(ModalChoice::Decision(m.keep_planning()))),
+                KeyCode::Esc => {
+                    m.editing = false;
+                    None
+                }
+                KeyCode::Backspace => {
+                    m.feedback.pop();
+                    None
+                }
+                KeyCode::Char(c) => {
+                    m.feedback.push(c);
+                    None
+                }
+                _ => None,
+            },
+            Modal::Plan(m) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    m.up();
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    m.down();
+                    None
+                }
+                KeyCode::PageDown => {
+                    m.scroll_by(PREVIEW_PAGE);
+                    None
+                }
+                KeyCode::PageUp => {
+                    m.scroll_by(-PREVIEW_PAGE);
+                    None
+                }
+                KeyCode::Enter => match m.current() {
+                    Some(p) => Some(Some(ModalChoice::ApprovePlan(p))),
+                    None => {
+                        m.editing = true;
+                        None
+                    }
+                },
+                KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
+                _ => None,
+            },
             Modal::Confirm(_) => match key.code {
                 KeyCode::Enter | KeyCode::Char('y') => Some(Some(ModalChoice::Decision(
                     PermissionDecision::Answer(Value::Bool(true)),
@@ -4334,6 +4447,15 @@ impl App {
                         self.rewind_to(block, restore_files);
                     }
                     ModalChoice::Decision(d) => self.answer_prompt(d),
+                    // The policy goes first: Claude puts back the mode it
+                    // had before plan mode only while it still plans.
+                    ModalChoice::ApprovePlan(p) => {
+                        if self.set_policy(p) {
+                            self.answer_prompt(PermissionDecision::Allow {
+                                updated_input: None,
+                            });
+                        }
+                    }
                     ModalChoice::Always(scope, rules) => self.allow_always(scope, &rules),
                     ModalChoice::Dismiss => self.close_modal(),
                 }
@@ -5433,6 +5555,8 @@ enum ModalChoice {
     /// (user block, also restore files)
     Rewind(usize, bool),
     Decision(PermissionDecision),
+    /// Carry out the agent's plan under this policy.
+    ApprovePlan(PermissionPolicy),
     /// Allow the request and keep these rules for the next ones like it.
     Always(Scope, Vec<Rule>),
     Dismiss,
@@ -8458,6 +8582,184 @@ pub(crate) mod tests {
         })
     }
 
+    fn denied(id: &str, reason: &str) -> Action {
+        Action::Command(SessionCommand::RespondPermission {
+            id: id.into(),
+            decision: PermissionDecision::Deny {
+                reason: reason.into(),
+            },
+        })
+    }
+
+    /// Claude, live and mid-turn, gone from accept-edits into plan mode.
+    fn planning_app() -> App {
+        let mut app = test_app(HarnessId::CLAUDE);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        app.submit_prompt("change the greeting".into());
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        assert!(app.set_policy(PermissionPolicy::Plan));
+        app.take_actions();
+        app
+    }
+
+    fn plan_request() -> AgentEvent {
+        AgentEvent::PermissionRequest(PermissionRequest {
+            id: "plan".into(),
+            kind: PermissionKind::PlanApproval {
+                plan: "# Plan\n\nSay hi.".into(),
+                plan_file: Some("/p.md".into()),
+            },
+            tool_call_id: Some("t1".into()),
+        })
+    }
+
+    #[test]
+    fn an_approved_plan_is_carried_out_under_the_policy_chosen_with_it() {
+        use PermissionPolicy::*;
+        let mut app = planning_app();
+        assert_eq!(app.effective_policy(), Some(Plan));
+        app.on_event(plan_request());
+        let Some(Modal::Plan(m)) = &app.modal else {
+            panic!("{:?}", app.modal);
+        };
+        // Not plan, nor bypass, which Claude cannot switch to here; the
+        // one it planned from comes first.
+        assert_eq!(m.policies, vec![Ask, AcceptEdits, Auto]);
+        assert_eq!(m.current(), Some(AcceptEdits));
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        // The policy before the approval: Claude puts back the mode it
+        // planned from only while it still plans.
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::Command(SessionCommand::SetPolicy(Auto)),
+                allowed("plan")
+            ]
+        );
+        assert_eq!(app.effective_policy(), Some(Auto));
+        // Claude then reports the mode it was set to.
+        app.on_event(AgentEvent::PolicyChanged(Auto));
+        assert_eq!(app.effective_policy(), Some(Auto));
+    }
+
+    #[test]
+    fn a_plan_not_approved_keeps_the_agent_planning() {
+        let mut app = planning_app();
+        app.on_event(plan_request());
+        // From accept-edits up past ask to the last row.
+        app.handle_modal_key(key(KeyCode::Up));
+        app.handle_modal_key(key(KeyCode::Up));
+        app.handle_modal_key(key(KeyCode::Enter));
+        for c in "Use Howdy, keep it short".chars() {
+            app.handle_modal_key(key(KeyCode::Char(c)));
+        }
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.take_actions(),
+            vec![denied("plan", "Use Howdy, keep it short")]
+        );
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Plan));
+
+        // Esc is never an approval.
+        app.on_event(plan_request());
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert_eq!(app.take_actions(), vec![denied("plan", "")]);
+
+        // Nor is a handoff: the summary is written instead.
+        app.handoff = Some(Handoff {
+            to: HarnessId::CODEX,
+            start: 0,
+            held: false,
+        });
+        app.on_event(plan_request());
+        assert!(app.modal.is_none());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::RespondPermission {
+                decision: PermissionDecision::Deny { .. },
+                ..
+            })]
+        ));
+    }
+
+    #[test]
+    fn while_planning_a_rule_answers_only_a_read() {
+        let mut app = planning_app();
+        app.rules
+            .append(Scope::Workspace, &[Rule::edit("**"), Rule::read("**")])
+            .unwrap();
+        let request = |id: &str, action: ToolAction| {
+            AgentEvent::PermissionRequest(PermissionRequest {
+                id: id.into(),
+                kind: PermissionKind::ToolUse {
+                    tool: "Write".into(),
+                    input: Value::Null,
+                    action,
+                    description: None,
+                },
+                tool_call_id: None,
+            })
+        };
+        let file = app.cwd.join("notes.txt");
+        app.on_event(request("read", ToolAction::Read { path: file.clone() }));
+        assert_eq!(app.take_actions(), vec![allowed("read")]);
+        app.on_event(request(
+            "write",
+            ToolAction::Edit {
+                paths: vec![file.clone()],
+            },
+        ));
+        assert!(app.take_actions().is_empty());
+        assert_eq!(
+            app.modal.as_ref().and_then(Modal::request_id),
+            Some("write")
+        );
+        app.close_modal();
+        app.take_actions();
+
+        // Out of plan mode the same rule answers it.
+        app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Ask));
+        app.on_event(request("write", ToolAction::Edit { paths: vec![file] }));
+        assert_eq!(app.take_actions(), vec![allowed("write")]);
+    }
+
+    /// The model can go into plan mode by itself (`EnterPlanMode`).
+    #[test]
+    fn the_agent_going_into_plan_mode_by_itself_is_followed() {
+        use crate::tui::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        app.session_alive = true;
+        app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Plan));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Plan));
+        assert!(
+            app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Notice(n) if n.contains("went into plan mode")))
+        );
+        app.on_event(plan_request());
+        let Some(Modal::Plan(m)) = &app.modal else {
+            panic!("{:?}", app.modal);
+        };
+        assert_eq!(m.current(), Some(PermissionPolicy::AcceptEdits));
+    }
+
+    #[test]
+    fn plan_is_offered_only_where_the_harness_has_it() {
+        let mut app = test_app(HarnessId::PI);
+        assert!(!app.offered_policies().contains(&PermissionPolicy::Plan));
+        assert!(!app.set_policy(PermissionPolicy::Plan));
+        let app = test_app(HarnessId::CLAUDE);
+        assert_eq!(app.offered_policies()[0], PermissionPolicy::Plan);
+    }
+
     #[test]
     fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
         use crate::tui::transcript::Block;
@@ -9244,9 +9546,10 @@ pub(crate) mod tests {
         let Some(Modal::Policy(p)) = &app.modal else {
             panic!("no picker");
         };
-        assert_eq!(p.list.items.len(), 4);
-        assert_eq!(p.list.disabled_reason(1), Some("not offered by pi"));
+        assert_eq!(p.list.items.len(), 5);
+        assert_eq!(p.list.disabled_reason(0), Some("not offered by pi"));
         assert_eq!(p.list.disabled_reason(2), Some("not offered by pi"));
+        assert_eq!(p.list.disabled_reason(3), Some("not offered by pi"));
         assert_eq!(p.list.current(), Some(&PermissionPolicy::Ask));
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
@@ -9333,7 +9636,7 @@ pub(crate) mod tests {
         // A row that cannot be chosen cannot be saved either.
         app.open_policy_picker();
         if let Some(Modal::Policy(p)) = &mut app.modal {
-            p.list.selected = 1;
+            p.list.selected = 2;
         }
         app.handle_modal_key(key(KeyCode::Char('d')));
         assert!(saving(&app).is_none());

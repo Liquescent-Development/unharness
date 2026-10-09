@@ -85,6 +85,7 @@ pub fn request_message(kind: &PermissionKind) -> String {
         PermissionKind::Confirm { title, .. }
         | PermissionKind::Select { title, .. }
         | PermissionKind::Input { title, .. } => title.clone(),
+        PermissionKind::PlanApproval { .. } => "approve the plan?".to_string(),
     }
 }
 

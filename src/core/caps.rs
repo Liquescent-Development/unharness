@@ -12,6 +12,10 @@ use super::session::Attachment;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionPolicy {
+    /// The agent reads and plans; it acts only once the user approves its
+    /// plan, and then under the policy the user picks with the approval.
+    /// Everything `Ask` guarantees holds here too.
+    Plan,
     /// Nothing that writes, executes or reaches out runs without the
     /// user's answer or an allow rule; reads may run. A harness that cannot
     /// hold to that does not declare this policy.
@@ -25,7 +29,8 @@ pub enum PermissionPolicy {
 }
 
 impl PermissionPolicy {
-    pub const ALL: [PermissionPolicy; 4] = [
+    pub const ALL: [PermissionPolicy; 5] = [
+        PermissionPolicy::Plan,
         PermissionPolicy::Ask,
         PermissionPolicy::AcceptEdits,
         PermissionPolicy::Auto,
@@ -34,6 +39,7 @@ impl PermissionPolicy {
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().replace('_', "-").as_str() {
+            "plan" => Some(PermissionPolicy::Plan),
             "ask" | "manual" => Some(PermissionPolicy::Ask),
             "accept-edits" | "acceptedits" | "edits" => Some(PermissionPolicy::AcceptEdits),
             "auto" => Some(PermissionPolicy::Auto),
@@ -46,6 +52,7 @@ impl PermissionPolicy {
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            PermissionPolicy::Plan => "plan",
             PermissionPolicy::Ask => "ask",
             PermissionPolicy::AcceptEdits => "accept-edits",
             PermissionPolicy::Auto => "auto",
@@ -55,6 +62,7 @@ impl PermissionPolicy {
 
     pub fn description(&self) -> &'static str {
         match self {
+            PermissionPolicy::Plan => "Read and plan; act only once the plan is approved",
             PermissionPolicy::Ask => "Prompt for every tool permission",
             PermissionPolicy::AcceptEdits => "Auto-approve file edits, prompt for the rest",
             PermissionPolicy::Auto => "Harness classifier reviews actions automatically",
@@ -74,7 +82,7 @@ impl FromStr for PermissionPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         PermissionPolicy::parse(s).ok_or_else(|| {
             format!(
-                "Unknown policy '{}'. Supported: ask, accept-edits, auto, bypass",
+                "Unknown policy '{}'. Supported: plan, ask, accept-edits, auto, bypass",
                 s
             )
         })
@@ -368,6 +376,28 @@ mod tests {
         assert_eq!(PermissionPolicy::parse("yolo"), Some(Bypass));
         assert_eq!(PermissionPolicy::parse("nope"), None);
         assert!(Ask < AcceptEdits && AcceptEdits < Auto && Auto < Bypass);
+        assert_eq!(PermissionPolicy::parse("Plan"), Some(Plan));
+        assert!(Plan < Ask);
+        // As saved in a conversation.
+        assert_eq!(serde_json::to_string(&Plan).unwrap(), "\"plan\"");
+    }
+
+    /// Plan is the least permissive policy: nothing stands in for it, and
+    /// it stands in for nothing a harness lacks unless nothing else is left.
+    #[test]
+    fn plan_is_never_more_permissive_than_asked() {
+        let without = [PolicySupport::full(Ask), PolicySupport::full(Bypass)];
+        let e = resolve_policy(&without, Plan).unwrap_err();
+        assert_eq!(e.requested, Plan);
+        let with: Vec<PolicySupport> = PermissionPolicy::ALL
+            .into_iter()
+            .map(PolicySupport::full)
+            .collect();
+        assert_eq!(resolve_policy(&with, Ask).unwrap().effective, Ask);
+        let only_plan = [PolicySupport::full(Plan), PolicySupport::full(Bypass)];
+        let r = resolve_policy(&only_plan, AcceptEdits).unwrap();
+        assert_eq!(r.effective, Plan);
+        assert!(r.warning.is_some());
     }
 
     #[test]

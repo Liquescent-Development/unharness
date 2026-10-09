@@ -58,7 +58,7 @@ pub fn requested_policy(
 pub fn explicit_policy(args: &CommonRunArgs) -> Result<Option<PermissionPolicy>> {
     if let Some(p) = &args.policy {
         return PermissionPolicy::parse(p).map(Some).ok_or_else(|| {
-            anyhow::anyhow!("unknown policy '{p}' (ask, accept-edits, auto, bypass)")
+            anyhow::anyhow!("unknown policy '{p}' (plan, ask, accept-edits, auto, bypass)")
         });
     }
     Ok(args.auto.then_some(PermissionPolicy::Bypass))
@@ -96,13 +96,19 @@ fn check_configured_policies(config: &Config) -> Result<()> {
 
 /// The policy of a run without the TUI. Nobody is there to choose another
 /// one, so a policy the harness does not have, with nothing less permissive
-/// in its place, ends the run.
+/// in its place, ends the run. Nor is anybody there to approve a plan, so
+/// `plan` is never one.
 fn print_policy(
     harness: &dyn Harness,
     policies: &[PolicySupport],
     requested: PermissionPolicy,
 ) -> Result<PolicyResolution> {
-    resolve_policy(policies, requested).map_err(|e| {
+    let policies: Vec<PolicySupport> = policies
+        .iter()
+        .filter(|p| p.policy != PermissionPolicy::Plan)
+        .copied()
+        .collect();
+    resolve_policy(&policies, requested).map_err(|e| {
         let supported: Vec<&str> = e.supported.iter().map(|p| p.as_str()).collect();
         anyhow::anyhow!(
             "policy '{}' is not available for {} without the TUI; pass --policy with one of: {}",
@@ -506,6 +512,13 @@ mod tests {
         let claude = crate::harness::claude::ClaudeHarness::default();
         let res = print_policy(&claude, &claude.print_policies(true), PermissionPolicy::Ask);
         assert_eq!(res.unwrap().effective, PermissionPolicy::Ask);
+        // Nobody could approve the plan.
+        let policies = claude.capabilities().permission_policies;
+        let e = print_policy(&claude, &policies, PermissionPolicy::Plan).unwrap_err();
+        assert!(
+            e.to_string()
+                .starts_with("policy 'plan' is not available for Claude")
+        );
     }
 
     #[test]

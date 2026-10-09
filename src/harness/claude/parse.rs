@@ -9,9 +9,24 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
-    ModelRef, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question,
-    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    ModelRef, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
+    ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
+    SubagentStatus, ToolAction, Usage,
 };
+
+/// The policy of one of Claude's permission modes, as `system` `status`
+/// reports it. `dontAsk` has none.
+pub fn policy_of_mode(mode: &str) -> Option<PermissionPolicy> {
+    match mode {
+        "plan" => Some(PermissionPolicy::Plan),
+        // `manual` is the name 2.1.296's `--help` gives `default`.
+        "default" | "manual" => Some(PermissionPolicy::Ask),
+        "acceptEdits" => Some(PermissionPolicy::AcceptEdits),
+        "auto" => Some(PermissionPolicy::Auto),
+        "bypassPermissions" => Some(PermissionPolicy::Bypass),
+        _ => None,
+    }
+}
 
 /// unharness's id for the API Claude calls, from Claude's own name for it
 /// (`account.apiProvider` in the answer to `initialize`).
@@ -525,6 +540,17 @@ impl ClaudeParser {
                 )));
             }
             "compact_boundary" => out.push(AgentEvent::Notice("context compacted".into())),
+            // Sent when the mode changes: set by us, or by the model
+            // (`EnterPlanMode`, `fixtures/plan_enter.jsonl`).
+            "status" if val.get("permissionMode").is_some() => {
+                let mode = str_at(val, "permissionMode");
+                match policy_of_mode(mode) {
+                    Some(p) => out.push(AgentEvent::PolicyChanged(p)),
+                    None => out.push(AgentEvent::Notice(format!(
+                        "Claude switched to its '{mode}' mode, which unharness has no policy for"
+                    ))),
+                }
+            }
             // Shell commands are tasks too (`local_bash`); only agents are subagents.
             "task_started" if str_at(val, "task_type") == "local_agent" => {
                 let task = str_at(val, "task_id").to_string();
@@ -923,6 +949,11 @@ impl ClaudeParser {
                 let kind = if tool == "AskUserQuestion" {
                     PermissionKind::Question {
                         questions: parse_questions(&input),
+                    }
+                } else if tool == "ExitPlanMode" {
+                    PermissionKind::PlanApproval {
+                        plan: str_at(&input, "plan").to_string(),
+                        plan_file: opt_str(&input, "planFilePath"),
                     }
                 } else {
                     PermissionKind::ToolUse {

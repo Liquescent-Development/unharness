@@ -26,6 +26,7 @@ use crate::core::{
 /// prompts routed to us over stdio.
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
     match policy {
+        PermissionPolicy::Plan => vec!["--permission-mode", "plan"],
         PermissionPolicy::Ask => vec!["--permission-mode", "default"],
         PermissionPolicy::AcceptEdits => vec!["--permission-mode", "acceptEdits"],
         PermissionPolicy::Auto => vec!["--permission-mode", "auto"],
@@ -40,6 +41,7 @@ pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
 /// Claude's `set_permission_mode` control request value for a policy.
 pub fn policy_mode_name(policy: PermissionPolicy) -> &'static str {
     match policy {
+        PermissionPolicy::Plan => "plan",
         PermissionPolicy::Ask => "default",
         PermissionPolicy::AcceptEdits => "acceptEdits",
         PermissionPolicy::Auto => "auto",
@@ -219,7 +221,30 @@ pub fn control_request(subtype: &str, extra: Value) -> (String, String) {
 #[derive(Debug, Clone)]
 pub struct PendingPermission {
     input: Value,
-    is_question: bool,
+    kind: PendingKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    Tool,
+    Question,
+    /// `ExitPlanMode`: only an `Allow` approves the plan.
+    Plan,
+}
+
+/// A plan the user did not approve, worded as Claude's own interface words
+/// it (2.1.296): with what the user said, or told to wait without.
+const PLAN_REJECTED: &str = "The user doesn't want to proceed with this tool use. The tool use \
+     was rejected (eg. if it was a file edit, the new_string was NOT written to the file).";
+
+fn plan_rejected(feedback: &str) -> String {
+    if feedback.trim().is_empty() {
+        format!(
+            "{PLAN_REJECTED} STOP what you are doing and wait for the user to tell you how to proceed."
+        )
+    } else {
+        format!("{PLAN_REJECTED} To tell you how to proceed, the user said:\n{feedback}")
+    }
 }
 
 pub fn encode_decision(pending: &PendingPermission, decision: &PermissionDecision) -> Value {
@@ -228,9 +253,15 @@ pub fn encode_decision(pending: &PendingPermission, decision: &PermissionDecisio
             "behavior": "allow",
             "updatedInput": updated_input.clone().unwrap_or_else(|| pending.input.clone()),
         }),
+        PermissionDecision::Deny { reason } if pending.kind == PendingKind::Plan => {
+            json!({"behavior":"deny","message": plan_rejected(reason)})
+        }
         PermissionDecision::Deny { reason } => json!({"behavior":"deny","message": reason}),
+        PermissionDecision::Answer(_) if pending.kind == PendingKind::Plan => {
+            json!({"behavior":"deny","message": plan_rejected("")})
+        }
         PermissionDecision::Answer(answer) => {
-            if pending.is_question {
+            if pending.kind == PendingKind::Question {
                 if answer.is_null() {
                     json!({"behavior":"deny","message":"User dismissed the question"})
                 } else {
@@ -453,19 +484,22 @@ async fn drive(
                         }
                         for ev in parser.feed(&line) {
                             if let AgentEvent::PermissionRequest(req) = &ev {
-                                let (input, is_question) = match &req.kind {
-                                    PermissionKind::ToolUse { input, .. } => (input.clone(), false),
-                                    PermissionKind::Question { .. } => (Value::Null, true),
-                                    _ => (Value::Null, false),
+                                let (input, kind) = match &req.kind {
+                                    PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
+                                    PermissionKind::Question { .. } => (Value::Null, PendingKind::Question),
+                                    PermissionKind::PlanApproval { .. } => (Value::Null, PendingKind::Plan),
+                                    _ => (Value::Null, PendingKind::Tool),
                                 };
-                                // For questions we need the original input to echo back.
-                                let input = if is_question {
+                                // For questions and plans we need the original input to echo back.
+                                let input = if kind == PendingKind::Tool {
+                                    input
+                                } else {
                                     serde_json::from_str::<Value>(&line)
                                         .ok()
                                         .and_then(|v| v.pointer("/request/input").cloned())
                                         .unwrap_or(Value::Null)
-                                } else { input };
-                                pending.insert(req.id.clone(), PendingPermission { input, is_question });
+                                };
+                                pending.insert(req.id.clone(), PendingPermission { input, kind });
                             }
                             if events.send(ev).await.is_err() {
                                 if !shutting_down {
@@ -559,7 +593,7 @@ mod tests {
     fn decision_encoding() {
         let p = PendingPermission {
             input: json!({"file_path":"/x"}),
-            is_question: false,
+            kind: PendingKind::Tool,
         };
         let allow = encode_decision(
             &p,
@@ -584,7 +618,7 @@ mod tests {
 
         let q = PendingPermission {
             input: json!({"questions":[{"question":"Color?"}]}),
-            is_question: true,
+            kind: PendingKind::Question,
         };
         let ans = encode_decision(&q, &PermissionDecision::Answer(json!({"Color?":"Red"})));
         assert_eq!(ans["behavior"], "allow");
@@ -609,6 +643,47 @@ mod tests {
         );
         let dismissed = encode_decision(&q, &PermissionDecision::Answer(Value::Null));
         assert_eq!(dismissed["behavior"], "deny");
+
+        // A plan is approved with its input as it came
+        // (`fixtures/plan_approved.jsonl`), and only by `Allow`.
+        let plan = PendingPermission {
+            input: json!({"plan": "# Plan", "planFilePath": "/p.md"}),
+            kind: PendingKind::Plan,
+        };
+        let approved = encode_decision(
+            &plan,
+            &PermissionDecision::Allow {
+                updated_input: None,
+            },
+        );
+        assert_eq!(
+            approved,
+            json!({"behavior":"allow","updatedInput":{"plan": "# Plan", "planFilePath": "/p.md"}})
+        );
+        for answer in [Value::Null, Value::Bool(true)] {
+            let kept = encode_decision(&plan, &PermissionDecision::Answer(answer));
+            assert_eq!(kept["behavior"], "deny");
+            assert!(
+                kept["message"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("how to proceed.")
+            );
+        }
+        // Feedback goes as Claude's own interface sends it, which haiku
+        // followed where the bare text was not (`fixtures/plan_rejected.jsonl`).
+        let feedback = encode_decision(
+            &plan,
+            &PermissionDecision::Deny {
+                reason: "Use Howdy".into(),
+            },
+        );
+        assert!(
+            feedback["message"]
+                .as_str()
+                .unwrap()
+                .ends_with("To tell you how to proceed, the user said:\nUse Howdy")
+        );
 
         let line = control_response("r1", allow);
         let v: Value = serde_json::from_str(&line).unwrap();

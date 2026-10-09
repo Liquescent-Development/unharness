@@ -441,6 +441,22 @@ impl<O: Write, E: Write> Headless<O, E> {
                     }
                 }
             }
+            // The agent can enter plan mode by itself (Claude's
+            // `EnterPlanMode`); its plan is never approved here.
+            PermissionKind::PlanApproval { .. } => {
+                self.warn(format!(
+                    "kept {} planning: nobody can approve a plan without the TUI",
+                    self.name
+                ));
+                (
+                    PermissionDecision::Deny {
+                        reason: "unharness is running without a user to approve the plan. \
+                                 Do not carry it out; end the turn with the plan."
+                            .into(),
+                    },
+                    json!({"decision": "deny"}),
+                )
+            }
             _ => {
                 self.warn(format!(
                     "dismissed a question from {}: nobody can answer it without the TUI",
@@ -778,6 +794,9 @@ fn permission_json(req: &PermissionRequest) -> Value {
             "prefill": prefill,
             "multiline": multiline,
         }),
+        PermissionKind::PlanApproval { plan, plan_file } => {
+            json!({"kind": "plan_approval", "plan": plan, "plan_file": plan_file})
+        }
     };
     v["type"] = json!("permission_request");
     v["id"] = json!(req.id);
@@ -875,6 +894,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             };
             json!({"type": "turn_completed", "status": status, "error": error})
         }
+        AgentEvent::PolicyChanged(p) => json!({"type": "policy_changed", "policy": p}),
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
         AgentEvent::Error(e) => json!({"type": "error", "message": e}),
         AgentEvent::ProcessExited { code } => json!({"type": "process_exited", "code": code}),

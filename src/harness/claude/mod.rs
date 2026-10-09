@@ -713,7 +713,7 @@ mod tests {
     fn capabilities_and_models() {
         let caps = ClaudeHarness::default().capabilities();
         assert!(caps.interactive_permissions);
-        assert_eq!(caps.permission_policies.len(), 4);
+        assert_eq!(caps.permission_policies.len(), 5);
         assert!(caps.supports_effort("xhigh"));
         let models = ClaudeHarness::default()
             .list_models(
