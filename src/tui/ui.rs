@@ -1654,6 +1654,19 @@ fn picker_lines<T>(
     let mut lines = vec![Line::default()];
     for (i, item) in picker.items.iter().enumerate() {
         let (label, desc, active) = row(item);
+        // A row that cannot be chosen is dimmed and struck through, with
+        // why in place of its description.
+        if let Some(why) = picker.disabled_reason(i) {
+            let dim = Style::default().fg(Color::DarkGray);
+            let pad = 28usize.saturating_sub(label.chars().count());
+            lines.push(Line::from(vec![
+                Span::styled("   ", dim),
+                Span::styled(label, dim.add_modifier(Modifier::CROSSED_OUT)),
+                Span::styled(format!("{} ", " ".repeat(pad)), dim),
+                Span::styled(format!("─ {why}"), dim),
+            ]));
+            continue;
+        }
         let selected = i == picker.selected;
         let style = if selected {
             Style::default()
@@ -2390,6 +2403,30 @@ mod tests {
     use crate::tui::app::tests::test_app;
     use crossterm::event::KeyEvent;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn a_row_that_cannot_be_chosen_is_struck_through_with_its_reason() {
+        let p = ListPicker::new(vec!["ask", "bypass"])
+            .with_disabled(|s| (*s == "ask").then(|| "not offered".to_string()));
+        let lines = picker_lines(&p, Color::Green, |s| (s.to_string(), "desc".into(), true));
+        let text = |l: &Line| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let ask = &lines[1];
+        assert!(text(ask).contains("─ not offered"));
+        assert!(!text(ask).contains('❯') && !text(ask).contains("[active]"));
+        assert!(
+            ask.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+        // The cursor is on the row that can be chosen.
+        assert!(text(&lines[2]).starts_with(" ❯ bypass"));
+    }
 
     #[test]
     fn wrap_prefixed_text_indents_continuations() {

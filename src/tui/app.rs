@@ -5165,6 +5165,8 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
             p.down();
             None
         }
+        // Nothing that can be chosen is under the cursor: the picker stays.
+        KeyCode::Enter if p.current().is_none() => None,
         KeyCode::Enter => Some(Some(())),
         KeyCode::Esc | KeyCode::Char('q') => Some(None),
         _ => None,

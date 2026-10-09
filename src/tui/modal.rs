@@ -14,41 +14,84 @@ use crate::harness::ModelInfo;
 pub struct ListPicker<T> {
     pub items: Vec<T>,
     pub selected: usize,
+    /// Why each row cannot be chosen, `None` for one that can. The cursor
+    /// never rests on such a row.
+    pub disabled: Vec<Option<String>>,
 }
 
 impl<T> ListPicker<T> {
     pub fn new(items: Vec<T>) -> Self {
-        ListPicker { items, selected: 0 }
+        let disabled = items.iter().map(|_| None).collect();
+        ListPicker {
+            items,
+            selected: 0,
+            disabled,
+        }
     }
 
+    /// Mark the rows that cannot be chosen, each with its reason.
+    pub fn with_disabled(mut self, why: impl Fn(&T) -> Option<String>) -> Self {
+        self.disabled = self.items.iter().map(why).collect();
+        self.settle();
+        self
+    }
+
+    /// Start on row `idx`, or on the first that can be chosen if it cannot.
     pub fn with_selected(mut self, idx: Option<usize>) -> Self {
         if let Some(i) = idx
             && i < self.items.len()
         {
             self.selected = i;
         }
+        self.settle();
         self
     }
 
-    pub fn up(&mut self) {
-        if self.items.is_empty() {
-            return;
+    pub fn is_enabled(&self, idx: usize) -> bool {
+        idx < self.items.len() && self.disabled.get(idx).is_none_or(Option::is_none)
+    }
+
+    pub fn disabled_reason(&self, idx: usize) -> Option<&str> {
+        self.disabled.get(idx).and_then(Option::as_deref)
+    }
+
+    fn settle(&mut self) {
+        if !self.is_enabled(self.selected)
+            && let Some(i) = (0..self.items.len()).find(|&i| self.is_enabled(i))
+        {
+            self.selected = i;
         }
-        self.selected = if self.selected == 0 {
-            self.items.len() - 1
-        } else {
-            self.selected - 1
-        };
+    }
+
+    /// Move one row, wrapping, past the ones that cannot be chosen.
+    fn step(&mut self, back: bool) {
+        let n = self.items.len();
+        for k in 1..=n {
+            let i = if back {
+                (self.selected + n * k - k) % n
+            } else {
+                (self.selected + k) % n
+            };
+            if self.is_enabled(i) {
+                self.selected = i;
+                return;
+            }
+        }
+    }
+
+    pub fn up(&mut self) {
+        self.step(true);
     }
 
     pub fn down(&mut self) {
-        if self.items.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.items.len();
+        self.step(false);
     }
 
+    /// The row under the cursor, if it can be chosen.
     pub fn current(&self) -> Option<&T> {
+        if !self.is_enabled(self.selected) {
+            return None;
+        }
         self.items.get(self.selected)
     }
 }
@@ -606,6 +649,37 @@ mod tests {
         e.up();
         e.down();
         assert!(e.current().is_none());
+    }
+
+    #[test]
+    fn list_picker_skips_rows_that_cannot_be_chosen() {
+        let why = |n: &i32| (n % 2 == 0).then(|| format!("{n} is even"));
+        // Asked to start on a row that cannot be chosen: the first that can.
+        let mut p = ListPicker::new(vec![1, 2, 3, 4, 5])
+            .with_disabled(why)
+            .with_selected(Some(1));
+        assert_eq!(p.current(), Some(&1));
+        p.down();
+        assert_eq!(p.current(), Some(&3));
+        p.down();
+        p.down();
+        assert_eq!(p.current(), Some(&1));
+        p.up();
+        assert_eq!(p.current(), Some(&5));
+        assert_eq!(p.disabled_reason(1), Some("2 is even"));
+        assert_eq!(p.disabled_reason(0), None);
+
+        // The order of the builders does not matter.
+        let p = ListPicker::new(vec![2, 3])
+            .with_selected(Some(0))
+            .with_disabled(why);
+        assert_eq!(p.current(), Some(&3));
+
+        // Nothing can be chosen: nothing is current, and moving is harmless.
+        let mut p = ListPicker::new(vec![2, 4]).with_disabled(why);
+        p.down();
+        p.up();
+        assert!(p.current().is_none());
     }
 
     #[test]
