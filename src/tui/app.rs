@@ -988,17 +988,22 @@ impl App {
 
     /// Write the conversation to disk. Failures are reported once per run.
     pub fn persist(&mut self) {
-        self.sync_conversation();
-        if !self.conversation.has_content() {
-            return;
-        }
-        if let Err(e) = self.store.save(&self.conversation)
+        if let Err(e) = self.save_conversation()
             && !self.persist_failed
         {
             self.persist_failed = true;
             self.transcript
                 .push_error(format!("could not save the conversation: {e:#}"));
         }
+    }
+
+    /// Write the conversation to disk, if it has anything to keep.
+    fn save_conversation(&mut self) -> anyhow::Result<()> {
+        self.sync_conversation();
+        if !self.conversation.has_content() {
+            return Ok(());
+        }
+        self.store.save(&self.conversation)
     }
 
     // ----------------------------------------------------------------- accessors
@@ -2121,8 +2126,10 @@ impl App {
             self.shutdown_session();
         }
         self.idle_start_paused = false;
+        // A copy ran where the original ran.
         let mut fork = self.successor();
         fork.title = self.conversation.title.clone();
+        fork.last_policies = self.conversation.last_policies.clone();
         self.conversation = fork;
 
         let mut branched = Vec::new();
@@ -2193,13 +2200,27 @@ impl App {
             );
             return;
         }
-        self.persist();
+        // Nothing of it is dropped: one that cannot be saved stays.
+        if let Err(e) = self.save_conversation() {
+            self.transcript.push_error(format!(
+                "could not save the conversation, so /clear keeps it: {e:#}"
+            ));
+            return;
+        }
         let had_content = self.conversation.has_content();
-        // Even one nothing was sent to may have been resumed on a session
-        // of this conversation.
-        if self.session_alive {
+        // A session started with nothing to resume and sent nothing knows
+        // nothing of this conversation, and serves the next. Any other ends,
+        // a blank one resumed on a session of this conversation too.
+        let keep = self.session_alive
+            && self.session_blank
+            && !self.session_ids.contains_key(&self.active);
+        let said = self.transcript.blocks.len();
+        if self.session_alive && !keep {
             self.shutdown_session();
         }
+        // What ending it told (a change to the harness's configuration) is
+        // told in the new conversation.
+        let told = self.transcript.blocks.split_off(said);
         self.idle_start_paused = false;
         self.conversation = self.successor();
         self.transcript = Transcript::default();
@@ -2207,25 +2228,34 @@ impl App {
         self.last_active_index.clear();
         self.fork_pending.clear();
         self.plan.clear();
-        self.queued.clear();
         self.anchors.clear();
         self.file_checkpoints.clear();
         self.restore_undo = None;
         self.first_prompt = None;
         self.generation_duration = None;
         self.reset_usage();
+        self.subagent_focus = None;
+        self.close_subagent_view();
+        self.show_from_the_end();
         self.transcript.push_system(if had_content {
             "New conversation; the previous one is in /resume."
         } else {
             "New conversation."
         });
-        self.auto_scroll = true;
+        self.transcript.blocks.extend(told);
+        // Prompts held after a turn that did not finish are the user's, not
+        // the conversation's.
+        if !self.queued.is_empty() {
+            self.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
     }
 
-    /// A new conversation that keeps what this one was run with.
+    /// A new conversation that keeps the models and efforts this one chose.
     fn successor(&self) -> Conversation {
         let mut next = Conversation::new(self.active);
-        next.last_policies = self.conversation.last_policies.clone();
         next.models = self.conversation.models.clone();
         next.efforts = self.conversation.efforts.clone();
         next
@@ -6210,6 +6240,8 @@ pub(crate) mod tests {
         assert_eq!(app.context, ContextUsage::default());
         assert_eq!(app.active, HarnessId::CLAUDE);
         assert_eq!(app.models[&HarnessId::CLAUDE].model, "opus");
+        // No harness has run in it yet.
+        assert!(app.conversation.last_policies.is_empty());
         assert_eq!(
             app.transcript.blocks.len(),
             1,
@@ -6229,6 +6261,7 @@ pub(crate) mod tests {
         let saved = app.store.load(&old).unwrap();
         assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
         assert_eq!(saved.sessions[&HarnessId::CODEX], "codex-1");
+        assert!(saved.last_policies.contains_key(&HarnessId::CLAUDE));
         assert!(saved.blocks.iter().any(
             |b| matches!(b, crate::core::conversations::BlockRecord::Assistant { text, .. } if text == "answer")
         ));
@@ -6256,6 +6289,98 @@ pub(crate) mod tests {
             app.transcript.blocks.as_slice(),
             [super::super::transcript::Block::System(s)] if s == "New conversation."
         ));
+    }
+
+    /// A session started with nothing to resume and sent nothing serves
+    /// the new conversation; one started on a session of the old ends.
+    #[test]
+    fn clear_keeps_a_session_that_knows_nothing() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.handle_slash_command("/clear");
+        assert!(app.take_actions().is_empty());
+        assert!(app.session_alive);
+        // Its id is the new conversation's once something is sent.
+        app.submit_prompt("hello".into());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-1");
+
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_ids.insert(HarnessId::CLAUDE, "claude-0".into());
+        blank_session(&mut app);
+        app.handle_slash_command("/clear");
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    }
+
+    /// What ending the session told about the harness's configuration is
+    /// not lost with the old transcript.
+    #[test]
+    fn clear_tells_a_configuration_change_in_the_new_conversation() {
+        use crate::core::guard::{Guarded, Watch};
+        let mut app = test_app(HarnessId::PI);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.session_alive = true;
+        let config = tempfile::tempdir().unwrap();
+        app.guard = Some(Watch::begin(
+            &[Guarded::Tree(config.path().to_path_buf())],
+            None,
+        ));
+        std::fs::write(config.path().join("extension.ts"), "x").unwrap();
+        app.handle_slash_command("/clear");
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("configuration changed while it ran"))
+        );
+    }
+
+    /// A conversation that cannot be saved is not dropped.
+    #[test]
+    fn clear_keeps_a_conversation_it_cannot_save() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        let dir = app.store.root().join("conversations");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::write(&dir, "in the way").unwrap();
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .starts_with("could not save the conversation, so /clear keeps it")
+        );
+    }
+
+    /// Prompts held after a turn that failed wait for the user in the new
+    /// conversation.
+    #[test]
+    fn clear_keeps_held_prompts() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.queue_prompt("two".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error("boom".into()),
+        });
+        assert_eq!(app.queued.len(), 1);
+        app.handle_slash_command("/clear");
+        assert_eq!(app.queued.len(), 1);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .starts_with("1 queued prompt(s) held")
+        );
     }
 
     /// Not while something of the conversation is still at work: what it

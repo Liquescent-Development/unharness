@@ -348,11 +348,13 @@ transcript as context.
 `/clear` starts a new conversation in the same workspace, as a fresh
 launch would, with the same harness, policy, model, effort, provider and
 sandbox. The conversation left is saved as it was and stays in
-`/resume`. The agent's session ends and a new one starts that knows
-nothing of it, so usage and the context meter start from zero; a harness
-used before the clear starts afresh too when you switch to it. `/clear`
-waits until the turn, the subagents at work and a running `!` command
-are done.
+`/resume`; when it cannot be saved, `/clear` keeps it and says why. The
+agent's session ends and a new one starts that knows nothing of it
+(one started fresh and sent nothing yet carries on), so usage and
+the context meter start from zero; a harness used before the clear
+starts afresh too when you switch to it. Prompts held after a turn that
+did not finish stay queued. `/clear` waits until the turn, the subagents
+at work and a running `!` command are done.
 
 ## Hooks
 
