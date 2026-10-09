@@ -3209,17 +3209,8 @@ impl App {
     /// Returns whether `p` could be set on the active harness. Only a
     /// policy it has can be: what the user picks is what runs.
     pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
-        let policies = self.caps().permission_policies;
-        let res = match resolve_policy(&policies, p) {
-            Ok(res) if res.effective == p => res,
-            _ => {
-                let e = PolicyUnavailable {
-                    requested: p,
-                    supported: self.offered_policies(),
-                };
-                self.transcript.push_error(e.to_string());
-                return false;
-            }
+        let Some(res) = self.offered(p) else {
+            return false;
         };
         // Only a prompt that waited for this choice is sent by it.
         let was_waiting = self.effective_policy().is_none();
@@ -3249,8 +3240,8 @@ impl App {
     /// `scope` (under the config directory, never in the workspace), and
     /// choose it. Returns whether both were done.
     pub fn save_default_policy(&mut self, p: PermissionPolicy, scope: Scope) -> bool {
-        if self.caps().supports_policy(p).is_none() {
-            return self.set_policy(p);
+        if self.offered(p).is_none() {
+            return false;
         }
         let name = self.short_name();
         let id = self.active.as_str();
@@ -3279,18 +3270,29 @@ impl App {
             path.display()
         ));
         // What this run reads as the default from now on, unless the
-        // workspace's own settings name another.
-        let in_workspace = match scope {
+        // workspace's own settings name another for this harness. One they
+        // name for every harness gives way to it, which the user is told.
+        let workspace = match scope {
             Scope::Global => Config::scoped_path(&dir, Scope::Workspace, root.as_deref())
-                .and_then(|w| Config::load_file(&w).ok().flatten())
-                .and_then(|c| c.harness(id)?.default_policy.clone()),
+                .and_then(|w| Config::load_file(&w).ok().flatten()),
             Scope::Workspace => None,
         };
-        match in_workspace {
+        let for_harness = workspace
+            .as_ref()
+            .and_then(|c| c.harness(id)?.default_policy.clone());
+        let for_all = workspace.as_ref().and_then(|c| c.default_policy.clone());
+        match for_harness {
             Some(w) => self.transcript.push_notice(format!(
                 "this workspace's settings make {w} {name}'s default here"
             )),
             None => {
+                if let Some(w) = for_all.filter(|w| *w != p.as_str()) {
+                    self.transcript.push_notice(format!(
+                        "this workspace's default_policy ({w}) no longer applies to {name}: \
+                         a harness's own default comes first (save for this workspace to \
+                         keep {w} here)"
+                    ));
+                }
                 self.config
                     .harnesses
                     .entry(id.to_string())
@@ -3299,6 +3301,22 @@ impl App {
             }
         }
         self.set_policy(p)
+    }
+
+    /// How `p` resolves on the active harness, if it offers it; otherwise
+    /// the user is told which it does offer.
+    fn offered(&mut self, p: PermissionPolicy) -> Option<PolicyResolution> {
+        match resolve_policy(&self.caps().permission_policies, p) {
+            Ok(res) if res.effective == p => Some(res),
+            _ => {
+                let e = PolicyUnavailable {
+                    requested: p,
+                    supported: self.offered_policies(),
+                };
+                self.transcript.push_error(e.to_string());
+                None
+            }
+        }
     }
 
     /// Choose the sandbox level for the run. Returns whether it could be
@@ -8982,6 +9000,26 @@ pub(crate) mod tests {
         }
         app.handle_modal_key(key(KeyCode::Char('d')));
         assert!(saving(&app).is_none());
+    }
+
+    /// A harness's own default comes before a workspace's `default_policy`:
+    /// one saved for every workspace says so where that gives way.
+    #[test]
+    fn saving_over_a_workspace_default_for_every_harness_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        let dir = app.cwd.join(".unharness/test-config");
+        let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, "default_policy = \"ask\"\n").unwrap();
+        assert!(app.save_default_policy(PermissionPolicy::Bypass, Scope::Global));
+        assert!(notices(&app).iter().any(|n| {
+            n.starts_with("this workspace's default_policy (ask) no longer applies to Claude")
+        }));
+        // Not when it is the same.
+        let before = notices(&app).len();
+        assert!(app.save_default_policy(PermissionPolicy::Ask, Scope::Global));
+        assert_eq!(notices(&app).len(), before);
     }
 
     /// A wanted policy that runs as a less permissive one: the cursor is on
