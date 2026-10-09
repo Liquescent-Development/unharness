@@ -88,7 +88,7 @@ fn check_configured_policies(config: &Config) -> Result<()> {
         .chain(config.default_policy.as_deref());
     for p in named {
         if PermissionPolicy::parse(p).is_none() {
-            bail!("unknown policy '{p}' in config (ask, accept-edits, auto, bypass)");
+            bail!("unknown policy '{p}' in config (plan, ask, accept-edits, auto, bypass)");
         }
     }
     Ok(())
