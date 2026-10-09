@@ -1472,25 +1472,47 @@ fn render_split(
 }
 
 fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
-    let count = app.suggestions.len().min(8) as u16;
-    let height = count + 2;
-    // Sits above the status rule so it never covers the prompt.
-    let top = prompt_row.y.saturating_sub(1);
-    if top < height {
-        return;
-    }
-    let area = Rect {
-        x: prompt_row.x + 1,
-        y: top - height,
-        width: 76.min(prompt_row.width.saturating_sub(4)),
-        height,
+    let files = app.completing_file.is_some();
+    let title = if files {
+        " Files [Tab to complete] "
+    } else {
+        " Suggestions [Tab to complete] "
     };
-    frame.render_widget(Clear, area);
-    let mut lines = Vec::new();
+    let count = app.suggestions.len().min(8) as u16;
     // The window moves down with the selection once it passes the last row.
     let first = (app.selected_suggestion + 1).saturating_sub(count as usize);
-    let shown = app.suggestions.iter().enumerate().skip(first);
-    for (i, (cmd, desc)) in shown.take(count as usize) {
+    let shown = || {
+        app.suggestions
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(count as usize)
+    };
+
+    // As wide as the widest entry needs, up to the prompt's width. The
+    // name column is sized by every entry, so that it stays put while the
+    // list scrolls.
+    let max_width = prompt_row.width.saturating_sub(4) as usize;
+    let inner_max = max_width.saturating_sub(2);
+    let widest_name = app.suggestions.iter().map(|(c, _)| c.width()).max();
+    let widest_name = widest_name.unwrap_or(0);
+    let name_col = widest_name.min((inner_max * 2 / 5).max(12)).max(12);
+    let content = if files {
+        // Marker and a space after the path.
+        widest_name + 3
+    } else {
+        let widest_desc = shown().map(|(_, (_, d))| d.width()).max().unwrap_or(0);
+        // Marker, name column, " ─ ", description and a space.
+        name_col + 5 + widest_desc + 1
+    };
+    let width = (content + 2).max(title.width() + 2).min(max_width);
+    let inner = width.saturating_sub(2);
+    // A space is left before the border.
+    let room = inner.saturating_sub(name_col + 6);
+
+    let mut lines = Vec::new();
+    let mut cut_selected = None;
+    for (i, (cmd, desc)) in shown() {
         let selected = i == app.selected_suggestion;
         let style = if selected {
             Style::default()
@@ -1501,23 +1523,63 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
             Style::default()
         };
         let marker = if selected { "❯ " } else { "  " };
-        if app.completing_file.is_some() {
+        if files {
             // A path too long for the list keeps its end: the file's name.
-            let room = area.width.saturating_sub(5) as usize;
-            let path = keep_end(cmd, room);
+            let path = keep_end(cmd, inner.saturating_sub(3));
             lines.push(Line::styled(format!("{marker}{path} "), style));
             continue;
         }
+        let name = keep_start(cmd, name_col);
+        let pad = " ".repeat(name_col.saturating_sub(name.width()));
+        if selected && desc.width() > room {
+            cut_selected = Some(desc.as_str());
+        }
         lines.push(Line::from(vec![
-            Span::styled(format!("{marker}{cmd:<26} "), style),
-            Span::styled(format!("─ {desc}"), Style::default().fg(Color::Gray)),
+            Span::styled(format!("{marker}{name}{pad} "), style),
+            Span::styled(
+                format!("─ {}", keep_start(desc, room)),
+                Style::default().fg(Color::Gray),
+            ),
         ]));
     }
-    let title = if app.completing_file.is_some() {
-        " Files [Tab to complete] "
-    } else {
-        " Suggestions [Tab to complete] "
+
+    // The selected entry's description in full, when its row cut it.
+    let mut detail = Vec::new();
+    if let Some(desc) = cut_selected {
+        let wrap = inner.saturating_sub(2);
+        let mut wrapped = wrap_words(desc, wrap);
+        if wrapped.len() > 2 {
+            // Joined to the next line it no longer fits, so it is cut.
+            wrapped[1] = keep_start(&format!("{} {}", wrapped[1], wrapped[2]), wrap);
+            wrapped.truncate(2);
+        }
+        let dim = Style::default().fg(Color::DarkGray);
+        detail.push(Line::styled("─".repeat(inner), dim));
+        detail.extend(
+            wrapped
+                .into_iter()
+                .map(|l| Line::styled(format!(" {l}"), Style::default().fg(Color::Gray))),
+        );
+    }
+
+    // Sits above the status rule so it never covers the prompt.
+    let top = prompt_row.y.saturating_sub(1);
+    let list_height = count + 2;
+    if top < list_height + detail.len() as u16 {
+        detail.clear();
+    }
+    let height = list_height + detail.len() as u16;
+    if top < height {
+        return;
+    }
+    lines.extend(detail);
+    let area = Rect {
+        x: prompt_row.x + 1,
+        y: top - height,
+        width: width as u16,
+        height,
     };
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
@@ -1529,7 +1591,6 @@ fn render_suggestions(frame: &mut Frame, app: &App, prompt_row: Rect) {
     );
 }
 
-/// `text` cut at the front to `width` columns, an ellipsis for what went.
 /// The start of `text` that fits in `width` columns, `…` marking a cut.
 fn keep_start(text: &str, width: usize) -> String {
     if text.width() <= width {
@@ -1548,6 +1609,7 @@ fn keep_start(text: &str, width: usize) -> String {
     kept
 }
 
+/// `text` cut at the front to `width` columns, an ellipsis for what went.
 fn keep_end(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_string();
@@ -3798,6 +3860,66 @@ mod tests {
 
         assert_eq!(keep_end("src/main.rs", 11), "src/main.rs");
         assert_eq!(keep_end("src/main.rs", 8), "…main.rs");
+        assert_eq!(keep_start("src/main.rs", 11), "src/main.rs");
+        assert_eq!(keep_start("src/main.rs", 8), "src/mai…");
+    }
+
+    const PROVIDER: &str = "Open the provider picker (multi-provider harnesses)";
+
+    #[test]
+    fn suggestions_fit_wide_terminals() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for c in "/prov".chars() {
+            app.insert_char(c);
+        }
+        let (rows, _) = screen(&mut app, 124, 24);
+        let row = rows.iter().find(|r| r.contains("❯ /provider")).unwrap();
+        assert!(row.contains(PROVIDER), "{row}");
+        assert!(!rows.iter().any(|r| r.contains('…')), "nothing cut");
+    }
+
+    #[test]
+    fn cut_description_is_shown_below() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_char('/');
+        let at = |app: &App, name: &str| app.suggestions.iter().position(|(c, _)| c == name);
+        app.selected_suggestion = at(&app, "/provider").unwrap();
+        let (rows, _) = screen(&mut app, 60, 30);
+        if std::env::var("UNHARNESS_DUMP_UI").is_ok() {
+            eprintln!("{}", rows.join("\n"));
+        }
+        let row = rows.iter().position(|r| r.contains("❯ /provider")).unwrap();
+        assert!(rows[row].contains("…"), "{}", rows[row]);
+        assert!(
+            rows[row..].iter().any(|r| r.contains("harnesses)")),
+            "full description below"
+        );
+
+        app.selected_suggestion = at(&app, "/model").unwrap();
+        let (rows, _) = screen(&mut app, 60, 30);
+        assert!(!rows.iter().any(|r| r.contains("harnesses)")), "no detail");
+    }
+
+    #[test]
+    fn long_harness_name_does_not_push_description() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.insert_char('/');
+        let long = format!("/plugin:{}", "very-long-skill-name-".repeat(4));
+        app.suggestions = vec![
+            ("/model".into(), "Open the model picker".into()),
+            (long, "claude: a skill".into()),
+            ("/effort".into(), "Open the reasoning effort picker".into()),
+        ];
+        app.selected_suggestion = 0;
+        let (rows, _) = screen(&mut app, 100, 30);
+        let column = |name: &str| {
+            let row = rows.iter().find(|r| r.contains(name)).unwrap();
+            row.split(" ─ ").next().unwrap().chars().count()
+        };
+        assert_eq!(column("/model"), column("/effort"));
+        assert_eq!(column("/model"), column("/plugin:"));
+        let row = rows.iter().find(|r| r.contains("/plugin:")).unwrap();
+        assert!(row.contains("… ─ claude: a skill"), "{row}");
     }
 
     #[test]
