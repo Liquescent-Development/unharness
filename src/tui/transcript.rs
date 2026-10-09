@@ -739,6 +739,18 @@ impl Transcript {
 
     /// The session was ended mid-turn: no call still running will report.
     pub fn end_running_tools(&mut self) {
+        self.end_calls("stopped: the session was ended", true);
+    }
+
+    /// A turn was cut short (interrupted, failed): its own calls still
+    /// running will not report. Not its subagents' (a Codex sub-agent
+    /// outlives an interrupt of the main turn). A result that comes after
+    /// all is still shown.
+    pub fn end_turn_calls(&mut self) {
+        self.end_calls("stopped: the turn ended without its result", false);
+    }
+
+    fn end_calls(&mut self, why: &str, subagents: bool) {
         for b in &mut self.blocks {
             if let Block::Tool {
                 output,
@@ -752,14 +764,14 @@ impl Transcript {
             {
                 if !*done {
                     if output.is_empty() {
-                        *output = "stopped: the session was ended".to_string();
+                        *output = why.to_string();
                     }
                     *is_error = true;
                     *done = true;
                     *duration = Some(started.elapsed());
                 }
-                if let Some(run) = agent {
-                    run.log.end_running_tools();
+                if subagents && let Some(run) = agent {
+                    run.log.end_calls(why, subagents);
                 }
             }
         }
@@ -1414,6 +1426,34 @@ mod tests {
                 (true, true, "first line"),
             ]
         );
+    }
+
+    #[test]
+    fn a_turn_cut_short_ends_its_own_calls_not_its_subagents() {
+        let mut t = Transcript::default();
+        t.tool_started("spawn", "Agent", json!({"description": "look"}));
+        t.agent_started("spawn", "look", None);
+        t.tool_result("spawn", "launched", false);
+        t.agent_log("spawn")
+            .unwrap()
+            .tool_started("inner", "Read", json!({"file_path": "a"}));
+        t.tool_started("t", "Bash", json!({"command": "sleep 20"}));
+        t.end_turn_calls();
+        let open = |blocks: &[Block], id: &str| {
+            blocks
+                .iter()
+                .any(|b| matches!(b, Block::Tool { id: i, done: false, .. } if i == id))
+        };
+        assert!(!open(&t.blocks, "t"));
+        let run = t.agent("spawn").unwrap();
+        assert!(run.status.is_none());
+        assert!(open(&run.log.blocks, "inner"));
+        // A result that comes after all is still shown.
+        t.tool_result("t", "slept", false);
+        assert!(t.blocks.iter().any(|b| matches!(
+            b,
+            Block::Tool { id, output, is_error: false, .. } if id == "t" && output == "slept"
+        )));
     }
 
     #[test]

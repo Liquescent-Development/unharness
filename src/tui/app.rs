@@ -556,6 +556,9 @@ pub struct TranscriptView {
     pub rendered: Vec<Line<'static>>,
     /// Per transcript block, where its lines are in `rendered` and `lines`.
     pub blocks: Vec<KeptBlock>,
+    /// The blocks still running, whose status is drawn again on every
+    /// frame instead of being laid out again.
+    pub live: Vec<LiveRow>,
     /// The width `rendered` was laid out for.
     pub width: u16,
     /// The scrollbar, when there is more transcript than fits.
@@ -575,6 +578,29 @@ pub struct KeptBlock {
     pub top: usize,
     /// One past its last line.
     pub end: usize,
+}
+
+/// A running block's first line, as laid out before it was fitted to the
+/// width, and where its status is in it.
+#[derive(Debug, Clone)]
+pub struct LiveRow {
+    /// Its index in [`TranscriptView::blocks`].
+    pub block: usize,
+    pub line: Line<'static>,
+    /// The status's span in `line`.
+    pub span: usize,
+    pub live: Live,
+}
+
+/// What a running row's status shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Live {
+    pub since: Instant,
+    /// The time it has run; not while it waits on the user, whose time
+    /// that is.
+    pub clock: bool,
+    /// A `!` command's, which says "running".
+    pub shell: bool,
 }
 
 /// The transcript's scrollbar: a thumb on the right border whose size and
@@ -2842,9 +2868,10 @@ impl App {
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 let done = stop_reason == StopReason::Done;
-                // A hook of a turn cut short is not reported on.
+                // A hook or a call of a turn cut short is not reported on.
                 if !done {
                     self.transcript.end_turn_hooks();
+                    self.transcript.end_turn_calls();
                 }
                 match stop_reason {
                     StopReason::Done => {}
@@ -2893,6 +2920,7 @@ impl App {
                 self.drop_subagents();
                 self.check_guard();
                 self.process_gone();
+                self.transcript.end_running_tools();
                 if self.is_generating {
                     self.finish_generation();
                     self.transcript.push_error(format!(
