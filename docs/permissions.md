@@ -88,7 +88,8 @@ but greys out, and will not select, one the harness does not have, and
 A conversation keeps the policies you chose for it, for each harness,
 and one named with `--policy` or `UNHARNESS_POLICY`; `--resume`,
 `Ctrl+R` and `/resume` bring them back. What you named in the run you
-resume it in wins: `--policy` over everything the conversation had, and
+resume it in wins: `--policy` over everything the conversation had
+(also when it names the policy the conversation was named), and
 a policy chosen in the TUI before `Ctrl+R` over the conversation's
 choice for that harness. A harness the conversation chose nothing for
 follows its default as it is when you resume. When the policy a harness

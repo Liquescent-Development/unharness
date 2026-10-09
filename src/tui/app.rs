@@ -1061,8 +1061,9 @@ impl App {
         let conv = &self.conversation;
         self.policy_explicit = self.run_policy.or(conv.policy);
         // A policy named in this run for every harness holds over what the
-        // conversation chose for each, and what this run chose over both.
-        self.policy_choice = if self.policy_explicit == conv.policy {
+        // conversation chose for each, also when it is the one the
+        // conversation was named; what this run chose holds over both.
+        self.policy_choice = if self.run_policy.is_none() {
             conv.policy_choices.clone()
         } else {
             HashMap::new()
@@ -1182,19 +1183,19 @@ impl App {
             return;
         }
         let name = self.short_name();
-        let requested = self.policy_requested();
-        let why = if self.run_choices.contains_key(&self.active) {
+        let wanted = self.wanted_policy();
+        let why = if now != Some(wanted) {
+            format!("{wanted} is not available on {name}")
+        } else if self.run_choices.contains_key(&self.active) {
             "chosen in this run".to_string()
         } else if self.policy_choice.contains_key(&self.active) {
             format!("chosen for {name} in this conversation")
-        } else if self.run_policy.is_some() && self.run_policy != self.conversation.policy {
+        } else if self.run_policy.is_some() {
             if at_start {
                 "named with --policy".to_string()
             } else {
                 "named in this run".to_string()
             }
-        } else if now != Some(requested) {
-            format!("{requested} is not available on {name}")
         } else if self.policy_explicit.is_some() {
             "the policy named for this conversation".to_string()
         } else {
@@ -7876,8 +7877,26 @@ pub(crate) mod tests {
             == "Claude last ran this conversation under bypass; it continues under accept-edits (named with --policy)"));
     }
 
+    /// A choice the harness no longer offers is not passed off as what runs.
     #[test]
-    fn the_same_policy_named_on_resume_keeps_the_choices_made_for_it() {
+    fn a_resumed_choice_that_is_not_offered_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let mut conv = Conversation::new(HarnessId::AGY);
+        conv.blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        conv.policy_choices
+            .insert(HarnessId::AGY, PermissionPolicy::Ask);
+        conv.last_policies
+            .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        store.save(&conv).unwrap();
+        let app = resume_with(tmp.path(), None);
+        assert!(notices(&app).iter().any(|n| n
+            == "Antigravity last ran this conversation under accept-edits; it waits for a policy (ask is not available on Antigravity)"), "{:?}", notices(&app));
+    }
+
+    #[test]
+    fn a_policy_named_on_resume_holds_over_every_choice_even_the_same() {
         let tmp = tempfile::tempdir().unwrap();
         let store = ConversationStore::open(Some(tmp.path()), tmp.path());
         let mut conv = Conversation::new(HarnessId::AGY);
@@ -7886,13 +7905,22 @@ pub(crate) mod tests {
         conv.policy = Some(PermissionPolicy::Ask);
         conv.policy_choices
             .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        conv.policy_choices
+            .insert(HarnessId::CLAUDE, PermissionPolicy::Bypass);
         store.save(&conv).unwrap();
-        let app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
+        // Resumed as it was: its choices hold.
+        let app = resume_with(tmp.path(), None);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
         assert!(app.modal.is_none());
-        // Another one asks again.
-        let app = resume_with(tmp.path(), Some(PermissionPolicy::Auto));
+        // `--policy ask`, the policy it was named: `ask` everywhere, so agy
+        // waits for a choice and Claude does not run under `bypass`.
+        let mut app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
         assert_eq!(app.policy_choice, HashMap::new());
+        assert_eq!(app.effective_policy(), None);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        app.modal = None;
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
     }
 
     /// Resume the last conversation in `cwd` with `model` and `effort` on
