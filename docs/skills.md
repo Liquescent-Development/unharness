@@ -64,7 +64,8 @@ A command is a prompt with optional `description` and `argument-hint`
 frontmatter. Write `$ARGUMENTS` for what follows the command: it is the only
 placeholder both harnesses read the same way (Claude Code's `$0` is the
 first word, pi's `$1`). Codex and Antigravity have no command files of their
-own; a skill in `.agents/skills` is a slash command there.
+own; a skill in `.agents/skills` is a `/name` command there, as on every
+harness (unharness sends it to Codex as `$name`).
 
 A subagent is a file in Claude Code's format:
 
