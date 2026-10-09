@@ -43,9 +43,14 @@ attached to the next prompt.
 | `Ctrl+H` | Harness |
 | `Ctrl+M` | Model (provider first on multi-provider harnesses) |
 | `Ctrl+E` | Reasoning effort (the levels come from the harness) |
-| `Ctrl+P` | Permission policy |
+| `Ctrl+P` | Permission policy for this harness (`d` saves it as the harness's default) |
 | `Ctrl+R` | Resume a saved conversation |
 | `Ctrl+S`, `/subagents` | Subagents of this conversation |
+
+A choice that cannot be taken is greyed out with the reason beside it,
+and the cursor skips it: a harness not found on `PATH` (which `/switch`
+refuses too), a policy the
+harness does not have, a sandbox level with no sandbox to enforce it.
 
 ### Transcript
 

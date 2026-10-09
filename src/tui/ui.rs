@@ -19,7 +19,7 @@ use super::code::{
     sanitize, wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
+use super::modal::{AlwaysDraft, ListPicker, Modal, PolicyPicker, QuestionModal, takes_text};
 use super::prompt;
 use super::transcript::{
     Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
@@ -30,7 +30,6 @@ use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
 use crate::core::{
     HarnessId, HookOutcome, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus,
-    resolve_policy,
 };
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -1057,6 +1056,44 @@ fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Under the policy list: how to save the selected policy as the
+/// harness's default, or where it is about to be saved.
+fn policy_save_lines(p: &PolicyPicker, harness: &str, width: usize) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::DarkGray);
+    let place = |scope: Scope| match scope {
+        Scope::Workspace => "this workspace",
+        Scope::Global => "every workspace",
+    };
+    let (Some(scope), Some(pol)) = (p.save, p.list.current()) else {
+        return vec![Line::from(Span::styled(
+            format!(" d save as {harness}'s default"),
+            gray,
+        ))];
+    };
+    let mut lines = wrap_prefixed_text(
+        " ",
+        &format!(
+            "Save {pol} as {harness}'s default policy, for {}?",
+            place(scope)
+        ),
+        width,
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut hint = " Enter save and use it".to_string();
+    if p.has_workspace {
+        let other = match scope {
+            Scope::Workspace => Scope::Global,
+            Scope::Global => Scope::Workspace,
+        };
+        hint.push_str(&format!(" · Tab {}", place(other)));
+    }
+    hint.push_str(" · Esc back");
+    lines.push(Line::from(Span::styled(hint, gray)));
+    lines
+}
+
 pub fn wrap_prefixed_text(
     prefix: &'static str,
     text: &str,
@@ -1654,6 +1691,19 @@ fn picker_lines<T>(
     let mut lines = vec![Line::default()];
     for (i, item) in picker.items.iter().enumerate() {
         let (label, desc, active) = row(item);
+        // A row that cannot be chosen is dimmed and struck through, with
+        // why in place of its description.
+        if let Some(why) = picker.disabled_reason(i) {
+            let dim = Style::default().fg(Color::DarkGray);
+            let pad = 28usize.saturating_sub(label.chars().count());
+            lines.push(Line::from(vec![
+                Span::styled("   ", dim),
+                Span::styled(label, dim.add_modifier(Modifier::CROSSED_OUT)),
+                Span::styled(format!("{} ", " ".repeat(pad)), dim),
+                Span::styled(format!("─ {why}"), dim),
+            ]));
+            continue;
+        }
         let selected = i == picker.selected;
         let style = if selected {
             Style::default()
@@ -1686,19 +1736,15 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             centered_rect(70, 50, area),
             modal_block(format!(" Harness ({NAV}) "), Color::Cyan),
             picker_lines(p, Color::Cyan, |o| {
-                let status = if o.installed {
-                    format!(
-                        "v{}{}",
-                        o.version.as_deref().unwrap_or("?"),
-                        if o.interactive_permissions {
-                            ", interactive permissions"
-                        } else {
-                            ", no permission prompts"
-                        }
-                    )
-                } else {
-                    "not found on PATH".to_string()
-                };
+                let status = format!(
+                    "v{}{}",
+                    o.version.as_deref().unwrap_or("?"),
+                    if o.interactive_permissions {
+                        ", interactive permissions"
+                    } else {
+                        ", no permission prompts"
+                    }
+                );
                 (o.display_name.to_string(), status, o.id == app.active)
             }),
         ),
@@ -1762,48 +1808,76 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ),
         Modal::Policy(p) => {
+            let popup = centered_rect(80, 50, area);
+            let width = popup.width.saturating_sub(2) as usize;
             let caps = app.caps();
+            let effective = app.effective_policy();
+            let degraded =
+                |pol: &PermissionPolicy| caps.supports_policy(*pol).and_then(|s| s.degraded);
+            let mut lines = picker_lines(&p.list, Color::Green, |pol| {
+                let note = if degraded(pol).is_some() {
+                    " (degraded)"
+                } else {
+                    ""
+                };
+                (
+                    pol.as_str().to_string(),
+                    format!("{}{note}", pol.description()),
+                    Some(*pol) == effective,
+                )
+            });
+            // What was asked for cannot be had here: say so above the list.
+            let wanted = app.wanted_policy();
+            if caps.supports_policy(wanted).is_none() {
+                let mut note = format!("{wanted} is not offered by {}", app.display_name());
+                if let Some(e) = effective {
+                    note.push_str(&format!("; running {e}"));
+                }
+                let note =
+                    wrap_prefixed_text(" ", &note, width, Style::default().fg(Color::Yellow));
+                lines.splice(0..1, note);
+            }
+            // How the selected policy falls short here, in full.
+            if let Some(d) = p.list.current().and_then(degraded) {
+                lines.push(Line::default());
+                lines.extend(wrap_prefixed_text(
+                    " ",
+                    &format!("degraded: {d}"),
+                    width,
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+            lines.push(Line::default());
+            lines.extend(policy_save_lines(p, app.short_name(), width));
             (
-                centered_rect(80, 50, area),
+                popup,
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
-                picker_lines(p, Color::Green, |pol| {
-                    let support = match resolve_policy(&caps.permission_policies, *pol) {
-                        Ok(res) if res.effective == *pol => caps
-                            .supports_policy(*pol)
-                            .and_then(|s| s.degraded)
-                            .map(|d| format!(" (degraded: {d})"))
-                            .unwrap_or_default(),
-                        Ok(res) => {
-                            format!(" (not supported here; falls back to {})", res.effective)
-                        }
-                        Err(_) => " (not available here)".to_string(),
-                    };
-                    (
-                        pol.as_str().to_string(),
-                        format!("{}{}", pol.description(), support),
-                        *pol == app.wanted_policy(),
-                    )
-                }),
+                lines,
             )
         }
         Modal::Sandbox(p) => {
-            let unavailable = app.sandbox.backend.as_ref().err();
+            let popup = centered_rect(80, 50, area);
+            let width = popup.width.saturating_sub(2) as usize;
+            let mut lines = picker_lines(p, Color::Magenta, |level| {
+                (
+                    level.as_str().to_string(),
+                    level.description().to_string(),
+                    *level == app.sandbox_level().0,
+                )
+            });
+            if let Err(why) = &app.sandbox.backend {
+                let note = wrap_prefixed_text(
+                    " ",
+                    &format!("no sandbox here: {why}"),
+                    width,
+                    Style::default().fg(Color::Yellow),
+                );
+                lines.splice(0..1, note);
+            }
             (
-                centered_rect(80, 50, area),
+                popup,
                 modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
-                picker_lines(p, Color::Magenta, |level| {
-                    let support = match unavailable {
-                        Some(why) if *level != SandboxLevel::Off => {
-                            format!(" (not available here: {why})")
-                        }
-                        _ => String::new(),
-                    };
-                    (
-                        level.as_str().to_string(),
-                        format!("{}{}", level.description(), support),
-                        *level == app.sandbox_level().0,
-                    )
-                }),
+                lines,
             )
         }
         Modal::Resume(p) => (
@@ -2392,6 +2466,30 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
+    fn a_row_that_cannot_be_chosen_is_struck_through_with_its_reason() {
+        let p = ListPicker::new(vec!["ask", "bypass"])
+            .with_disabled(|s| (*s == "ask").then(|| "not offered".to_string()));
+        let lines = picker_lines(&p, Color::Green, |s| (s.to_string(), "desc".into(), true));
+        let text = |l: &Line| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        };
+        let ask = &lines[1];
+        assert!(text(ask).contains("─ not offered"));
+        assert!(!text(ask).contains('❯') && !text(ask).contains("[active]"));
+        assert!(
+            ask.spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+        // The cursor is on the row that can be chosen.
+        assert!(text(&lines[2]).starts_with(" ❯ bypass"));
+    }
+
+    #[test]
     fn wrap_prefixed_text_indents_continuations() {
         let long = "jetski: no output produced — a tool required the mcp permission that headless mode cannot prompt for, so it was auto-denied.";
         let lines = wrap_prefixed_text("  ✗ ", long, 60, Style::default());
@@ -2446,6 +2544,41 @@ mod tests {
         let w = wrap_words(&"x".repeat(25), 10);
         assert_eq!(w.len(), 3);
         assert_eq!(wrap_words("", 10), vec![String::new()]);
+    }
+
+    /// A reason too long for the picker's width is wrapped, not cut off.
+    #[test]
+    fn long_picker_notes_are_wrapped() {
+        let joined = |rows: Vec<String>| {
+            rows.iter()
+                .map(|r| r.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        let why = "Landlock is not available (Function not implemented (os error 38))";
+        app.sandbox.backend = Err(why.into());
+        app.open_sandbox_picker();
+        let text = joined(screen(&mut app, 60, 30).0);
+        assert!(text.contains("(os error 38))"), "{text}");
+        assert!(text.contains("no sandbox here"), "{text}");
+
+        // pi's `bypass` and its note, in full while it is selected.
+        let mut app = test_app(HarnessId::PI);
+        app.open_policy_picker();
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::Down));
+        let text = joined(screen(&mut app, 60, 30).0);
+        assert!(text.contains("are auto-accepted"), "{text}");
+        assert!(text.contains("d save as pi's default"), "{text}");
+
+        // `d`: where it is about to be saved.
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::Char('d')));
+        let text = joined(screen(&mut app, 100, 30).0);
+        assert!(
+            text.contains("Save bypass as pi's default policy, for this workspace?"),
+            "{text}"
+        );
+        assert!(text.contains("Tab every workspace"), "{text}");
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> (Vec<String>, (u16, u16)) {

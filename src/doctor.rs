@@ -13,8 +13,10 @@ use crate::core::rules::Scope;
 use crate::core::sandbox::{
     self, Sandbox, SandboxEnv, SandboxLevel, SandboxPaths, SandboxRequest, SandboxSetup,
 };
-use crate::core::{McpChannel, McpSupport, PermissionPolicy};
-use crate::runner::binary_overrides;
+use crate::core::{
+    HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, resolve_policy,
+};
+use crate::runner::{binary_overrides, configured_policy};
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
 use crate::skills_import::installed_plugins;
@@ -87,6 +89,17 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     },
                     policies.join(" "),
                     if caps.resume_by_id { " · resume" } else { "" }
+                );
+                let (default, fits) =
+                    describe_default_policy(config, d.id, &caps.permission_policies);
+                println!(
+                    "      {} Default policy: {}",
+                    "↳".dimmed(),
+                    if fits {
+                        default.normal()
+                    } else {
+                        default.yellow()
+                    }
                 );
 
                 println!(
@@ -528,5 +541,90 @@ fn report_rules(root: &Path) {
                 name
             );
         }
+    }
+}
+
+/// A harness's default policy, where it is set, and what it comes to on
+/// that harness; and whether it runs as set.
+fn describe_default_policy(
+    config: &Config,
+    id: HarnessId,
+    policies: &[PolicySupport],
+) -> (String, bool) {
+    let from = if config
+        .harness(id.as_str())
+        .is_some_and(|h| h.default_policy.is_some())
+    {
+        format!("[harnesses.{id}] default_policy")
+    } else if config.default_policy.is_some() {
+        "default_policy".to_string()
+    } else {
+        "built in".to_string()
+    };
+    let policy = match configured_policy(config, id) {
+        Ok(p) => p,
+        Err(e) => return (format!("{e} ({from})"), false),
+    };
+    match resolve_policy(policies, policy) {
+        Ok(res) if res.effective == policy => (format!("{policy} ({from})"), true),
+        Ok(res) => (
+            format!(
+                "{policy} ({from}): not offered, falls back to {}",
+                res.effective
+            ),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "{policy} ({from}): not offered, you choose one of {}",
+                e.supported
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            false,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HarnessSettings;
+
+    #[test]
+    fn a_default_policy_is_described_with_where_it_is_set_and_what_it_comes_to() {
+        let agy = [
+            PolicySupport::full(PermissionPolicy::AcceptEdits),
+            PolicySupport::full(PermissionPolicy::Bypass),
+        ];
+        let mut config = Config::default();
+        assert_eq!(
+            describe_default_policy(&config, HarnessId::AGY, &agy),
+            (
+                "ask (built in): not offered, you choose one of accept-edits, bypass".to_string(),
+                false
+            )
+        );
+        config.default_policy = Some("auto".into());
+        assert_eq!(
+            describe_default_policy(&config, HarnessId::AGY, &agy),
+            (
+                "auto (default_policy): not offered, falls back to accept-edits".to_string(),
+                false
+            )
+        );
+        config.harnesses.insert(
+            "agy".into(),
+            HarnessSettings {
+                default_policy: Some("bypass".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            describe_default_policy(&config, HarnessId::AGY, &agy),
+            ("bypass ([harnesses.agy] default_policy)".to_string(), true)
+        );
     }
 }

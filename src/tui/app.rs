@@ -16,7 +16,8 @@ use super::drop;
 use super::files;
 use super::history::PromptHistory;
 use super::modal::{
-    AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, QuestionStep, RewindOption,
+    AlwaysDraft, HarnessOption, ListPicker, Modal, PolicyPicker, ProviderOption, QuestionStep,
+    RewindOption,
 };
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
@@ -303,17 +304,19 @@ pub struct App {
 
     pub active: HarnessId,
     pub harness_options: Vec<HarnessOption>,
-    /// The policy the user asked for; the effective one is per harness.
-    /// The policy named on the command line or set in the TUI: it holds
-    /// for every harness. Without one each harness has its configured
-    /// default (`policy_requested`).
+    /// The policy named for every harness (`--policy`, or the one a
+    /// resumed conversation was named). Without one each harness has its
+    /// configured default (`policy_requested`).
     pub policy_explicit: Option<PermissionPolicy>,
-    /// What the user chose on a harness where the requested policy is not
-    /// available. It holds for that harness only.
+    /// What the user chose in the TUI, per harness. It holds for that
+    /// harness only, over the policy named for every harness.
     pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
-    /// The policy named in this run (`--policy`, `/policy`): it holds over
-    /// the one a resumed conversation was run with.
+    /// The policy named in this run (`--policy`): it holds over the one a
+    /// resumed conversation was run with.
     run_policy: Option<PermissionPolicy>,
+    /// What was chosen in this run: it holds over a resumed conversation's
+    /// choice for the same harness.
+    run_choices: HashMap<HarnessId, PermissionPolicy>,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
@@ -776,6 +779,7 @@ impl App {
             policy_explicit: init.policy,
             policy_choice: HashMap::new(),
             run_policy: init.policy,
+            run_choices: HashMap::new(),
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
@@ -1016,15 +1020,13 @@ impl App {
         })
     }
 
-    /// The policy asked of the active harness: the requested one, or where
-    /// that is not available, what the user chose there instead.
+    /// The policy asked of the active harness: what the user chose for it,
+    /// else the requested one.
     pub fn wanted_policy(&self) -> PermissionPolicy {
-        let policies = self.caps().permission_policies;
-        let requested = self.policy_requested();
-        match self.policy_choice.get(&self.active) {
-            Some(choice) if resolve_policy(&policies, requested).is_err() => *choice,
-            _ => requested,
-        }
+        self.policy_choice
+            .get(&self.active)
+            .copied()
+            .unwrap_or_else(|| self.policy_requested())
     }
 
     fn policy_resolution(&self) -> Result<PolicyResolution, PolicyUnavailable> {
@@ -1058,13 +1060,15 @@ impl App {
     fn take_conversation_choices(&mut self) {
         let conv = &self.conversation;
         self.policy_explicit = self.run_policy.or(conv.policy);
-        // A choice made for want of a policy holds for the request it was
-        // made for.
-        self.policy_choice = if self.policy_explicit == conv.policy {
+        // A policy named in this run for every harness holds over what the
+        // conversation chose for each, also when it is the one the
+        // conversation was named; what this run chose holds over both.
+        self.policy_choice = if self.run_policy.is_none() {
             conv.policy_choices.clone()
         } else {
             HashMap::new()
         };
+        self.policy_choice.extend(&self.run_choices);
 
         for h in std::mem::take(&mut self.chosen_models) {
             if self.run_models.contains(&h) {
@@ -1179,19 +1183,21 @@ impl App {
             return;
         }
         let name = self.short_name();
-        let requested = self.policy_requested();
-        let why = if self.run_policy.is_some() && self.run_policy != self.conversation.policy {
+        let wanted = self.wanted_policy();
+        let why = if now != Some(wanted) {
+            format!("{wanted} is not available on {name}")
+        } else if self.run_choices.contains_key(&self.active) {
+            "chosen in this run".to_string()
+        } else if self.policy_choice.contains_key(&self.active) {
+            format!("chosen for {name} in this conversation")
+        } else if self.run_policy.is_some() {
             if at_start {
                 "named with --policy".to_string()
             } else {
                 "named in this run".to_string()
             }
-        } else if self.wanted_policy() != requested {
-            format!("chosen where {requested} is not available on {name}")
-        } else if now != Some(requested) {
-            format!("{requested} is not available on {name}")
         } else if self.policy_explicit.is_some() {
-            "the policy chosen for this conversation".to_string()
+            "the policy named for this conversation".to_string()
         } else {
             "the configured default".to_string()
         };
@@ -3200,29 +3206,17 @@ impl App {
         self.require_policy();
     }
 
-    /// Returns whether `p` could be set on the active harness.
+    /// Returns whether `p` could be set on the active harness. Only a
+    /// policy it has can be: what the user picks is what runs.
     pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
-        let policies = self.caps().permission_policies;
-        let res = match resolve_policy(&policies, p) {
-            Ok(res) => res,
-            Err(e) => {
-                self.transcript.push_error(e.to_string());
-                return false;
-            }
+        let Some(res) = self.offered(p) else {
+            return false;
         };
         // Only a prompt that waited for this choice is sent by it.
         let was_waiting = self.effective_policy().is_none();
-        if resolve_policy(&policies, self.policy_requested()).is_err() {
-            // Chosen because the requested policy cannot be had here: the
-            // other harnesses keep the requested one.
-            self.policy_choice.insert(self.active, p);
-        } else {
-            self.policy_explicit = Some(p);
-            self.run_policy = Some(p);
-            // What was chosen in place of another request is not kept for
-            // this one.
-            self.policy_choice.clear();
-        }
+        // For this harness only: the others keep theirs.
+        self.policy_choice.insert(self.active, p);
+        self.run_choices.insert(self.active, p);
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
@@ -3240,6 +3234,89 @@ impl App {
             self.send_next_queued();
         }
         true
+    }
+
+    /// Save `p` as the active harness's default policy in the settings of
+    /// `scope` (under the config directory, never in the workspace), and
+    /// choose it. Returns whether both were done.
+    pub fn save_default_policy(&mut self, p: PermissionPolicy, scope: Scope) -> bool {
+        if self.offered(p).is_none() {
+            return false;
+        }
+        let name = self.short_name();
+        let id = self.active.as_str();
+        let root = self.workspace_root.clone();
+        let Some(dir) = self.rules.config_dir().map(Path::to_path_buf) else {
+            self.transcript
+                .push_error("there is no config directory to save the default policy in");
+            return false;
+        };
+        let Some(path) = Config::scoped_path(&dir, scope, root.as_deref()) else {
+            self.transcript
+                .push_error("there is no workspace to save the default policy for");
+            return false;
+        };
+        if let Err(e) = Config::set_harness_default_policy(&path, id, p) {
+            self.transcript
+                .push_error(format!("could not save the default policy: {e:#}"));
+            return false;
+        }
+        let place = match scope {
+            Scope::Workspace => "for this workspace",
+            Scope::Global => "for every workspace",
+        };
+        self.transcript.push_system(format!(
+            "Saved {p} as {name}'s default policy {place} ({})",
+            path.display()
+        ));
+        // What this run reads as the default from now on, unless the
+        // workspace's own settings name another for this harness. One they
+        // name for every harness gives way to it, which the user is told.
+        let workspace = match scope {
+            Scope::Global => Config::scoped_path(&dir, Scope::Workspace, root.as_deref())
+                .and_then(|w| Config::load_file(&w).ok().flatten()),
+            Scope::Workspace => None,
+        };
+        let for_harness = workspace
+            .as_ref()
+            .and_then(|c| c.harness(id)?.default_policy.clone());
+        let for_all = workspace.as_ref().and_then(|c| c.default_policy.clone());
+        match for_harness {
+            Some(w) => self.transcript.push_notice(format!(
+                "this workspace's settings make {w} {name}'s default here"
+            )),
+            None => {
+                if let Some(w) = for_all.filter(|w| *w != p.as_str()) {
+                    self.transcript.push_notice(format!(
+                        "this workspace's default_policy ({w}) no longer applies to {name}: \
+                         a harness's own default comes first (save for this workspace to \
+                         keep {w} here)"
+                    ));
+                }
+                self.config
+                    .harnesses
+                    .entry(id.to_string())
+                    .or_default()
+                    .default_policy = Some(p.to_string());
+            }
+        }
+        self.set_policy(p)
+    }
+
+    /// How `p` resolves on the active harness, if it offers it; otherwise
+    /// the user is told which it does offer.
+    fn offered(&mut self, p: PermissionPolicy) -> Option<PolicyResolution> {
+        match resolve_policy(&self.caps().permission_policies, p) {
+            Ok(res) if res.effective == p => Some(res),
+            _ => {
+                let e = PolicyUnavailable {
+                    requested: p,
+                    supported: self.offered_policies(),
+                };
+                self.transcript.push_error(e.to_string());
+                None
+            }
+        }
     }
 
     /// Choose the sandbox level for the run. Returns whether it could be
@@ -3446,7 +3523,9 @@ impl App {
             .iter()
             .position(|o| o.id == self.active);
         self.modal = Some(Modal::Harness(
-            ListPicker::new(self.harness_options.clone()).with_selected(idx),
+            ListPicker::new(self.harness_options.clone())
+                .with_disabled(|o| (!o.installed).then(|| "not found on PATH".to_string()))
+                .with_selected(idx),
         ));
     }
 
@@ -3717,20 +3796,65 @@ impl App {
         self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
     }
 
-    pub fn open_policy_picker(&mut self) {
-        let idx = PermissionPolicy::ALL
+    /// Whether `id` was found when the harnesses were probed. One that was
+    /// not probed is taken as there.
+    fn harness_installed(&self, id: HarnessId) -> bool {
+        self.harness_options
             .iter()
-            .position(|p| *p == self.wanted_policy());
-        self.modal = Some(Modal::Policy(
-            ListPicker::new(PermissionPolicy::ALL.to_vec()).with_selected(idx),
-        ));
+            .find(|o| o.id == id)
+            .is_none_or(|o| o.installed)
+    }
+
+    /// The policies the active harness has, least permissive first.
+    pub fn offered_policies(&self) -> Vec<PermissionPolicy> {
+        let caps = self.caps();
+        PermissionPolicy::ALL
+            .into_iter()
+            .filter(|p| caps.supports_policy(*p).is_some())
+            .collect()
+    }
+
+    /// Every policy is listed; one the harness does not have cannot be
+    /// chosen. The cursor starts on the wanted policy, else on the one in
+    /// effect, else on the least permissive one there is.
+    pub fn open_policy_picker(&mut self) {
+        let offered = self.offered_policies();
+        let name = self.display_name();
+        let wanted = self.wanted_policy();
+        let start = if offered.contains(&wanted) {
+            Some(wanted)
+        } else {
+            self.effective_policy()
+        };
+        let idx = start.and_then(|s| PermissionPolicy::ALL.iter().position(|p| *p == s));
+        self.modal = Some(Modal::Policy(PolicyPicker {
+            list: ListPicker::new(PermissionPolicy::ALL.to_vec())
+                .with_disabled(|p| (!offered.contains(p)).then(|| format!("not offered by {name}")))
+                .with_selected(idx),
+            save: None,
+            has_workspace: self.rules.has_workspace(),
+        }));
+    }
+
+    /// The sandbox levels there is a backend for.
+    fn available_sandbox_levels(&self) -> Vec<SandboxLevel> {
+        SandboxLevel::ALL
+            .into_iter()
+            .filter(|l| self.sandbox.backend.is_ok() || *l == SandboxLevel::Off)
+            .collect()
     }
 
     pub fn open_sandbox_picker(&mut self) {
         let wanted = self.sandbox_level().0;
         let idx = SandboxLevel::ALL.iter().position(|l| *l == wanted);
+        let unavailable = self.sandbox.backend.is_err();
         self.modal = Some(Modal::Sandbox(
-            ListPicker::new(SandboxLevel::ALL.to_vec()).with_selected(idx),
+            ListPicker::new(SandboxLevel::ALL.to_vec())
+                // Why is said once, above the list.
+                .with_disabled(|l| {
+                    (unavailable && *l != SandboxLevel::Off).then(|| "no sandbox here".to_string())
+                })
+                .with_selected(idx),
         ));
     }
 
@@ -3764,10 +3888,8 @@ impl App {
         };
         let mut choice = None;
         let outcome = match &mut modal {
-            Modal::Harness(p) => picker_nav(p, key.code).map(|c| {
-                c.and_then(|_| p.current().map(|o| (o.id, o.installed)))
-                    .map(ModalChoice::Harness)
-            }),
+            Modal::Harness(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|o| ModalChoice::Harness(o.id)))),
             Modal::Provider(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|o| ModalChoice::Provider(o.id.clone())))),
             Modal::Model(p) => picker_nav(p, key.code).map(|c| {
@@ -3778,8 +3900,29 @@ impl App {
             }),
             Modal::Effort(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|e| ModalChoice::Effort(e.clone())))),
-            Modal::Policy(p) => picker_nav(p, key.code)
-                .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
+            // `d` asks where to save the policy as the harness's default;
+            // Enter then saves it there and chooses it.
+            Modal::Policy(p) => match (p.save, key.code) {
+                (Some(scope), KeyCode::Enter) => p
+                    .list
+                    .current()
+                    .map(|pol| Some(ModalChoice::SavePolicy(*pol, scope))),
+                (Some(_), KeyCode::Tab) => {
+                    p.toggle_scope();
+                    None
+                }
+                (Some(_), KeyCode::Esc) => {
+                    p.save = None;
+                    None
+                }
+                (Some(_), _) => None,
+                (None, KeyCode::Char('d')) => {
+                    p.start_save();
+                    None
+                }
+                (None, code) => picker_nav(&mut p.list, code)
+                    .map(|c| c.and_then(|_| p.list.current().map(|pol| ModalChoice::Policy(*pol)))),
+            },
             Modal::Sandbox(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|l| ModalChoice::Sandbox(*l)))),
             Modal::Subagents(p) => picker_nav(p, key.code)
@@ -4017,13 +4160,9 @@ impl App {
             Some(Some(choice)) => {
                 self.modal = Some(modal);
                 match choice {
-                    ModalChoice::Harness((id, installed)) => {
+                    ModalChoice::Harness(id) => {
                         self.modal = None;
-                        if installed {
-                            self.switch_harness(id);
-                        } else {
-                            self.transcript.push_error(format!("{id} is not installed"));
-                        }
+                        self.switch_harness(id);
                     }
                     ModalChoice::Provider(id) => {
                         self.modal = None;
@@ -4041,6 +4180,11 @@ impl App {
                     ModalChoice::Policy(p) => {
                         // An unavailable policy leaves the picker open.
                         if self.set_policy(p) {
+                            self.modal = None;
+                        }
+                    }
+                    ModalChoice::SavePolicy(p, scope) => {
+                        if self.save_default_policy(p, scope) {
                             self.modal = None;
                         }
                     }
@@ -4083,6 +4227,10 @@ impl App {
         match name {
             "/switch" | "/harness" => match arg {
                 Some(a) => match self.registry.parse(&a).map(|h| h.descriptor().id) {
+                    // Refused as the picker greys it out.
+                    Some(id) if !self.harness_installed(id) => self
+                        .transcript
+                        .push_error(format!("{id} is not installed (not found on PATH)")),
                     Some(id) => self.switch_harness(id),
                     None => self.transcript.push_error(format!("unknown harness '{a}'")),
                 },
@@ -4105,9 +4253,12 @@ impl App {
                     Some(p) => {
                         self.set_policy(p);
                     }
-                    None => self.transcript.push_error(format!(
-                        "unknown policy '{a}' (ask, accept-edits, auto, bypass)"
-                    )),
+                    None => {
+                        let offered: Vec<&str> =
+                            self.offered_policies().iter().map(|p| p.as_str()).collect();
+                        self.transcript
+                            .push_error(format!("unknown policy '{a}' ({})", offered.join(", ")));
+                    }
                 },
                 None => self.open_policy_picker(),
             },
@@ -4116,9 +4267,17 @@ impl App {
                     Some(l) => {
                         self.set_sandbox(l);
                     }
-                    None => self.transcript.push_error(format!(
-                        "unknown sandbox level '{a}' (read-only, workspace-write, off)"
-                    )),
+                    None => {
+                        let levels: Vec<&str> = self
+                            .available_sandbox_levels()
+                            .iter()
+                            .map(|l| l.as_str())
+                            .collect();
+                        self.transcript.push_error(format!(
+                            "unknown sandbox level '{a}' ({})",
+                            levels.join(", ")
+                        ));
+                    }
                 },
                 None => self.open_sandbox_picker(),
             },
@@ -4373,7 +4532,7 @@ impl App {
         } else {
             match (cmd.as_str(), sub.as_deref()) {
                 ("/switch" | "/harness", Some(s)) => {
-                    for o in &self.harness_options {
+                    for o in self.harness_options.iter().filter(|o| o.installed) {
                         let id = o.id.as_str();
                         if id.starts_with(s) {
                             out.push((format!("{cmd} {id}"), o.display_name.to_string()));
@@ -4381,14 +4540,14 @@ impl App {
                     }
                 }
                 ("/policy", Some(s)) => {
-                    for p in PermissionPolicy::ALL {
+                    for p in self.offered_policies() {
                         if p.as_str().starts_with(s) {
                             out.push((format!("/policy {p}"), p.description().to_string()));
                         }
                     }
                 }
                 ("/sandbox", Some(s)) => {
-                    for l in SandboxLevel::ALL {
+                    for l in self.available_sandbox_levels() {
                         if l.as_str().starts_with(s) {
                             out.push((format!("/sandbox {l}"), l.description().to_string()));
                         }
@@ -5136,11 +5295,14 @@ fn git_branch(root: &std::path::Path) -> Option<String> {
 }
 
 enum ModalChoice {
-    Harness((HarnessId, bool)),
+    /// One the picker could choose: installed.
+    Harness(HarnessId),
     Provider(String),
     Model(String),
     Effort(String),
     Policy(PermissionPolicy),
+    /// Choose the policy and save it as the harness's default.
+    SavePolicy(PermissionPolicy, Scope),
     Sandbox(SandboxLevel),
     Subagent(String),
     Resume(String),
@@ -5165,6 +5327,9 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
             p.down();
             None
         }
+        // Nothing that can be chosen is under the cursor of a list that has
+        // rows: the picker stays. An empty one closes as before.
+        KeyCode::Enter if p.current().is_none() && !p.items.is_empty() => None,
         KeyCode::Enter => Some(Some(())),
         KeyCode::Esc | KeyCode::Char('q') => Some(None),
         _ => None,
@@ -7024,13 +7189,25 @@ pub(crate) mod tests {
 
     #[test]
     fn policy_resolution_per_harness() {
+        // As with `--policy auto`: agy, which has no `auto`, runs the nearest
+        // less permissive policy and says so.
         let mut app = test_app(HarnessId::CLAUDE);
-        app.set_policy(PermissionPolicy::Auto);
+        app.policy_explicit = Some(PermissionPolicy::Auto);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
         assert!(app.policy_warning().is_none());
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
         assert!(app.policy_warning().unwrap().contains("less permissive"));
+
+        // A policy chosen in the TUI is for the harness it was chosen on.
+        assert!(app.set_policy(PermissionPolicy::Bypass));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
+        app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
     }
 
     #[test]
@@ -7103,12 +7280,19 @@ pub(crate) mod tests {
         assert!(!app.is_generating);
         assert!(matches!(app.modal, Some(Modal::Policy(_))));
 
-        // `ask` is the first row and cannot be taken: the picker stays.
-        app.handle_modal_key(key(KeyCode::Enter));
-        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        // `ask` cannot be chosen: the cursor starts on the least permissive
+        // policy there is, and never lands on `ask`.
+        let current = |app: &App| match &app.modal {
+            Some(Modal::Policy(p)) => p.list.current().copied(),
+            _ => None,
+        };
+        assert_eq!(current(&app), Some(PermissionPolicy::AcceptEdits));
+        app.handle_modal_key(key(KeyCode::Up));
+        assert_eq!(current(&app), Some(PermissionPolicy::Bypass));
+        app.handle_modal_key(key(KeyCode::Down));
+        assert_eq!(current(&app), Some(PermissionPolicy::AcceptEdits));
         assert_eq!(app.effective_policy(), None);
 
-        app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
@@ -7407,17 +7591,69 @@ pub(crate) mod tests {
         assert!(!app.set_sandbox(SandboxLevel::ReadOnly));
         assert_eq!(app.sandbox.explicit, None);
 
-        // The picker opens on the level in effect and stays open on a row
-        // that cannot be had.
+        for c in "/sandbox ".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/sandbox off"]);
+        app.set_input("");
+
+        // The picker opens on the level in effect, and the cursor never
+        // lands on a level that cannot be had.
         app.open_sandbox_picker();
+        let Some(Modal::Sandbox(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.disabled_reason(0), Some("no sandbox here"));
+        assert_eq!(p.current(), Some(&SandboxLevel::Off));
         app.handle_modal_key(key(KeyCode::Up));
-        app.handle_modal_key(key(KeyCode::Enter));
-        assert!(matches!(app.modal, Some(Modal::Sandbox(_))));
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
         assert!(app.status_warning().is_none());
+    }
+
+    #[test]
+    fn a_harness_that_is_not_installed_cannot_be_chosen() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for o in &mut app.harness_options {
+            o.installed = o.id == HarnessId::CLAUDE;
+        }
+        app.open_harness_picker();
+        let Some(Modal::Harness(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.current().map(|o| o.id), Some(HarnessId::CLAUDE));
+        assert!(
+            (0..p.items.len())
+                .filter(|&i| p.items[i].id != HarnessId::CLAUDE)
+                .all(|i| p.disabled_reason(i) == Some("not found on PATH"))
+        );
+        // Every other row is skipped, so Enter keeps the harness.
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.active, HarnessId::CLAUDE);
+
+        // Nor is it offered or taken by name.
+        for c in "/switch ".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/switch claude"]);
+        app.set_input("");
+        app.handle_slash_command("/switch codex");
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(app.transcript.blocks.iter().any(|b| matches!(
+            b,
+            crate::tui::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
+        )));
+
+        // A picker with no rows closes on Enter, as Esc would.
+        app.modal = Some(Modal::Effort(ListPicker::new(Vec::new())));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
     }
 
     #[test]
@@ -7493,27 +7729,29 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
 
-        // A policy set in the TUI is for the run, on every harness.
+        // A policy set in the TUI is for the harness it was set on.
         app.switch_harness(HarnessId::CLAUDE);
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
     }
 
     #[test]
-    fn a_choice_made_for_want_of_a_policy_does_not_outlive_the_request() {
+    fn a_choice_made_for_want_of_a_policy_outlives_changes_elsewhere() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
         assert!(app.set_policy(PermissionPolicy::Bypass));
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-        // Another policy is asked for on Claude, then `ask` again.
+        // Other policies are chosen on Claude: agy keeps its own.
         app.switch_harness(HarnessId::CLAUDE);
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         assert!(app.set_policy(PermissionPolicy::Ask));
         app.modal = None;
         app.switch_harness(HarnessId::AGY);
-        assert_eq!(app.effective_policy(), None);
-        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        assert!(app.modal.is_none());
     }
 
     /// Claude's configured default is `accept-edits`.
@@ -7675,11 +7913,36 @@ pub(crate) mod tests {
         app.resume_conversation(id);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
         assert!(notices(&app).iter().any(|n| n
-            == "Claude last ran this conversation under bypass; it continues under ask (named in this run)"));
+            == "Claude last ran this conversation under bypass; it continues under ask (chosen in this run)"));
+
+        // Named with `--policy`, for every harness: over what the
+        // conversation chose for Claude too.
+        let app = resume_with(tmp.path(), Some(PermissionPolicy::AcceptEdits));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(notices(&app).iter().any(|n| n
+            == "Claude last ran this conversation under bypass; it continues under accept-edits (named with --policy)"));
+    }
+
+    /// A choice the harness no longer offers is not passed off as what runs.
+    #[test]
+    fn a_resumed_choice_that_is_not_offered_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ConversationStore::open(Some(tmp.path()), tmp.path());
+        let mut conv = Conversation::new(HarnessId::AGY);
+        conv.blocks
+            .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        conv.policy_choices
+            .insert(HarnessId::AGY, PermissionPolicy::Ask);
+        conv.last_policies
+            .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        store.save(&conv).unwrap();
+        let app = resume_with(tmp.path(), None);
+        assert!(notices(&app).iter().any(|n| n
+            == "Antigravity last ran this conversation under accept-edits; it waits for a policy (ask is not available on Antigravity)"), "{:?}", notices(&app));
     }
 
     #[test]
-    fn the_same_policy_named_on_resume_keeps_the_choices_made_for_it() {
+    fn a_policy_named_on_resume_holds_over_every_choice_even_the_same() {
         let tmp = tempfile::tempdir().unwrap();
         let store = ConversationStore::open(Some(tmp.path()), tmp.path());
         let mut conv = Conversation::new(HarnessId::AGY);
@@ -7688,13 +7951,22 @@ pub(crate) mod tests {
         conv.policy = Some(PermissionPolicy::Ask);
         conv.policy_choices
             .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);
+        conv.policy_choices
+            .insert(HarnessId::CLAUDE, PermissionPolicy::Bypass);
         store.save(&conv).unwrap();
-        let app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
+        // Resumed as it was: its choices hold.
+        let app = resume_with(tmp.path(), None);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
         assert!(app.modal.is_none());
-        // Another one asks again.
-        let app = resume_with(tmp.path(), Some(PermissionPolicy::Auto));
+        // `--policy ask`, the policy it was named: `ask` everywhere, so agy
+        // waits for a choice and Claude does not run under `bypass`.
+        let mut app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
         assert_eq!(app.policy_choice, HashMap::new());
+        assert_eq!(app.effective_policy(), None);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        app.modal = None;
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
     }
 
     /// Resume the last conversation in `cwd` with `model` and `effort` on
@@ -8466,7 +8738,7 @@ pub(crate) mod tests {
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
-        assert_eq!(app.policy_requested(), PermissionPolicy::AcceptEdits);
+        assert_eq!(app.wanted_policy(), PermissionPolicy::AcceptEdits);
         app.open_effort_picker();
         app.handle_modal_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());
@@ -8650,9 +8922,156 @@ pub(crate) mod tests {
         assert_eq!(app.input, "src/main.rs ");
     }
 
+    /// pi has `ask` and `bypass` only: the others are listed and cannot
+    /// be chosen, from the picker, `/policy` or completion.
+    #[test]
+    fn a_policy_the_harness_lacks_cannot_be_chosen() {
+        let mut app = test_app(HarnessId::PI);
+        assert_eq!(
+            app.offered_policies(),
+            vec![PermissionPolicy::Ask, PermissionPolicy::Bypass]
+        );
+        app.open_policy_picker();
+        let Some(Modal::Policy(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.list.items.len(), 4);
+        assert_eq!(p.list.disabled_reason(1), Some("not offered by pi"));
+        assert_eq!(p.list.disabled_reason(2), Some("not offered by pi"));
+        assert_eq!(p.list.current(), Some(&PermissionPolicy::Ask));
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+
+        // Not `ask` in its place: an error, and nothing changes.
+        app.handle_slash_command("/policy auto");
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("'auto'") && e.contains("ask, bypass"))
+        ));
+
+        for c in "/policy a".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/policy ask"]);
+    }
+
+    /// `d` in the policy picker saves the selected policy as the harness's
+    /// default, in this workspace's settings or (Tab) the global ones, both
+    /// under the config directory, and chooses it.
+    #[test]
+    fn the_policy_picker_saves_a_harness_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::PI, None, false);
+        let dir = app.cwd.join(".unharness/test-config");
+        let saving = |app: &App| match &app.modal {
+            Some(Modal::Policy(p)) => p.save,
+            _ => None,
+        };
+
+        // This workspace: Esc goes back to the list, nothing is written.
+        app.open_policy_picker();
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        assert_eq!(saving(&app), Some(Scope::Workspace));
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(matches!(app.modal, Some(Modal::Policy(_))) && saving(&app).is_none());
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+        let saved = Config::load_file(&local).unwrap().unwrap();
+        assert_eq!(
+            saved.harnesses["pi"].default_policy.as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+            PermissionPolicy::Bypass
+        );
+        assert!(!dir.join("config.toml").exists());
+
+        // Every workspace, while this one's settings name another: saved,
+        // and the user told which holds here.
+        app.open_policy_picker();
+        app.handle_modal_key(key(KeyCode::Up));
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        app.handle_modal_key(key(KeyCode::Tab));
+        assert_eq!(saving(&app), Some(Scope::Global));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        let global = Config::load_file(&dir.join("config.toml"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            global.harnesses["pi"].default_policy.as_deref(),
+            Some("ask")
+        );
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n == "this workspace's settings make bypass pi's default here")
+        );
+        assert_eq!(
+            crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+            PermissionPolicy::Bypass
+        );
+
+        // A row that cannot be chosen cannot be saved either.
+        app.open_policy_picker();
+        if let Some(Modal::Policy(p)) = &mut app.modal {
+            p.list.selected = 1;
+        }
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        assert!(saving(&app).is_none());
+    }
+
+    /// A harness's own default comes before a workspace's `default_policy`:
+    /// one saved for every workspace says so where that gives way.
+    #[test]
+    fn saving_over_a_workspace_default_for_every_harness_says_so() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        let dir = app.cwd.join(".unharness/test-config");
+        let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, "default_policy = \"ask\"\n").unwrap();
+        assert!(app.save_default_policy(PermissionPolicy::Bypass, Scope::Global));
+        assert!(notices(&app).iter().any(|n| {
+            n.starts_with("this workspace's default_policy (ask) no longer applies to Claude")
+        }));
+        // Not when it is the same.
+        let before = notices(&app).len();
+        assert!(app.save_default_policy(PermissionPolicy::Ask, Scope::Global));
+        assert_eq!(notices(&app).len(), before);
+    }
+
+    /// A wanted policy that runs as a less permissive one: the cursor is on
+    /// the one that runs.
+    #[test]
+    fn the_policy_picker_starts_on_the_policy_in_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::Auto));
+        app.switch_harness(HarnessId::PI);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        app.open_policy_picker();
+        assert!(
+            matches!(&app.modal, Some(Modal::Policy(p)) if p.list.current() == Some(&PermissionPolicy::Ask))
+        );
+    }
+
     #[test]
     fn slash_commands_and_suggestions() {
         let mut app = test_app(HarnessId::CLAUDE);
+        // Whatever is on this machine's PATH.
+        for o in &mut app.harness_options {
+            o.installed = true;
+        }
         for c in "/pol".chars() {
             app.insert_char(c);
         }
@@ -8663,6 +9082,8 @@ pub(crate) mod tests {
         app.insert_char('b');
         assert_eq!(app.suggestions[0].0, "/policy bypass");
         app.set_input("");
+        // Levels are offered where there is a backend for them.
+        app.sandbox = SandboxSetup::null(Some(SandboxLevel::Off));
         for c in "/sandbox r".chars() {
             app.insert_char(c);
         }

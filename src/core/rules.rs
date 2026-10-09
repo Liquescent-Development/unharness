@@ -677,6 +677,11 @@ impl Rules {
         self.root.is_some()
     }
 
+    /// `<config dir>/unharness`, where the settings are too.
+    pub fn config_dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (Scope, &Rule)> {
         let workspace = self.workspace.iter().map(|r| (Scope::Workspace, r));
         workspace.chain(self.global.iter().map(|r| (Scope::Global, r)))
@@ -799,12 +804,17 @@ fn read_file(path: &Path) -> Result<Vec<Rule>> {
     }
 }
 
-fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+/// Replace `path` with `content` by a rename, keeping the permissions of
+/// the file it replaces (a config with secrets in it may be 0600).
+pub(crate) fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let partial = path.with_extension(format!("toml.{}.partial", std::process::id()));
     let mut file = std::fs::File::create(&partial)?;
+    if let Ok(old) = std::fs::metadata(path) {
+        file.set_permissions(old.permissions())?;
+    }
     std::io::Write::write_all(&mut file, content.as_bytes())?;
     file.sync_all()?;
     std::fs::rename(&partial, path).inspect_err(|_| {
