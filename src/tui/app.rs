@@ -3451,7 +3451,9 @@ impl App {
             .iter()
             .position(|o| o.id == self.active);
         self.modal = Some(Modal::Harness(
-            ListPicker::new(self.harness_options.clone()).with_selected(idx),
+            ListPicker::new(self.harness_options.clone())
+                .with_disabled(|o| (!o.installed).then(|| "not found on PATH".to_string()))
+                .with_selected(idx),
         ));
     }
 
@@ -3751,11 +3753,25 @@ impl App {
         ));
     }
 
+    /// The sandbox levels there is a backend for.
+    fn available_sandbox_levels(&self) -> Vec<SandboxLevel> {
+        SandboxLevel::ALL
+            .into_iter()
+            .filter(|l| self.sandbox.backend.is_ok() || *l == SandboxLevel::Off)
+            .collect()
+    }
+
     pub fn open_sandbox_picker(&mut self) {
         let wanted = self.sandbox_level().0;
         let idx = SandboxLevel::ALL.iter().position(|l| *l == wanted);
+        let unavailable = self.sandbox.backend.as_ref().err();
         self.modal = Some(Modal::Sandbox(
-            ListPicker::new(SandboxLevel::ALL.to_vec()).with_selected(idx),
+            ListPicker::new(SandboxLevel::ALL.to_vec())
+                .with_disabled(|l| match unavailable {
+                    Some(why) if *l != SandboxLevel::Off => Some(format!("not available: {why}")),
+                    _ => None,
+                })
+                .with_selected(idx),
         ));
     }
 
@@ -4416,7 +4432,7 @@ impl App {
                     }
                 }
                 ("/sandbox", Some(s)) => {
-                    for l in SandboxLevel::ALL {
+                    for l in self.available_sandbox_levels() {
                         if l.as_str().starts_with(s) {
                             out.push((format!("/sandbox {l}"), l.description().to_string()));
                         }
@@ -7444,17 +7460,50 @@ pub(crate) mod tests {
         assert!(!app.set_sandbox(SandboxLevel::ReadOnly));
         assert_eq!(app.sandbox.explicit, None);
 
-        // The picker opens on the level in effect and stays open on a row
-        // that cannot be had.
+        for c in "/sandbox ".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/sandbox off"]);
+        app.set_input("");
+
+        // The picker opens on the level in effect, and the cursor never
+        // lands on a level that cannot be had.
         app.open_sandbox_picker();
+        let Some(Modal::Sandbox(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.disabled_reason(0), Some("not available: no kernel"));
+        assert_eq!(p.current(), Some(&SandboxLevel::Off));
         app.handle_modal_key(key(KeyCode::Up));
-        app.handle_modal_key(key(KeyCode::Enter));
-        assert!(matches!(app.modal, Some(Modal::Sandbox(_))));
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
         assert!(app.status_warning().is_none());
+    }
+
+    #[test]
+    fn a_harness_that_is_not_installed_cannot_be_chosen() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for o in &mut app.harness_options {
+            o.installed = o.id == HarnessId::CLAUDE;
+        }
+        app.open_harness_picker();
+        let Some(Modal::Harness(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.current().map(|o| o.id), Some(HarnessId::CLAUDE));
+        assert!(
+            (0..p.items.len())
+                .filter(|&i| p.items[i].id != HarnessId::CLAUDE)
+                .all(|i| p.disabled_reason(i) == Some("not found on PATH"))
+        );
+        // Every other row is skipped, so Enter keeps the harness.
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.active, HarnessId::CLAUDE);
     }
 
     #[test]
@@ -8751,6 +8800,8 @@ pub(crate) mod tests {
         app.insert_char('b');
         assert_eq!(app.suggestions[0].0, "/policy bypass");
         app.set_input("");
+        // Levels are offered where there is a backend for them.
+        app.sandbox = SandboxSetup::null(Some(SandboxLevel::Off));
         for c in "/sandbox r".chars() {
             app.insert_char(c);
         }

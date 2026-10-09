@@ -1698,19 +1698,15 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             centered_rect(70, 50, area),
             modal_block(format!(" Harness ({NAV}) "), Color::Cyan),
             picker_lines(p, Color::Cyan, |o| {
-                let status = if o.installed {
-                    format!(
-                        "v{}{}",
-                        o.version.as_deref().unwrap_or("?"),
-                        if o.interactive_permissions {
-                            ", interactive permissions"
-                        } else {
-                            ", no permission prompts"
-                        }
-                    )
-                } else {
-                    "not found on PATH".to_string()
-                };
+                let status = format!(
+                    "v{}{}",
+                    o.version.as_deref().unwrap_or("?"),
+                    if o.interactive_permissions {
+                        ", interactive permissions"
+                    } else {
+                        ", no permission prompts"
+                    }
+                );
                 (o.display_name.to_string(), status, o.id == app.active)
             }),
         ),
@@ -1803,26 +1799,17 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 lines,
             )
         }
-        Modal::Sandbox(p) => {
-            let unavailable = app.sandbox.backend.as_ref().err();
-            (
-                centered_rect(80, 50, area),
-                modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
-                picker_lines(p, Color::Magenta, |level| {
-                    let support = match unavailable {
-                        Some(why) if *level != SandboxLevel::Off => {
-                            format!(" (not available here: {why})")
-                        }
-                        _ => String::new(),
-                    };
-                    (
-                        level.as_str().to_string(),
-                        format!("{}{}", level.description(), support),
-                        *level == app.sandbox_level().0,
-                    )
-                }),
-            )
-        }
+        Modal::Sandbox(p) => (
+            centered_rect(80, 50, area),
+            modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
+            picker_lines(p, Color::Magenta, |level| {
+                (
+                    level.as_str().to_string(),
+                    level.description().to_string(),
+                    *level == app.sandbox_level().0,
+                )
+            }),
+        ),
         Modal::Resume(p) => (
             centered_rect(85, 60, area),
             modal_block(format!(" Resume conversation ({NAV}) "), Color::Blue),
