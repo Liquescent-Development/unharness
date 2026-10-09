@@ -7265,23 +7265,29 @@ pub(crate) mod tests {
     /// Claude with a binary that exists wherever the test runs; nothing
     /// starts it.
     fn app_with_a_claude_binary() -> App {
+        app_with_a_binary(HarnessId::CLAUDE)
+    }
+
+    /// `harness` with a binary that exists wherever the test runs, also
+    /// where the CLI is not installed; nothing starts it.
+    fn app_with_a_binary(harness: HarnessId) -> App {
         let mut config = Config::default();
         config.harnesses.insert(
-            "claude".into(),
+            harness.as_str().into(),
             crate::config::HarnessSettings {
                 binary: Some("/bin/sh".into()),
                 ..Default::default()
             },
         );
         let tmp = tempfile::tempdir().unwrap();
-        test_app_with(
-            tmp.keep(),
-            HarnessId::CLAUDE,
-            None,
-            false,
-            config,
-            test_registry(),
-        )
+        let mut app = test_app_with(tmp.keep(), harness, None, false, config, test_registry());
+        // As in `test_app_in`: a harness without `ask` waits for a choice.
+        if app.effective_policy().is_none() {
+            app.policy_choice
+                .insert(harness, PermissionPolicy::AcceptEdits);
+            app.modal = None;
+        }
+        app
     }
 
     fn vertex_models() -> ListResult {
@@ -9311,7 +9317,7 @@ pub(crate) mod tests {
 
     #[test]
     fn a_harness_started_with_the_first_prompt_is_asked_for_its_commands() {
-        let mut app = test_app(HarnessId::AGY);
+        let mut app = app_with_a_binary(HarnessId::AGY);
         app.start_when_idle();
         assert!(app.take_actions().is_empty());
         let jobs = app.take_list_jobs();
@@ -9334,7 +9340,7 @@ pub(crate) mod tests {
         assert!(app.take_list_jobs().is_empty(), "asked again once listed");
 
         // One that failed says why, once, and is not asked again.
-        let mut app = test_app(HarnessId::AGY);
+        let mut app = app_with_a_binary(HarnessId::AGY);
         app.start_when_idle();
         app.take_list_jobs();
         app.on_list(
