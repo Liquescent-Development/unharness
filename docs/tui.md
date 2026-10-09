@@ -48,7 +48,8 @@ attached to the next prompt.
 | `Ctrl+S`, `/subagents` | Subagents of this conversation |
 
 A choice that cannot be taken is greyed out with the reason beside it,
-and the cursor skips it: a harness not found on `PATH`, a policy the
+and the cursor skips it: a harness not found on `PATH` (which `/switch`
+refuses too), a policy the
 harness does not have, a sandbox level with no sandbox to enforce it.
 
 ### Transcript

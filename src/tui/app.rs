@@ -3796,6 +3796,15 @@ impl App {
         self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
     }
 
+    /// Whether `id` was found when the harnesses were probed. One that was
+    /// not probed is taken as there.
+    fn harness_installed(&self, id: HarnessId) -> bool {
+        self.harness_options
+            .iter()
+            .find(|o| o.id == id)
+            .is_none_or(|o| o.installed)
+    }
+
     /// The policies the active harness has, least permissive first.
     pub fn offered_policies(&self) -> Vec<PermissionPolicy> {
         let caps = self.caps();
@@ -3879,10 +3888,8 @@ impl App {
         };
         let mut choice = None;
         let outcome = match &mut modal {
-            Modal::Harness(p) => picker_nav(p, key.code).map(|c| {
-                c.and_then(|_| p.current().map(|o| (o.id, o.installed)))
-                    .map(ModalChoice::Harness)
-            }),
+            Modal::Harness(p) => picker_nav(p, key.code)
+                .map(|c| c.and_then(|_| p.current().map(|o| ModalChoice::Harness(o.id)))),
             Modal::Provider(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|o| ModalChoice::Provider(o.id.clone())))),
             Modal::Model(p) => picker_nav(p, key.code).map(|c| {
@@ -4153,13 +4160,9 @@ impl App {
             Some(Some(choice)) => {
                 self.modal = Some(modal);
                 match choice {
-                    ModalChoice::Harness((id, installed)) => {
+                    ModalChoice::Harness(id) => {
                         self.modal = None;
-                        if installed {
-                            self.switch_harness(id);
-                        } else {
-                            self.transcript.push_error(format!("{id} is not installed"));
-                        }
+                        self.switch_harness(id);
                     }
                     ModalChoice::Provider(id) => {
                         self.modal = None;
@@ -4224,6 +4227,10 @@ impl App {
         match name {
             "/switch" | "/harness" => match arg {
                 Some(a) => match self.registry.parse(&a).map(|h| h.descriptor().id) {
+                    // Refused as the picker greys it out.
+                    Some(id) if !self.harness_installed(id) => self
+                        .transcript
+                        .push_error(format!("{id} is not installed (not found on PATH)")),
                     Some(id) => self.switch_harness(id),
                     None => self.transcript.push_error(format!("unknown harness '{a}'")),
                 },
@@ -4525,7 +4532,7 @@ impl App {
         } else {
             match (cmd.as_str(), sub.as_deref()) {
                 ("/switch" | "/harness", Some(s)) => {
-                    for o in &self.harness_options {
+                    for o in self.harness_options.iter().filter(|o| o.installed) {
                         let id = o.id.as_str();
                         if id.starts_with(s) {
                             out.push((format!("{cmd} {id}"), o.display_name.to_string()));
@@ -5288,7 +5295,8 @@ fn git_branch(root: &std::path::Path) -> Option<String> {
 }
 
 enum ModalChoice {
-    Harness((HarnessId, bool)),
+    /// One the picker could choose: installed.
+    Harness(HarnessId),
     Provider(String),
     Model(String),
     Effort(String),
@@ -5319,8 +5327,9 @@ fn picker_nav<T>(p: &mut ListPicker<T>, code: KeyCode) -> Option<Option<()>> {
             p.down();
             None
         }
-        // Nothing that can be chosen is under the cursor: the picker stays.
-        KeyCode::Enter if p.current().is_none() => None,
+        // Nothing that can be chosen is under the cursor of a list that has
+        // rows: the picker stays. An empty one closes as before.
+        KeyCode::Enter if p.current().is_none() && !p.items.is_empty() => None,
         KeyCode::Enter => Some(Some(())),
         KeyCode::Esc | KeyCode::Char('q') => Some(None),
         _ => None,
@@ -7626,6 +7635,25 @@ pub(crate) mod tests {
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.active, HarnessId::CLAUDE);
+
+        // Nor is it offered or taken by name.
+        for c in "/switch ".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/switch claude"]);
+        app.set_input("");
+        app.handle_slash_command("/switch codex");
+        assert_eq!(app.active, HarnessId::CLAUDE);
+        assert!(app.transcript.blocks.iter().any(|b| matches!(
+            b,
+            crate::tui::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
+        )));
+
+        // A picker with no rows closes on Enter, as Esc would.
+        app.modal = Some(Modal::Effort(ListPicker::new(Vec::new())));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
     }
 
     #[test]
@@ -9040,6 +9068,10 @@ pub(crate) mod tests {
     #[test]
     fn slash_commands_and_suggestions() {
         let mut app = test_app(HarnessId::CLAUDE);
+        // Whatever is on this machine's PATH.
+        for o in &mut app.harness_options {
+            o.installed = true;
+        }
         for c in "/pol".chars() {
             app.insert_char(c);
         }
