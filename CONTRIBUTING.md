@@ -109,7 +109,8 @@ version, which dist puts at the top of the GitHub Release. To cut one:
    tests, refactors and fixes to things that never shipped. Link a public
    issue as `([#N](https://github.com/Liquescent-Development/unharness/issues/N))`,
    and docs by their full GitHub URL, since relative links do not resolve
-   on a release page. A test fails until the section is there.
+   on a release page. Keep each entry on one line: a release page shows
+   every line break. A test fails until the section is there.
 3. Commit as `chore: release X.Y.Z`, tag it with `git tag -s vX.Y.Z -m
    "unharness X.Y.Z"`, and push `main`, then the tag.
 
