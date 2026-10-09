@@ -303,17 +303,19 @@ pub struct App {
 
     pub active: HarnessId,
     pub harness_options: Vec<HarnessOption>,
-    /// The policy the user asked for; the effective one is per harness.
-    /// The policy named on the command line or set in the TUI: it holds
-    /// for every harness. Without one each harness has its configured
-    /// default (`policy_requested`).
+    /// The policy named for every harness (`--policy`, or the one a
+    /// resumed conversation was named). Without one each harness has its
+    /// configured default (`policy_requested`).
     pub policy_explicit: Option<PermissionPolicy>,
-    /// What the user chose on a harness where the requested policy is not
-    /// available. It holds for that harness only.
+    /// What the user chose in the TUI, per harness. It holds for that
+    /// harness only, over the policy named for every harness.
     pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
-    /// The policy named in this run (`--policy`, `/policy`): it holds over
-    /// the one a resumed conversation was run with.
+    /// The policy named in this run (`--policy`): it holds over the one a
+    /// resumed conversation was run with.
     run_policy: Option<PermissionPolicy>,
+    /// What was chosen in this run: it holds over a resumed conversation's
+    /// choice for the same harness.
+    run_choices: HashMap<HarnessId, PermissionPolicy>,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
@@ -776,6 +778,7 @@ impl App {
             policy_explicit: init.policy,
             policy_choice: HashMap::new(),
             run_policy: init.policy,
+            run_choices: HashMap::new(),
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
@@ -1016,15 +1019,13 @@ impl App {
         })
     }
 
-    /// The policy asked of the active harness: the requested one, or where
-    /// that is not available, what the user chose there instead.
+    /// The policy asked of the active harness: what the user chose for it,
+    /// else the requested one.
     pub fn wanted_policy(&self) -> PermissionPolicy {
-        let policies = self.caps().permission_policies;
-        let requested = self.policy_requested();
-        match self.policy_choice.get(&self.active) {
-            Some(choice) if resolve_policy(&policies, requested).is_err() => *choice,
-            _ => requested,
-        }
+        self.policy_choice
+            .get(&self.active)
+            .copied()
+            .unwrap_or_else(|| self.policy_requested())
     }
 
     fn policy_resolution(&self) -> Result<PolicyResolution, PolicyUnavailable> {
@@ -1058,13 +1059,14 @@ impl App {
     fn take_conversation_choices(&mut self) {
         let conv = &self.conversation;
         self.policy_explicit = self.run_policy.or(conv.policy);
-        // A choice made for want of a policy holds for the request it was
-        // made for.
+        // A policy named in this run for every harness holds over what the
+        // conversation chose for each, and what this run chose over both.
         self.policy_choice = if self.policy_explicit == conv.policy {
             conv.policy_choices.clone()
         } else {
             HashMap::new()
         };
+        self.policy_choice.extend(&self.run_choices);
 
         for h in std::mem::take(&mut self.chosen_models) {
             if self.run_models.contains(&h) {
@@ -1180,18 +1182,20 @@ impl App {
         }
         let name = self.short_name();
         let requested = self.policy_requested();
-        let why = if self.run_policy.is_some() && self.run_policy != self.conversation.policy {
+        let why = if self.run_choices.contains_key(&self.active) {
+            "chosen in this run".to_string()
+        } else if self.policy_choice.contains_key(&self.active) {
+            format!("chosen for {name} in this conversation")
+        } else if self.run_policy.is_some() && self.run_policy != self.conversation.policy {
             if at_start {
                 "named with --policy".to_string()
             } else {
                 "named in this run".to_string()
             }
-        } else if self.wanted_policy() != requested {
-            format!("chosen where {requested} is not available on {name}")
         } else if now != Some(requested) {
             format!("{requested} is not available on {name}")
         } else if self.policy_explicit.is_some() {
-            "the policy chosen for this conversation".to_string()
+            "the policy named for this conversation".to_string()
         } else {
             "the configured default".to_string()
         };
@@ -3217,17 +3221,9 @@ impl App {
         };
         // Only a prompt that waited for this choice is sent by it.
         let was_waiting = self.effective_policy().is_none();
-        if resolve_policy(&policies, self.policy_requested()).is_err() {
-            // Chosen because the requested policy cannot be had here: the
-            // other harnesses keep the requested one.
-            self.policy_choice.insert(self.active, p);
-        } else {
-            self.policy_explicit = Some(p);
-            self.run_policy = Some(p);
-            // What was chosen in place of another request is not kept for
-            // this one.
-            self.policy_choice.clear();
-        }
+        // For this harness only: the others keep theirs.
+        self.policy_choice.insert(self.active, p);
+        self.run_choices.insert(self.active, p);
         self.transcript
             .push_system(format!("Permission policy: {}", res.effective));
         if let Some(w) = res.warning {
@@ -7078,13 +7074,25 @@ pub(crate) mod tests {
 
     #[test]
     fn policy_resolution_per_harness() {
+        // As with `--policy auto`: agy, which has no `auto`, runs the nearest
+        // less permissive policy and says so.
         let mut app = test_app(HarnessId::CLAUDE);
-        app.set_policy(PermissionPolicy::Auto);
+        app.policy_explicit = Some(PermissionPolicy::Auto);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
         assert!(app.policy_warning().is_none());
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
         assert!(app.policy_warning().unwrap().contains("less permissive"));
+
+        // A policy chosen in the TUI is for the harness it was chosen on.
+        assert!(app.set_policy(PermissionPolicy::Bypass));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.switch_harness(HarnessId::CLAUDE);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
+        app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
     }
 
     #[test]
@@ -7587,27 +7595,29 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::AGY);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
 
-        // A policy set in the TUI is for the run, on every harness.
+        // A policy set in the TUI is for the harness it was set on.
         app.switch_harness(HarnessId::CLAUDE);
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         app.switch_harness(HarnessId::AGY);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
     }
 
     #[test]
-    fn a_choice_made_for_want_of_a_policy_does_not_outlive_the_request() {
+    fn a_choice_made_for_want_of_a_policy_outlives_changes_elsewhere() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
         assert!(app.set_policy(PermissionPolicy::Bypass));
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-        // Another policy is asked for on Claude, then `ask` again.
+        // Other policies are chosen on Claude: agy keeps its own.
         app.switch_harness(HarnessId::CLAUDE);
         assert!(app.set_policy(PermissionPolicy::AcceptEdits));
         assert!(app.set_policy(PermissionPolicy::Ask));
         app.modal = None;
         app.switch_harness(HarnessId::AGY);
-        assert_eq!(app.effective_policy(), None);
-        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        assert!(app.modal.is_none());
     }
 
     /// Claude's configured default is `accept-edits`.
@@ -7769,7 +7779,14 @@ pub(crate) mod tests {
         app.resume_conversation(id);
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
         assert!(notices(&app).iter().any(|n| n
-            == "Claude last ran this conversation under bypass; it continues under ask (named in this run)"));
+            == "Claude last ran this conversation under bypass; it continues under ask (chosen in this run)"));
+
+        // Named with `--policy`, for every harness: over what the
+        // conversation chose for Claude too.
+        let app = resume_with(tmp.path(), Some(PermissionPolicy::AcceptEdits));
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(notices(&app).iter().any(|n| n
+            == "Claude last ran this conversation under bypass; it continues under accept-edits (named with --policy)"));
     }
 
     #[test]
@@ -8560,7 +8577,7 @@ pub(crate) mod tests {
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
-        assert_eq!(app.policy_requested(), PermissionPolicy::AcceptEdits);
+        assert_eq!(app.wanted_policy(), PermissionPolicy::AcceptEdits);
         app.open_effort_picker();
         app.handle_modal_key(key(KeyCode::Esc));
         assert!(app.modal.is_none());

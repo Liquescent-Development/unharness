@@ -30,35 +30,61 @@ A harness that cannot hold to that does not offer `ask`:
 - an ACP agent offers `ask` only when you have marked it as one that asks
   ([ACP agents](acp.md#permissions)).
 
+### Which policy a harness runs under
+
+The first of these that is set, for the harness you are on:
+
+1. the policy you chose for it in the TUI (`Ctrl+P` or `/policy`);
+2. `--policy` or `UNHARNESS_POLICY`, for every harness;
+3. `[harnesses.<name>] default_policy` in the config;
+4. `default_policy` in the config;
+5. `ask`.
+
+A choice in the TUI is for the harness you made it on: switch to
+another and it runs under its own choice or its default, and switching
+back brings yours back. Each harness can have a default of its own:
+
+```toml
+default_policy = "ask"
+
+[harnesses.claude]
+default_policy = "auto"
+
+[harnesses.agy]
+default_policy = "accept-edits"   # agy has no ask
+```
+
+A workspace's settings (`<config dir>/unharness/workspaces/`, see
+[configuration](configuration.md)) can set the same keys for one
+workspace.
+
 ### Fallback
 
-A requested policy that a harness does not have falls back to the nearest
-**less** permissive one it has, never to a more permissive one. When there
-is none (for example `ask`, the default, on a harness without it),
-unharness does not choose for you:
+A policy named before the harness was known (`--policy`,
+`UNHARNESS_POLICY`, a `default_policy`) that the harness does not have
+falls back to the nearest **less** permissive one it has, never to a
+more permissive one, with a warning. When there is none (for example
+`ask`, the default, on a harness without it), unharness does not choose
+for you:
 
-- the TUI opens the policy picker and starts no session until you choose.
-  That choice holds for that harness only, until you set another policy
-  for the run;
+- the TUI opens the policy picker and starts no session until you
+  choose;
 - `--print` and `--no-tui` stop with an error naming the policies you can
   pass with `--policy`.
 
-The fallback is for a policy named before you knew the harness:
-`--policy`, `UNHARNESS_POLICY`, `default_policy`, or one set for the run
-on another harness. What you choose in the TUI is what runs: the picker
-lists every policy but greys out, and will not select, one the harness
-does not have, and `/policy` with such a policy is an error naming the
-ones it has.
+What you choose in the TUI is what runs: the picker lists every policy
+but greys out, and will not select, one the harness does not have, and
+`/policy` with such a policy is an error naming the ones it has.
 
 ### Resuming a conversation
 
-A conversation keeps the policy you chose for it (`--policy`,
-`UNHARNESS_POLICY`, `/policy`, or the picker where that policy was not
-available), and `--resume`, `Ctrl+R` and `/resume` bring it back. A
-policy named in the run you resume it in wins: on the command line, or
-with `/policy` before `Ctrl+R`. A conversation that never had a policy
-named follows `default_policy` as it is when you resume it, whatever the
-conversation open before it ran under. When the policy a harness
+A conversation keeps the policies you chose for it, for each harness,
+and one named with `--policy` or `UNHARNESS_POLICY`; `--resume`,
+`Ctrl+R` and `/resume` bring them back. What you named in the run you
+resume it in wins: `--policy` over everything the conversation had, and
+a policy chosen in the TUI before `Ctrl+R` over the conversation's
+choice for that harness. A harness the conversation chose nothing for
+follows its default as it is when you resume. When the policy a harness
 resumes under is not the one it last ran under (a policy named in the
 run, a changed default, a fallback), the transcript says so.
 

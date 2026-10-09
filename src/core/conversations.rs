@@ -188,12 +188,13 @@ pub struct Conversation {
     /// was forked from: their next session must branch it, not reattach.
     #[serde(default)]
     pub fork_pending: Vec<HarnessId>,
-    /// The policy named for every harness (`--policy`, `/policy`); `None`
-    /// when each followed its configured default.
+    /// The policy named for every harness (`--policy`, and `/policy` in
+    /// an older unharness); `None` when each followed its configured
+    /// default.
     #[serde(default)]
     pub policy: Option<PermissionPolicy>,
-    /// What was chosen on a harness where the named policy was not
-    /// available.
+    /// What was chosen in the TUI for each harness (in an older unharness
+    /// only where the named policy was not available).
     #[serde(default)]
     pub policy_choices: HashMap<HarnessId, PermissionPolicy>,
     /// The policy each harness last ran under, to tell the user when a
