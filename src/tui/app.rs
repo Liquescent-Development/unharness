@@ -3200,12 +3200,17 @@ impl App {
         self.require_policy();
     }
 
-    /// Returns whether `p` could be set on the active harness.
+    /// Returns whether `p` could be set on the active harness. Only a
+    /// policy it has can be: what the user picks is what runs.
     pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
         let policies = self.caps().permission_policies;
         let res = match resolve_policy(&policies, p) {
-            Ok(res) => res,
-            Err(e) => {
+            Ok(res) if res.effective == p => res,
+            _ => {
+                let e = PolicyUnavailable {
+                    requested: p,
+                    supported: self.offered_policies(),
+                };
                 self.transcript.push_error(e.to_string());
                 return false;
             }
@@ -3717,12 +3722,32 @@ impl App {
         self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
     }
 
+    /// The policies the active harness has, least permissive first.
+    pub fn offered_policies(&self) -> Vec<PermissionPolicy> {
+        let caps = self.caps();
+        PermissionPolicy::ALL
+            .into_iter()
+            .filter(|p| caps.supports_policy(*p).is_some())
+            .collect()
+    }
+
+    /// Every policy is listed; one the harness does not have cannot be
+    /// chosen. The cursor starts on the wanted policy, else on the one in
+    /// effect, else on the least permissive one there is.
     pub fn open_policy_picker(&mut self) {
-        let idx = PermissionPolicy::ALL
-            .iter()
-            .position(|p| *p == self.wanted_policy());
+        let offered = self.offered_policies();
+        let name = self.display_name();
+        let wanted = self.wanted_policy();
+        let start = if offered.contains(&wanted) {
+            Some(wanted)
+        } else {
+            self.effective_policy()
+        };
+        let idx = start.and_then(|s| PermissionPolicy::ALL.iter().position(|p| *p == s));
         self.modal = Some(Modal::Policy(
-            ListPicker::new(PermissionPolicy::ALL.to_vec()).with_selected(idx),
+            ListPicker::new(PermissionPolicy::ALL.to_vec())
+                .with_disabled(|p| (!offered.contains(p)).then(|| format!("not offered by {name}")))
+                .with_selected(idx),
         ));
     }
 
@@ -4105,9 +4130,12 @@ impl App {
                     Some(p) => {
                         self.set_policy(p);
                     }
-                    None => self.transcript.push_error(format!(
-                        "unknown policy '{a}' (ask, accept-edits, auto, bypass)"
-                    )),
+                    None => {
+                        let offered: Vec<&str> =
+                            self.offered_policies().iter().map(|p| p.as_str()).collect();
+                        self.transcript
+                            .push_error(format!("unknown policy '{a}' ({})", offered.join(", ")));
+                    }
                 },
                 None => self.open_policy_picker(),
             },
@@ -4381,7 +4409,7 @@ impl App {
                     }
                 }
                 ("/policy", Some(s)) => {
-                    for p in PermissionPolicy::ALL {
+                    for p in self.offered_policies() {
                         if p.as_str().starts_with(s) {
                             out.push((format!("/policy {p}"), p.description().to_string()));
                         }
@@ -7105,12 +7133,19 @@ pub(crate) mod tests {
         assert!(!app.is_generating);
         assert!(matches!(app.modal, Some(Modal::Policy(_))));
 
-        // `ask` is the first row and cannot be taken: the picker stays.
-        app.handle_modal_key(key(KeyCode::Enter));
-        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        // `ask` cannot be chosen: the cursor starts on the least permissive
+        // policy there is, and never lands on `ask`.
+        let current = |app: &App| match &app.modal {
+            Some(Modal::Policy(p)) => p.current().copied(),
+            _ => None,
+        };
+        assert_eq!(current(&app), Some(PermissionPolicy::AcceptEdits));
+        app.handle_modal_key(key(KeyCode::Up));
+        assert_eq!(current(&app), Some(PermissionPolicy::Bypass));
+        app.handle_modal_key(key(KeyCode::Down));
+        assert_eq!(current(&app), Some(PermissionPolicy::AcceptEdits));
         assert_eq!(app.effective_policy(), None);
 
-        app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
@@ -8650,6 +8685,57 @@ pub(crate) mod tests {
         }
         app.accept_suggestion();
         assert_eq!(app.input, "src/main.rs ");
+    }
+
+    /// pi has `ask` and `bypass` only: the others are listed and cannot
+    /// be chosen, from the picker, `/policy` or completion.
+    #[test]
+    fn a_policy_the_harness_lacks_cannot_be_chosen() {
+        let mut app = test_app(HarnessId::PI);
+        assert_eq!(
+            app.offered_policies(),
+            vec![PermissionPolicy::Ask, PermissionPolicy::Bypass]
+        );
+        app.open_policy_picker();
+        let Some(Modal::Policy(p)) = &app.modal else {
+            panic!("no picker");
+        };
+        assert_eq!(p.items.len(), 4);
+        assert_eq!(p.disabled_reason(1), Some("not offered by pi"));
+        assert_eq!(p.disabled_reason(2), Some("not offered by pi"));
+        assert_eq!(p.current(), Some(&PermissionPolicy::Ask));
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+
+        // Not `ask` in its place: an error, and nothing changes.
+        app.handle_slash_command("/policy auto");
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        assert!(app.transcript.blocks.iter().any(
+            |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("'auto'") && e.contains("ask, bypass"))
+        ));
+
+        for c in "/policy a".chars() {
+            app.insert_char(c);
+        }
+        let offered: Vec<&str> = app.suggestions.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(offered, ["/policy ask"]);
+    }
+
+    /// A wanted policy that runs as a less permissive one: the cursor is on
+    /// the one that runs.
+    #[test]
+    fn the_policy_picker_starts_on_the_policy_in_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::Auto));
+        app.switch_harness(HarnessId::PI);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        app.open_policy_picker();
+        assert!(
+            matches!(&app.modal, Some(Modal::Policy(p)) if p.current() == Some(&PermissionPolicy::Ask))
+        );
     }
 
     #[test]

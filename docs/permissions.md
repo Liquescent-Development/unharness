@@ -43,6 +43,13 @@ unharness does not choose for you:
 - `--print` and `--no-tui` stop with an error naming the policies you can
   pass with `--policy`.
 
+The fallback is for a policy named before you knew the harness:
+`--policy`, `UNHARNESS_POLICY`, `default_policy`, or one set for the run
+on another harness. What you choose in the TUI is what runs: the picker
+lists every policy but greys out, and will not select, one the harness
+does not have, and `/policy` with such a policy is an error naming the
+ones it has.
+
 ### Resuming a conversation
 
 A conversation keeps the policy you chose for it (`--policy`,

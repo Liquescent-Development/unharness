@@ -30,7 +30,6 @@ use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
 use crate::core::{
     HarnessId, HookOutcome, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus,
-    resolve_policy,
 };
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -1776,27 +1775,32 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Modal::Policy(p) => {
             let caps = app.caps();
+            let effective = app.effective_policy();
+            let mut lines = picker_lines(p, Color::Green, |pol| {
+                let degraded = caps
+                    .supports_policy(*pol)
+                    .and_then(|s| s.degraded)
+                    .map(|d| format!(" (degraded: {d})"))
+                    .unwrap_or_default();
+                (
+                    pol.as_str().to_string(),
+                    format!("{}{}", pol.description(), degraded),
+                    Some(*pol) == effective,
+                )
+            });
+            // What was asked for cannot be had here: say so above the list.
+            let wanted = app.wanted_policy();
+            if caps.supports_policy(wanted).is_none() {
+                let mut note = format!(" {wanted} is not offered by {}", app.display_name());
+                if let Some(e) = effective {
+                    note.push_str(&format!("; running {e}"));
+                }
+                lines[0] = Line::from(Span::styled(note, Style::default().fg(Color::Yellow)));
+            }
             (
                 centered_rect(80, 50, area),
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
-                picker_lines(p, Color::Green, |pol| {
-                    let support = match resolve_policy(&caps.permission_policies, *pol) {
-                        Ok(res) if res.effective == *pol => caps
-                            .supports_policy(*pol)
-                            .and_then(|s| s.degraded)
-                            .map(|d| format!(" (degraded: {d})"))
-                            .unwrap_or_default(),
-                        Ok(res) => {
-                            format!(" (not supported here; falls back to {})", res.effective)
-                        }
-                        Err(_) => " (not available here)".to_string(),
-                    };
-                    (
-                        pol.as_str().to_string(),
-                        format!("{}{}", pol.description(), support),
-                        *pol == app.wanted_policy(),
-                    )
-                }),
+                lines,
             )
         }
         Modal::Sandbox(p) => {
