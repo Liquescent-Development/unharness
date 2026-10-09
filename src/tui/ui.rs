@@ -1770,46 +1770,76 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             }),
         ),
         Modal::Policy(p) => {
+            let popup = centered_rect(80, 50, area);
+            let width = popup.width.saturating_sub(2) as usize;
             let caps = app.caps();
             let effective = app.effective_policy();
+            let degraded =
+                |pol: &PermissionPolicy| caps.supports_policy(*pol).and_then(|s| s.degraded);
             let mut lines = picker_lines(p, Color::Green, |pol| {
-                let degraded = caps
-                    .supports_policy(*pol)
-                    .and_then(|s| s.degraded)
-                    .map(|d| format!(" (degraded: {d})"))
-                    .unwrap_or_default();
+                let note = if degraded(pol).is_some() {
+                    " (degraded)"
+                } else {
+                    ""
+                };
                 (
                     pol.as_str().to_string(),
-                    format!("{}{}", pol.description(), degraded),
+                    format!("{}{note}", pol.description()),
                     Some(*pol) == effective,
                 )
             });
             // What was asked for cannot be had here: say so above the list.
             let wanted = app.wanted_policy();
             if caps.supports_policy(wanted).is_none() {
-                let mut note = format!(" {wanted} is not offered by {}", app.display_name());
+                let mut note = format!("{wanted} is not offered by {}", app.display_name());
                 if let Some(e) = effective {
                     note.push_str(&format!("; running {e}"));
                 }
-                lines[0] = Line::from(Span::styled(note, Style::default().fg(Color::Yellow)));
+                let note =
+                    wrap_prefixed_text(" ", &note, width, Style::default().fg(Color::Yellow));
+                lines.splice(0..1, note);
+            }
+            // How the selected policy falls short here, in full.
+            if let Some(d) = p.current().and_then(degraded) {
+                lines.push(Line::default());
+                lines.extend(wrap_prefixed_text(
+                    " ",
+                    &format!("degraded: {d}"),
+                    width,
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             (
-                centered_rect(80, 50, area),
+                popup,
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
                 lines,
             )
         }
-        Modal::Sandbox(p) => (
-            centered_rect(80, 50, area),
-            modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
-            picker_lines(p, Color::Magenta, |level| {
+        Modal::Sandbox(p) => {
+            let popup = centered_rect(80, 50, area);
+            let width = popup.width.saturating_sub(2) as usize;
+            let mut lines = picker_lines(p, Color::Magenta, |level| {
                 (
                     level.as_str().to_string(),
                     level.description().to_string(),
                     *level == app.sandbox_level().0,
                 )
-            }),
-        ),
+            });
+            if let Err(why) = &app.sandbox.backend {
+                let note = wrap_prefixed_text(
+                    " ",
+                    &format!("no sandbox here: {why}"),
+                    width,
+                    Style::default().fg(Color::Yellow),
+                );
+                lines.splice(0..1, note);
+            }
+            (
+                popup,
+                modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
+                lines,
+            )
+        }
         Modal::Resume(p) => (
             centered_rect(85, 60, area),
             modal_block(format!(" Resume conversation ({NAV}) "), Color::Blue),
@@ -2474,6 +2504,31 @@ mod tests {
         let w = wrap_words(&"x".repeat(25), 10);
         assert_eq!(w.len(), 3);
         assert_eq!(wrap_words("", 10), vec![String::new()]);
+    }
+
+    /// A reason too long for the picker's width is wrapped, not cut off.
+    #[test]
+    fn long_picker_notes_are_wrapped() {
+        let joined = |rows: Vec<String>| {
+            rows.iter()
+                .map(|r| r.trim_matches(|c: char| c == '│' || c.is_whitespace()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        let why = "Landlock is not available (Function not implemented (os error 38))";
+        app.sandbox.backend = Err(why.into());
+        app.open_sandbox_picker();
+        let text = joined(screen(&mut app, 60, 30).0);
+        assert!(text.contains("(os error 38))"), "{text}");
+        assert!(text.contains("no sandbox here"), "{text}");
+
+        // pi's `bypass` and its note, in full while it is selected.
+        let mut app = test_app(HarnessId::PI);
+        app.open_policy_picker();
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::Down));
+        let text = joined(screen(&mut app, 60, 30).0);
+        assert!(text.contains("are auto-accepted"), "{text}");
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> (Vec<String>, (u16, u16)) {

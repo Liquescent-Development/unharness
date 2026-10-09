@@ -3764,12 +3764,12 @@ impl App {
     pub fn open_sandbox_picker(&mut self) {
         let wanted = self.sandbox_level().0;
         let idx = SandboxLevel::ALL.iter().position(|l| *l == wanted);
-        let unavailable = self.sandbox.backend.as_ref().err();
+        let unavailable = self.sandbox.backend.is_err();
         self.modal = Some(Modal::Sandbox(
             ListPicker::new(SandboxLevel::ALL.to_vec())
-                .with_disabled(|l| match unavailable {
-                    Some(why) if *l != SandboxLevel::Off => Some(format!("not available: {why}")),
-                    _ => None,
+                // Why is said once, above the list.
+                .with_disabled(|l| {
+                    (unavailable && *l != SandboxLevel::Off).then(|| "no sandbox here".to_string())
                 })
                 .with_selected(idx),
         ));
@@ -4160,9 +4160,17 @@ impl App {
                     Some(l) => {
                         self.set_sandbox(l);
                     }
-                    None => self.transcript.push_error(format!(
-                        "unknown sandbox level '{a}' (read-only, workspace-write, off)"
-                    )),
+                    None => {
+                        let levels: Vec<&str> = self
+                            .available_sandbox_levels()
+                            .iter()
+                            .map(|l| l.as_str())
+                            .collect();
+                        self.transcript.push_error(format!(
+                            "unknown sandbox level '{a}' ({})",
+                            levels.join(", ")
+                        ));
+                    }
                 },
                 None => self.open_sandbox_picker(),
             },
@@ -7473,7 +7481,7 @@ pub(crate) mod tests {
         let Some(Modal::Sandbox(p)) = &app.modal else {
             panic!("no picker");
         };
-        assert_eq!(p.disabled_reason(0), Some("not available: no kernel"));
+        assert_eq!(p.disabled_reason(0), Some("no sandbox here"));
         assert_eq!(p.current(), Some(&SandboxLevel::Off));
         app.handle_modal_key(key(KeyCode::Up));
         app.handle_modal_key(key(KeyCode::Down));
