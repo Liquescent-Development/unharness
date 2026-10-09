@@ -137,8 +137,10 @@ prompt, so there such a command is an error.
 
 Once the agent's session has started, the autocomplete list offers the
 commands it reports (Claude Code's, pi's and an ACP agent's), after
-unharness's own and marked with the harness's name. Before the first
-prompt the list has only unharness's.
+unharness's own and marked with the harness's name. The harness is
+started as soon as unharness is (and after a switch or a resume), before
+anything is sent to it, so its commands are there before the first
+prompt; a list opened while it starts takes them in when they come.
 
 unharness's own commands come first: `/clear` clears unharness's
 transcript. `\/` sends the rest as typed: `\/clear` is Claude Code's
