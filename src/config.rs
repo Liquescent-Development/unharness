@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::core::PermissionPolicy;
 use crate::core::checkpoints::project_key;
 use crate::core::mcp::{self, McpServer, McpServerSettings};
+use crate::core::rules::{Scope, write_atomic};
 use crate::core::sandbox;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -148,7 +150,7 @@ impl Config {
     }
 
     /// Read and parse a config file; `None` when there is none.
-    fn load_file(path: &Path) -> Result<Option<Self>> {
+    pub(crate) fn load_file(path: &Path) -> Result<Option<Self>> {
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -200,6 +202,65 @@ impl Config {
         }
         std::fs::write(&path, toml::to_string_pretty(self)?)?;
         Ok(path)
+    }
+
+    /// The settings file of `scope` under `dir` (`<config dir>/unharness`);
+    /// `None` for a workspace's when there is no workspace.
+    pub fn scoped_path(dir: &Path, scope: Scope, root: Option<&Path>) -> Option<PathBuf> {
+        match scope {
+            Scope::Global => Some(dir.join("config.toml")),
+            Scope::Workspace => root.map(|r| Self::workspace_path_in(&dir.join("workspaces"), r)),
+        }
+    }
+
+    /// Set `[harnesses.<harness>] default_policy` in the file at `path`,
+    /// leaving the rest of it as it was, comments included. A file that
+    /// is a link stays one.
+    pub fn set_harness_default_policy(
+        path: &Path,
+        harness: &str,
+        policy: PermissionPolicy,
+    ) -> Result<()> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        let mut doc: toml_edit::DocumentMut = content
+            .parse()
+            .with_context(|| format!("{} is not valid TOML", path.display()))?;
+        let harnesses = doc
+            .entry("harnesses")
+            .or_insert_with(|| {
+                let mut t = toml_edit::Table::new();
+                t.set_implicit(true);
+                toml_edit::Item::Table(t)
+            })
+            .as_table_like_mut()
+            .with_context(|| format!("harnesses in {} is not a table", path.display()))?;
+        let created = !harnesses.contains_key(harness);
+        let settings = harnesses
+            .entry(harness)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_like_mut()
+            .with_context(|| format!("harnesses.{harness} in {} is not a table", path.display()))?;
+        settings.insert("default_policy", toml_edit::value(policy.as_str()));
+        // Comments at the end of the file would follow a new table: it goes
+        // after them instead.
+        let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
+        if created && !trailing.trim().is_empty() {
+            doc.set_trailing("");
+            if let Some(t) = doc["harnesses"][harness].as_table_mut() {
+                t.decor_mut().set_prefix(format!("{trailing}\n"));
+            }
+        }
+        let content = doc.to_string();
+        // What is written has to read back as a config.
+        toml::from_str::<Config>(&content)
+            .with_context(|| format!("{} is not a valid unharness config", path.display()))?;
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        write_atomic(&target, &content)
+            .with_context(|| format!("could not write {}", path.display()))
     }
 
     /// Settings for one harness, if configured.
@@ -319,6 +380,107 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_policy_is_set_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("unharness");
+
+        // No file yet: one with just the setting.
+        let global = Config::scoped_path(&dir, Scope::Global, None).unwrap();
+        Config::set_harness_default_policy(&global, "agy", PermissionPolicy::AcceptEdits).unwrap();
+        let written = std::fs::read_to_string(&global).unwrap();
+        assert_eq!(
+            written,
+            "[harnesses.agy]\ndefault_policy = \"accept-edits\"\n"
+        );
+
+        // An existing one keeps its comments, order and other settings.
+        let before = "# mine\ndefault_policy = \"ask\" # everywhere\n\n\
+                      [harnesses.claude]\nbinary = \"/opt/claude\" # pinned\n\
+                      default_policy = \"ask\"\n";
+        std::fs::write(&global, before).unwrap();
+        Config::set_harness_default_policy(&global, "claude", PermissionPolicy::Auto).unwrap();
+        Config::set_harness_default_policy(&global, "pi", PermissionPolicy::Bypass).unwrap();
+        let after = std::fs::read_to_string(&global).unwrap();
+        assert!(after.starts_with("# mine\ndefault_policy = \"ask\" # everywhere\n"));
+        assert!(after.contains("binary = \"/opt/claude\" # pinned"));
+        let cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(cfg.default_policy.as_deref(), Some("ask"));
+        assert_eq!(
+            cfg.harnesses["claude"].default_policy.as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            cfg.harnesses["pi"].default_policy.as_deref(),
+            Some("bypass")
+        );
+
+        // A comment at the end stays with the table it follows.
+        std::fs::write(
+            &global,
+            "[harnesses.claude]\nbinary = \"x\"\n# extra_args = []\n",
+        )
+        .unwrap();
+        Config::set_harness_default_policy(&global, "pi", PermissionPolicy::Ask).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&global).unwrap(),
+            "[harnesses.claude]\nbinary = \"x\"\n# extra_args = []\n\n\
+             [harnesses.pi]\ndefault_policy = \"ask\"\n"
+        );
+
+        // A workspace's file is under the config directory, never in it.
+        let root = tmp.path().join("ws");
+        std::fs::create_dir(&root).unwrap();
+        let local = Config::scoped_path(&dir, Scope::Workspace, Some(&root)).unwrap();
+        assert!(local.starts_with(dir.join("workspaces")));
+        assert_eq!(Config::scoped_path(&dir, Scope::Workspace, None), None);
+        Config::set_harness_default_policy(&local, "claude", PermissionPolicy::Ask).unwrap();
+        let ws = Config::load_workspace_in(&dir.join("workspaces"), &root)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ws.harnesses["claude"].default_policy.as_deref(),
+            Some("ask")
+        );
+        assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_default_policy_is_written_through_a_link_keeping_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("dotfiles/config.toml");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "# secrets below\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = tmp.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        Config::set_harness_default_policy(&link, "pi", PermissionPolicy::Ask).unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        let content = std::fs::read_to_string(&real).unwrap();
+        assert_eq!(
+            content,
+            "# secrets below\n\n[harnesses.pi]\ndefault_policy = \"ask\"\n"
+        );
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_config_that_cannot_take_the_setting_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        for content in ["harnesses = 3\n", "[harnesses]\npi = \"x\"\n", "not toml ["] {
+            std::fs::write(&path, content).unwrap();
+            assert!(
+                Config::set_harness_default_policy(&path, "pi", PermissionPolicy::Ask).is_err()
+            );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
 
     #[test]
     fn test_config_defaults() {

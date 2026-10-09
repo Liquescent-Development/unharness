@@ -59,6 +59,12 @@ A workspace's settings (`<config dir>/unharness/workspaces/`, see
 workspace. `unharness doctor` shows each harness's default, where it is
 set, and what it comes to on that harness.
 
+To save one from the TUI, press `d` on a policy in the picker: it asks
+whether for this workspace or (`Tab`) for every workspace, and `Enter`
+writes `default_policy` under `[harnesses.<name>]` in that file, leaving
+the rest of the file as it was, and switches to the policy. Nothing is
+written to the workspace itself.
+
 ### Fallback
 
 A policy named before the harness was known (`--policy`,

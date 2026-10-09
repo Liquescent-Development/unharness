@@ -19,7 +19,7 @@ use super::code::{
     sanitize, wrap_words,
 };
 use super::markdown::render_markdown_to_lines;
-use super::modal::{AlwaysDraft, ListPicker, Modal, QuestionModal, takes_text};
+use super::modal::{AlwaysDraft, ListPicker, Modal, PolicyPicker, QuestionModal, takes_text};
 use super::prompt;
 use super::transcript::{
     Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
@@ -1056,6 +1056,44 @@ fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Under the policy list: how to save the selected policy as the
+/// harness's default, or where it is about to be saved.
+fn policy_save_lines(p: &PolicyPicker, harness: &str, width: usize) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::DarkGray);
+    let place = |scope: Scope| match scope {
+        Scope::Workspace => "this workspace",
+        Scope::Global => "every workspace",
+    };
+    let (Some(scope), Some(pol)) = (p.save, p.list.current()) else {
+        return vec![Line::from(Span::styled(
+            format!(" d save as {harness}'s default"),
+            gray,
+        ))];
+    };
+    let mut lines = wrap_prefixed_text(
+        " ",
+        &format!(
+            "Save {pol} as {harness}'s default policy, for {}?",
+            place(scope)
+        ),
+        width,
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    );
+    let mut hint = " Enter save and use it".to_string();
+    if p.has_workspace {
+        let other = match scope {
+            Scope::Workspace => Scope::Global,
+            Scope::Global => Scope::Workspace,
+        };
+        hint.push_str(&format!(" · Tab {}", place(other)));
+    }
+    hint.push_str(" · Esc back");
+    lines.push(Line::from(Span::styled(hint, gray)));
+    lines
+}
+
 pub fn wrap_prefixed_text(
     prefix: &'static str,
     text: &str,
@@ -1776,7 +1814,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             let effective = app.effective_policy();
             let degraded =
                 |pol: &PermissionPolicy| caps.supports_policy(*pol).and_then(|s| s.degraded);
-            let mut lines = picker_lines(p, Color::Green, |pol| {
+            let mut lines = picker_lines(&p.list, Color::Green, |pol| {
                 let note = if degraded(pol).is_some() {
                     " (degraded)"
                 } else {
@@ -1800,7 +1838,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                 lines.splice(0..1, note);
             }
             // How the selected policy falls short here, in full.
-            if let Some(d) = p.current().and_then(degraded) {
+            if let Some(d) = p.list.current().and_then(degraded) {
                 lines.push(Line::default());
                 lines.extend(wrap_prefixed_text(
                     " ",
@@ -1809,6 +1847,8 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     Style::default().fg(Color::Yellow),
                 ));
             }
+            lines.push(Line::default());
+            lines.extend(policy_save_lines(p, app.short_name(), width));
             (
                 popup,
                 modal_block(format!(" Permission policy ({NAV}) "), Color::Green),
@@ -2529,6 +2569,16 @@ mod tests {
         app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::Down));
         let text = joined(screen(&mut app, 60, 30).0);
         assert!(text.contains("are auto-accepted"), "{text}");
+        assert!(text.contains("d save as pi's default"), "{text}");
+
+        // `d`: where it is about to be saved.
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::Char('d')));
+        let text = joined(screen(&mut app, 100, 30).0);
+        assert!(
+            text.contains("Save bypass as pi's default policy, for this workspace?"),
+            "{text}"
+        );
+        assert!(text.contains("Tab every workspace"), "{text}");
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> (Vec<String>, (u16, u16)) {

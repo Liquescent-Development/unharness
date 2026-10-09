@@ -16,7 +16,8 @@ use super::drop;
 use super::files;
 use super::history::PromptHistory;
 use super::modal::{
-    AlwaysDraft, HarnessOption, ListPicker, Modal, ProviderOption, QuestionStep, RewindOption,
+    AlwaysDraft, HarnessOption, ListPicker, Modal, PolicyPicker, ProviderOption, QuestionStep,
+    RewindOption,
 };
 use super::prompt;
 use super::selection::{self, Granularity, Point, Selection};
@@ -3243,6 +3244,62 @@ impl App {
         true
     }
 
+    /// Save `p` as the active harness's default policy in the settings of
+    /// `scope` (under the config directory, never in the workspace), and
+    /// choose it. Returns whether both were done.
+    pub fn save_default_policy(&mut self, p: PermissionPolicy, scope: Scope) -> bool {
+        if self.caps().supports_policy(p).is_none() {
+            return self.set_policy(p);
+        }
+        let name = self.short_name();
+        let id = self.active.as_str();
+        let root = self.workspace_root.clone();
+        let Some(dir) = self.rules.config_dir().map(Path::to_path_buf) else {
+            self.transcript
+                .push_error("there is no config directory to save the default policy in");
+            return false;
+        };
+        let Some(path) = Config::scoped_path(&dir, scope, root.as_deref()) else {
+            self.transcript
+                .push_error("there is no workspace to save the default policy for");
+            return false;
+        };
+        if let Err(e) = Config::set_harness_default_policy(&path, id, p) {
+            self.transcript
+                .push_error(format!("could not save the default policy: {e:#}"));
+            return false;
+        }
+        let place = match scope {
+            Scope::Workspace => "for this workspace",
+            Scope::Global => "for every workspace",
+        };
+        self.transcript.push_system(format!(
+            "Saved {p} as {name}'s default policy {place} ({})",
+            path.display()
+        ));
+        // What this run reads as the default from now on, unless the
+        // workspace's own settings name another.
+        let in_workspace = match scope {
+            Scope::Global => Config::scoped_path(&dir, Scope::Workspace, root.as_deref())
+                .and_then(|w| Config::load_file(&w).ok().flatten())
+                .and_then(|c| c.harness(id)?.default_policy.clone()),
+            Scope::Workspace => None,
+        };
+        match in_workspace {
+            Some(w) => self.transcript.push_notice(format!(
+                "this workspace's settings make {w} {name}'s default here"
+            )),
+            None => {
+                self.config
+                    .harnesses
+                    .entry(id.to_string())
+                    .or_default()
+                    .default_policy = Some(p.to_string());
+            }
+        }
+        self.set_policy(p)
+    }
+
     /// Choose the sandbox level for the run. Returns whether it could be
     /// set. The sandbox is applied when a process is spawned, so a live
     /// session is shut down and comes back under the new level, resumed
@@ -3742,11 +3799,13 @@ impl App {
             self.effective_policy()
         };
         let idx = start.and_then(|s| PermissionPolicy::ALL.iter().position(|p| *p == s));
-        self.modal = Some(Modal::Policy(
-            ListPicker::new(PermissionPolicy::ALL.to_vec())
+        self.modal = Some(Modal::Policy(PolicyPicker {
+            list: ListPicker::new(PermissionPolicy::ALL.to_vec())
                 .with_disabled(|p| (!offered.contains(p)).then(|| format!("not offered by {name}")))
                 .with_selected(idx),
-        ));
+            save: None,
+            has_workspace: self.rules.has_workspace(),
+        }));
     }
 
     /// The sandbox levels there is a backend for.
@@ -3815,8 +3874,29 @@ impl App {
             }),
             Modal::Effort(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|e| ModalChoice::Effort(e.clone())))),
-            Modal::Policy(p) => picker_nav(p, key.code)
-                .map(|c| c.and_then(|_| p.current().map(|pol| ModalChoice::Policy(*pol)))),
+            // `d` asks where to save the policy as the harness's default;
+            // Enter then saves it there and chooses it.
+            Modal::Policy(p) => match (p.save, key.code) {
+                (Some(scope), KeyCode::Enter) => p
+                    .list
+                    .current()
+                    .map(|pol| Some(ModalChoice::SavePolicy(*pol, scope))),
+                (Some(_), KeyCode::Tab) => {
+                    p.toggle_scope();
+                    None
+                }
+                (Some(_), KeyCode::Esc) => {
+                    p.save = None;
+                    None
+                }
+                (Some(_), _) => None,
+                (None, KeyCode::Char('d')) => {
+                    p.start_save();
+                    None
+                }
+                (None, code) => picker_nav(&mut p.list, code)
+                    .map(|c| c.and_then(|_| p.list.current().map(|pol| ModalChoice::Policy(*pol)))),
+            },
             Modal::Sandbox(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|l| ModalChoice::Sandbox(*l)))),
             Modal::Subagents(p) => picker_nav(p, key.code)
@@ -4078,6 +4158,11 @@ impl App {
                     ModalChoice::Policy(p) => {
                         // An unavailable policy leaves the picker open.
                         if self.set_policy(p) {
+                            self.modal = None;
+                        }
+                    }
+                    ModalChoice::SavePolicy(p, scope) => {
+                        if self.save_default_policy(p, scope) {
                             self.modal = None;
                         }
                     }
@@ -5189,6 +5274,8 @@ enum ModalChoice {
     Model(String),
     Effort(String),
     Policy(PermissionPolicy),
+    /// Choose the policy and save it as the harness's default.
+    SavePolicy(PermissionPolicy, Scope),
     Sandbox(SandboxLevel),
     Subagent(String),
     Resume(String),
@@ -7168,7 +7255,7 @@ pub(crate) mod tests {
         // `ask` cannot be chosen: the cursor starts on the least permissive
         // policy there is, and never lands on `ask`.
         let current = |app: &App| match &app.modal {
-            Some(Modal::Policy(p)) => p.current().copied(),
+            Some(Modal::Policy(p)) => p.list.current().copied(),
             _ => None,
         };
         assert_eq!(current(&app), Some(PermissionPolicy::AcceptEdits));
@@ -8774,10 +8861,10 @@ pub(crate) mod tests {
         let Some(Modal::Policy(p)) = &app.modal else {
             panic!("no picker");
         };
-        assert_eq!(p.items.len(), 4);
-        assert_eq!(p.disabled_reason(1), Some("not offered by pi"));
-        assert_eq!(p.disabled_reason(2), Some("not offered by pi"));
-        assert_eq!(p.current(), Some(&PermissionPolicy::Ask));
+        assert_eq!(p.list.items.len(), 4);
+        assert_eq!(p.list.disabled_reason(1), Some("not offered by pi"));
+        assert_eq!(p.list.disabled_reason(2), Some("not offered by pi"));
+        assert_eq!(p.list.current(), Some(&PermissionPolicy::Ask));
         app.handle_modal_key(key(KeyCode::Down));
         app.handle_modal_key(key(KeyCode::Enter));
         assert!(app.modal.is_none());
@@ -8797,6 +8884,78 @@ pub(crate) mod tests {
         assert_eq!(offered, ["/policy ask"]);
     }
 
+    /// `d` in the policy picker saves the selected policy as the harness's
+    /// default, in this workspace's settings or (Tab) the global ones, both
+    /// under the config directory, and chooses it.
+    #[test]
+    fn the_policy_picker_saves_a_harness_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::PI, None, false);
+        let dir = app.cwd.join(".unharness/test-config");
+        let saving = |app: &App| match &app.modal {
+            Some(Modal::Policy(p)) => p.save,
+            _ => None,
+        };
+
+        // This workspace: Esc goes back to the list, nothing is written.
+        app.open_policy_picker();
+        app.handle_modal_key(key(KeyCode::Down));
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        assert_eq!(saving(&app), Some(Scope::Workspace));
+        app.handle_modal_key(key(KeyCode::Esc));
+        assert!(matches!(app.modal, Some(Modal::Policy(_))) && saving(&app).is_none());
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
+        let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+        let saved = Config::load_file(&local).unwrap().unwrap();
+        assert_eq!(
+            saved.harnesses["pi"].default_policy.as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+            PermissionPolicy::Bypass
+        );
+        assert!(!dir.join("config.toml").exists());
+
+        // Every workspace, while this one's settings name another: saved,
+        // and the user told which holds here.
+        app.open_policy_picker();
+        app.handle_modal_key(key(KeyCode::Up));
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        app.handle_modal_key(key(KeyCode::Tab));
+        assert_eq!(saving(&app), Some(Scope::Global));
+        app.handle_modal_key(key(KeyCode::Enter));
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        let global = Config::load_file(&dir.join("config.toml"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            global.harnesses["pi"].default_policy.as_deref(),
+            Some("ask")
+        );
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n == "this workspace's settings make bypass pi's default here")
+        );
+        assert_eq!(
+            crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+            PermissionPolicy::Bypass
+        );
+
+        // A row that cannot be chosen cannot be saved either.
+        app.open_policy_picker();
+        if let Some(Modal::Policy(p)) = &mut app.modal {
+            p.list.selected = 1;
+        }
+        app.handle_modal_key(key(KeyCode::Char('d')));
+        assert!(saving(&app).is_none());
+    }
+
     /// A wanted policy that runs as a less permissive one: the cursor is on
     /// the one that runs.
     #[test]
@@ -8808,7 +8967,7 @@ pub(crate) mod tests {
         assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
         app.open_policy_picker();
         assert!(
-            matches!(&app.modal, Some(Modal::Policy(p)) if p.current() == Some(&PermissionPolicy::Ask))
+            matches!(&app.modal, Some(Modal::Policy(p)) if p.list.current() == Some(&PermissionPolicy::Ask))
         );
     }
 

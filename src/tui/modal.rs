@@ -105,6 +105,38 @@ pub struct HarnessOption {
     pub interactive_permissions: bool,
 }
 
+/// The policy picker. `save` is where the selected policy is to be saved
+/// as the harness's default, once `d` asked for that.
+#[derive(Debug, Clone)]
+pub struct PolicyPicker {
+    pub list: ListPicker<PermissionPolicy>,
+    pub save: Option<Scope>,
+    /// There is a workspace, so where to save is a choice.
+    pub has_workspace: bool,
+}
+
+impl PolicyPicker {
+    /// Ask where to save the selected policy: this workspace, if any.
+    pub fn start_save(&mut self) {
+        if self.list.current().is_some() {
+            self.save = Some(if self.has_workspace {
+                Scope::Workspace
+            } else {
+                Scope::Global
+            });
+        }
+    }
+
+    pub fn toggle_scope(&mut self) {
+        if self.has_workspace {
+            self.save = self.save.map(|s| match s {
+                Scope::Workspace => Scope::Global,
+                Scope::Global => Scope::Workspace,
+            });
+        }
+    }
+}
+
 /// A user turn the conversation can be rewound to.
 #[derive(Debug, Clone)]
 pub struct RewindOption {
@@ -494,7 +526,7 @@ pub enum Modal {
     Provider(ListPicker<ProviderOption>),
     Model(ListPicker<ModelInfo>),
     Effort(ListPicker<String>),
-    Policy(ListPicker<PermissionPolicy>),
+    Policy(PolicyPicker),
     Sandbox(ListPicker<SandboxLevel>),
     /// The conversation's subagents; the chosen one's transcript is opened.
     Subagents(ListPicker<super::app::SubagentOption>),
