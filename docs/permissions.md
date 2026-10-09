@@ -56,7 +56,8 @@ default_policy = "accept-edits"   # agy has no ask
 
 A workspace's settings (`<config dir>/unharness/workspaces/`, see
 [configuration](configuration.md)) can set the same keys for one
-workspace.
+workspace. `unharness doctor` shows each harness's default, where it is
+set, and what it comes to on that harness.
 
 ### Fallback
 

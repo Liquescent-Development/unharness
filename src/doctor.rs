@@ -13,7 +13,7 @@ use crate::core::rules::Scope;
 use crate::core::sandbox::{
     self, Sandbox, SandboxEnv, SandboxLevel, SandboxPaths, SandboxRequest, SandboxSetup,
 };
-use crate::core::{McpChannel, McpSupport, PermissionPolicy};
+use crate::core::{McpChannel, McpSupport, PermissionPolicy, PolicySupport, resolve_policy};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -87,6 +87,17 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     },
                     policies.join(" "),
                     if caps.resume_by_id { " · resume" } else { "" }
+                );
+                let (default, fits) =
+                    describe_default_policy(config, d.id.as_str(), &caps.permission_policies);
+                println!(
+                    "      {} Default policy: {}",
+                    "↳".dimmed(),
+                    if fits {
+                        default.normal()
+                    } else {
+                        default.yellow()
+                    }
                 );
 
                 println!(
@@ -528,5 +539,86 @@ fn report_rules(root: &Path) {
                 name
             );
         }
+    }
+}
+
+/// A harness's default policy, where it is set, and what it comes to on
+/// that harness; and whether it runs as set.
+fn describe_default_policy(
+    config: &Config,
+    id: &str,
+    policies: &[PolicySupport],
+) -> (String, bool) {
+    let (named, from) = match config.harness(id).and_then(|h| h.default_policy.as_deref()) {
+        Some(p) => (p, format!("[harnesses.{id}] default_policy")),
+        None => match config.default_policy.as_deref() {
+            Some(p) => (p, "default_policy".to_string()),
+            None => ("ask", "built in".to_string()),
+        },
+    };
+    let Some(policy) = PermissionPolicy::parse(named) else {
+        return (format!("{named} ({from}): not a policy"), false);
+    };
+    match resolve_policy(policies, policy) {
+        Ok(res) if res.effective == policy => (format!("{policy} ({from})"), true),
+        Ok(res) => (
+            format!(
+                "{policy} ({from}): not offered, falls back to {}",
+                res.effective
+            ),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "{policy} ({from}): not offered, you choose one of {}",
+                e.supported
+                    .iter()
+                    .map(|p| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            false,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::HarnessSettings;
+
+    #[test]
+    fn a_default_policy_is_described_with_where_it_is_set_and_what_it_comes_to() {
+        let agy = [
+            PolicySupport::full(PermissionPolicy::AcceptEdits),
+            PolicySupport::full(PermissionPolicy::Bypass),
+        ];
+        let mut config = Config::default();
+        assert_eq!(
+            describe_default_policy(&config, "agy", &agy),
+            (
+                "ask (built in): not offered, you choose one of accept-edits, bypass".to_string(),
+                false
+            )
+        );
+        config.default_policy = Some("auto".into());
+        assert_eq!(
+            describe_default_policy(&config, "agy", &agy),
+            (
+                "auto (default_policy): not offered, falls back to accept-edits".to_string(),
+                false
+            )
+        );
+        config.harnesses.insert(
+            "agy".into(),
+            HarnessSettings {
+                default_policy: Some("bypass".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            describe_default_policy(&config, "agy", &agy),
+            ("bypass ([harnesses.agy] default_policy)".to_string(), true)
+        );
     }
 }
