@@ -199,6 +199,16 @@ impl Drop for Unharness {
 }
 
 /// Takes the turn and never answers it.
+/// A turn of Claude's, played once it has been sent `initialize` and a
+/// prompt: the TUI starts the session before the first prompt.
+fn basic_turn() -> String {
+    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
+    format!(
+        ">> {{\"subtype\": \"initialize\"}}\n>> {{\"type\": \"user\"}}\n{}",
+        std::fs::read_to_string(fixture).unwrap()
+    )
+}
+
 const SILENT: &str = ">> {\"subtype\": \"initialize\"}\n>> {\"type\": \"user\"}\n";
 
 // The CLI is in a session of its own, so no signal to unharness reaches
@@ -359,12 +369,17 @@ fn quitting_the_tui_says_it_waits_for_the_cli_and_ctrl_c_stops_waiting() {
     if !python_available() {
         return;
     }
-    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let setup = Setup::new(&std::fs::read_to_string(fixture).unwrap());
+    let setup = Setup::new(&basic_turn());
     let (mut unharness, pty) = Pty::spawn(setup.command(&[]));
     wait_until("the TUI is up", Duration::from_secs(20), || {
         pty.shows("Welcome to unharness")
     });
+    // The CLI is started before the first prompt, for its commands.
+    wait_until(
+        "the CLI is asked for its commands",
+        Duration::from_secs(20),
+        || std::fs::read_to_string(setup.path("log")).is_ok_and(|l| l.contains("initialize")),
+    );
     pty.type_keys(b"hi\r");
     wait_until("the turn is over", Duration::from_secs(20), || {
         pty.shows("last turn")
@@ -694,8 +709,7 @@ fn a_hangup_while_the_prompt_is_in_the_editor_still_ends_the_session_in_order() 
     if !python_available() {
         return;
     }
-    let fixture = repo().join("src/harness/claude/fixtures/basic_turn.jsonl");
-    let setup = Setup::new(&std::fs::read_to_string(fixture).unwrap());
+    let setup = Setup::new(&basic_turn());
     let editor_pid = setup.path("editor-pid");
     let mut cmd = setup.command(&[]);
     cmd.env(
