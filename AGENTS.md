@@ -95,7 +95,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   same way. No rule reaches unharness's own config and state directories.
 - **A change to a harness's own configuration is never silent.** The files
   that decide a CLI's next run are declared in `src/harness/<name>/`
-  (`guarded`) and compared after every turn (`core/guard.rs`). What a CLI
+  (`guarded`) and compared after every turn and when a session ends (`core/guard.rs`). What a CLI
   rewrites by itself is projected away there (Claude's counters in
   `.claude.json`, Codex's trust entry for the workspace), found by running
   it, so that a warning means something.

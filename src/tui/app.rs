@@ -1944,6 +1944,9 @@ impl App {
                     .push_back(Action::Command(SessionCommand::Rewind {
                         anchor: anchor.clone(),
                     }));
+                // Rewound, it is the conversation's: a restart now would
+                // resume it from before the rewind.
+                self.mark_prompted();
             }
             None => self.forget_session(active),
         }
@@ -2586,9 +2589,10 @@ impl App {
         let sender = self.short_name().to_string();
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
-                // A new session nobody has prompted is not saved, nor is
-                // the conversation for it.
-                if self.session_blank && !self.session_ids.contains_key(&self.active) {
+                // A session nobody has prompted is not saved, nor is the
+                // conversation for it: not a new one, not a fork made at its
+                // start, not one that replaced a session it could not resume.
+                if self.session_blank {
                     self.blank_session = Some((session_id, model));
                 } else {
                     self.commit_session(session_id, model);
@@ -2895,6 +2899,11 @@ impl App {
     /// End the active harness's session. It is not alive from here on: a
     /// prompt handled before the loop runs the shutdown starts the next.
     fn shutdown_session(&mut self) {
+        // What it changed since the last turn ended, or since it started
+        // when it never had one, is told before the next process is watched.
+        if self.session_alive {
+            self.check_guard();
+        }
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
@@ -3291,6 +3300,7 @@ impl App {
         self.models.insert(self.active, m.clone());
         self.chosen_models.insert(self.active);
         self.run_models.insert(self.active);
+        self.idle_start_paused = false;
         if self.session_alive && self.session_blank {
             // Nothing was sent to it: it starts again with the model.
             self.shutdown_session();
@@ -3323,6 +3333,7 @@ impl App {
         self.chosen_efforts.insert(self.active);
         self.run_efforts.insert(self.active);
         self.transcript.push_system(format!("Effort: {effort}"));
+        self.idle_start_paused = false;
         if self.session_alive && self.session_blank {
             // Claude would take the change as a turn: it starts again with
             // the effort instead.
@@ -8130,7 +8141,7 @@ pub(crate) mod tests {
         ));
         // What the turn changed in the harness's configuration is told.
         assert!(app.transcript.blocks.iter().any(
-            |b| matches!(b, Block::Error(e) if e.contains("configuration changed during this turn"))
+            |b| matches!(b, Block::Error(e) if e.contains("configuration changed while it ran"))
         ));
         // The next prompt resumes the session in a new process.
         app.submit_prompt("go on".into());
@@ -9308,6 +9319,135 @@ pub(crate) mod tests {
             stop_reason: StopReason::Done,
         });
         app.set_model("sonnet".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::Command(SessionCommand::SetModel(_))]
+        ));
+    }
+
+    #[test]
+    fn a_model_chosen_after_a_failed_start_starts_the_session() {
+        let mut app = test_app(HarnessId::CODEX);
+        app.start_failed("thread/start failed: unknown model".into());
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.set_model("gpt-5".into());
+        app.start_when_idle();
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
+    #[test]
+    fn what_an_unprompted_session_changed_is_told_when_it_ends() {
+        use crate::core::guard::{Guarded, Watch};
+        let config = tempfile::tempdir().unwrap();
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.guard = Some(Watch::begin(
+            &[Guarded::Tree(config.path().to_path_buf())],
+            None,
+        ));
+        blank_session(&mut app);
+        std::fs::write(config.path().join("settings.json"), "{}").unwrap();
+        app.set_model("opus".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("configuration changed while it ran")),
+            "{:?}",
+            notices(&app)
+        );
+    }
+
+    #[test]
+    fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.session_alive = false;
+        app.fork_conversation();
+        app.take_actions();
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession {
+                resume: Some("claude-1".into())
+            }]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        // The branch is not taken until something is sent to it.
+        assert!(app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-1");
+        let copy = app.store.load(&app.conversation.id).unwrap();
+        assert_eq!(copy.sessions[&HarnessId::CLAUDE], "claude-1");
+        assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
+        // Started again, it branches again from the original.
+        app.set_model("opus".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession {
+                resume: Some("claude-1".into())
+            }]
+        );
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-3".into(),
+            model: None,
+        });
+        app.submit_prompt("two".into());
+        assert!(!app.fork_pending());
+        assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-3");
+    }
+
+    #[test]
+    fn a_rewound_session_is_the_conversation_s() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
+            app.submit_prompt(prompt.into());
+            app.session_alive = true;
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: "s1".into(),
+                model: None,
+            });
+            app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+        }
+        app.take_actions();
+        // As after a resume: started early on its session.
+        app.session_alive = false;
+        app.start_when_idle();
+        app.take_actions();
+        app.session_alive = true;
+        let two = app
+            .transcript
+            .blocks
+            .iter()
+            .position(|b| matches!(b, Block::User { text } if text == "two"))
+            .unwrap();
+        app.rewind_to(two, false);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Rewind {
+                anchor: "a2".into()
+            })]
+        );
+        // Restarting it would resume it from before the rewind.
+        app.set_model("opus".into());
         assert!(matches!(
             &app.take_actions()[..],
             [Action::Command(SessionCommand::SetModel(_))]

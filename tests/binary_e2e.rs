@@ -198,7 +198,6 @@ impl Drop for Unharness {
     }
 }
 
-/// Takes the turn and never answers it.
 /// A turn of Claude's, played once it has been sent `initialize` and a
 /// prompt: the TUI starts the session before the first prompt.
 fn basic_turn() -> String {
@@ -209,6 +208,7 @@ fn basic_turn() -> String {
     )
 }
 
+/// Takes the turn and never answers it.
 const SILENT: &str = ">> {\"subtype\": \"initialize\"}\n>> {\"type\": \"user\"}\n";
 
 // The CLI is in a session of its own, so no signal to unharness reaches
