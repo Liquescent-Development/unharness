@@ -221,6 +221,11 @@ impl Config {
         harness: &str,
         policy: PermissionPolicy,
     ) -> Result<()> {
+        // A link to a file not there yet (a dotfiles checkout) would be
+        // replaced by a file.
+        if path.is_symlink() && !path.exists() {
+            anyhow::bail!("{} is a link to a file that does not exist", path.display());
+        }
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -229,6 +234,9 @@ impl Config {
         let mut doc: toml_edit::DocumentMut = content
             .parse()
             .with_context(|| format!("{} is not valid TOML", path.display()))?;
+        let inline = doc
+            .get("harnesses")
+            .is_some_and(toml_edit::Item::is_inline_table);
         let harnesses = doc
             .entry("harnesses")
             .or_insert_with(|| {
@@ -239,25 +247,43 @@ impl Config {
             .as_table_like_mut()
             .with_context(|| format!("harnesses in {} is not a table", path.display()))?;
         let created = !harnesses.contains_key(harness);
+        // In the form the tables around it have: one written inline would
+        // otherwise be left out of an inline table.
+        let new = if inline {
+            toml_edit::Item::Value(toml_edit::InlineTable::new().into())
+        } else {
+            toml_edit::Item::Table(toml_edit::Table::new())
+        };
         let settings = harnesses
             .entry(harness)
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .or_insert(new)
             .as_table_like_mut()
             .with_context(|| format!("harnesses.{harness} in {} is not a table", path.display()))?;
         settings.insert("default_policy", toml_edit::value(policy.as_str()));
         // Comments at the end of the file would follow a new table: it goes
         // after them instead.
         let trailing = doc.trailing().as_str().unwrap_or_default().to_string();
-        if created && !trailing.trim().is_empty() {
+        if created && !inline && !trailing.trim().is_empty() {
             doc.set_trailing("");
             if let Some(t) = doc["harnesses"][harness].as_table_mut() {
                 t.decor_mut().set_prefix(format!("{trailing}\n"));
             }
         }
         let content = doc.to_string();
-        // What is written has to read back as a config.
-        toml::from_str::<Config>(&content)
+        // What is written has to read back as a config, with the setting.
+        let back: Config = toml::from_str(&content)
             .with_context(|| format!("{} is not a valid unharness config", path.display()))?;
+        if back
+            .harness(harness)
+            .and_then(|h| h.default_policy.as_deref())
+            != Some(policy.as_str())
+        {
+            anyhow::bail!(
+                "could not add the setting to {} as it is laid out; add [harnesses.{harness}] \
+                 default_policy = \"{policy}\" by hand",
+                path.display()
+            );
+        }
         let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         write_atomic(&target, &content)
             .with_context(|| format!("could not write {}", path.display()))
@@ -467,6 +493,45 @@ mod tests {
         );
         let mode = std::fs::metadata(&real).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_default_policy_goes_into_an_inline_table_inline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "harnesses = { claude = { binary = \"/opt/claude\" } }\n# tail\n",
+        )
+        .unwrap();
+        Config::set_harness_default_policy(&path, "pi", PermissionPolicy::Bypass).unwrap();
+        Config::set_harness_default_policy(&path, "claude", PermissionPolicy::Auto).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.ends_with("# tail\n"), "{after}");
+        let cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(
+            cfg.harnesses["pi"].default_policy.as_deref(),
+            Some("bypass")
+        );
+        assert_eq!(
+            cfg.harnesses["claude"].default_policy.as_deref(),
+            Some("auto")
+        );
+        assert_eq!(
+            cfg.harnesses["claude"].binary.as_deref(),
+            Some(Path::new("/opt/claude"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_missing_file_is_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("config.toml");
+        std::os::unix::fs::symlink(tmp.path().join("dotfiles/config.toml"), &link).unwrap();
+        let e = Config::set_harness_default_policy(&link, "pi", PermissionPolicy::Ask).unwrap_err();
+        assert!(e.to_string().contains("does not exist"), "{e}");
+        assert!(link.is_symlink());
     }
 
     #[test]
