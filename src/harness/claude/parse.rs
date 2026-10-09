@@ -1180,6 +1180,33 @@ mod tests {
         fixture("ask_previews");
     }
 
+    /// Started in plan mode (2.1.296): the plan file is written without a
+    /// request, `ExitPlanMode` asks, and the mode set before the approval
+    /// is the one that holds.
+    #[test]
+    fn fixture_plan_approved() {
+        fixture("plan_approved");
+    }
+
+    /// A rejected plan is revised and asked about again.
+    #[test]
+    fn fixture_plan_rejected() {
+        fixture("plan_rejected");
+    }
+
+    /// The model enters plan mode by itself: no request, a mode report.
+    #[test]
+    fn fixture_plan_enter() {
+        fixture("plan_enter");
+    }
+
+    /// Plan mode set on a session launched with bypass: a write is still
+    /// asked about.
+    #[test]
+    fn fixture_plan_after_bypass() {
+        fixture("plan_after_bypass");
+    }
+
     #[test]
     fn fixture_hooks() {
         fixture("hooks");
