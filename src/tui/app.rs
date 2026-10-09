@@ -215,7 +215,7 @@ pub struct SubagentOption {
     pub depth: usize,
 }
 
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(super) const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/harness", "Open the harness picker"),
@@ -575,6 +575,17 @@ pub struct KeptBlock {
     pub top: usize,
     /// One past its last line.
     pub end: usize,
+    /// It is running: its status, at the end of its first line, is drawn
+    /// again on every frame instead of being laid out again.
+    pub live: Option<Live>,
+}
+
+/// A running row's status: since when, and whose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Live {
+    pub since: Instant,
+    /// A `!` command's, which says "running".
+    pub shell: bool,
 }
 
 /// The transcript's scrollbar: a thumb on the right border whose size and

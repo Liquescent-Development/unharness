@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, KeptBlock, Scrollbar};
+use super::app::{App, KeptBlock, Live, SPINNER_FRAMES, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
     sanitize, wrap_words,
@@ -380,7 +380,10 @@ fn block_lines(
                 d.map(|d| format!(" {:.1}s", d.as_secs_f32()))
                     .unwrap_or_default()
             };
-            let running = Span::styled(" ⠿ running", Style::default().fg(Color::Yellow));
+            let running = Span::styled(
+                running_status(SPINNER_FRAMES[0], 0.0, false),
+                Style::default().fg(Color::Yellow),
+            );
             // A call that spawned a subagent shows how the subagent is
             // doing: the call itself may have returned at once.
             let status = match agent.as_ref().map(|a| (a.status, &a.duration)) {
@@ -592,7 +595,7 @@ fn shell_lines(
         ),
         Span::styled(
             match status {
-                ShellStatus::Running => "⠿ running".to_string(),
+                ShellStatus::Running => running_status(SPINNER_FRAMES[0], 0.0, true),
                 ShellStatus::Exited { code: 0 } => format!(
                     "✓ exit 0{}",
                     duration
@@ -633,9 +636,70 @@ fn shell_lines(
     lines
 }
 
-/// Columns kept for a tool call's status after its summary (` ⠿ running`,
+/// Columns kept for a tool call's status after its summary (` ⠙ 12s`,
 /// ` ✓ 274.0s`) and the space before it.
 const STATUS_ROOM: usize = 11;
+
+/// The status of a row still running, `secs` into it: a tool call's or a
+/// subagent's (` ⠙ 12s`, after its summary), or a `!` command's (`⠙ running
+/// 12s`). Laid out with the first frame and no time, and drawn again on
+/// every frame ([`patch_running`]).
+fn running_status(spinner: &str, secs: f32, shell: bool) -> String {
+    if shell {
+        format!("{spinner} running {secs:.0}s")
+    } else {
+        format!(" {spinner} {secs:.0}s")
+    }
+}
+
+/// When a row that is still running started: a tool call that has not
+/// returned, a subagent at work (since it started, not since its call
+/// returned) or a `!` command.
+fn running_since(b: &TBlock) -> Option<Live> {
+    let since = match b {
+        TBlock::Tool {
+            agent: Some(run), ..
+        } => run.status.is_none().then_some(run.started),
+        TBlock::Tool {
+            done: false,
+            started,
+            ..
+        } => Some(*started),
+        TBlock::Shell {
+            status: ShellStatus::Running,
+            started,
+            ..
+        } => {
+            return Some(Live {
+                since: *started,
+                shell: true,
+            });
+        }
+        _ => None,
+    };
+    since.map(|since| Live {
+        since,
+        shell: false,
+    })
+}
+
+/// Draws the status of each running row again, with the spinner's frame and
+/// the time so far. Only that span changes, so the block is not laid out
+/// again: a row far up would otherwise lay out all below it on every tick.
+fn patch_running(view: &mut TranscriptView, spinner: &str, width: usize) {
+    for kept in &view.blocks {
+        let Some(live) = kept.live else { continue };
+        let Some(line) = view.rendered.get_mut(kept.top) else {
+            continue;
+        };
+        if let Some(span) = line.spans.last_mut() {
+            span.content =
+                running_status(spinner, live.since.elapsed().as_secs_f32(), live.shell).into();
+        }
+        clamp_lines(std::slice::from_mut(line), width);
+        view.lines[kept.top] = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    }
+}
 
 /// Fewest columns a tool call's summary gets beside its name; with less, the
 /// name has a line of its own.
@@ -809,6 +873,10 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         let followed = i + 1 < shown.len();
         let key = block_key(b, gap, followed, thinking_live, elapsed);
         if i == fresh && view.blocks.get(i).is_some_and(|k| k.key == key) {
+            // Its start is read again, not kept: the key leaves it out.
+            if let (Some(live), Some(now)) = (&mut view.blocks[i].live, running_since(b)) {
+                live.since = now.since;
+            }
             fresh += 1;
             continue;
         }
@@ -832,6 +900,14 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         let top = view.rendered.len();
+        // The status is the last span of its first line, unless the line
+        // was cut short for want of room: then it stays as it was laid out.
+        let live = running_since(b).filter(|live| {
+            lines
+                .first()
+                .and_then(|l| l.spans.last())
+                .is_some_and(|s| s.content == running_status(SPINNER_FRAMES[0], 0.0, live.shell))
+        });
         view.lines.extend(lines.iter().map(|l| {
             l.spans
                 .iter()
@@ -843,6 +919,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             key,
             top,
             end: view.rendered.len(),
+            live,
         });
     }
     if fresh == shown.len() && view.blocks.len() > fresh {
@@ -852,6 +929,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         view.rendered.truncate(keep);
         view.lines.truncate(keep);
     }
+    patch_running(&mut view, app.spinner(), inner.width as usize);
     view.took = started.elapsed();
 
     let total = view.rendered.len().min(u16::MAX as usize) as u16;
@@ -3315,7 +3393,7 @@ mod tests {
         ];
         for name in names {
             for width in [64, 74, 114] {
-                for (done, status) in [(false, "⠿ running"), (true, "✓ 0.7s")] {
+                for (done, status) in [(false, "⠋ 0s"), (true, "✓ 0.7s")] {
                     let text = render(name, done, width);
                     let all = format!("{width}: {text:?}");
                     assert!(text.len() > 1, "{all}");
@@ -3626,6 +3704,100 @@ mod tests {
     }
 
     #[test]
+    fn a_running_row_animates_without_a_new_layout() {
+        use std::time::Duration;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "spawn".into(),
+            name: "Agent".into(),
+            input: serde_json::json!({"description": "look around"}),
+        });
+        app.on_event(crate::core::AgentEvent::SubagentStarted {
+            id: "spawn".into(),
+            description: "look around".into(),
+            kind: Some("Explore".into()),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "spawn".into(),
+            output: "launched".into(),
+            is_error: false,
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({"command": "sleep 20"}),
+        });
+        app.transcript.shell_started("sleep 5");
+        app.transcript.push_notice("below them");
+        let (rows, _) = screen(&mut app, 80, 30);
+        let text = rows.join("\n");
+        assert!(text.contains("(Explore) ⠋ 0s"), "{text}");
+        assert!(text.contains("sleep 20"), "{text}");
+        assert!(text.contains("You ran ⠋ running 0s"), "{text}");
+        let kept = app.transcript_view.blocks.clone();
+
+        // Time passes and the spinner turns: each row says so, and none is
+        // laid out again.
+        let ago = std::time::Instant::now() - Duration::from_secs(12);
+        for b in &mut app.transcript.blocks {
+            match b {
+                TBlock::Tool {
+                    agent: Some(run), ..
+                } => run.started = ago,
+                TBlock::Tool { started, .. } | TBlock::Shell { started, .. } => *started = ago,
+                _ => {}
+            }
+        }
+        app.tick_spinner();
+        let (rows, _) = screen(&mut app, 80, 30);
+        let text = rows.join("\n");
+        assert_eq!(
+            app.transcript_view
+                .blocks
+                .iter()
+                .map(|b| b.key)
+                .collect::<Vec<_>>(),
+            kept.iter().map(|b| b.key).collect::<Vec<_>>()
+        );
+        assert!(text.contains("(Explore) ⠙ 12s"), "{text}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("sleep 20") && r.contains(" ⠙ 12s")),
+            "{text}"
+        );
+        assert!(text.contains("You ran ⠙ running 12s"), "{text}");
+        assert!(!text.contains("⠋"), "{text}");
+        // What a selection copies is what is on the screen.
+        assert!(
+            app.transcript_view
+                .lines
+                .iter()
+                .any(|l| l.contains("You ran ⠙ running 12s")),
+            "{:?}",
+            app.transcript_view.lines
+        );
+
+        // Once ended, a row stops.
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t".into(),
+            output: String::new(),
+            is_error: false,
+        });
+        app.transcript.shell_ended(ShellStatus::Exited { code: 0 });
+        let (rows, _) = screen(&mut app, 80, 30);
+        let text = rows.join("\n");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("sleep 20") && r.contains(" ✓ 12.")),
+            "{text}"
+        );
+        assert!(text.contains("You ran ✓ exit 0 12."), "{text}");
+        assert!(text.contains("(Explore) ⠙ 12s"), "{text}");
+    }
+
+    #[test]
     fn a_subagent_is_one_line_in_the_main_transcript_and_a_transcript_of_its_own() {
         use super::super::app::tests::mouse;
         use crossterm::event::{MouseButton, MouseEventKind};
@@ -3674,7 +3846,7 @@ mod tests {
         for d in ["read the first file", "read the second"] {
             assert!(
                 rows.iter()
-                    .any(|r| r.contains(&format!("Agent  {d} (Explore) ⠿ running"))),
+                    .any(|r| r.contains(&format!("Agent  {d} (Explore) ⠋ 0s"))),
                 "{text}"
             );
         }
