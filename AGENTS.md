@@ -530,7 +530,11 @@ recorded ones. For anything else:
   flag is passed; a `can_use_tool` request goes to both sides, and one
   answered there comes to us as `control_cancel_request` (withdrawn). The
   TUI keeps it across a new process of the same harness (sent again once
-  it starts) and takes it off on a switch, a fork, `/clear` and quit.
+  it starts) and takes it off on a switch, a fork, a resume, `/clear` and
+  quit. A remote prompt is checkpointed and titles a new conversation as
+  a typed one does, and leaves what the bridge owes for the next prompt
+  typed here; it has no rewind anchor (Claude was not recorded rewinding
+  to one), so a rewind to it starts a new session.
   Checked in the TUI (tmux, Landlock, haiku): the link was shown, a prompt
   typed remotely was shown as the user's and made the session the
   conversation's, the modal of its Write closed when it was allowed

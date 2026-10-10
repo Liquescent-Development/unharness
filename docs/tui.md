@@ -189,7 +189,8 @@ seen go with the next prompt instead.
 Remote Control: the transcript gives a `claude.ai/code/session_…` link,
 which opens in a browser or the Claude app signed in to the same account,
 and the status bar says `remote` (`remote: starting` until the link is
-there, the connection's state while it is not connected). `/rc <name>`
+there, the connection's state while it is not connected, `remote:
+paused` while Claude is not running). `/rc <name>`
 names the session there, `/rc status` shows the link again, `/rc off`
 takes it off. Claude's own `/rc` cannot run in the headless mode unharness
 drives it in; this is the same thing through Claude's SDK interface.
@@ -200,9 +201,12 @@ goes to both sides, and whichever answers first decides: an answer there
 closes the request here. An allow rule still answers what it covers at
 once (the remote side may show the request until then).
 
-A new Claude process (a sandbox or provider change, a resume) is put on
-Remote Control again, with the same link where Claude resumes the session.
-A switch to another harness, a fork, `/clear` and quitting take it off.
+A new Claude process (a sandbox or provider change, the next prompt after
+Claude exited) is put on Remote Control again, with the same link where
+Claude resumes the session; meanwhile the status bar says `remote:
+paused`. Turned on before the session has started, it goes on once it has.
+A switch to another harness, a fork, `/resume`, `/clear` and quitting take
+it off. Elsewhere `/rc` is the agent's own command, if it has one.
 It is not offered in `--print` or `--no-tui` (where Claude's own `/rc`
 works).
 

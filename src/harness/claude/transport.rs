@@ -471,6 +471,9 @@ async fn drive(
             raw = proc.lines.recv() => {
                 match raw {
                     Some(RawLine::Stdout(line)) => {
+                        // The answer to one of our `remote_control` requests,
+                        // which the parser would take for a generic one.
+                        let mut remote_answer = None;
                         // Driver-level bookkeeping before the pure parser sees it.
                         if let Ok(v) = serde_json::from_str::<Value>(&line) {
                             match v.get("type").and_then(Value::as_str) {
@@ -479,16 +482,13 @@ async fn drive(
                                     if rid.is_some() && rid == awaiting_init.as_deref() {
                                         awaiting_init = None;
                                     }
-                                    // Its error is not the parser's generic one.
                                     if let Some(enabled) = rid.and_then(|r| remote_requests.remove(r)) {
-                                        let answer = ClaudeParser::remote_control_answer(
-                                            enabled,
-                                            v.get("response").unwrap_or(&Value::Null),
-                                        );
-                                        if events.send(AgentEvent::RemoteControl(answer)).await.is_err() {
-                                            break;
-                                        }
-                                        continue;
+                                        remote_answer = Some(AgentEvent::RemoteControl(
+                                            ClaudeParser::remote_control_answer(
+                                                enabled,
+                                                v.get("response").unwrap_or(&Value::Null),
+                                            ),
+                                        ));
                                     }
                                     // Only the answer to `initialize` names the account.
                                     if let Some(why) = v
@@ -506,7 +506,11 @@ async fn drive(
                                 _ => {}
                             }
                         }
-                        for ev in parser.feed(&line) {
+                        let evs = match remote_answer {
+                            Some(ev) => vec![ev],
+                            None => parser.feed(&line),
+                        };
+                        for ev in evs {
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let (input, kind) = match &req.kind {
                                     PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
