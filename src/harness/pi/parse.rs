@@ -54,6 +54,17 @@ impl PiParser {
         if t.is_empty() {
             return vec![];
         }
+        // pi before 0.76.0 refuses `--session-id` this way and exits
+        // (`fixtures/too_old.jsonl`), as one of `Unknown options: --a, --b`
+        // when there are more (0.73.1's source); another refused flag says
+        // nothing about the version.
+        if t.contains("Unknown option") && t.split([' ', ',']).any(|word| word == "--session-id") {
+            let min = super::MIN_VERSION;
+            return vec![AgentEvent::Notice(format!(
+                "pi: {t} (unharness needs pi {min} or later: run `{}`)",
+                min.upgrade
+            ))];
+        }
         vec![AgentEvent::Notice(format!("pi: {t}"))]
     }
 
@@ -643,6 +654,27 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn fixture_too_old() {
+        // pi 0.73.1 refusing `--session-id`.
+        assert_fixture(&mut PiParser::new(None), &fixtures_dir(file!()), "too_old");
+    }
+
+    #[test]
+    fn only_a_refused_session_id_names_the_version() {
+        let mut p = PiParser::new(None);
+        let hinted = |events: Vec<AgentEvent>| matches!(&events[..], [AgentEvent::Notice(n)] if n.contains("pi update --self"));
+        assert!(hinted(p.feed_stderr(
+            "Error: Unknown options: --frobnicate, --session-id"
+        )));
+        assert!(!hinted(
+            p.feed_stderr("Error: Unknown option: --frobnicate")
+        ));
+        assert!(!hinted(
+            p.feed_stderr("Error: Unknown option: --session-idx")
+        ));
     }
 
     #[test]

@@ -52,6 +52,23 @@ pub struct Probe {
     pub auth: AuthInfo,
 }
 
+/// The oldest release of a CLI unharness works with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinVersion {
+    pub version: [u64; 3],
+    /// What that release brought that unharness uses.
+    pub needs: &'static str,
+    /// What to run to update the CLI.
+    pub upgrade: &'static str,
+}
+
+impl std::fmt::Display for MinVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [major, minor, patch] = self.version;
+        write!(f, "{major}.{minor}.{patch}")
+    }
+}
+
 /// Options for the vendor's own interfaces (`-p --native` and `--no-tui`).
 #[derive(Debug, Clone, Default)]
 pub struct PrintConfig {
@@ -86,6 +103,19 @@ pub trait Harness: Send + Sync {
 
     /// Locate the binary, read its version and auth state. Cheap and synchronous.
     fn probe(&self, binary_override: Option<&Path>) -> Probe;
+
+    /// The oldest release this harness works with, which `doctor` checks
+    /// the probed version against. Declared only where an older release is
+    /// known to lack something unharness uses, saying where that was found.
+    fn min_version(&self) -> Option<MinVersion> {
+        None
+    }
+
+    /// Whether `--version` on the binary names the CLI unharness drives, so
+    /// that `doctor` warns when it gives none. Default: yes.
+    fn reports_version(&self) -> bool {
+        true
+    }
 
     /// Whether the harness is signed in, for choosing a default at startup.
     /// Must stay cheap (a file read or a quick status command, no model
@@ -207,7 +237,12 @@ pub fn resolve_binary(desc: &HarnessDescriptor, override_path: Option<&Path>) ->
     desc.binary_names.iter().find_map(|name| which(name))
 }
 
-/// Run `<binary> --version` and return trimmed stdout.
+/// Run `<binary> --version` and return what it printed on stdout, trimmed;
+/// `None` when it fails or prints nothing there. When stdout is empty,
+/// stderr is taken only if it is a bare version: pi before 0.74 (the
+/// `@mariozechner` package; 0.73.1 run) sends stdout to stderr when stdin
+/// is not a terminal, `--version` included, and anything else on stderr
+/// (a warning, a log line) is not a version.
 pub fn probe_version(binary: &Path) -> Option<String> {
     let output = std::process::Command::new(binary)
         .arg("--version")
@@ -216,8 +251,34 @@ pub fn probe_version(binary: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    bare_version(&stderr).map(|_| stderr)
+}
+
+/// `text` as a version when it is three numbers and nothing else (`1.3.2`;
+/// not `1.3`, `v1.3.2` or `1.3.2-beta`).
+pub fn bare_version(text: &str) -> Option<[u64; 3]> {
+    let parts: Vec<u64> = text
+        .trim()
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    parts.try_into().ok()
+}
+
+/// The version in what `--version` printed: the first word of its first
+/// line that is three numbers, with a leading `v` and punctuation around
+/// it left out (`2.1.296 (Claude Code)`, `codex-cli 0.157.0`, `(v1.2.3)`).
+/// A pre-release (`1.3.2-beta`) is not taken for one.
+pub fn parse_version(text: &str) -> Option<[u64; 3]> {
+    text.lines().next()?.split_whitespace().find_map(|word| {
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        bare_version(word.strip_prefix('v').unwrap_or(word))
+    })
 }
 
 /// Find an executable on `PATH`.
@@ -242,4 +303,57 @@ pub fn which(name: &str) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_is_the_first_word_of_three_numbers() {
+        assert_eq!(parse_version("2.1.296 (Claude Code)"), Some([2, 1, 296]));
+        assert_eq!(parse_version("codex-cli 0.157.0"), Some([0, 157, 0]));
+        assert_eq!(parse_version("1.1.0\n"), Some([1, 1, 0]));
+        assert_eq!(parse_version("pi v1.2.0"), Some([1, 2, 0]));
+        assert_eq!(parse_version("tool (1.2.3), built today"), Some([1, 2, 3]));
+        assert_eq!(parse_version("1.3"), None);
+        assert_eq!(parse_version("1.3.2-beta"), None);
+        assert_eq!(parse_version("unknown"), None);
+        assert_eq!(parse_version(""), None);
+        // Only the first line names the version.
+        assert_eq!(parse_version("nightly\nbuilt with node 22.1.0"), None);
+    }
+
+    #[test]
+    fn a_bare_version_is_three_numbers_and_nothing_else() {
+        assert_eq!(bare_version("1.3.2\n"), Some([1, 3, 2]));
+        assert_eq!(bare_version("v1.3.2"), None);
+        assert_eq!(bare_version("1.3.2-beta"), None);
+        assert_eq!(bare_version("Update available: 1.4.0"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_printed_on_stderr_is_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let stdout = stub("stdout", "echo 1.1.0; echo noise >&2");
+        // What pi 0.73.1 does with stdin not a terminal.
+        let stderr = stub("stderr", "echo 0.73.1 >&2");
+        // Anything else on stderr is not taken for a version.
+        let noise = stub("noise", "echo 'Update available: 1.4.0' >&2");
+        let failed = stub("failed", "echo 1.0.0; exit 1");
+        let silent = stub("silent", "exit 0");
+        assert_eq!(probe_version(&stdout).as_deref(), Some("1.1.0"));
+        assert_eq!(probe_version(&stderr).as_deref(), Some("0.73.1"));
+        assert_eq!(probe_version(&noise), None);
+        assert_eq!(probe_version(&failed), None);
+        assert_eq!(probe_version(&silent), None);
+    }
 }

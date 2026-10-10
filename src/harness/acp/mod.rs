@@ -211,6 +211,12 @@ impl Harness for AcpHarness {
         }
     }
 
+    /// The command's first word may be a launcher (`npx`) or an agent that
+    /// does not answer `--version`; unharness reaches it over ACP.
+    fn reports_version(&self) -> bool {
+        false
+    }
+
     /// Models are a property of a live session (`configOptions`); the TUI
     /// receives them through `CapabilitiesChanged`.
     fn list_models(
