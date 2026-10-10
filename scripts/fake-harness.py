@@ -6,7 +6,10 @@ network access or vendor binaries. The fixture format is the one produced by
 the `scripts/record-*.py` recorders:
 
   >> {...}   a line the client is expected to SEND: the fake blocks here until
-             it reads one line from stdin (content is logged, not checked)
+             it reads one line from stdin (content is logged, not checked).
+             When both carry a `request_id`, later lines that name the
+             recorded one name the client's instead, so that an answer
+             reaches the request it was for.
   !! text    written to stderr
   # ...      ignored
   {...}      written to stdout
@@ -91,9 +94,21 @@ def main() -> int:
             log.flush()
         return line
 
+    # Recorded request ids, and the ids the client sent in their place.
+    request_ids = {}
+
+    def request_id(text):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return None
+        return value.get("request_id") if isinstance(value, dict) else None
+
     with open(fixture) as f:
         for raw in f:
             line = raw.rstrip("\n")
+            for recorded, sent in request_ids.items():
+                line = line.replace(f'"{recorded}"', f'"{sent}"')
             if line == "# gate":
                 gate = os.environ.get("UNHARNESS_FAKE_GATE")
                 while gate and not os.path.exists(gate):
@@ -107,8 +122,12 @@ def main() -> int:
             if not line.strip():
                 continue
             if line.startswith(">>"):
-                if read_stdin_line() is None:
+                got = read_stdin_line()
+                if got is None:
                     break
+                recorded, sent = request_id(line[2:]), request_id(got)
+                if recorded and sent:
+                    request_ids[recorded] = sent
                 continue
             if line.startswith("!!"):
                 sys.stderr.write(line[2:].lstrip() + "\n")
