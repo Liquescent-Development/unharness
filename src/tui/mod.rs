@@ -9,6 +9,8 @@ pub mod drop;
 pub mod editor;
 pub mod files;
 pub mod herdr;
+#[cfg(unix)]
+pub mod herdr_proxy;
 pub mod history;
 pub mod markdown;
 pub mod modal;

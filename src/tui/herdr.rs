@@ -205,17 +205,24 @@ impl Log {
             return;
         }
         self.last = Some(what.to_string());
-        let Some(path) = &self.path else { return };
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = append(path, &format!("{secs} {what}\n"));
+        if let Some(path) = &self.path {
+            log_line(path, what);
+        }
     }
 
     fn succeeded(&mut self) {
         self.last = None;
     }
+}
+
+/// Append `what` to the log at `path`, after the time in seconds since
+/// the epoch.
+pub(super) fn log_line(path: &Path, what: &str) {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = append(path, &format!("{secs} {what}\n"));
 }
 
 fn append(path: &Path, line: &str) -> std::io::Result<()> {
