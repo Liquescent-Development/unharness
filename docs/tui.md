@@ -99,7 +99,7 @@ beside the options, or below them on a narrow terminal.
 | `Enter` | Choose it and go to the next question. On a multi-select question, go on with what is ticked (the highlighted option, if nothing is). On the Submit page, send, or open the first unanswered question |
 | `Space` | Choose, or tick/untick on a multi-select question |
 | `←`/`→`, `Tab`/`Shift+Tab` | Move between the questions and the Submit page; the cursor lands on your answer |
-| `PageUp`/`PageDown` | Scroll the preview |
+| `PageUp`/`PageDown`, mouse wheel | Scroll the preview |
 | `Esc` | Dismiss the questions unanswered |
 
 The `[other]` row takes a typed answer instead of the options (on a
@@ -115,7 +115,7 @@ under (the one you planned from is highlighted) and a Keep planning row.
 |---|---|
 | `↑`/`↓` | Highlight a row |
 | `Enter` | Approve the plan under the highlighted policy; on Keep planning, start typing what to change, and `Enter` again sends it |
-| `PageUp`/`PageDown` | Scroll the plan |
+| `PageUp`/`PageDown`, mouse wheel | Scroll the plan |
 | `Esc` | Keep planning without saying what to change (while typing, stop typing) |
 
 ## Slash commands

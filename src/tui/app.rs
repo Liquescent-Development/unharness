@@ -560,7 +560,8 @@ pub struct AppInit {
     pub default_providers: HashMap<HarnessId, ProviderId>,
 }
 
-/// Transcript lines scrolled per wheel notch.
+/// Lines scrolled per wheel notch, in the transcript and in a dialog's plan
+/// or preview.
 const WHEEL_LINES: u16 = 3;
 
 /// Lines a question's preview scrolls on PageUp/PageDown.
@@ -5495,9 +5496,20 @@ impl App {
         text
     }
 
-    /// Mouse input, when the TUI has the mouse. A dialog keeps it out.
+    /// Mouse input, when the TUI has the mouse. A dialog takes only the
+    /// wheel, for what it scrolls.
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
-        if self.modal.is_some() {
+        if let Some(modal) = &mut self.modal {
+            let lines = match ev.kind {
+                MouseEventKind::ScrollUp => -i32::from(WHEEL_LINES),
+                MouseEventKind::ScrollDown => i32::from(WHEEL_LINES),
+                _ => return,
+            };
+            match modal {
+                Modal::Plan(m) => m.scroll_by(lines),
+                Modal::Question(m) => m.scroll_preview(lines),
+                _ => {}
+            }
             return;
         }
         match ev.kind {
@@ -10697,10 +10709,12 @@ pub(crate) mod tests {
         assert_eq!(app.scroll, 20);
         assert_eq!(app.input, "draft");
 
-        // Not while a dialog is open.
+        // Not while a dialog is open, which takes no click either.
         app.open_policy_picker();
         app.handle_mouse(mouse(MouseEventKind::ScrollUp, 5, 5));
         assert_eq!(app.scroll, 20);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        assert!(app.selection.is_none());
     }
 
     #[test]
