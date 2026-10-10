@@ -119,6 +119,7 @@ impl Harness for PiHarness {
             slash_commands: true,
             // Checked on 1.1.0: quit unprompted, no session file was left.
             start_unprompted: true,
+            remote_control: false,
         }
     }
 

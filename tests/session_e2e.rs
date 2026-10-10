@@ -9,7 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 use unharness::core::{
     AgentEvent, CapsUpdate, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision,
-    PermissionKind, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
+    PermissionKind, PermissionPolicy, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
+    StopReason,
 };
 use unharness::harness::Harness;
 
@@ -2348,4 +2349,85 @@ async fn a_cli_that_cannot_start_fails_to_spawn_also_through_its_reaper() {
     .expect("spawned");
     let io = err.root_cause().downcast_ref::<std::io::Error>().unwrap();
     assert_eq!(io.kind(), std::io::ErrorKind::NotFound, "{err:#}");
+}
+
+#[tokio::test]
+async fn claude_remote_control_turns_on_withdraws_remote_answers_and_turns_off() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    // Recorded on Claude Code 2.1.296: Remote Control on, a local turn, a
+    // prompt typed on claude.ai/code whose Write was allowed there, off.
+    let fixture = repo().join("src/harness/claude/fixtures/remote_control_permission.jsonl");
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle
+        .send(SessionCommand::RemoteControl {
+            enabled: true,
+            name: Some("unharness-rec".into()),
+        })
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("Reply with the single word: ready."))
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    // The local turn, then the remote one.
+    let mut turns = 0;
+    while turns < 2 {
+        let ev = next_event(&mut handle).await;
+        if matches!(ev, AgentEvent::TurnCompleted { .. }) {
+            turns += 1;
+        }
+        events.push(ev);
+    }
+    assert!(
+        events.contains(&AgentEvent::RemoteControl(RemoteControl::On {
+            url: "https://claude.ai/code/session_REDACTED".into()
+        }))
+    );
+    // The answer to our request is the driver's, not a generic one.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_)))
+    );
+    let asked = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::PermissionRequest(req) => Some(req.id.clone()),
+            _ => None,
+        })
+        .expect("the remote turn's Write was asked about");
+    assert!(events.contains(&AgentEvent::PermissionWithdrawn { id: asked }));
+
+    handle
+        .send(SessionCommand::RemoteControl {
+            enabled: false,
+            name: Some("ignored".into()),
+        })
+        .await
+        .unwrap();
+    loop {
+        if next_event(&mut handle).await == AgentEvent::RemoteControl(RemoteControl::Off) {
+            break;
+        }
+    }
+    let sent: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["request"]["subtype"] == "remote_control")
+        .map(|v| v["request"].clone())
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            serde_json::json!({"subtype": "remote_control", "enabled": true, "name": "unharness-rec"}),
+            serde_json::json!({"subtype": "remote_control", "enabled": false}),
+        ]
+    );
 }

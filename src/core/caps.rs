@@ -169,6 +169,10 @@ pub struct Capabilities {
     /// nothing behind, so the TUI starts it as soon as it is idle without
     /// one, to have what it reports (its commands) before the first prompt.
     pub start_unprompted: bool,
+    /// The session can be put on the vendor's own remote control (Claude's
+    /// Remote Control: claude.ai/code and the Claude app), and taken off it
+    /// (`SessionCommand::RemoteControl`).
+    pub remote_control: bool,
 }
 
 /// Whether a harness takes MCP server definitions for one session, without

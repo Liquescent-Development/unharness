@@ -148,6 +148,7 @@ impl Harness for AgyHarness {
             // (`init` comes then, not after the first message): one
             // started early would leave an empty one behind.
             start_unprompted: false,
+            remote_control: false,
         }
     }
 

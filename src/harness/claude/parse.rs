@@ -10,8 +10,8 @@ use serde_json::Value;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
     ModelRef, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
-    ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
-    SubagentStatus, ToolAction, Usage,
+    ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, RemoteControl,
+    StopReason, SubagentStatus, ToolAction, Usage,
 };
 
 /// The policy of one of Claude's permission modes, as `system` `status`
@@ -284,6 +284,32 @@ impl ClaudeParser {
             .map(|(task, _)| task.as_str())
     }
 
+    /// What the answer to a `remote_control` request (`control_response`'s
+    /// `response`) says, for one that turned it on (`enabled`) or off.
+    pub fn remote_control_answer(enabled: bool, response: &Value) -> RemoteControl {
+        if let Some(err) = response.get("error").and_then(Value::as_str) {
+            return RemoteControl::Failed {
+                reason: err.to_string(),
+            };
+        }
+        if !enabled {
+            return RemoteControl::Off;
+        }
+        // `connect_url` and `environment_id` came empty (2.1.296).
+        match response
+            .pointer("/response/session_url")
+            .and_then(Value::as_str)
+            .filter(|u| !u.is_empty())
+        {
+            Some(url) => RemoteControl::On {
+                url: url.to_string(),
+            },
+            None => RemoteControl::Failed {
+                reason: "Claude did not say where the session is".into(),
+            },
+        }
+    }
+
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             // Claude never prints non-JSON on stdout in stream-json mode; surface it.
@@ -553,6 +579,34 @@ impl ClaudeParser {
                     ))),
                 }
             }
+            // Remote Control's connection (2.1.296): `ready` once registered,
+            // `connected` once attached; `failed` carries a `failure_kind`,
+            // `terminal` when none is given.
+            "bridge_state" => {
+                let state = str_at(val, "state");
+                let detail = opt_str(val, "detail").filter(|d| !d.is_empty());
+                let ended = state == "policy_disabled"
+                    || (state == "failed"
+                        && val
+                            .get("failure_kind")
+                            .and_then(Value::as_str)
+                            .is_none_or(|k| k == "terminal"));
+                out.push(AgentEvent::RemoteControl(if ended {
+                    RemoteControl::Failed {
+                        reason: detail.unwrap_or_else(|| match state {
+                            "policy_disabled" => {
+                                "your organization does not allow Remote Control".into()
+                            }
+                            _ => "Remote Control failed".into(),
+                        }),
+                    }
+                } else {
+                    RemoteControl::State {
+                        state: state.to_string(),
+                        detail,
+                    }
+                }));
+            }
             // Shell commands are tasks too (`local_bash`); only agents are subagents.
             "task_started" if str_at(val, "task_type") == "local_agent" => {
                 let task = str_at(val, "task_id").to_string();
@@ -800,6 +854,17 @@ impl ClaudeParser {
     }
 
     fn on_user(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        // `--replay-user-messages` echoes every prompt; one typed on Remote
+        // Control has an `origin` of kind `human` (2.1.296), ours none.
+        if val.get("isReplay").and_then(Value::as_bool) == Some(true) {
+            if val.pointer("/origin/kind").and_then(Value::as_str) == Some("human") {
+                let text = flatten_content(val.pointer("/message/content"));
+                if !text.is_empty() {
+                    out.push(AgentEvent::RemotePrompt { text });
+                }
+            }
+            return;
+        }
         let Some(content) = val.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
@@ -1243,6 +1308,130 @@ mod tests {
     #[test]
     fn fixture_hooks() {
         fixture("hooks");
+    }
+
+    /// On Remote Control (2.1.296), a Write asked about while a prompt
+    /// typed on claude.ai/code runs, and allowed there.
+    #[test]
+    fn fixture_remote_control_permission() {
+        fixture("remote_control_permission");
+        let events = replay(
+            &mut ClaudeParser::new(),
+            include_str!("fixtures/remote_control_permission.jsonl"),
+        );
+        let asked = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::PermissionRequest(req) => Some(req.id.clone()),
+                _ => None,
+            })
+            .expect("the Write was asked about");
+        // Answered remotely, so withdrawn here.
+        assert!(events.contains(&AgentEvent::PermissionWithdrawn { id: asked }));
+        let states: Vec<&AgentEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::RemoteControl(_)))
+            .collect();
+        assert_eq!(
+            states,
+            [
+                &AgentEvent::RemoteControl(RemoteControl::State {
+                    state: "ready".into(),
+                    detail: None
+                }),
+                &AgentEvent::RemoteControl(RemoteControl::State {
+                    state: "connected".into(),
+                    detail: None
+                }),
+            ]
+        );
+    }
+
+    /// Under `--replay-user-messages`: our prompt is echoed without an
+    /// origin, the one typed on claude.ai/code with `origin.kind: human`.
+    #[test]
+    fn fixture_remote_control_prompt() {
+        fixture("remote_control_prompt");
+        let events = replay(
+            &mut ClaudeParser::new(),
+            include_str!("fixtures/remote_control_prompt.jsonl"),
+        );
+        let prompts: Vec<&AgentEvent> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::RemotePrompt { .. }))
+            .collect();
+        assert_eq!(
+            prompts,
+            [&AgentEvent::RemotePrompt {
+                text: "Reply with the single word: pong".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn remote_control_answers() {
+        let on = serde_json::json!({"subtype": "success", "request_id": "r", "response": {
+            "session_url": "https://claude.ai/code/session_x", "connect_url": "", "environment_id": ""}});
+        assert_eq!(
+            ClaudeParser::remote_control_answer(true, &on),
+            RemoteControl::On {
+                url: "https://claude.ai/code/session_x".into()
+            }
+        );
+        let off = serde_json::json!({"subtype": "success", "request_id": "r"});
+        assert_eq!(
+            ClaudeParser::remote_control_answer(false, &off),
+            RemoteControl::Off
+        );
+        let refused = serde_json::json!({"subtype": "error", "request_id": "r",
+            "error": "Remote Control cannot be enabled from inside a remote session"});
+        assert_eq!(
+            ClaudeParser::remote_control_answer(true, &refused),
+            RemoteControl::Failed {
+                reason: "Remote Control cannot be enabled from inside a remote session".into()
+            }
+        );
+        // An answer without a URL is no use to the user.
+        assert!(matches!(
+            ClaudeParser::remote_control_answer(true, &off),
+            RemoteControl::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn bridge_failures_end_remote_control_only_when_terminal() {
+        let mut p = ClaudeParser::new();
+        let feed = |p: &mut ClaudeParser, v: serde_json::Value| p.feed(&v.to_string());
+        assert_eq!(
+            feed(
+                &mut p,
+                serde_json::json!({"type": "system", "subtype": "bridge_state",
+                    "state": "failed", "detail": "lost", "failure_kind": "transient"})
+            ),
+            [AgentEvent::RemoteControl(RemoteControl::State {
+                state: "failed".into(),
+                detail: Some("lost".into())
+            })]
+        );
+        assert_eq!(
+            feed(
+                &mut p,
+                serde_json::json!({"type": "system", "subtype": "bridge_state",
+                    "state": "failed", "detail": "gone"})
+            ),
+            [AgentEvent::RemoteControl(RemoteControl::Failed {
+                reason: "gone".into()
+            })]
+        );
+        assert!(matches!(
+            feed(
+                &mut p,
+                serde_json::json!({"type": "system", "subtype": "bridge_state",
+                    "state": "policy_disabled"})
+            )
+            .as_slice(),
+            [AgentEvent::RemoteControl(RemoteControl::Failed { .. })]
+        ));
     }
 
     #[test]

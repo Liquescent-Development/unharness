@@ -189,6 +189,7 @@ impl Harness for AcpHarness {
             // Its commands come only from a session. Unverified: whether
             // an agent keeps a session nothing was sent to.
             start_unprompted: true,
+            remote_control: false,
         }
     }
 

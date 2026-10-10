@@ -1,0 +1,21 @@
+HookStarted id=d9d9dbae-3e35-4981-9c97-013b28c6db41 SessionStart:startup
+HookEnded id=d9d9dbae-3e35-4981-9c97-013b28c6db41 SessionStart:startup ok ""
+CapabilitiesChanged models=13 provider=anthropic commands=71
+SessionStarted id=4d8c8163-a279-4dd8-8d61-ed5ec4f6c939 model=claude-haiku-5-5
+RemoteControl State ready
+RemoteControl State connected
+TurnStarted
+Context used=22674 window=-
+TextDelta "ready"
+RateLimit status=allowed five_hour=5% seven_day=33%
+Usage in=2 out=4 cache_read=15261 cache_write=7411 cost=0.0016 cumulative=false
+Context used=- window=1000000
+TurnCompleted Done
+RemotePrompt "Reply with the single word: pong"
+TurnStarted
+Context used=29300 window=-
+TextDelta "pong"
+RateLimit status=allowed five_hour=6% seven_day=33%
+Usage in=2 out=69 cache_read=15261 cache_write=14037 cost=0.0030 cumulative=false
+Context used=- window=1000000
+TurnCompleted Done

@@ -37,8 +37,8 @@ use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessCommand, HarnessId,
     ModelRef, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
-    PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, Rule, Rules, SessionCommand,
-    StopReason, Usage, resolve_policy,
+    PolicyResolution, PolicyUnavailable, ProviderId, RateLimitInfo, RemoteControl, Rule, Rules,
+    SessionCommand, StopReason, Usage, resolve_policy,
 };
 use crate::harness::{Harness, ModelInfo, resolve_binary};
 
@@ -215,6 +215,17 @@ pub struct SubagentOption {
     pub depth: usize,
 }
 
+/// The active harness's session on the vendor's remote control.
+#[derive(Debug, Clone, Default)]
+struct RemoteSession {
+    /// What it is called there, if the user named it.
+    name: Option<String>,
+    /// Where it can be opened, once the harness's process said.
+    url: Option<String>,
+    /// How the connection stands, in the harness's words.
+    state: Option<String>,
+}
+
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const BASE_COMMANDS: &[(&str, &str)] = &[
@@ -272,6 +283,10 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/skills", "List skills discovered in .agents/skills"),
     ("/allow", "List what is allowed without asking"),
     (
+        "/remote-control",
+        "Answer this session from claude.ai/code or the Claude app: /remote-control [on [name]|off]",
+    ),
+    (
         "/clear",
         "Start a new conversation (the previous one stays in /resume)",
     ),
@@ -280,7 +295,7 @@ const BASE_COMMANDS: &[(&str, &str)] = &[
 ];
 
 /// Names `handle_slash_command` answers to that the list leaves out.
-const HIDDEN_ALIASES: &[&str] = &["/sessions", "/exit"];
+const HIDDEN_ALIASES: &[&str] = &["/sessions", "/exit", "/rc"];
 
 /// Whether `/name` is one of unharness's own commands, which a harness's
 /// command of the same name gives way to.
@@ -377,6 +392,11 @@ pub struct App {
     /// Session ids seen this run (or chosen via /resume), per harness.
     pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
+    /// The vendor's remote control the user put the active harness's
+    /// session on (`/remote-control`). It outlives the harness's process:
+    /// each new one is put on it again (`remote_control_resend`); a
+    /// switch, a fork, `/clear` and quit end it.
+    remote: Option<RemoteSession>,
     /// The live or starting session was started before anything was sent
     /// to it (so that its commands are listed): until the first prompt it
     /// is not part of the conversation.
@@ -845,6 +865,7 @@ impl App {
             last_active_index,
             session_ids,
             session_alive: false,
+            remote: None,
             session_blank: false,
             blank_session: None,
             idle_start_paused: false,
@@ -2082,6 +2103,9 @@ impl App {
     /// Stop using `harness`'s vendor session: its next turn starts a fresh
     /// one and gets the conversation so far as context.
     fn forget_session(&mut self, harness: HarnessId) {
+        if harness == self.active {
+            self.end_remote_control();
+        }
         if harness == self.active && self.session_alive {
             self.shutdown_session();
         }
@@ -2137,6 +2161,7 @@ impl App {
         }
         self.persist();
         let original = self.conversation.id.clone();
+        self.end_remote_control();
         if self.session_alive {
             self.shutdown_session();
         }
@@ -2229,6 +2254,7 @@ impl App {
         let keep = self.session_alive
             && self.session_blank
             && !self.session_ids.contains_key(&self.active);
+        self.end_remote_control();
         let said = self.transcript.blocks.len();
         if self.session_alive && !keep {
             self.shutdown_session();
@@ -3019,6 +3045,16 @@ impl App {
                 outcome,
                 output,
             } => self.transcript.hook_ended(&id, &name, outcome, &output),
+            AgentEvent::RemoteControl(r) => self.on_remote_control(r),
+            AgentEvent::RemotePrompt { text } => {
+                // The session is the conversation's from here on, as with a
+                // prompt typed here.
+                if self.session_blank {
+                    self.mark_prompted();
+                }
+                self.transcript.push_notice("from Remote Control:");
+                self.transcript.push_user(text);
+            }
             AgentEvent::Notice(n) => self.transcript.push_notice(n),
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
@@ -3073,6 +3109,155 @@ impl App {
     fn drop_subagents(&mut self) {
         self.subagents.clear();
         self.transcript.end_running_agents();
+    }
+
+    /// Whether one of unharness's own commands is offered for the active
+    /// harness (in the `/` list and `/help`).
+    fn offers_command(&self, name: &str) -> bool {
+        name != "/remote-control" || self.caps().remote_control
+    }
+
+    /// `/remote-control [on [name] | off | status]`.
+    pub fn remote_control_command(&mut self, args: &str) {
+        if !self.caps().remote_control {
+            self.transcript
+                .push_error(format!("{} has no remote control", self.short_name()));
+            return;
+        }
+        let (word, name) = match args.split_once(char::is_whitespace) {
+            Some((w, n)) => (w, Some(n.trim().to_string()).filter(|n| !n.is_empty())),
+            None => (args, None),
+        };
+        match word {
+            "" | "on" => self.remote_control_on(name),
+            "off" if name.is_none() => self.remote_control_off(),
+            "status" if name.is_none() => {
+                let says = match &self.remote {
+                    None => "Remote Control is off".to_string(),
+                    Some(RemoteSession {
+                        url: Some(url),
+                        state,
+                        ..
+                    }) => format!(
+                        "Remote Control is on ({}): {url}",
+                        state.as_deref().unwrap_or("starting")
+                    ),
+                    Some(_) => "Remote Control is starting".to_string(),
+                };
+                self.transcript.push_notice(says);
+            }
+            _ => self
+                .transcript
+                .push_notice("usage: /remote-control [on [name] | off | status]"),
+        }
+    }
+
+    fn remote_control_on(&mut self, name: Option<String>) {
+        if let Some(remote) = &self.remote {
+            let says = match &remote.url {
+                Some(url) => format!("Remote Control is already on: {url}"),
+                None => "Remote Control is starting".to_string(),
+            };
+            self.transcript.push_notice(says);
+            return;
+        }
+        self.remote = Some(RemoteSession {
+            name: name.clone(),
+            ..Default::default()
+        });
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::RemoteControl {
+                    enabled: true,
+                    name,
+                }));
+        } else {
+            // Sent once the session is up (`remote_control_resend`).
+            self.ensure_session();
+        }
+        self.transcript.push_notice(format!(
+            "turning on Remote Control for {}",
+            self.short_name()
+        ));
+    }
+
+    fn remote_control_off(&mut self) {
+        if self.remote.take().is_none() {
+            self.transcript.push_notice("Remote Control is off");
+            return;
+        }
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::RemoteControl {
+                    enabled: false,
+                    name: None,
+                }));
+        } else {
+            self.transcript.push_notice("Remote Control is off");
+        }
+    }
+
+    /// Remote Control ends with the conversation's tie to this session (a
+    /// switch, a fork, `/clear`, quit): taken off before the session is
+    /// shut down, so that the remote side is told.
+    fn end_remote_control(&mut self) {
+        if self.remote.take().is_none() {
+            return;
+        }
+        if self.session_alive {
+            self.actions
+                .push_back(Action::Command(SessionCommand::RemoteControl {
+                    enabled: false,
+                    name: None,
+                }));
+        }
+        self.transcript.push_notice("Remote Control ended");
+    }
+
+    /// For a session that just started: the command that puts it on Remote
+    /// Control again, if the user had it on.
+    pub fn remote_control_resend(&mut self) -> Option<SessionCommand> {
+        let remote = self.remote.as_mut()?;
+        remote.url = None;
+        remote.state = None;
+        Some(SessionCommand::RemoteControl {
+            enabled: true,
+            name: remote.name.clone(),
+        })
+    }
+
+    /// What the status bar says of Remote Control.
+    pub fn remote_status(&self) -> Option<String> {
+        let remote = self.remote.as_ref()?;
+        Some(match (&remote.url, remote.state.as_deref()) {
+            (None, _) => "remote: starting".to_string(),
+            (Some(_), None | Some("connected")) => "remote".to_string(),
+            (Some(_), Some(state)) => format!("remote: {state}"),
+        })
+    }
+
+    fn on_remote_control(&mut self, event: RemoteControl) {
+        match event {
+            RemoteControl::On { url } => {
+                if let Some(remote) = self.remote.as_mut() {
+                    remote.url = Some(url.clone());
+                }
+                self.transcript.push_system(format!(
+                    "Remote Control is on: open {url} in a browser or the Claude app"
+                ));
+            }
+            RemoteControl::State { state, .. } => {
+                if let Some(remote) = self.remote.as_mut() {
+                    remote.state = Some(state);
+                }
+            }
+            RemoteControl::Off => self.transcript.push_notice("Remote Control is off"),
+            RemoteControl::Failed { reason } => {
+                self.remote = None;
+                self.transcript
+                    .push_error(format!("Remote Control: {reason}"));
+            }
+        }
     }
 
     /// End the active harness's session. It is not alive from here on: a
@@ -3328,6 +3513,7 @@ impl App {
     }
 
     fn switch_now(&mut self, next: HarnessId) {
+        self.end_remote_control();
         if self.session_alive {
             self.shutdown_session();
         }
@@ -3729,6 +3915,7 @@ impl App {
     }
 
     pub fn quit(&mut self) {
+        self.end_remote_control();
         if self.session_alive {
             self.shutdown_session();
         }
@@ -4624,6 +4811,7 @@ impl App {
             "/undo-restore" => self.undo_restore(),
             "/fork" => self.fork_conversation(),
             "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
+            "/remote-control" | "/rc" => self.remote_control_command(rest),
             "/attach" => match rest {
                 path if !path.is_empty() => self.attach(path),
                 _ if self.attachments.is_empty() => {
@@ -4710,7 +4898,7 @@ impl App {
             "/clear" => self.new_conversation(),
             "/help" => {
                 let mut help = String::from("Commands:\n");
-                for (c, d) in BASE_COMMANDS {
+                for (c, d) in BASE_COMMANDS.iter().filter(|(c, _)| self.offers_command(c)) {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
@@ -4862,7 +5050,7 @@ impl App {
                 }
                 (_, None) => {
                     for (c, d) in BASE_COMMANDS {
-                        if c.starts_with(cmd.as_str()) {
+                        if c.starts_with(cmd.as_str()) && self.offers_command(c) {
                             out.push((c.to_string(), d.to_string()));
                         }
                     }
@@ -7861,6 +8049,105 @@ pub(crate) mod tests {
         assert!(
             matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1")
         );
+    }
+
+    #[test]
+    fn remote_control_is_offered_only_where_declared() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CODEX);
+        app.session_alive = true;
+        app.handle_slash_command("/rc");
+        assert!(app.take_actions().is_empty());
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(Block::Error(e)) if e.contains("has no remote control")
+        ));
+        assert!(!app.offers_command("/remote-control"));
+        assert!(app.offers_command("/model"));
+        let claude = test_app(HarnessId::CLAUDE);
+        assert!(claude.offers_command("/remote-control"));
+    }
+
+    #[test]
+    fn remote_control_comes_back_on_each_new_process_until_a_switch() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.handle_slash_command("/remote-control on my desk");
+        assert_eq!(
+            app.take_actions(),
+            [Action::Command(SessionCommand::RemoteControl {
+                enabled: true,
+                name: Some("my desk".into())
+            })]
+        );
+        assert_eq!(app.remote_status().as_deref(), Some("remote: starting"));
+        app.on_event(AgentEvent::RemoteControl(RemoteControl::On {
+            url: "https://claude.ai/code/session_x".into(),
+        }));
+        app.on_event(AgentEvent::RemoteControl(RemoteControl::State {
+            state: "connected".into(),
+            detail: None,
+        }));
+        assert_eq!(app.remote_status().as_deref(), Some("remote"));
+        // A new process (a sandbox change, a resume...) is put on it again.
+        assert_eq!(
+            app.remote_control_resend(),
+            Some(SessionCommand::RemoteControl {
+                enabled: true,
+                name: Some("my desk".into())
+            })
+        );
+        assert_eq!(app.remote_status().as_deref(), Some("remote: starting"));
+        // A switch ends it, telling the remote side first.
+        app.switch_now(HarnessId::CODEX);
+        let actions = app.take_actions();
+        assert_eq!(
+            actions[0],
+            Action::Command(SessionCommand::RemoteControl {
+                enabled: false,
+                name: None
+            })
+        );
+        assert_eq!(actions[1], Action::Shutdown);
+        assert_eq!(app.remote_status(), None);
+        assert_eq!(app.remote_control_resend(), None);
+    }
+
+    #[test]
+    fn a_failed_remote_control_is_dropped() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.handle_slash_command("/rc");
+        app.take_actions();
+        app.on_event(AgentEvent::RemoteControl(RemoteControl::Failed {
+            reason: "your organization does not allow Remote Control".into(),
+        }));
+        assert_eq!(app.remote_status(), None);
+        assert_eq!(app.remote_control_resend(), None);
+    }
+
+    #[test]
+    fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
+        use super::super::transcript::Block;
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.session_alive = true;
+        app.session_blank = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::RemotePrompt {
+            text: "Reply with the single word: pong".into(),
+        });
+        assert!(!app.session_blank);
+        assert_eq!(
+            app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+            Some("claude-1")
+        );
+        assert!(matches!(
+            app.transcript.blocks.last(),
+            Some(Block::User { text }) if text == "Reply with the single word: pong"
+        ));
     }
 
     #[test]

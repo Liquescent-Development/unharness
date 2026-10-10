@@ -119,6 +119,8 @@ pub fn session_args(cfg: &SessionConfig) -> Vec<String> {
         "--include-partial-messages",
         "--forward-subagent-text",
         "--include-hook-events",
+        // Shows a prompt typed on Remote Control; ours are echoed too.
+        "--replay-user-messages",
         "--permission-prompts",
         "host",
         "--permission-prompt-tool",
@@ -367,6 +369,8 @@ async fn drive(
 ) {
     let mut parser = ClaudeParser::new();
     let mut pending: HashMap<String, PendingPermission> = HashMap::new();
+    // Our `remote_control` requests: whether each turns it on.
+    let mut remote_requests: HashMap<String, bool> = HashMap::new();
     let mut shutting_down = false;
 
     // Handshake. The CLI answers with its command/model catalog; we only need
@@ -443,6 +447,15 @@ async fn drive(
                     SessionCommand::SetPolicy(p) => Some(
                         control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
                     ),
+                    SessionCommand::RemoteControl { enabled, name } => {
+                        let mut extra = json!({"enabled": enabled});
+                        if let Some(name) = name.filter(|_| enabled) {
+                            extra["name"] = json!(name);
+                        }
+                        let (id, line) = control_request("remote_control", extra);
+                        remote_requests.insert(id, enabled);
+                        Some(line)
+                    }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
                         shut_down(&mut proc).await;
@@ -465,6 +478,17 @@ async fn drive(
                                     let rid = v.pointer("/response/request_id").and_then(Value::as_str);
                                     if rid.is_some() && rid == awaiting_init.as_deref() {
                                         awaiting_init = None;
+                                    }
+                                    // Its error is not the parser's generic one.
+                                    if let Some(enabled) = rid.and_then(|r| remote_requests.remove(r)) {
+                                        let answer = ClaudeParser::remote_control_answer(
+                                            enabled,
+                                            v.get("response").unwrap_or(&Value::Null),
+                                        );
+                                        if events.send(AgentEvent::RemoteControl(answer)).await.is_err() {
+                                            break;
+                                        }
+                                        continue;
                                     }
                                     // Only the answer to `initialize` names the account.
                                     if let Some(why) = v
@@ -570,7 +594,7 @@ mod tests {
     fn session_args_shape() {
         let a = session_args(&cfg(PermissionPolicy::Ask));
         let s = a.join(" ");
-        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text --include-hook-events --permission-prompts host --permission-prompt-tool stdio"));
+        assert!(s.starts_with("-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --forward-subagent-text --include-hook-events --replay-user-messages --permission-prompts host --permission-prompt-tool stdio"));
         assert!(s.contains("--model opus"));
         assert!(s.contains("--effort high"));
         assert!(s.contains("--session-id "));

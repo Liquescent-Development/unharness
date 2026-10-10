@@ -175,6 +175,12 @@ pub enum SessionCommand {
     SetModel(ModelRef),
     SetEffort(Option<String>),
     SetPolicy(PermissionPolicy),
+    /// Put the session on the vendor's remote control, or take it off
+    /// (`Capabilities::remote_control`); `name` names it there.
+    RemoteControl {
+        enabled: bool,
+        name: Option<String>,
+    },
     Shutdown,
 }
 

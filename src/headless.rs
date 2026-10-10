@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use crate::core::rules::rule_may_answer;
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
-    PermissionRequest, Rule, Rules, SessionCommand, SessionHandle, StopReason, SubagentStatus,
-    ToolAction, Usage,
+    PermissionRequest, RemoteControl, Rule, Rules, SessionCommand, SessionHandle, StopReason,
+    SubagentStatus, ToolAction, Usage,
 };
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
@@ -907,6 +907,21 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             json!({"type": "turn_completed", "status": status, "error": error})
         }
         AgentEvent::PolicyChanged(p) => json!({"type": "policy_changed", "policy": p}),
+        // Neither is sent: a `--print` run does not put its session on
+        // remote control.
+        AgentEvent::RemotePrompt { text } => json!({"type": "remote_prompt", "text": text}),
+        AgentEvent::RemoteControl(r) => match r {
+            RemoteControl::On { url } => {
+                json!({"type": "remote_control", "state": "on", "url": url})
+            }
+            RemoteControl::State { state, detail } => {
+                json!({"type": "remote_control", "state": state, "detail": detail})
+            }
+            RemoteControl::Off => json!({"type": "remote_control", "state": "off"}),
+            RemoteControl::Failed { reason } => {
+                json!({"type": "remote_control", "state": "failed", "detail": reason})
+            }
+        },
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
         AgentEvent::Error(e) => json!({"type": "error", "message": e}),
         AgentEvent::ProcessExited { code } => json!({"type": "process_exited", "code": code}),

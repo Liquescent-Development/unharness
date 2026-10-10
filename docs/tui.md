@@ -140,6 +140,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/fork` | Continue in a copy of the conversation |
 | `/skills` | List skills found in `.agents/skills` |
 | `/allow` | List what is allowed without asking |
+| `/remote-control`, `/rc` | Answer the session from claude.ai/code or the Claude app (Claude Code; [below](#remote-control)) |
 | `/clear` | Start a new conversation (the previous one stays in `/resume`) |
 | `/help`, `/quit` | Commands and shortcuts; quit |
 
@@ -181,6 +182,29 @@ could be a command where it was text, or the other way round.
 A command has to start the message the agent gets, so it goes alone: the
 context of a harness switch and the output of `!` commands it has not
 seen go with the next prompt instead.
+
+### Remote Control
+
+`/remote-control` (or `/rc`) puts the Claude Code session on Claude's
+Remote Control: the transcript gives a `claude.ai/code/session_…` link,
+which opens in a browser or the Claude app signed in to the same account,
+and the status bar says `remote` (`remote: starting` until the link is
+there, the connection's state while it is not connected). `/rc <name>`
+names the session there, `/rc status` shows the link again, `/rc off`
+takes it off. Claude's own `/rc` cannot run in the headless mode unharness
+drives it in; this is the same thing through Claude's SDK interface.
+
+A prompt typed there runs as a turn of the session, shown in the
+transcript as yours under "from Remote Control". A permission request
+goes to both sides, and whichever answers first decides: an answer there
+closes the request here. An allow rule still answers what it covers at
+once (the remote side may show the request until then).
+
+A new Claude process (a sandbox or provider change, a resume) is put on
+Remote Control again, with the same link where Claude resumes the session.
+A switch to another harness, a fork, `/clear` and quitting take it off.
+It is not offered in `--print` or `--no-tui` (where Claude's own `/rc`
+works).
 
 ## File references
 

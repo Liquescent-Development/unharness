@@ -15,8 +15,8 @@ use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::session::ProcessSlot;
 use crate::core::{
-    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand,
+    SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
@@ -157,6 +157,11 @@ async fn drive(
                 match cmd {
                     // agy takes no event on stdin that would stop one.
                     SessionCommand::StopSubagent { .. } => {}
+                    SessionCommand::RemoteControl { .. } => {
+                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
+                            reason: "agy has no remote control".into(),
+                        })).await;
+                    }
                     SessionCommand::Steer { .. }
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. } => {
