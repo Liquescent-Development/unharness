@@ -62,10 +62,14 @@ def main() -> int:
                     help="the answer to the next select dialog (repeatable; default: ok)")
     ap.add_argument("--abort-on-select", action="store_true",
                     help="send abort instead of answering the first select dialog")
+    ap.add_argument("--session-id",
+                    help="pass --session-id as unharness does (a pi before 0.76.0 refuses it)")
     args = ap.parse_args()
 
     cwd = os.getcwd()
     cmd = ["pi", "--mode", "rpc", "--no-session"]
+    if args.session_id:
+        cmd += ["--session-id", args.session_id]
     if args.provider:
         cmd += ["--provider", args.provider]
     if args.model:

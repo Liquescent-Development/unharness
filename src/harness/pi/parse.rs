@@ -54,8 +54,11 @@ impl PiParser {
         if t.is_empty() {
             return vec![];
         }
-        // pi 0.73.1 refused `--session-id` this way and exited.
-        if t.contains("Unknown option:") {
+        // pi before 0.76.0 refuses `--session-id` this way and exits
+        // (`fixtures/too_old.jsonl`), as one of `Unknown options: --a, --b`
+        // when there are more (0.73.1's source); another refused flag says
+        // nothing about the version.
+        if t.contains("Unknown option") && t.split([' ', ',']).any(|word| word == "--session-id") {
             let min = super::MIN_VERSION;
             return vec![AgentEvent::Notice(format!(
                 "pi: {t} (unharness needs pi {min} or later: run `{}`)",
@@ -654,21 +657,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_option_names_the_version_unharness_needs() {
+    fn fixture_too_old() {
+        // pi 0.73.1 refusing `--session-id`.
+        assert_fixture(&mut PiParser::new(None), &fixtures_dir(file!()), "too_old");
+    }
+
+    #[test]
+    fn only_a_refused_session_id_names_the_version() {
         let mut p = PiParser::new(None);
-        // What pi 0.73.1 printed before exiting 1.
-        assert_eq!(
-            p.feed_stderr("Error: Unknown option: --session-id\n"),
-            vec![AgentEvent::Notice(
-                "pi: Error: Unknown option: --session-id (unharness needs pi 0.78.1 or \
-                 later: run `pi update --self`)"
-                    .into()
-            )]
-        );
-        assert_eq!(
-            p.feed_stderr("something else"),
-            vec![AgentEvent::Notice("pi: something else".into())]
-        );
+        let hinted = |events: Vec<AgentEvent>| matches!(&events[..], [AgentEvent::Notice(n)] if n.contains("pi update --self"));
+        assert!(hinted(p.feed_stderr(
+            "Error: Unknown options: --frobnicate, --session-id"
+        )));
+        assert!(!hinted(
+            p.feed_stderr("Error: Unknown option: --frobnicate")
+        ));
+        assert!(!hinted(
+            p.feed_stderr("Error: Unknown option: --session-idx")
+        ));
     }
 
     #[test]

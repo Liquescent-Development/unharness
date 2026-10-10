@@ -1,0 +1,7 @@
+# pi 0.73.1 (@mariozechner/pi-coding-agent, deprecated) refusing --session-id: scripts/record-pi.py --session-id <id> hi
+>> {"id": "req-1", "type": "get_state"}
+>> {"id": "req-2", "type": "get_commands"}
+>> {"id": "req-3", "type": "get_available_models"}
+>> {"id": "req-4", "type": "prompt", "message": "hi"}
+!! Error: Unknown option: --session-id
+# exit=1

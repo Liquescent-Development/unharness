@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
-    parse_version, probe_version, resolve_binary,
+    bare_version, probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
@@ -303,7 +303,7 @@ const PRINT_SKILLS_SINCE: [u64; 3] = [1, 1, 11];
 /// Whether `agy --version` (`1.3.2`) names one that answers `/skills` in
 /// print mode. Anything but three numbers is not taken for a version.
 fn answers_skills(version: &str) -> bool {
-    parse_version(version).is_some_and(|v| v >= PRINT_SKILLS_SINCE)
+    bare_version(version).is_some_and(|v| v >= PRINT_SKILLS_SINCE)
 }
 
 /// The skills agy offers in `cwd`, which a prompt runs as `/name`:

@@ -54,8 +54,12 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| d.binary_names[0].to_string());
-                let warning =
-                    version_warning(probe.version.as_deref(), h.min_version().as_ref(), &name);
+                let warning = version_warning(
+                    probe.version.as_deref(),
+                    h.min_version().as_ref(),
+                    h.reports_version(),
+                    &name,
+                );
                 println!(
                     "  {} {} ({}) at {}",
                     if warning.is_some() {
@@ -559,38 +563,55 @@ fn report_rules(root: &Path) {
 }
 
 /// The version as doctor shows it: its three numbers when they can be
-/// read out of what `--version` printed, else that text.
+/// read out of what `--version` printed, else that text's first line.
 fn describe_version(version: Option<&str>) -> String {
     match version.map(|v| (v, parse_version(v))) {
         None => "version unknown".into(),
         Some((_, Some([major, minor, patch]))) => format!("v{major}.{minor}.{patch}"),
-        Some((text, None)) => text.into(),
+        Some((text, None)) => first_line(text).into(),
     }
 }
 
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
 /// What is wrong with the version `<binary> --version` gave, if anything:
-/// none at all, one that cannot be read where a minimum is declared, or one
-/// below it.
+/// none where the harness `reports_version` or declares a minimum, one that
+/// cannot be read where a minimum is declared, or one below it.
 fn version_warning(
     version: Option<&str>,
     min: Option<&MinVersion>,
+    reports_version: bool,
     binary: &str,
 ) -> Option<String> {
+    let older = |min: &MinVersion| {
+        format!(
+            "older than {min}, which unharness needs for {}: run `{}`",
+            min.needs, min.upgrade
+        )
+    };
     let Some(version) = version else {
-        return Some(format!(
-            "`{binary} --version` printed nothing unharness could read"
-        ));
+        if !reports_version && min.is_none() {
+            return None;
+        }
+        let none = format!("`{binary} --version` failed or printed no version");
+        return Some(match min {
+            Some(min) => format!("{none}, so it may be {}", older(min)),
+            None => none,
+        });
     };
     let min = min?;
     match parse_version(version) {
         None => Some(format!(
-            "could not read a version from `{version}`, so it may be older than {min}, which \
-             unharness needs for {}: run `{}`",
-            min.needs, min.upgrade
+            "could not read a version from `{}`, so it may be {}",
+            first_line(version),
+            older(min)
         )),
         Some(v) if v < min.version => Some(format!(
-            "{version} is older than {min}, which unharness needs for {}: run `{}`",
-            min.needs, min.upgrade
+            "{} is {}",
+            describe_version(Some(version)),
+            older(min)
         )),
         Some(_) => None,
     }
@@ -648,13 +669,24 @@ mod tests {
     #[test]
     fn a_version_that_cannot_be_read_or_is_too_old_is_warned_about() {
         let min = crate::harness::pi::MIN_VERSION;
+        let pi = |version| version_warning(version, Some(&min), true, "pi");
         assert_eq!(
-            version_warning(None, None, "codex").as_deref(),
-            Some("`codex --version` printed nothing unharness could read")
+            version_warning(None, None, true, "codex").as_deref(),
+            Some("`codex --version` failed or printed no version")
         );
-        assert_eq!(version_warning(Some("whatever"), None, "codex"), None);
+        // An ACP agent's command need not answer `--version`.
+        assert_eq!(version_warning(None, None, false, "npx"), None);
+        assert_eq!(version_warning(Some("whatever"), None, true, "codex"), None);
         assert_eq!(
-            version_warning(Some("whatever"), Some(&min), "pi").as_deref(),
+            pi(None).as_deref(),
+            Some(
+                "`pi --version` failed or printed no version, so it may be older than 0.78.1, \
+                 which unharness needs for --session-id and the gate's ctx.mode: run \
+                 `pi update --self`"
+            )
+        );
+        assert_eq!(
+            pi(Some("whatever\nand more")).as_deref(),
             Some(
                 "could not read a version from `whatever`, so it may be older than 0.78.1, \
                  which unharness needs for --session-id and the gate's ctx.mode: run \
@@ -662,22 +694,22 @@ mod tests {
             )
         );
         assert_eq!(
-            version_warning(Some("0.73.1"), Some(&min), "pi").as_deref(),
+            pi(Some("0.73.1")).as_deref(),
             Some(
-                "0.73.1 is older than 0.78.1, which unharness needs for --session-id and the \
+                "v0.73.1 is older than 0.78.1, which unharness needs for --session-id and the \
                  gate's ctx.mode: run `pi update --self`"
             )
         );
-        assert!(version_warning(Some("0.78.0"), Some(&min), "pi").is_some());
-        assert_eq!(version_warning(Some("0.78.1"), Some(&min), "pi"), None);
-        assert_eq!(version_warning(Some("1.1.0"), Some(&min), "pi"), None);
+        assert!(pi(Some("0.78.0")).is_some());
+        assert_eq!(pi(Some("0.78.1")), None);
+        assert_eq!(pi(Some("1.1.0")), None);
     }
 
     #[test]
     fn a_version_is_shown_as_its_numbers() {
         assert_eq!(describe_version(Some("2.1.296 (Claude Code)")), "v2.1.296");
         assert_eq!(describe_version(Some("codex-cli 0.157.0")), "v0.157.0");
-        assert_eq!(describe_version(Some("nightly")), "nightly");
+        assert_eq!(describe_version(Some("nightly\nbuilt today")), "nightly");
         assert_eq!(describe_version(None), "version unknown");
     }
 

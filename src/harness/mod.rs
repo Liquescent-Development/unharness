@@ -111,6 +111,12 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// Whether `--version` on the binary names the CLI unharness drives, so
+    /// that `doctor` warns when it gives none. Default: yes.
+    fn reports_version(&self) -> bool {
+        true
+    }
+
     /// Whether the harness is signed in, for choosing a default at startup.
     /// Must stay cheap (a file read or a quick status command, no model
     /// query): `None` when only a slower check or a live session can tell.
@@ -231,10 +237,12 @@ pub fn resolve_binary(desc: &HarnessDescriptor, override_path: Option<&Path>) ->
     desc.binary_names.iter().find_map(|name| which(name))
 }
 
-/// Run `<binary> --version` and return what it printed, trimmed: stdout,
-/// or stderr when stdout is empty. pi before 0.74 (the `@mariozechner`
-/// package; 0.73.1 read in its source) sends stdout to stderr when stdin is
-/// not a terminal, `--version` included.
+/// Run `<binary> --version` and return what it printed on stdout, trimmed;
+/// `None` when it fails or prints nothing there. When stdout is empty,
+/// stderr is taken only if it is a bare version: pi before 0.74 (the
+/// `@mariozechner` package; 0.73.1 run) sends stdout to stderr when stdin
+/// is not a terminal, `--version` included, and anything else on stderr
+/// (a warning, a log line) is not a version.
 pub fn probe_version(binary: &Path) -> Option<String> {
     let output = std::process::Command::new(binary)
         .arg("--version")
@@ -243,22 +251,33 @@ pub fn probe_version(binary: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    [&output.stdout, &output.stderr]
-        .into_iter()
-        .map(|out| String::from_utf8_lossy(out).trim().to_string())
-        .find(|s| !s.is_empty())
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return Some(stdout);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    bare_version(&stderr).map(|_| stderr)
 }
 
-/// The version in what `--version` printed: the first word that is three
-/// numbers (`2.1.296 (Claude Code)`, `codex-cli 0.157.0`). A pre-release
-/// (`1.3.2-beta`) is not taken for one.
+/// `text` as a version when it is three numbers and nothing else (`1.3.2`;
+/// not `1.3`, `v1.3.2` or `1.3.2-beta`).
+pub fn bare_version(text: &str) -> Option<[u64; 3]> {
+    let parts: Vec<u64> = text
+        .trim()
+        .split('.')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()?;
+    parts.try_into().ok()
+}
+
+/// The version in what `--version` printed: the first word of its first
+/// line that is three numbers, with a leading `v` and punctuation around
+/// it left out (`2.1.296 (Claude Code)`, `codex-cli 0.157.0`, `(v1.2.3)`).
+/// A pre-release (`1.3.2-beta`) is not taken for one.
 pub fn parse_version(text: &str) -> Option<[u64; 3]> {
-    text.split_whitespace().find_map(|word| {
-        let parts: Vec<u64> = word
-            .split('.')
-            .map(|p| p.parse().ok())
-            .collect::<Option<_>>()?;
-        parts.try_into().ok()
+    text.lines().next()?.split_whitespace().find_map(|word| {
+        let word = word.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        bare_version(word.strip_prefix('v').unwrap_or(word))
     })
 }
 
@@ -295,10 +314,22 @@ mod tests {
         assert_eq!(parse_version("2.1.296 (Claude Code)"), Some([2, 1, 296]));
         assert_eq!(parse_version("codex-cli 0.157.0"), Some([0, 157, 0]));
         assert_eq!(parse_version("1.1.0\n"), Some([1, 1, 0]));
+        assert_eq!(parse_version("pi v1.2.0"), Some([1, 2, 0]));
+        assert_eq!(parse_version("tool (1.2.3), built today"), Some([1, 2, 3]));
         assert_eq!(parse_version("1.3"), None);
         assert_eq!(parse_version("1.3.2-beta"), None);
         assert_eq!(parse_version("unknown"), None);
         assert_eq!(parse_version(""), None);
+        // Only the first line names the version.
+        assert_eq!(parse_version("nightly\nbuilt with node 22.1.0"), None);
+    }
+
+    #[test]
+    fn a_bare_version_is_three_numbers_and_nothing_else() {
+        assert_eq!(bare_version("1.3.2\n"), Some([1, 3, 2]));
+        assert_eq!(bare_version("v1.3.2"), None);
+        assert_eq!(bare_version("1.3.2-beta"), None);
+        assert_eq!(bare_version("Update available: 1.4.0"), None);
     }
 
     #[cfg(unix)]
@@ -315,10 +346,13 @@ mod tests {
         let stdout = stub("stdout", "echo 1.1.0; echo noise >&2");
         // What pi 0.73.1 does with stdin not a terminal.
         let stderr = stub("stderr", "echo 0.73.1 >&2");
+        // Anything else on stderr is not taken for a version.
+        let noise = stub("noise", "echo 'Update available: 1.4.0' >&2");
         let failed = stub("failed", "echo 1.0.0; exit 1");
         let silent = stub("silent", "exit 0");
         assert_eq!(probe_version(&stdout).as_deref(), Some("1.1.0"));
         assert_eq!(probe_version(&stderr).as_deref(), Some("0.73.1"));
+        assert_eq!(probe_version(&noise), None);
         assert_eq!(probe_version(&failed), None);
         assert_eq!(probe_version(&silent), None);
     }
