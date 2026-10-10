@@ -20,7 +20,7 @@ use super::modal::{
     RewindOption,
 };
 use super::prompt;
-use super::selection::{self, Granularity, Point, Selection};
+use super::selection::{self, Granularity, Point, RowCopy, Selection};
 use super::transcript::{DEFAULT_BRIDGE_MAX_CHARS, Transcript, tool_summary};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
@@ -589,6 +589,8 @@ pub struct TranscriptView {
     pub lines: Vec<String>,
     /// Every rendered line, kept between frames.
     pub rendered: Vec<Line<'static>>,
+    /// Per entry of `lines`, what a copy takes from it.
+    pub copy: Vec<RowCopy>,
     /// Per transcript block, where its lines are in `rendered` and `lines`.
     pub blocks: Vec<KeptBlock>,
     /// The blocks still running, whose status is drawn again on every
@@ -622,6 +624,8 @@ pub struct LiveRow {
     /// Its index in [`TranscriptView::blocks`].
     pub block: usize,
     pub line: Line<'static>,
+    /// What a copy takes from `line`.
+    pub copy: RowCopy,
     /// The status's span in `line`.
     pub span: usize,
     pub live: Live,
