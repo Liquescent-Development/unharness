@@ -481,14 +481,15 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
 /// variables, which name the pane unharness runs in and herdr's socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HerdrEnv {
-    /// What unharness got: it reports nothing to herdr itself (`--print`,
-    /// `--no-tui`, `herdr = false`), so a CLI's own herdr integration may.
+    /// What unharness got: the CLI is what runs in the pane (`--no-tui`)
+    /// or the user turned herdr off (`herdr = false`), so a CLI's own
+    /// herdr integration may report.
     Inherit,
     /// What unharness got, with the socket of its proxy
     /// (`tui::herdr_proxy`), which keeps a CLI's integration from
-    /// reporting over unharness's own reports.
+    /// reporting for the pane unharness runs in (the TUI, `--print`).
     Proxy(PathBuf),
-    /// None: unharness reports, and its proxy did not start.
+    /// None: the proxy was wanted and did not start.
     Strip,
 }
 

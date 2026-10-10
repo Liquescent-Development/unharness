@@ -470,9 +470,12 @@ own state reports (`herdr integration install claude`, pi's herdr
 extension): unharness answers those itself, so the pane shows
 unharness's state. They are noted once each in `herdr.log`.
 
-`--print` and `--no-tui` report nothing to herdr, and pass the
-variables on unchanged, as does `herdr = false`: there a CLI's own
-integration reports for the pane.
+`--print` reports nothing, but its CLI reaches herdr through that
+socket too: herdr 0.8.2 keeps the first report a CLI's integration makes
+for a pane after the CLI has gone, and a TUI in that pane later could
+not report. `--no-tui`, where the CLI's own interface is what runs in
+the pane, and `herdr = false` pass the variables on unchanged, and there
+a CLI's own integration reports for the pane.
 
 ## Terminal notes
 

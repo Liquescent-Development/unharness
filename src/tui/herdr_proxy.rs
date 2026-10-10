@@ -2,23 +2,33 @@
 //!
 //! herdr hands its pane's variables to what runs there, and an agent CLI's
 //! own herdr integration (`herdr integration install claude`, pi's
-//! extension) reports the pane's state with them. unharness reports for
-//! its pane itself, and on herdr 0.8.2 one `pane.report_agent_session`
-//! from `herdr:claude` made herdr ignore every later `pane.report_agent`
-//! from unharness, so the CLIs get `HERDR_SOCKET_PATH` naming this socket
-//! instead. A request that reports for a pane or gives one up is answered
-//! here the way herdr answers it and goes no further; everything else goes
-//! to herdr's socket, and its answers come back line by line.
+//! extension) reports the pane's state with them. On herdr 0.8.2 one
+//! `pane.report_agent_session` from `herdr:claude` made herdr ignore every
+//! later `pane.report_agent` from unharness, in that process and in the
+//! next one in the pane, and nothing unharness could send undid it. So
+//! where unharness is what runs in the pane (the TUI, `--print`), the CLIs
+//! get `HERDR_SOCKET_PATH` naming this socket instead. A request that
+//! reports for a pane or gives one up is answered here the way herdr
+//! answers it and goes no further; everything else goes to herdr's socket,
+//! and its answers come back line by line. herdr takes one JSON object per
+//! line and refuses an array, a method spelled otherwise and a duplicate
+//! key, so there is no other way to send a report through.
+//!
+//! An answer given here may overtake one of herdr's on a connection that
+//! carries several requests; every client seen sends one per connection.
 //!
 //! The socket is `herdr.sock` in a directory of its own (0700) under the
-//! runtime directory, removed when the proxy is dropped. A process that
-//! connects to herdr's socket by its default path gets past it: this keeps
-//! integrations from reporting over unharness, it does not keep anything
-//! from herdr.
+//! runtime directory, removed when the proxy is dropped, or by the next
+//! proxy when unharness was killed. A process that connects to herdr's
+//! socket by its default path gets past it: this keeps integrations from
+//! reporting over unharness, it does not keep anything from herdr (the
+//! sandbox does not confine connecting to a socket).
 
 use std::collections::HashSet;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -38,7 +48,17 @@ const AGENT_METHODS: &[&str] = &[
 ];
 
 /// The longest line a client may send; a longer one ends the connection.
-const MAX_LINE: usize = 1 << 20;
+const MAX_LINE: usize = 16 << 20;
+
+/// How many distinct lines the log takes: a client chooses what it says.
+const MAX_NOTES: usize = 64;
+
+/// How often a client that stopped sending is looked at, while herdr's
+/// side of its connection is still open.
+const HANGUP_CHECK: Duration = Duration::from_millis(500);
+
+/// What a directory of the proxy's is called, before its random part.
+const DIR_PREFIX: &str = "unharness-herdr-";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
@@ -69,15 +89,25 @@ fn classify(line: &[u8]) -> Verdict {
     let source = v
         .pointer("/params/source")
         .and_then(Value::as_str)
-        .unwrap_or("no source");
+        .map_or_else(|| "no source".to_string(), shown);
     Verdict::Answer {
         reply: format!("{}\n", json!({"id": id, "result": {"type": "ok"}})),
         what: format!("kept from herdr: {method} from {source}"),
     }
 }
 
-/// Writes each distinct line once to `herdr.log`: a CLI reports on every
-/// turn.
+/// `text` as it may go in the log: on one line, and not long.
+fn shown(text: &str) -> String {
+    let short: String = text.chars().take(64).collect();
+    let mut out = short.escape_debug().to_string();
+    if short.len() < text.len() {
+        out.push('…');
+    }
+    out
+}
+
+/// Writes each distinct line once to `herdr.log`, the first `MAX_NOTES`
+/// of them: a CLI reports on every turn.
 struct Log {
     path: Option<PathBuf>,
     seen: Mutex<HashSet<String>>,
@@ -88,11 +118,14 @@ impl Log {
         let Ok(mut seen) = self.seen.lock() else {
             return;
         };
-        if !seen.insert(what.to_string()) {
+        if seen.len() >= MAX_NOTES || !seen.insert(what.to_string()) {
             return;
         }
         if let Some(path) = &self.path {
             super::herdr::log_line(path, what);
+            if seen.len() == MAX_NOTES {
+                super::herdr::log_line(path, "proxy: nothing more is noted");
+            }
         }
     }
 }
@@ -116,10 +149,11 @@ impl Proxy {
 
     fn start_in(parent: &Path, upstream: PathBuf, log: Option<PathBuf>) -> std::io::Result<Proxy> {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        sweep(parent);
         // Short: a socket's path must fit in `sun_path` (104 bytes on
         // macOS, whose temporary directory is long already).
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let dir = parent.join(format!("unharness-herdr-{}", &id[..12]));
+        let dir = parent.join(format!("{DIR_PREFIX}{}", &id[..12]));
         std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
         let path = dir.join("herdr.sock");
         let bound = UnixListener::bind(&path).and_then(|listener| {
@@ -155,17 +189,54 @@ impl Drop for Proxy {
     }
 }
 
+/// Remove what a proxy of a killed unharness left in `parent`: a directory
+/// of the user's, not a link, holding only a socket nothing listens on.
+fn sweep(parent: &Path) {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    // SAFETY: `geteuid` cannot fail and touches no memory.
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(DIR_PREFIX) {
+            continue;
+        }
+        let dir = entry.path();
+        let ours = std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir() && m.uid() == uid);
+        let sock = dir.join("herdr.sock");
+        let dead = std::fs::symlink_metadata(&sock).is_ok_and(|m| m.file_type().is_socket())
+            && std::os::unix::net::UnixStream::connect(&sock)
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused);
+        if ours && dead {
+            let _ = std::fs::remove_file(&sock);
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+}
+
 async fn accept(listener: UnixListener, upstream: Arc<PathBuf>, log: Arc<Log>) {
     let mut connections = JoinSet::new();
-    while let Ok((client, _)) = listener.accept().await {
-        while connections.try_join_next().is_some() {}
-        connections.spawn(serve(client, upstream.clone(), log.clone()));
+    loop {
+        match listener.accept().await {
+            Ok((client, _)) => {
+                while connections.try_join_next().is_some() {}
+                connections.spawn(serve(client, upstream.clone(), log.clone()));
+            }
+            // Out of descriptors, or a client gone before it was taken:
+            // the next one may fare better.
+            Err(e) => {
+                log.once(&format!("proxy: accept: {e}"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
     }
 }
 
 /// One client: its lines in order, each answered here or written to
 /// herdr's socket, which is connected at the first line it gets.
 async fn serve(client: UnixStream, upstream: Arc<PathBuf>, log: Arc<Log>) {
+    let fd = client.as_raw_fd();
     let (read, write) = client.into_split();
     // Answers given here and lines from herdr go through one writer, a
     // whole line at a time.
@@ -185,7 +256,14 @@ async fn serve(client: UnixStream, upstream: Arc<PathBuf>, log: Arc<Log>) {
             Ok(n) => n,
             Err(_) => break,
         };
-        if n == 0 || line.len() > MAX_LINE {
+        if n == 0 {
+            break;
+        }
+        if line.len() > MAX_LINE {
+            log.once(&format!(
+                "proxy: a request over {} MiB ended its connection",
+                MAX_LINE >> 20
+            ));
             break;
         }
         match classify(&line) {
@@ -223,11 +301,34 @@ async fn serve(client: UnixStream, upstream: Arc<PathBuf>, log: Arc<Log>) {
         }
     }
     // The client is done sending: so is herdr's side, and what herdr still
-    // answers is passed on until it closes.
+    // answers (a subscription's events) is passed on until it closes, or
+    // until the client is gone altogether, which an idle subscription
+    // would not show otherwise.
     if let Some(mut to) = herdr {
         let _ = to.shutdown().await;
     }
-    while copying.join_next().await.is_some() {}
+    let mut check = tokio::time::interval(HANGUP_CHECK);
+    loop {
+        tokio::select! {
+            done = copying.join_next() => if done.is_none() { break },
+            _ = check.tick() => if hung_up(fd) { break },
+        }
+    }
+}
+
+/// Whether the peer of `fd` closed the connection, not only its sending
+/// side (a client that did `shutdown(SHUT_WR)` may still read). Linux
+/// says so with `POLLHUP`.
+fn hung_up(fd: RawFd) -> bool {
+    let mut p = libc::pollfd {
+        fd,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: one `pollfd` on the stack, no timeout; `fd` is held open by
+    // the caller.
+    let n = unsafe { libc::poll(&mut p, 1, 0) };
+    n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR) != 0
 }
 
 /// herdr's lines to the client until either closes.
@@ -455,5 +556,143 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         drop(proxy);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn what_a_client_names_goes_in_the_log_on_one_short_line() {
+        let req = json!({
+            "id": 1,
+            "method": "pane.report_agent",
+            "params": {"source": format!("evil\n1791660179 forged line{}", "x".repeat(200))},
+        });
+        let Verdict::Answer { what, .. } = classify(req.to_string().as_bytes()) else {
+            panic!("forwarded");
+        };
+        assert!(!what.contains('\n'), "{what}");
+        assert!(what.contains("evil\\n1791660179"), "{what}");
+        assert!(what.ends_with('…') && what.len() < 140, "{what}");
+    }
+
+    #[test]
+    fn the_log_takes_only_so_many_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr.log");
+        let log = Log {
+            path: Some(path.clone()),
+            seen: Mutex::new(HashSet::new()),
+        };
+        for i in 0..MAX_NOTES + 10 {
+            log.once(&format!("kept from herdr: pane.report_agent from s{i}"));
+        }
+        log.once("kept from herdr: pane.report_agent from s0");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), MAX_NOTES + 1, "{text}");
+        assert!(
+            text.lines()
+                .last()
+                .unwrap()
+                .ends_with("nothing more is noted")
+        );
+    }
+
+    #[tokio::test]
+    async fn what_a_killed_unharness_left_is_swept_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path();
+        // A socket nobody listens on any more.
+        let stale = parent.join(format!("{DIR_PREFIX}stale"));
+        std::fs::create_dir(&stale).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(stale.join("herdr.sock")).unwrap());
+        // One that is in use, another unharness's.
+        let live = Proxy::start_in(parent, parent.join("absent.sock"), None).unwrap();
+        // Not ours to take: other names, a link, a directory with more in it.
+        let other = parent.join("other");
+        std::fs::create_dir(&other).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(other.join("herdr.sock")).unwrap());
+        std::os::unix::fs::symlink(&other, parent.join(format!("{DIR_PREFIX}link"))).unwrap();
+        let full = parent.join(format!("{DIR_PREFIX}full"));
+        std::fs::create_dir(&full).unwrap();
+        drop(std::os::unix::net::UnixListener::bind(full.join("herdr.sock")).unwrap());
+        std::fs::write(full.join("keep"), "k").unwrap();
+
+        let next = Proxy::start_in(parent, parent.join("absent.sock"), None).unwrap();
+        assert!(!stale.exists());
+        assert!(live.path().exists());
+        assert!(other.join("herdr.sock").exists());
+        assert!(parent.join(format!("{DIR_PREFIX}link")).exists());
+        assert!(full.join("keep").exists());
+        drop(next);
+    }
+
+    /// herdr's side of a subscription: takes one request and then neither
+    /// answers nor closes. Says when the proxy closed its connection.
+    async fn subscribed_herdr(path: &Path) -> tokio::sync::oneshot::Receiver<()> {
+        let listener = UnixListener::bind(path).unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            let fd = s.as_raw_fd();
+            let mut s = BufReader::new(s);
+            let mut line = String::new();
+            s.read_line(&mut line).await.unwrap();
+            while !hung_up(fd) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let _ = tx.send(());
+            drop(s);
+        });
+        rx
+    }
+
+    #[tokio::test]
+    async fn a_client_gone_ends_an_idle_subscription() {
+        let tmp = tempfile::tempdir().unwrap();
+        let herdr_sock = tmp.path().join("herdr.sock");
+        let closed = subscribed_herdr(&herdr_sock).await;
+        let proxy = Proxy::start_in(tmp.path(), herdr_sock, None).unwrap();
+        let mut s = UnixStream::connect(proxy.path()).await.unwrap();
+        s.write_all(b"{\"id\":1,\"method\":\"events.subscribe\"}\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        drop(s);
+        tokio::time::timeout(HANGUP_CHECK * 4, closed)
+            .await
+            .expect("the proxy let go of herdr")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_stopped_sending_still_gets_herdrs_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let herdr_sock = tmp.path().join("herdr.sock");
+        let listener = UnixListener::bind(&herdr_sock).unwrap();
+        tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            let mut s = BufReader::new(s);
+            let mut line = String::new();
+            s.read_line(&mut line).await.unwrap();
+            // Past a check or two of the client.
+            tokio::time::sleep(HANGUP_CHECK * 2).await;
+            for i in 0..3 {
+                let event = json!({"id": 1, "result": {"n": i}});
+                s.get_mut()
+                    .write_all(format!("{event}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+        let proxy = Proxy::start_in(tmp.path(), herdr_sock, None).unwrap();
+        let mut s = UnixStream::connect(proxy.path()).await.unwrap();
+        s.write_all(b"{\"id\":1,\"method\":\"events.subscribe\"}\n")
+            .await
+            .unwrap();
+        s.shutdown().await.unwrap();
+        let mut got = String::new();
+        tokio::time::timeout(HANGUP_CHECK * 6, s.read_to_string(&mut got))
+            .await
+            .expect("herdr's answers and the end")
+            .unwrap();
+        assert_eq!(got.lines().count(), 3, "{got}");
     }
 }
