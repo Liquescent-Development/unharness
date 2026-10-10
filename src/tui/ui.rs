@@ -3048,6 +3048,57 @@ mod tests {
     }
 
     #[test]
+    fn the_wheel_scrolls_a_preview_and_a_plan() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::MouseEventKind;
+        let long: Vec<String> = (1..=60).map(|i| format!("line {i}")).collect();
+        let long = long.join("\n\n");
+        let wheel = |app: &mut App, kind: MouseEventKind| {
+            for _ in 0..60 {
+                app.handle_mouse(mouse(kind, 5, 5));
+            }
+        };
+
+        let mut questions = greeting_and_tone();
+        questions[0].options[0].preview = Some(long.clone());
+        let mut app = question_app(questions);
+        let (rows, _) = screen(&mut app, 140, 40);
+        assert!(!rows.iter().any(|r| r.contains("line 60")));
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 60");
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 1 ");
+        assert!(!rows.iter().any(|r| r.contains("line 60")));
+
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.modal = Some(Modal::Plan(PlanModal::new("plan".into(), long, None)));
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 1 ");
+        assert!(!rows.iter().any(|r| r.contains("line 60")));
+        wheel(&mut app, MouseEventKind::ScrollDown);
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 60");
+        find(&rows, "Keep planning");
+        wheel(&mut app, MouseEventKind::ScrollUp);
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 1 ");
+        assert!(!rows.iter().any(|r| r.contains("line 60")));
+
+        // PageDown too, also while the feedback is typed.
+        let Some(Modal::Plan(m)) = &mut app.modal else {
+            unreachable!()
+        };
+        m.editing = true;
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::PageDown));
+        let Some(Modal::Plan(m)) = &app.modal else {
+            unreachable!()
+        };
+        assert!(m.editing && m.scroll > 0);
+    }
+
+    #[test]
     fn preview_scroll_follows_the_size_it_was_drawn_at() {
         use crossterm::event::KeyCode;
         let mut questions = greeting_and_tone();
