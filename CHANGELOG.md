@@ -2,6 +2,32 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.8.0 - 2026-10-10
+
+### Added
+
+- Plan is a fifth permission policy, the least permissive, for Claude Code: the agent plans read-only, and approving its plan picks the policy to carry it out under, or you keep planning with feedback. See [Permissions](https://github.com/Liquescent-Development/unharness/blob/main/docs/permissions.md#plan).
+- `/remote-control` (`/rc`) puts a Claude Code session on Claude's Remote Control: the link is shown in the transcript and the state in the status bar, and a prompt typed remotely is shown as yours. ([#6](https://github.com/Liquescent-Development/unharness/issues/6))
+- In a herdr pane, agents get herdr's pane context (`--current` and the herdr skill work), and an agent CLI's own herdr integration no longer reports over unharness. ([#4](https://github.com/Liquescent-Development/unharness/issues/4))
+- `d` on a policy in the picker saves it as the harness's default, for this workspace or every workspace. A policy chosen in the TUI holds for the harness it was chosen on.
+- `doctor` shows each harness's default policy and where it comes from, and warns about a harness version that is too old or that it cannot read, with what to run. ([#5](https://github.com/Liquescent-Development/unharness/issues/5))
+- Running tool, subagent and `!` command rows show a spinner and the time so far.
+- The mouse wheel scrolls the plan and a question's preview.
+
+### Changed
+
+- `/clear` saves the conversation and starts a new one with the same harness and choices, instead of emptying the transcript and keeping the vendor session.
+- Pickers grey out, with the reason, a policy the harness lacks, a harness that is not installed and a sandbox level there is no backend for; `/policy`, `/switch` and `/sandbox` refuse them too. `--policy`, `UNHARNESS_POLICY` and `default_policy` still fall back.
+
+### Fixed
+
+- Claude Code's sync of organisation skills no longer ends a turn with "configuration changed". ([#7](https://github.com/Liquescent-Development/unharness/issues/7))
+- `--resume` with `--policy` holds over every policy the conversation had, also when it names the one the conversation was started with.
+- A permission dialog closes when Claude cancels its request (a hook answered it, or it was answered remotely).
+- `doctor` reads the version of a pi that prints it on stderr, and pi's unknown-option error names the version unharness needs.
+- The suggestion list grows to the prompt's width and shows a cut description in full below it.
+- A drag a dialog cut short no longer keeps scrolling behind it.
+
 ## 0.7.0 - 2026-10-09
 
 ### Added
