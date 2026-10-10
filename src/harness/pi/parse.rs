@@ -54,6 +54,14 @@ impl PiParser {
         if t.is_empty() {
             return vec![];
         }
+        // pi 0.73.1 refused `--session-id` this way and exited.
+        if t.contains("Unknown option:") {
+            let min = super::MIN_VERSION;
+            return vec![AgentEvent::Notice(format!(
+                "pi: {t} (unharness needs pi {min} or later: run `{}`)",
+                min.upgrade
+            ))];
+        }
         vec![AgentEvent::Notice(format!("pi: {t}"))]
     }
 
@@ -642,6 +650,24 @@ mod tests {
                 r#"{"type":"extension_ui_request","id":"u5","method":"setStatus","statusKey":"k"}"#
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unknown_option_names_the_version_unharness_needs() {
+        let mut p = PiParser::new(None);
+        // What pi 0.73.1 printed before exiting 1.
+        assert_eq!(
+            p.feed_stderr("Error: Unknown option: --session-id\n"),
+            vec![AgentEvent::Notice(
+                "pi: Error: Unknown option: --session-id (unharness needs pi 0.78.1 or \
+                 later: run `pi update --self`)"
+                    .into()
+            )]
+        );
+        assert_eq!(
+            p.feed_stderr("something else"),
+            vec![AgentEvent::Notice("pi: something else".into())]
         );
     }
 
