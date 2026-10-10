@@ -98,7 +98,15 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   (`guarded`) and compared after every turn and when a session ends (`core/guard.rs`). What a CLI
   rewrites by itself is projected away there (Claude's counters in
   `.claude.json`, Codex's trust entry for the workspace), found by running
-  it, so that a warning means something.
+  it, so that a warning means something. A tree is compared by the mode,
+  size and change time of everything in it, so that a change undone before
+  the check is still one, except the files a harness declares as its CLI's
+  bookkeeping (`Guarded::TreeWithBookkeeping`), compared by content up to
+  1 MiB: Claude's sync of organisation skills rewrites
+  `skills/synced/<org>/manifest.json` and `.last-complete-round`, and only
+  those, with the same bytes on a timer (2.1.296, #114). Watched files
+  are opened without blocking (a tree's without following a link), so a
+  FIFO put in a file's place cannot hang the check.
 - **No silent edits to vendor settings.** unharness does not write to
   `~/.claude`, `~/.codex`, `~/.gemini` or similar. The one exception:
   unless `[harnesses.claude] relocate_config = false`, `~/.claude.json` is

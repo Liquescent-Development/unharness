@@ -64,6 +64,19 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(|| Path::new("~").join(STATE_DIR))
 }
 
+/// The files of `skills` that Claude's sync of organisation skills rewrites
+/// with the same bytes on a timer, `synced/<org>/manifest.json` and
+/// `synced/<org>/.last-complete-round` (2.1.296, #114). The skills it syncs
+/// were not rewritten.
+fn synced_bookkeeping(path: &Path) -> bool {
+    let parts: Vec<_> = path.iter().collect();
+    matches!(
+        parts.as_slice(),
+        [synced, _org, name]
+            if *synced == "synced" && (*name == "manifest.json" || *name == ".last-complete-round")
+    )
+}
+
 /// The part of `.claude.json` that decides what Claude runs and allows: MCP
 /// servers, and each project's allowed tools, MCP approvals and trust. The
 /// rest is counters and caches that change on every run.
@@ -310,9 +323,13 @@ impl Harness for ClaudeHarness {
             Guarded::File(state.join("CLAUDE.md")),
             Guarded::json(config, config_that_matters),
         ];
-        for tree in ["agents", "commands", "skills", "hooks"] {
+        for tree in ["agents", "commands", "hooks"] {
             guarded.push(Guarded::Tree(state.join(tree)));
         }
+        guarded.push(Guarded::TreeWithBookkeeping {
+            path: state.join("skills"),
+            rewritten: synced_bookkeeping,
+        });
         guarded
     }
 
@@ -656,6 +673,27 @@ mod tests {
         cmd.get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect()
+    }
+
+    /// Only the sync's own two files are compared by content; a synced
+    /// skill is compared as any other file.
+    #[test]
+    fn only_the_skill_sync_s_bookkeeping_is_compared_by_content() {
+        for path in [
+            "synced/org/manifest.json",
+            "synced/org/.last-complete-round",
+        ] {
+            assert!(synced_bookkeeping(Path::new(path)), "{path}");
+        }
+        for path in [
+            "synced/org/pdf/SKILL.md",
+            "synced/org/pdf/manifest.json",
+            "synced/manifest.json",
+            "mine/manifest.json",
+            "synced/org",
+        ] {
+            assert!(!synced_bookkeeping(Path::new(path)), "{path}");
+        }
     }
 
     #[test]

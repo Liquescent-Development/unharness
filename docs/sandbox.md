@@ -133,6 +133,11 @@ editing those, so unharness watches them instead:
   says which;
 - the version from before the session is saved under
   `~/.local/state/unharness/guard/`;
+- a file in a watched directory (skills, hooks, an installed binary)
+  counts as changed when it is rewritten at all, also with the same
+  content, or its mode changes. The exception is bookkeeping the CLI
+  itself rewrites with the same bytes, compared by content: Claude Code's
+  `skills/synced/<org>/manifest.json` and `.last-complete-round`;
 - unharness cannot tell a change the CLI made itself (saving an "always
   allow" rule, say) from one the agent made;
 - `--no-tui` passthrough is not watched.
