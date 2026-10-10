@@ -15,6 +15,7 @@ pub mod history;
 pub mod markdown;
 pub mod modal;
 pub mod prompt;
+pub mod rows;
 pub mod selection;
 pub mod shell;
 pub mod transcript;

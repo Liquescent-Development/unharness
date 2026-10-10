@@ -12,6 +12,9 @@ use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 use unicode_width::UnicodeWidthChar;
 
+use super::rows::{Part, Rows};
+use super::selection::Join;
+
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 static THEME: LazyLock<Theme> = LazyLock::new(|| {
     let mut themes = ThemeSet::load_defaults();
@@ -86,28 +89,39 @@ pub fn sanitize(text: &str) -> String {
 
 /// Word wrap that also breaks tokens wider than `max_width` by character.
 pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
+    wrap_words_joined(text, max_width)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// [`wrap_words`], with how each line goes on from the one before: after
+/// the space a break drops, or inside a word broken by character. The first
+/// is a [`Join::Line`].
+pub fn wrap_words_joined(text: &str, max_width: usize) -> Vec<(String, Join)> {
     let max_width = max_width.max(1);
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_len = 0;
+    let mut join = Join::Line;
     for word in text.split(' ') {
         let word_len = unicode_width::UnicodeWidthStr::width(word);
         if word_len > max_width {
             if !current.is_empty() {
-                lines.push(std::mem::take(&mut current));
+                lines.push((std::mem::take(&mut current), join));
+                join = Join::Space;
             }
-            let mut chunk = String::new();
             let mut chunk_len = 0;
             for c in word.chars() {
                 let cw = UnicodeWidthChar::width(c).unwrap_or(1);
                 if chunk_len + cw > max_width {
-                    lines.push(std::mem::take(&mut chunk));
+                    lines.push((std::mem::take(&mut current), join));
+                    join = Join::Nothing;
                     chunk_len = 0;
                 }
-                chunk.push(c);
+                current.push(c);
                 chunk_len += cw;
             }
-            current = chunk;
             current_len = chunk_len;
             continue;
         }
@@ -119,12 +133,13 @@ pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
             current.push_str(word);
             current_len += 1 + word_len;
         } else {
-            lines.push(std::mem::replace(&mut current, word.to_string()));
+            lines.push((std::mem::replace(&mut current, word.to_string()), join));
+            join = Join::Space;
             current_len = word_len;
         }
     }
     if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
+        lines.push((current, join));
     }
     lines
 }
@@ -215,24 +230,26 @@ fn highlight_spans(hl: &mut Option<HighlightLines<'static>>, line: &str) -> Vec<
     vec![(Style::default().fg(Color::White), line.to_string())]
 }
 
-/// Wrap styled segments to `width` display cells, continuing with `cont`.
+/// One source line of styled segments wrapped to `width` display cells,
+/// after `first_prefix` and then `cont_prefix`, which are drawing.
 fn wrap_spans(
     segments: Vec<(Style, String)>,
     width: usize,
-    first_prefix: Vec<Span<'static>>,
-    cont_prefix: Vec<Span<'static>>,
+    first_prefix: Vec<Part>,
+    cont_prefix: Vec<Part>,
     prefix_width: usize,
-) -> Vec<Line<'static>> {
+) -> Rows {
     let avail = width.saturating_sub(prefix_width).max(8);
-    let mut lines = Vec::new();
-    let mut current: Vec<Span<'static>> = first_prefix.clone();
+    let mut rows = Rows::new();
+    let mut current: Vec<Part> = first_prefix;
+    let mut join = Join::Line;
     let mut used = 0usize;
     let mut buf = String::new();
     let mut buf_style = Style::default();
 
-    let flush = |current: &mut Vec<Span<'static>>, buf: &mut String, style: Style| {
+    let flush = |current: &mut Vec<Part>, buf: &mut String, style: Style| {
         if !buf.is_empty() {
-            current.push(Span::styled(std::mem::take(buf), style));
+            current.push(Part::Text(Span::styled(std::mem::take(buf), style)));
         }
     };
 
@@ -241,10 +258,8 @@ fn wrap_spans(
             let w = UnicodeWidthChar::width(ch).unwrap_or(1);
             if used + w > avail {
                 flush(&mut current, &mut buf, buf_style);
-                lines.push(Line::from(std::mem::replace(
-                    &mut current,
-                    cont_prefix.clone(),
-                )));
+                let row = std::mem::replace(&mut current, cont_prefix.clone());
+                rows.text(row, std::mem::replace(&mut join, Join::Nothing));
                 used = 0;
             }
             if buf_style != style && !buf.is_empty() {
@@ -256,8 +271,8 @@ fn wrap_spans(
         }
     }
     flush(&mut current, &mut buf, buf_style);
-    lines.push(Line::from(current));
-    lines
+    rows.text(current, join);
+    rows
 }
 
 /// Output and the gutter beside it: the terminal's own colour, dimmed, which
@@ -267,36 +282,36 @@ pub fn faint() -> Style {
     Style::default().add_modifier(Modifier::DIM)
 }
 
-fn gutter() -> Vec<Span<'static>> {
-    vec![Span::styled(GUTTER, faint())]
+fn gutter() -> Vec<Part> {
+    vec![Part::Draw(Span::styled(GUTTER, faint()))]
 }
 
-fn cont() -> Vec<Span<'static>> {
-    vec![Span::styled(CONT, faint())]
+fn cont() -> Vec<Part> {
+    vec![Part::Draw(Span::styled(CONT, faint()))]
 }
 
 /// Highlighted, wrapped source lines with a gutter. `hint` is a language
 /// token or file path; `diff` content is routed to [`diff_lines`].
-pub fn code_lines(text: &str, hint: &str, width: usize) -> Vec<Line<'static>> {
+pub fn code_lines(text: &str, hint: &str, width: usize) -> Rows {
     if hint.eq_ignore_ascii_case("diff") || hint.eq_ignore_ascii_case("patch") {
         return diff_lines(text, width);
     }
     let text = sanitize(text);
     let mut hl = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
-    let mut out = Vec::new();
+    let mut out = Rows::new();
     for line in text.lines() {
         let segs = highlight_spans(&mut hl, line);
-        out.extend(wrap_spans(segs, width, gutter(), cont(), CONT.len()));
+        out.append(wrap_spans(segs, width, gutter(), cont(), CONT.len()));
     }
     out
 }
 
 /// Plain (unhighlighted) wrapped lines with a gutter, e.g. command output.
-pub fn plain_lines(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+pub fn plain_lines(text: &str, width: usize, style: Style) -> Rows {
     let text = sanitize(text);
-    let mut out = Vec::new();
+    let mut out = Rows::new();
     for line in text.lines() {
-        out.extend(wrap_spans(
+        out.append(wrap_spans(
             vec![(style, line.to_string())],
             width,
             gutter(),
@@ -335,10 +350,10 @@ pub fn looks_like_diff(text: &str) -> bool {
     hunk || (plus > 0 && minus > 0)
 }
 
-/// Red/green diff rendering, wrapped.
-pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
+/// Red/green diff rendering, wrapped. A copy takes the diff as written.
+pub fn diff_lines(text: &str, width: usize) -> Rows {
     let text = sanitize(text);
-    let mut out = Vec::new();
+    let mut out = Rows::new();
     for line in text.lines() {
         let (marker, style) = if line.starts_with("+++")
             || line.starts_with("---")
@@ -365,16 +380,22 @@ pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
         } else {
             ("  ", Style::default().fg(Color::Gray))
         };
-        let body = if marker.trim().is_empty() {
-            line.to_string()
+        let (body, marker) = if marker.trim().is_empty() {
+            (
+                line.to_string(),
+                Part::Draw(Span::styled(marker, style.add_modifier(Modifier::BOLD))),
+            )
         } else {
-            line[1..].to_string()
+            (
+                line[1..].to_string(),
+                Part::Stand(
+                    Span::styled(marker, style.add_modifier(Modifier::BOLD)),
+                    if marker.starts_with('+') { "+" } else { "-" },
+                ),
+            )
         };
-        let first = vec![
-            Span::styled(GUTTER, faint()),
-            Span::styled(marker, style.add_modifier(Modifier::BOLD)),
-        ];
-        out.extend(wrap_spans(
+        let first = vec![Part::Draw(Span::styled(GUTTER, faint())), marker];
+        out.append(wrap_spans(
             vec![(style, body)],
             width,
             first,
@@ -386,41 +407,53 @@ pub fn diff_lines(text: &str, width: usize) -> Vec<Line<'static>> {
 }
 
 /// Render an old→new replacement as a diff with syntax colouring under the
-/// red/green tint. `hint` is the file path for syntax selection.
-pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Vec<Line<'static>> {
-    let (old, new) = (sanitize(old), sanitize(new));
-    let mut out = Vec::new();
-    let mut hl_old = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
-    let mut hl_new = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
-    for line in old.lines() {
-        let segs = highlight_spans(&mut hl_old, line)
+/// red/green tint. `hint` is the file path for syntax selection. A copy
+/// takes it as a diff, each line after its `-` or `+`.
+pub fn replacement_lines(old: &str, new: &str, hint: &str, width: usize) -> Rows {
+    let mut out = marked_lines(old, hint, width, Marker::Old);
+    out.append(marked_lines(new, hint, width, Marker::New));
+    out
+}
+
+/// A file written whole: as the new side of a replacement, but a copy
+/// takes the file, without the `+ ` in front of each line.
+pub fn written_lines(content: &str, hint: &str, width: usize) -> Rows {
+    marked_lines(content, hint, width, Marker::Written)
+}
+
+#[derive(Clone, Copy)]
+enum Marker {
+    Old,
+    New,
+    Written,
+}
+
+/// `text` highlighted on a red or green tint, each line after a `-` or `+`.
+fn marked_lines(text: &str, hint: &str, width: usize, marker: Marker) -> Rows {
+    let text = sanitize(text);
+    let mut hl = syntax_for(hint).map(|s| HighlightLines::new(s, &THEME));
+    let (sign, color, bg) = match marker {
+        Marker::Old => ("-", Color::Red, Color::Rgb(60, 20, 20)),
+        Marker::New | Marker::Written => ("+", Color::Green, Color::Rgb(15, 50, 20)),
+    };
+    let mut out = Rows::new();
+    for line in text.lines() {
+        let segs = highlight_spans(&mut hl, line)
             .into_iter()
-            .map(|(s, t)| (s.bg(Color::Rgb(60, 20, 20)), t))
+            .map(|(s, t)| (s.bg(bg), t))
             .collect();
+        let shown = Span::styled(
+            format!("{sign} "),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        );
         let first = vec![
-            Span::styled(GUTTER, faint()),
-            Span::styled(
-                "- ",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ),
+            Part::Draw(Span::styled(GUTTER, faint())),
+            match marker {
+                Marker::Written => Part::Draw(shown),
+                Marker::Old | Marker::New => Part::Stand(shown, sign),
+            },
         ];
-        out.extend(wrap_spans(segs, width, first, cont(), CONT.len() + 2));
-    }
-    for line in new.lines() {
-        let segs = highlight_spans(&mut hl_new, line)
-            .into_iter()
-            .map(|(s, t)| (s.bg(Color::Rgb(15, 50, 20)), t))
-            .collect();
-        let first = vec![
-            Span::styled(GUTTER, faint()),
-            Span::styled(
-                "+ ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-        out.extend(wrap_spans(segs, width, first, cont(), CONT.len() + 2));
+        out.append(wrap_spans(segs, width, first, cont(), CONT.len() + 2));
     }
     out
 }
@@ -432,12 +465,13 @@ pub fn line_text(line: &Line<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::selection::{RowCopy, width};
     use super::*;
 
     #[test]
     fn highlights_rust_and_wraps_long_lines() {
         let src = "fn main() { let x = \"hello\"; }";
-        let lines = code_lines(src, "rust", 80);
+        let lines = code_lines(src, "rust", 80).into_lines();
         assert_eq!(lines.len(), 1);
         assert!(
             lines[0].spans.len() > 2,
@@ -446,7 +480,7 @@ mod tests {
         assert_eq!(line_text(&lines[0]), format!("{GUTTER}{src}"));
 
         let long = "x".repeat(50);
-        let wrapped = code_lines(&long, "txt", 30);
+        let wrapped = code_lines(&long, "txt", 30).into_lines();
         assert!(wrapped.len() >= 2);
         assert!(line_text(&wrapped[1]).starts_with(CONT));
         let joined: String = wrapped
@@ -458,7 +492,7 @@ mod tests {
 
     #[test]
     fn diff_colours() {
-        let lines = diff_lines("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n ctx", 80);
+        let lines = diff_lines("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n ctx", 80).into_lines();
         assert_eq!(lines.len(), 6);
         assert_eq!(lines[3].spans[1].style.fg, Some(Color::Red));
         assert_eq!(lines[4].spans[1].style.fg, Some(Color::Green));
@@ -468,10 +502,76 @@ mod tests {
 
     #[test]
     fn replacement_marks_old_and_new() {
-        let lines = replacement_lines("let a = 1;", "let a = 2;\nlet b = 3;", "main.rs", 80);
+        let lines =
+            replacement_lines("let a = 1;", "let a = 2;\nlet b = 3;", "main.rs", 80).into_lines();
         assert_eq!(lines.len(), 3);
         assert!(line_text(&lines[0]).contains("- "));
         assert!(line_text(&lines[1]).contains("+ "));
+    }
+
+    #[test]
+    fn a_copy_takes_code_and_output_without_the_gutter() {
+        let src = "fn main() {\n\n    let long = \"abcdefghijklmnopqrstuvwxyz\";\n}";
+        let rows = code_lines(src, "rust", 30);
+        assert!(rows.len() > 4, "the long line wraps");
+        assert_eq!(rows.copied(), src);
+        // The gutter and the wrap mark are drawing; a wrapped row goes on
+        // inside the line.
+        assert!(!rows.copies()[0].covers(0));
+        assert!(rows.copies()[0].covers(width(GUTTER)));
+        assert!(matches!(
+            rows.copies()[3],
+            RowCopy::Text {
+                join: Join::Nothing,
+                ..
+            }
+        ));
+        let out = plain_lines("total 4\ndrwxr-xr-x  2 me me 4096 .", 80, faint());
+        assert_eq!(out.copied(), "total 4\ndrwxr-xr-x  2 me me 4096 .");
+    }
+
+    #[test]
+    fn a_diff_is_copied_as_written_and_a_written_file_without_markers() {
+        let diff = "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n ctx";
+        assert_eq!(diff_lines(diff, 80).copied(), diff);
+        let edit = replacement_lines("let a = 1;", "let a = 2;\nlet b = 3;", "main.rs", 80);
+        assert_eq!(edit.copied(), "-let a = 1;\n+let a = 2;\n+let b = 3;");
+        let file = "let a = 2;\n    let b = 3;";
+        let written = written_lines(file, "main.rs", 80);
+        assert_eq!(written.copied(), file);
+        // Drawn as the new side of an edit.
+        assert_eq!(
+            written.lines().iter().map(line_text).collect::<Vec<_>>(),
+            replacement_lines("", file, "main.rs", 80)
+                .lines()
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn wrapped_words_say_how_they_go_on() {
+        assert_eq!(
+            wrap_words_joined("one two three", 8),
+            vec![
+                ("one two".to_string(), Join::Line),
+                ("three".to_string(), Join::Space)
+            ]
+        );
+        assert_eq!(
+            wrap_words_joined("go abcdefghij x", 4),
+            vec![
+                ("go".to_string(), Join::Line),
+                ("abcd".to_string(), Join::Space),
+                ("efgh".to_string(), Join::Nothing),
+                ("ij x".to_string(), Join::Nothing),
+            ]
+        );
+        assert_eq!(
+            wrap_words("go abcdefghij x", 4),
+            vec!["go", "abcd", "efgh", "ij x"]
+        );
     }
 
     #[test]

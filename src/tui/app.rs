@@ -5687,12 +5687,17 @@ impl App {
 
     /// The selection as first and last cell, for the highlight.
     pub fn selection_range(&self) -> Option<(Point, Point)> {
-        self.selection?.range(&self.transcript_view.lines)
+        self.selection?.range(&self.transcript_view.lines, &[])
     }
 
     pub fn selected_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
-        Some(selection::text(&self.transcript_view.lines, start, end))
+        Some(selection::text(
+            &self.transcript_view.lines,
+            &[],
+            start,
+            end,
+        ))
     }
 
     #[cfg(test)]

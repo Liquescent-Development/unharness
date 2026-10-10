@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::{App, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
-    sanitize, wrap_words,
+    sanitize, wrap_words, written_lines,
 };
 use super::markdown::render_markdown_to_lines;
 use super::modal::{
@@ -485,11 +485,10 @@ fn block_layout(
                 // transcript of its own. Only a failed spawn says more here.
                 Some(_) => {
                     if *is_error && !output.is_empty() {
-                        lines.extend(plain_lines(
-                            output,
-                            body_width,
-                            Style::default().fg(Color::Red),
-                        ));
+                        lines.extend(
+                            plain_lines(output, body_width, Style::default().fg(Color::Red))
+                                .into_lines(),
+                        );
                     }
                 }
                 None => {
@@ -499,7 +498,7 @@ fn block_layout(
                     let left_out = if input_beyond_summary(name, input)
                         && let Ok(json) = serde_json::to_string_pretty(input)
                     {
-                        code_lines(&json, "json", body_width)
+                        code_lines(&json, "json", body_width).into_lines()
                     } else {
                         Vec::new()
                     };
@@ -649,7 +648,7 @@ fn shell_lines(
             faint(),
         )));
     }
-    lines.extend(plain_lines(output, body_width, faint()));
+    lines.extend(plain_lines(output, body_width, faint()).into_lines());
     close_gutter(&mut lines);
     lines
 }
@@ -1078,13 +1077,13 @@ fn tool_body_lines(
             get("new_string").or_else(|| get("new_str")),
         )
     {
-        lines.extend(replacement_lines(old, new, path, width));
+        lines.extend(replacement_lines(old, new, path, width).into_lines());
     } else if (lname == "write" || lname == "write_file" || lname == "create_file")
         && let Some(content) = get("content").or_else(|| get("contents"))
     {
-        lines.extend(replacement_lines("", content, path, width));
+        lines.extend(written_lines(content, path, width).into_lines());
     } else if (lname == "read" || lname == "read_file") && !output.is_empty() {
-        lines.extend(code_lines(output, path, width));
+        lines.extend(code_lines(output, path, width).into_lines());
     }
 
     if !output.is_empty() && (lines.is_empty() || is_error) {
@@ -1094,9 +1093,9 @@ fn tool_body_lines(
             faint()
         };
         if !is_error && looks_like_diff(output) {
-            lines.extend(diff_lines(output, width));
+            lines.extend(diff_lines(output, width).into_lines());
         } else {
-            lines.extend(plain_lines(output, width, style));
+            lines.extend(plain_lines(output, width, style).into_lines());
         }
     }
     lines

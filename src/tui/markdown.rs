@@ -40,7 +40,9 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec
                 let done = done || i + 1 < chunks.len();
                 lines.extend(Renderer::new(md, max_width, done).run());
             }
-            Chunk::Diff(diff) => lines.extend(diff_lines(diff, max_width.saturating_sub(2))),
+            Chunk::Diff(diff) => {
+                lines.extend(diff_lines(diff, max_width.saturating_sub(2)).into_lines())
+            }
         }
     }
     lines
@@ -721,7 +723,7 @@ impl<'a> Renderer<'a> {
                 DIM,
             ),
         ]);
-        for line in code_lines(&code.text, &code.label, avail) {
+        for line in code_lines(&code.text, &code.label, avail).into_lines() {
             self.push_drawn(line);
         }
         let end = if closed {
