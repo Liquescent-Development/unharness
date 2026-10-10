@@ -315,10 +315,12 @@ impl ClaudeParser {
             "user" => self.on_user(val, &mut out),
             "result" => self.on_result(val, &mut out),
             "control_request" => self.on_control_request(val, &mut out),
+            // Answered elsewhere: by a hook, or remotely (Remote Control).
             "control_cancel_request" => {
-                out.push(AgentEvent::Notice(
-                    "permission request cancelled by harness".to_string(),
-                ));
+                let id = str_at(val, "request_id");
+                if !id.is_empty() {
+                    out.push(AgentEvent::PermissionWithdrawn { id: id.to_string() });
+                }
             }
             // Handled by the driver (pending request bookkeeping).
             "control_response" => {

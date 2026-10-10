@@ -35,7 +35,8 @@ pub enum AgentEvent {
     },
     PermissionRequest(PermissionRequest),
     /// The harness no longer waits for the answer to request `id` (its turn
-    /// was stopped): the question is closed unanswered.
+    /// was stopped, or the request was answered elsewhere): the question is
+    /// closed unanswered.
     PermissionWithdrawn {
         id: String,
     },

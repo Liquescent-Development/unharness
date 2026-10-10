@@ -569,10 +569,11 @@ recorded ones. For anything else:
   parser checks for the server and tool (one recording); Claude's
   `NotebookEdit` and `MultiEdit` inputs (field names from the tool schemas,
   no request recorded). An ACP agent that offers `allow_always` and no
-  `allow_once` gets a cancel and the user a notice. Not done: a lock
-  around appending to a rules file (two unharness saving at once can lose
-  one rule), re-reading rules while running, closing the modal when Claude
-  cancels a request.
+  `allow_once` gets a cancel and the user a notice. A request Claude
+  cancels (`control_cancel_request`: a hook answered it, or it was
+  answered remotely) is withdrawn, which closes its modal. Not done: a
+  lock around appending to a rules file (two unharness saving at once can
+  lose one rule), re-reading rules while running.
 - herdr (`tui/herdr.rs`), checked on herdr 0.8.2 (socket protocol 20)
   in a named test session with Claude Code 2.1.289 and agy 1.2.17: the
   TUI sends `pane.report_agent` (`source` and `agent` both `unharness`,
