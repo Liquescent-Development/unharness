@@ -43,9 +43,10 @@ asking.
 The plan opens in a dialog of its own ([Permission
 prompts](tui.md#permission-prompts)). Approving it picks the policy the
 agent carries it out under (the one you planned from is highlighted).
-Bypass is not offered there, because Claude cannot switch to it in a
-session not started with it. Or keep the agent planning, with what to
-change. No rule answers this dialog and there is no "allow always".
+Bypass is offered there only in a session started under it, because
+Claude cannot switch to it in one that was not. Or keep the agent
+planning, with what to change. No rule answers this dialog and there is
+no "allow always".
 
 The agent can also go into plan mode by itself (Claude's
 `EnterPlanMode`): the policy then shows `plan` and is kept like one you
@@ -53,7 +54,8 @@ chose. Choosing another policy while it plans ends plan mode.
 
 `plan` is a policy of the TUI only. `--print` and `--no-tui` do not
 offer it, since nobody could approve the plan; a plan the agent asks to
-carry out in `--print` is not approved.
+carry out in `--print` is not approved, and while it plans there only a
+read is answered by a rule.
 
 ### Which policy a harness runs under
 

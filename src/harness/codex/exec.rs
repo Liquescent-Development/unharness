@@ -20,11 +20,11 @@ pub struct CodexExec;
 /// `-s` (0.157.0), so at another level `auto` runs with that level and
 /// Codex's default approvals, which is `accept-edits` there.
 ///
-/// There is nothing for `ask`: `exec` cannot prompt, and the CLI takes no
-/// `untrusted` approval policy (0.157.0), so it is not declared and never
-/// resolved to.
+/// There is nothing for `ask`, nor for `plan`, which holds to all `ask`
+/// does: `exec` cannot prompt, and the CLI takes no `untrusted` approval
+/// policy (0.157.0), so neither is declared and neither is resolved to.
 pub fn policy_args(policy: PermissionPolicy, own: OwnSandbox) -> Result<Vec<&'static str>> {
-    if policy == PermissionPolicy::Ask {
+    if policy <= PermissionPolicy::Ask {
         bail!("codex exec cannot ask before acting");
     }
     Ok(match (policy, own) {
@@ -39,7 +39,7 @@ pub fn policy_args(policy: PermissionPolicy, own: OwnSandbox) -> Result<Vec<&'st
 
 /// Equivalent `-c key=value` overrides, usable on `exec resume`.
 pub fn policy_config_overrides(policy: PermissionPolicy, own: OwnSandbox) -> Result<Vec<String>> {
-    if policy == PermissionPolicy::Ask {
+    if policy <= PermissionPolicy::Ask {
         bail!("codex exec cannot ask before acting");
     }
     Ok(vec![
@@ -307,6 +307,8 @@ mod tests {
         ] {
             assert!(policy_args(PermissionPolicy::Ask, own).is_err());
             assert!(policy_config_overrides(PermissionPolicy::Ask, own).is_err());
+            assert!(policy_args(PermissionPolicy::Plan, own).is_err());
+            assert!(policy_config_overrides(PermissionPolicy::Plan, own).is_err());
         }
         for session in [None, Some("t1")] {
             assert!(

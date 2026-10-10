@@ -486,7 +486,8 @@ recorded ones. For anything else:
     So the driver sends `set_permission_mode` with the chosen policy
     before the allow.
   - `bypassPermissions` is refused in a session not launched with it
-    (`bypass_not_launched`), so the modal does not offer bypass.
+    (`bypass_not_launched`), so the modal offers bypass only when the
+    session was started under it (#142 for Ctrl+P).
   - A deny reaches the model verbatim as the tool's error. A bare
     "Use Howdy" was followed by an edit to the plan and then the old
     change, so the transport words it as Claude's own interface does

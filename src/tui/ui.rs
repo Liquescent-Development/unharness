@@ -2346,7 +2346,8 @@ fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
     .split(inner);
 
     let title = match &m.plan_file {
-        Some(path) => format!(" Plan · {path} "),
+        // The agent's to name: drawn as other text from it is.
+        Some(path) => format!(" Plan · {} ", sanitize(path).replace('\n', " ")),
         None => " Plan ".to_string(),
     };
     let pane = Block::default()

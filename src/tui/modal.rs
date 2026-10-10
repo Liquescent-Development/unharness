@@ -723,8 +723,11 @@ impl Modal {
             Modal::Permission(_) => Some(PermissionDecision::Deny {
                 reason: "cancelled by user".into(),
             }),
-            // Never an approval: the agent keeps planning.
-            Modal::Plan(m) => Some(m.keep_planning()),
+            // Never an approval: the agent keeps planning, told nothing
+            // (feedback is sent only with Enter).
+            Modal::Plan(_) => Some(PermissionDecision::Deny {
+                reason: String::new(),
+            }),
             Modal::Question(_) | Modal::Confirm(_) | Modal::Select(_) | Modal::Input(_) => {
                 Some(PermissionDecision::Answer(Value::Null))
             }

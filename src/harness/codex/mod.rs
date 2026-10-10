@@ -250,12 +250,17 @@ impl Harness for CodexHarness {
             thinking: true,
             tool_events: true,
             interactive_permissions: app_server,
+            // Not `plan`: nothing drives Codex's `collaborationMode` yet.
             permission_policies: if app_server {
-                PermissionPolicy::ALL
-                    .iter()
-                    .copied()
-                    .map(PolicySupport::full)
-                    .collect()
+                [
+                    PermissionPolicy::Ask,
+                    PermissionPolicy::AcceptEdits,
+                    PermissionPolicy::Auto,
+                    PermissionPolicy::Bypass,
+                ]
+                .into_iter()
+                .map(PolicySupport::full)
+                .collect()
             } else {
                 exec_policies()
             },

@@ -17,9 +17,11 @@ use anyhow::{Result, bail};
 use colored::*;
 use serde_json::{Value, json};
 
+use crate::core::rules::rule_may_answer;
 use crate::core::{
-    AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionRequest,
-    Rule, Rules, SessionCommand, SessionHandle, StopReason, SubagentStatus, ToolAction, Usage,
+    AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
+    PermissionRequest, Rule, Rules, SessionCommand, SessionHandle, StopReason, SubagentStatus,
+    ToolAction, Usage,
 };
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
@@ -108,6 +110,9 @@ pub struct Headless<O: Write, E: Write> {
     stop: Option<StopReason>,
     /// The user pressed Ctrl+C.
     interrupted: bool,
+    /// The agent went into plan mode by itself (`--print` never starts
+    /// one in it): only a read is answered by a rule meanwhile.
+    planning: bool,
     started: Instant,
 }
 
@@ -148,6 +153,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             warnings: Vec::new(),
             stop: None,
             interrupted: false,
+            planning: false,
             started: Instant::now(),
         }
     }
@@ -266,6 +272,9 @@ impl<O: Write, E: Write> Headless<O, E> {
         match ev {
             AgentEvent::Sub { parent, event } => self.track(event, Some(parent), commands),
             AgentEvent::PermissionRequest(req) => commands.push(self.answer(req)),
+            AgentEvent::PolicyChanged(p) if main => {
+                self.planning = *p == PermissionPolicy::Plan;
+            }
             AgentEvent::SubagentStarted { id, .. } => {
                 self.running.insert(id.clone());
             }
@@ -408,7 +417,10 @@ impl<O: Write, E: Write> Headless<O, E> {
     fn answer(&mut self, req: &PermissionRequest) -> SessionCommand {
         let (decision, line) = match &req.kind {
             PermissionKind::ToolUse { tool, action, .. } => {
-                match self.rules.allows(tool, action, &self.cwd) {
+                let ruled = rule_may_answer(self.planning, action)
+                    .then(|| self.rules.allows(tool, action, &self.cwd))
+                    .flatten();
+                match ruled {
                     Some(rules) => {
                         let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
                         self.note(&format!(
@@ -1076,6 +1088,46 @@ mod tests {
         assert_eq!(result["usage"]["output"], 4);
         // Nothing but the lines on stdout.
         assert!(run.err.is_empty());
+    }
+
+    /// The model can go into plan mode by itself: its writes and commands
+    /// are then not answered by a rule, and its plan is not approved.
+    #[test]
+    fn while_the_agent_plans_only_a_read_is_answered_by_a_rule() {
+        let (_dir, mut run) = headless(Format::Json, false);
+        run.rules
+            .append(Scope::Workspace, &[Rule::shell("cargo test")])
+            .unwrap();
+        let plan = AgentEvent::PermissionRequest(PermissionRequest {
+            id: "plan".into(),
+            kind: PermissionKind::PlanApproval {
+                plan: "# Plan".into(),
+                plan_file: None,
+            },
+            tool_call_id: None,
+        });
+        let commands = feed(
+            &mut run,
+            vec![
+                AgentEvent::PolicyChanged(PermissionPolicy::Plan),
+                shell_request("a", "cargo test"),
+                plan,
+                AgentEvent::PolicyChanged(PermissionPolicy::Ask),
+                shell_request("b", "cargo test"),
+                done(),
+            ],
+        );
+        let decisions: Vec<(&str, bool)> = commands
+            .iter()
+            .map(|c| match c {
+                SessionCommand::RespondPermission { id, decision } => (
+                    id.as_str(),
+                    matches!(decision, PermissionDecision::Allow { .. }),
+                ),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(decisions, [("a", false), ("plan", false), ("b", true)]);
     }
 
     #[test]
