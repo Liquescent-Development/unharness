@@ -66,7 +66,7 @@ headers = { Authorization = "Bearer …" }
 | `default_harness` | first signed-in ([how](usage.md#the-default-harness)) | Harness to start with |
 | `default_policy` | `ask` | [Permission policy](permissions.md) |
 | `mouse` | `true` | unharness handles the mouse; `false` leaves it to the terminal |
-| `herdr` | `true` | Inside a [herdr](tui.md#herdr) pane, report the session's state to herdr |
+| `herdr` | `true` | Inside a [herdr](tui.md#herdr) pane, report the session's state to herdr, and keep the agent CLIs' own herdr integrations from reporting over it |
 | `auto_sync` | `true` | Refresh the `CLAUDE.md` / `GEMINI.md` symlinks before each run |
 | `bridge_max_chars` | unset | How much of the conversation seeds a newly switched-to harness, in characters. Unset, it is a quarter of the context window the harness's model last reported (at four characters a token, as many characters as the window has tokens; a window is taken as between 8,000 and 2,000,000 tokens), or 24,000 before one has |
 | `bridge_summary` | `"auto"` | Ask the harness being left for a handoff summary when the conversation is over `bridge_max_chars` (`"never"` to skip it); see [Switching harnesses](usage.md#switching-harnesses) |

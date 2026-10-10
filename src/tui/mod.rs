@@ -149,13 +149,17 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     }));
 
     MOUSE.store(launch.config.mouse.unwrap_or(true), Ordering::SeqCst);
-    let mut herdr = launch
+    let pane = launch
         .config
         .herdr
         .unwrap_or(true)
         .then(|| herdr::Pane::from_env(|k| std::env::var(k).ok()))
-        .flatten()
-        .map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
+        .flatten();
+    // The CLIs reach herdr through the proxy while unharness reports,
+    // so that their own herdr integrations do not report over it. Held
+    // until every CLI is gone: a hook may report as one ends.
+    let herdr_proxy = pane.as_ref().and_then(start_herdr_proxy);
+    let mut herdr = pane.map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
     // Before the terminal is taken, where an error can still be read.
     let frames = FrameLog::from_env()?;
     let mut out = stdout();
@@ -200,6 +204,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     if let Some(h) = herdr {
         h.release().await;
     }
+    drop(herdr_proxy);
 
     restore_terminal()?;
     terminal.show_cursor()?;
@@ -208,6 +213,33 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
         println!("{line}");
     }
     res
+}
+
+#[cfg(unix)]
+type HerdrProxy = herdr_proxy::Proxy;
+#[cfg(not(unix))]
+type HerdrProxy = ();
+
+/// Start the proxy in front of `pane`'s socket and have the processes
+/// unharness starts use it, or, failing that, get none of herdr's
+/// variables.
+fn start_herdr_proxy(pane: &herdr::Pane) -> Option<HerdrProxy> {
+    use crate::core::sandbox::{HerdrEnv, set_herdr_env};
+    #[cfg(unix)]
+    match herdr_proxy::Proxy::start(pane.socket.clone(), herdr::default_log()) {
+        Ok(proxy) => {
+            set_herdr_env(HerdrEnv::Proxy(proxy.path().to_path_buf()));
+            return Some(proxy);
+        }
+        Err(e) => {
+            if let Some(log) = herdr::default_log() {
+                herdr::log_line(&log, &format!("proxy: not started: {e}"));
+            }
+        }
+    }
+    let _ = pane;
+    set_herdr_env(HerdrEnv::Strip);
+    None
 }
 
 async fn event_loop(

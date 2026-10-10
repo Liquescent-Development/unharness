@@ -627,12 +627,40 @@ recorded ones. For anything else:
   arrived, about 1.5 s after launch, and the report wins after that.
   Unverified: where herdr shows the `message` of a blocked report (no
   API view returns it), whether the release or the exit cleared the
-  pane. `Sandbox::wrap` takes every `HERDR_*` variable away from what
-  it starts, sandbox on or off: the socket drives every pane, and a
-  vendor integration (`herdr integration install claude`) would
-  otherwise report for the same pane under its own `source`. What
-  follows was seen before that, with the variables inherited: pi's
-  herdr extension reports
+  pane. A vendor integration (`herdr integration install claude`)
+  reports for the same pane under its own `source`, and one
+  `pane.report_agent_session` from `herdr:claude` made herdr ignore
+  every later `pane.report_agent` from unharness (stuck on `working`;
+  `pane.clear_agent_authority` did not undo it). So while the TUI
+  reports, what it starts gets every `HERDR_*` variable with
+  `HERDR_SOCKET_PATH` naming a proxy (`tui/herdr_proxy.rs`, a socket in
+  a 0700 directory under the runtime directory): `pane.report_agent`,
+  `pane.report_agent_session`, `pane.release_agent`,
+  `pane.clear_agent_authority` and `pane.report_metadata` are answered
+  there with `{"type": "ok"}` (what herdr answers; all 17 built-in
+  integrations of 0.8.2 send only the first two, one request per
+  connection, and act on no answer), for any pane id, and everything
+  else goes to herdr's socket (`Sandbox::wrap`, `HerdrEnv`). Without the
+  pane id an agent's `herdr pane current --current` answered with the
+  UI-focused pane, and `pane get --current` with `pane_not_found` (#67);
+  hiding the variables was never a boundary, since herdr finds its
+  default socket by itself, and that still gets past the proxy. Where
+  unharness does not report (`--print`, `--no-tui`, `herdr = false`)
+  the variables pass as they are; where the proxy fails to start they
+  are removed. Checked in the TUI against an isolated herdr server
+  (scratch `XDG_CONFIG_HOME`, tmux, Landlock, Claude Code 2.1.296 with
+  its herdr hook installed, focus on another pane): the agent saw all six
+  variables, `herdr pane current --current` named its own pane, `herdr
+  pane split --current --no-focus` split its own pane, the hook's
+  `pane.report_agent_session` was kept from herdr (no `agent_session` on
+  the pane) and the pane went `working`, `idle` as unharness reported;
+  `/quit` released the pane and removed the proxy's directory, and
+  `--print` passed herdr's own socket. `herdr pane get` takes only a pane
+  id (0.8.2): `--current` there is `pane_not_found` in any pane. Checked
+  before with a prototype: layout, run, wait-output, agent list and wait
+  through it. Unverified: `events.subscribe` through it, a client that sends several
+  requests on one connection, macOS. Seen with the variables inherited,
+  before the proxy: pi's herdr extension reports
   only when `ctx.mode` is `tui`, so it is silent in unharness's `rpc`
   sessions; pi's A2A extension (`herdr-a2a`) fails with "client session
   readiness timed out" because its broker answers `POST /v1/register`

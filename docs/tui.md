@@ -245,8 +245,8 @@ way Claude Code's `!` does.
   zsh that is `.zshenv`, not `.zshrc` and its aliases.
 - It runs in the session's working directory, under the sandbox the
   active harness's process gets ([Sandbox](sandbox.md)): a command you
-  type cannot write where the agent could not. Like the agent, it does
-  not get herdr's `HERDR_*` variables ([herdr](#herdr)).
+  type cannot write where the agent could not. Like the agent, it
+  reaches herdr through unharness ([herdr](#herdr)).
 - It has no input and no terminal: stdin is empty, so a command that asks
   for a password or opens an editor fails instead of waiting.
 - Output (stdout and stderr, as they arrive) streams into the transcript
@@ -462,10 +462,17 @@ its socket cannot be reached, unharness carries on and writes what went
 wrong to `herdr.log` in its state directory (`~/.local/state/unharness/`
 on Linux). `herdr = false` in the config turns this off.
 
-The agent CLIs unharness starts do not get herdr's `HERDR_*` variables,
-so they cannot reach herdr's socket (which drives every pane), and a
-vendor's own herdr integration does not report over unharness's. pi's
-herdr extensions are silent under unharness as a result.
+The agent CLIs unharness starts get the pane's `HERDR_*` variables, so
+an agent can drive herdr from its own pane (`herdr pane split --current`,
+the herdr skill). Their `HERDR_SOCKET_PATH` names a socket of
+unharness's that passes everything on to herdr except an agent CLI's
+own state reports (`herdr integration install claude`, pi's herdr
+extension): unharness answers those itself, so the pane shows
+unharness's state. They are noted once each in `herdr.log`.
+
+`--print` and `--no-tui` report nothing to herdr, and pass the
+variables on unchanged, as does `herdr = false`: there a CLI's own
+integration reports for the pane.
 
 ## Terminal notes
 
