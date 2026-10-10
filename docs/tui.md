@@ -118,6 +118,11 @@ under (the one you planned from is highlighted) and a Keep planning row.
 | `PageUp`/`PageDown`, mouse wheel | Scroll the plan |
 | `Esc` | Keep planning without saying what to change (while typing, stop typing) |
 
+The wheel scrolls a plan or a preview only while unharness has the mouse
+(see [Mouse, selection and clipboard](#mouse-selection-and-clipboard)).
+With `mouse = false` many terminals send the wheel as `↑`/`↓`, which move
+the highlighted row instead.
+
 ## Slash commands
 
 Type `/` to open autocomplete; `Enter` on a partial command completes it.

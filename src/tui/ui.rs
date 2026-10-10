@@ -3085,6 +3085,17 @@ mod tests {
         let (rows, _) = screen(&mut app, 140, 40);
         find(&rows, "line 1 ");
         assert!(!rows.iter().any(|r| r.contains("line 60")));
+
+        // PageDown too, also while the feedback is typed.
+        let Some(Modal::Plan(m)) = &mut app.modal else {
+            unreachable!()
+        };
+        m.editing = true;
+        app.handle_modal_key(KeyEvent::from(crossterm::event::KeyCode::PageDown));
+        let Some(Modal::Plan(m)) = &app.modal else {
+            unreachable!()
+        };
+        assert!(m.editing && m.scroll > 0);
     }
 
     #[test]

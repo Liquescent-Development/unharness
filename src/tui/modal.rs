@@ -608,6 +608,18 @@ pub enum Modal {
 }
 
 impl Modal {
+    /// Scroll what the dialog scrolls (a plan, a question's preview) by
+    /// `lines`, from PageUp/PageDown or the wheel; false for a dialog with
+    /// nothing to scroll.
+    pub fn scroll(&mut self, lines: i32) -> bool {
+        match self {
+            Modal::Plan(m) => m.scroll_by(lines),
+            Modal::Question(m) => m.scroll_preview(lines),
+            _ => return false,
+        }
+        true
+    }
+
     /// Build the right prompt modal for a harness request.
     pub fn for_request(req: PermissionRequest) -> Modal {
         match &req.kind {

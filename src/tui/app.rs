@@ -564,7 +564,7 @@ pub struct AppInit {
 /// or preview.
 const WHEEL_LINES: u16 = 3;
 
-/// Lines a question's preview scrolls on PageUp/PageDown.
+/// Lines a dialog's plan or preview scrolls on PageUp/PageDown.
 const PREVIEW_PAGE: i32 = 5;
 
 /// Presses this close together on one cell count as a double or triple click.
@@ -4330,6 +4330,15 @@ impl App {
         let Some(mut modal) = self.modal.take() else {
             return;
         };
+        let page = match key.code {
+            KeyCode::PageDown => PREVIEW_PAGE,
+            KeyCode::PageUp => -PREVIEW_PAGE,
+            _ => 0,
+        };
+        if page != 0 && modal.scroll(page) {
+            self.modal = Some(modal);
+            return;
+        }
         let mut choice = None;
         let outcome = match &mut modal {
             Modal::Harness(p) => picker_nav(p, key.code)
@@ -4525,14 +4534,6 @@ impl App {
                             m.next_page();
                             QuestionStep::Stay
                         }
-                        KeyCode::PageDown => {
-                            m.scroll_preview(PREVIEW_PAGE);
-                            QuestionStep::Stay
-                        }
-                        KeyCode::PageUp => {
-                            m.scroll_preview(-PREVIEW_PAGE);
-                            QuestionStep::Stay
-                        }
                         _ => QuestionStep::Stay,
                     }
                 };
@@ -4569,14 +4570,6 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     m.down();
-                    None
-                }
-                KeyCode::PageDown => {
-                    m.scroll_by(PREVIEW_PAGE);
-                    None
-                }
-                KeyCode::PageUp => {
-                    m.scroll_by(-PREVIEW_PAGE);
                     None
                 }
                 KeyCode::Enter => match m.current() {
@@ -5496,18 +5489,21 @@ impl App {
         text
     }
 
-    /// Mouse input, when the TUI has the mouse. A dialog takes only the
-    /// wheel, for what it scrolls.
+    /// Mouse input, when the TUI has the mouse. A dialog takes the wheel,
+    /// for what it scrolls, and a release ends a drag it cut short.
     pub fn handle_mouse(&mut self, ev: MouseEvent) {
         if let Some(modal) = &mut self.modal {
-            let lines = match ev.kind {
-                MouseEventKind::ScrollUp => -i32::from(WHEEL_LINES),
-                MouseEventKind::ScrollDown => i32::from(WHEEL_LINES),
-                _ => return,
-            };
-            match modal {
-                Modal::Plan(m) => m.scroll_by(lines),
-                Modal::Question(m) => m.scroll_preview(lines),
+            match ev.kind {
+                MouseEventKind::ScrollUp => {
+                    modal.scroll(-i32::from(WHEEL_LINES));
+                }
+                MouseEventKind::ScrollDown => {
+                    modal.scroll(i32::from(WHEEL_LINES));
+                }
+                // Nothing is copied: the press may have been on the dialog.
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.end_drag();
+                }
                 _ => {}
             }
             return;
@@ -5633,9 +5629,15 @@ impl App {
         };
     }
 
-    fn mouse_release(&mut self) {
+    /// Stop scrolling at an edge and let go of the scrollbar; true when its
+    /// thumb was held.
+    fn end_drag(&mut self) -> bool {
         self.drag_edge = 0;
-        if self.scrollbar_grab.take().is_some() {
+        self.scrollbar_grab.take().is_some()
+    }
+
+    fn mouse_release(&mut self) {
+        if self.end_drag() {
             return;
         }
         match self.selected_text() {
@@ -10715,6 +10717,24 @@ pub(crate) mod tests {
         assert_eq!(app.scroll, 20);
         app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 5, 5));
         assert!(app.selection.is_none());
+    }
+
+    #[test]
+    fn a_release_under_a_dialog_ends_the_drag_it_cut_short() {
+        let left = MouseButton::Left;
+        let mut app = test_app(HarnessId::CLAUDE);
+        // Held past the bottom edge, or by the scrollbar thumb, when a
+        // request opened a dialog.
+        app.drag_edge = 1;
+        app.scrollbar_grab = Some(2);
+        app.open_policy_picker();
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), 5, 5));
+        assert!(app.scrollbar_held());
+        app.handle_mouse(mouse(MouseEventKind::Up(left), 5, 5));
+        assert_eq!(app.drag_edge, 0);
+        assert!(!app.scrollbar_held());
+        assert!(app.take_copy_request().is_none());
+        assert!(app.modal.is_some());
     }
 
     #[test]
