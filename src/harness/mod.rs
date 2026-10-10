@@ -207,7 +207,10 @@ pub fn resolve_binary(desc: &HarnessDescriptor, override_path: Option<&Path>) ->
     desc.binary_names.iter().find_map(|name| which(name))
 }
 
-/// Run `<binary> --version` and return trimmed stdout.
+/// Run `<binary> --version` and return what it printed, trimmed: stdout,
+/// or stderr when stdout is empty. pi before 0.74 (the `@mariozechner`
+/// package; 0.73.1 read in its source) sends stdout to stderr when stdin is
+/// not a terminal, `--version` included.
 pub fn probe_version(binary: &Path) -> Option<String> {
     let output = std::process::Command::new(binary)
         .arg("--version")
@@ -216,8 +219,23 @@ pub fn probe_version(binary: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!s.is_empty()).then_some(s)
+    [&output.stdout, &output.stderr]
+        .into_iter()
+        .map(|out| String::from_utf8_lossy(out).trim().to_string())
+        .find(|s| !s.is_empty())
+}
+
+/// The version in what `--version` printed: the first word that is three
+/// numbers (`2.1.296 (Claude Code)`, `codex-cli 0.157.0`). A pre-release
+/// (`1.3.2-beta`) is not taken for one.
+pub fn parse_version(text: &str) -> Option<[u64; 3]> {
+    text.split_whitespace().find_map(|word| {
+        let parts: Vec<u64> = word
+            .split('.')
+            .map(|p| p.parse().ok())
+            .collect::<Option<_>>()?;
+        parts.try_into().ok()
+    })
 }
 
 /// Find an executable on `PATH`.
@@ -242,4 +260,42 @@ pub fn which(name: &str) -> Option<PathBuf> {
         return Some(candidate);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_is_the_first_word_of_three_numbers() {
+        assert_eq!(parse_version("2.1.296 (Claude Code)"), Some([2, 1, 296]));
+        assert_eq!(parse_version("codex-cli 0.157.0"), Some([0, 157, 0]));
+        assert_eq!(parse_version("1.1.0\n"), Some([1, 1, 0]));
+        assert_eq!(parse_version("1.3"), None);
+        assert_eq!(parse_version("1.3.2-beta"), None);
+        assert_eq!(parse_version("unknown"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_version_printed_on_stderr_is_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let stub = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        let stdout = stub("stdout", "echo 1.1.0; echo noise >&2");
+        // What pi 0.73.1 does with stdin not a terminal.
+        let stderr = stub("stderr", "echo 0.73.1 >&2");
+        let failed = stub("failed", "echo 1.0.0; exit 1");
+        let silent = stub("silent", "exit 0");
+        assert_eq!(probe_version(&stdout).as_deref(), Some("1.1.0"));
+        assert_eq!(probe_version(&stderr).as_deref(), Some("0.73.1"));
+        assert_eq!(probe_version(&failed), None);
+        assert_eq!(probe_version(&silent), None);
+    }
 }
