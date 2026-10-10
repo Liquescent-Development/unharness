@@ -236,6 +236,73 @@ pub struct QuestionModal {
     pub preview_max: u16,
 }
 
+/// The agent's plan, to carry out under a policy or to keep working on.
+#[derive(Debug, Clone)]
+pub struct PlanModal {
+    pub request_id: String,
+    pub plan: String,
+    pub plan_file: Option<String>,
+    /// The policies the plan can be carried out under, one row each; the
+    /// row after them keeps the agent planning.
+    pub policies: Vec<PermissionPolicy>,
+    pub cursor: usize,
+    /// What the agent is told when it keeps planning.
+    pub feedback: String,
+    pub editing: bool,
+    /// Lines the plan is scrolled down.
+    pub scroll: u16,
+    /// The furthest the plan can scroll, as last drawn.
+    pub scroll_max: u16,
+}
+
+impl PlanModal {
+    pub fn new(request_id: String, plan: String, plan_file: Option<String>) -> Self {
+        PlanModal {
+            request_id,
+            plan,
+            plan_file,
+            policies: Vec::new(),
+            cursor: 0,
+            feedback: String::new(),
+            editing: false,
+            scroll: 0,
+            scroll_max: 0,
+        }
+    }
+
+    /// Offer `policies`, with `preferred` highlighted when it is one of them.
+    pub fn set_policies(&mut self, policies: Vec<PermissionPolicy>, preferred: PermissionPolicy) {
+        self.cursor = policies.iter().position(|p| *p == preferred).unwrap_or(0);
+        self.policies = policies;
+    }
+
+    /// The highlighted policy; none on the row that keeps planning.
+    pub fn current(&self) -> Option<PermissionPolicy> {
+        self.policies.get(self.cursor).copied()
+    }
+
+    pub fn up(&mut self) {
+        let n = self.policies.len() + 1;
+        self.cursor = (self.cursor + n - 1) % n;
+    }
+
+    pub fn down(&mut self) {
+        self.cursor = (self.cursor + 1) % (self.policies.len() + 1);
+    }
+
+    pub fn scroll_by(&mut self, lines: i32) {
+        let max = i32::from(self.scroll_max);
+        self.scroll = (i32::from(self.scroll) + lines).clamp(0, max) as u16;
+    }
+
+    /// The answer that keeps the agent planning, with what the user typed.
+    pub fn keep_planning(&self) -> PermissionDecision {
+        PermissionDecision::Deny {
+            reason: self.feedback.trim().to_string(),
+        }
+    }
+}
+
 /// The question has a row for a typed answer: it allows one, or it has
 /// no options to choose from.
 pub fn takes_text(q: &Question) -> bool {
@@ -534,6 +601,7 @@ pub enum Modal {
     Rewind(ListPicker<RewindOption>),
     Permission(PermissionModal),
     Question(QuestionModal),
+    Plan(PlanModal),
     Confirm(ConfirmModal),
     Select(SelectModal),
     Input(InputModal),
@@ -574,6 +642,12 @@ impl Modal {
                 text: prefill.clone().unwrap_or_default(),
                 multiline: *multiline,
             }),
+            // The policies to offer are the app's to fill in.
+            PermissionKind::PlanApproval { plan, plan_file } => Modal::Plan(PlanModal::new(
+                req.id.clone(),
+                plan.clone(),
+                plan_file.clone(),
+            )),
         }
     }
 
@@ -596,6 +670,7 @@ impl Modal {
             }
             Modal::Permission(m) if m.denying => Some((&mut m.reason, false)),
             Modal::Question(m) if m.editing_other => Some((&mut m.other[m.idx], false)),
+            Modal::Plan(m) if m.editing => Some((&mut m.feedback, false)),
             Modal::Input(m) => Some((&mut m.text, m.multiline)),
             _ => None,
         }
@@ -606,6 +681,7 @@ impl Modal {
             self,
             Modal::Permission(_)
                 | Modal::Question(_)
+                | Modal::Plan(_)
                 | Modal::Confirm(_)
                 | Modal::Select(_)
                 | Modal::Input(_)
@@ -620,6 +696,7 @@ impl Modal {
                 m.current()
                     .map_or_else(|| "submit answers".into(), super::herdr::question_label),
             ),
+            Modal::Plan(_) => Some("approve the plan?".into()),
             Modal::Confirm(m) => Some(m.title.clone()),
             Modal::Select(m) => Some(m.title.clone()),
             Modal::Input(m) => Some(m.title.clone()),
@@ -632,6 +709,7 @@ impl Modal {
         match self {
             Modal::Permission(m) => Some(&m.request.id),
             Modal::Question(m) => Some(&m.request_id),
+            Modal::Plan(m) => Some(&m.request_id),
             Modal::Confirm(m) => Some(&m.request_id),
             Modal::Select(m) => Some(&m.request_id),
             Modal::Input(m) => Some(&m.request_id),
@@ -644,6 +722,11 @@ impl Modal {
         match self {
             Modal::Permission(_) => Some(PermissionDecision::Deny {
                 reason: "cancelled by user".into(),
+            }),
+            // Never an approval: the agent keeps planning, told nothing
+            // (feedback is sent only with Enter).
+            Modal::Plan(_) => Some(PermissionDecision::Deny {
+                reason: String::new(),
             }),
             Modal::Question(_) | Modal::Confirm(_) | Modal::Select(_) | Modal::Input(_) => {
                 Some(PermissionDecision::Answer(Value::Null))

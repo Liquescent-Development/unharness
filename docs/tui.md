@@ -12,7 +12,8 @@ The transcript fills the window. The current state sits under the prompt:
   and sandbox give way; the harness and its policy always stay.
 
 Above the prompt, when there is something to show: the agent's plan as a
-checklist (`/plan` hides it), prompts waiting in the queue, and files
+checklist (`/plan` hides it; plan mode is the `plan`
+[policy](permissions.md#plan)), prompts waiting in the queue, and files
 attached to the next prompt.
 
 ## Keys
@@ -106,6 +107,17 @@ multi-select question it replaces the ticks); a question with no options
 has an `[answer]` row. `Enter` on the row starts typing, `Enter` again
 keeps the answer and moves on, and `Esc` puts the text back as it was.
 
+Under the `plan` [policy](permissions.md#plan), the agent's plan opens in
+a dialog of its own: the plan, then one row per policy to carry it out
+under (the one you planned from is highlighted) and a Keep planning row.
+
+| Key | Action |
+|---|---|
+| `↑`/`↓` | Highlight a row |
+| `Enter` | Approve the plan under the highlighted policy; on Keep planning, start typing what to change, and `Enter` again sends it |
+| `PageUp`/`PageDown` | Scroll the plan |
+| `Esc` | Keep planning without saying what to change (while typing, stop typing) |
+
 ## Slash commands
 
 Type `/` to open autocomplete; `Enter` on a partial command completes it.
@@ -117,7 +129,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/resume` | Resume a saved conversation (every harness in it) |
 | `/sessions`, `/conversations` | List saved conversations in this workspace |
 | `/usage` | Token usage and cost, plus the account's rate-limit windows |
-| `/plan` | Show or hide the agent's plan |
+| `/plan` | Show or hide the agent's plan checklist (plan mode is `/policy plan`) |
 | `/subagents` | Open a subagent's own transcript (and stop it from there) |
 | `/attach <path>` | Attach an image, PDF or text file to the next prompt |
 | `/paste`, `/detach` | Attach the clipboard image; drop pending attachments |

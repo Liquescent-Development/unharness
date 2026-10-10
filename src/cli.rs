@@ -36,7 +36,7 @@ pub struct CommonRunArgs {
     #[arg(long, requires = "print")]
     pub native: bool,
 
-    /// Permission policy: ask, accept-edits, auto, bypass
+    /// Permission policy: plan, ask, accept-edits, auto, bypass (plan only in the TUI)
     #[arg(long, env = "UNHARNESS_POLICY")]
     pub policy: Option<String>,
 

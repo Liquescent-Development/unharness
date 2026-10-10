@@ -1,6 +1,6 @@
 # Permissions
 
-unharness gives every harness the same four permission policies and its
+unharness gives every harness the same five permission policies and its
 own allow rules. Set the policy with `--policy`, `UNHARNESS_POLICY`,
 `default_policy` in the config, `Ctrl+P` or `/policy`.
 
@@ -8,6 +8,7 @@ own allow rules. Set the policy with `--policy`, `UNHARNESS_POLICY`,
 
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
 |---|---|---|---|---|---|
+| `plan` | `plan` mode: reads and plans, asks before anything else, and waits for you to [approve the plan](#plan) | not available | not available | not available | not available |
 | `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available |
 | `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn |
 | `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
@@ -29,6 +30,32 @@ A harness that cannot hold to that does not offer `ask`:
   interface (`--no-tui`) does not accept the `untrusted` approval policy;
 - an ACP agent offers `ask` only when you have marked it as one that asks
   ([ACP agents](acp.md#permissions)).
+
+### Plan
+
+`plan` is the least permissive policy. The agent reads, plans, and
+asks you to approve its plan before it acts. Everything `ask` guarantees
+holds under it: Claude asks before every write and command in plan mode,
+and only a read is answered by an [allow rule](#allow-rules) meanwhile.
+Claude writes the plan itself to a file under `~/.claude/plans/` without
+asking.
+
+The plan opens in a dialog of its own ([Permission
+prompts](tui.md#permission-prompts)). Approving it picks the policy the
+agent carries it out under (the one you planned from is highlighted).
+Bypass is offered there only in a session started under it, because
+Claude cannot switch to it in one that was not. Or keep the agent
+planning, with what to change. No rule answers this dialog and there is
+no "allow always".
+
+The agent can also go into plan mode by itself (Claude's
+`EnterPlanMode`): the policy then shows `plan` and is kept like one you
+chose. Choosing another policy while it plans ends plan mode.
+
+`plan` is a policy of the TUI only. `--print` and `--no-tui` do not
+offer it, since nobody could approve the plan; a plan the agent asks to
+carry out in `--print` is not approved, and while it plans there only a
+read is answered by a rule.
 
 ### Which policy a harness runs under
 
@@ -194,7 +221,7 @@ or an MCP approval that cannot be tied to one call.
 - No rule allows a write or a read in unharness's own config and state
   directories, however wide its pattern.
 - Rules only allow. They apply under every policy to every request that
-  reaches unharness. What a harness decides without asking (see the policy
+  reaches unharness, except that under `plan` only a read is answered. What a harness decides without asking (see the policy
   table) never gets here, and neither does anything in `--print --native`
   and `--no-tui` runs.
 - Every request a rule answers is noted in the transcript, together with

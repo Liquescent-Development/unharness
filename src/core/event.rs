@@ -3,6 +3,7 @@
 
 use serde_json::Value;
 
+use super::caps::PermissionPolicy;
 use super::ids::{ModelInfo, ProviderId};
 use super::rules::ToolAction;
 
@@ -100,6 +101,9 @@ pub enum AgentEvent {
     },
     /// What the harness can do changed (model switch, handshake result...).
     CapabilitiesChanged(CapsUpdate),
+    /// The session now runs under this policy: one the user set, or one the
+    /// agent moved to by itself (Claude's `EnterPlanMode`).
+    PolicyChanged(PermissionPolicy),
     TurnCompleted {
         stop_reason: StopReason,
     },
@@ -367,6 +371,14 @@ pub enum PermissionKind {
         prefill: Option<String>,
         multiline: bool,
     },
+    /// The agent asks to leave plan mode and carry out `plan` (markdown).
+    /// Approved with `Allow`, after the policy to act under is set;
+    /// anything else keeps it planning. No rule answers it.
+    PlanApproval {
+        plan: String,
+        /// Where the agent keeps the plan, when it says.
+        plan_file: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,6 +527,11 @@ impl AgentEvent {
                         format!("Select {:?} n={}", short(title), options.len())
                     }
                     PermissionKind::Input { title, .. } => format!("Input {:?}", short(title)),
+                    PermissionKind::PlanApproval { plan, plan_file } => format!(
+                        "PlanApproval {:?} file={}",
+                        short(plan),
+                        plan_file.as_deref().unwrap_or("-")
+                    ),
                 };
                 format!("PermissionRequest id={} {}", req.id, kind)
             }
@@ -636,6 +653,7 @@ impl AgentEvent {
                 StopReason::Interrupted => "TurnCompleted Interrupted".to_string(),
                 StopReason::Error(e) => format!("TurnCompleted Error {:?}", short(e)),
             },
+            AgentEvent::PolicyChanged(p) => format!("PolicyChanged {p}"),
             AgentEvent::Notice(n) => format!("Notice {:?}", short(n)),
             AgentEvent::Error(e) => format!("Error {:?}", short(e)),
             AgentEvent::ProcessExited { code } => {

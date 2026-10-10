@@ -105,7 +105,8 @@ pub fn policy_params(policy: PermissionPolicy, own: OwnSandbox) -> (&'static str
     let approval = match policy {
         // Checked on 0.157.0: with `workspace-write`, `untrusted` asks before
         // every command and file change.
-        PermissionPolicy::Ask => "untrusted",
+        // Not declared for Codex yet; never sent one.
+        PermissionPolicy::Plan | PermissionPolicy::Ask => "untrusted",
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => "on-request",
         PermissionPolicy::Bypass => "never",
     };

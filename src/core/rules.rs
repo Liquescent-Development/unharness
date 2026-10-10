@@ -43,6 +43,14 @@ pub enum ToolAction {
     Opaque,
 }
 
+/// Whether an allow rule may answer a request for `action` made while the
+/// agent planned (`planning`) or not. In plan mode Claude asks before every
+/// write and command, and what it asks for then is not what the user
+/// allowed the rule for: only a read is answered.
+pub fn rule_may_answer(planning: bool, action: &ToolAction) -> bool {
+    !planning || matches!(action, ToolAction::Read { .. })
+}
+
 impl ToolAction {
     /// For fixture summaries.
     pub fn summary(&self) -> String {

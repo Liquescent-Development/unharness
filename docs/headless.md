@@ -98,6 +98,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `capabilities_changed` | any of `effort_levels`, `image_input`, `resume_by_id`, `mcp_http`, `plan_mode`, `models`: [{`id`, `provider`, `name`, `description`, `effort_levels`}], `provider` (the one the session runs on), `commands`: [{`name`, `description`, `hint`, `aliases`}] (the harness's own, run by a prompt that starts with `/name`; each list replaces the last), `slash_commands` (whether such a prompt runs one) |
 | `rewind_failed` | `reason` |
 | `turn_completed` | `status`: `done`, `interrupted` or `error`; `error` |
+| `policy_changed` | `policy`: the one the session runs under now (Claude reports each change of its mode, also one the model makes) |
 | `notice` | `message` |
 | `error` | `message` (the turn goes on) |
 | `process_exited` | `code` |
@@ -111,6 +112,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `confirm` | `title`, `message` |
 | `select` | `title`, `options` |
 | `input` | `title`, `placeholder`, `prefill`, `multiline` |
+| `plan_approval` | `plan` (markdown), `plan_file`; always denied without the TUI |
 
 `action` is what the call does, as allow rules see it, with a `kind`:
 `shell` (`command`, `cwd`), `edit` (`paths`), `read` (`path`), `mcp`

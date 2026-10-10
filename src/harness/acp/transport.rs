@@ -125,7 +125,8 @@ pub fn permission_outcome(options: &Value, decision: &PermissionDecision) -> Val
 /// ACP agent regardless of the modes it offers.
 pub fn auto_allows(policy: PermissionPolicy, kind: &str) -> bool {
     match policy {
-        PermissionPolicy::Ask => false,
+        // Not declared for ACP agents; never sent one.
+        PermissionPolicy::Plan | PermissionPolicy::Ask => false,
         PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => kind == "edit",
         PermissionPolicy::Bypass => true,
     }

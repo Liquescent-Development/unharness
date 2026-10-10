@@ -9,9 +9,24 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
-    ModelRef, PermissionKind, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question,
-    QuestionOption, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage,
+    ModelRef, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
+    ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
+    SubagentStatus, ToolAction, Usage,
 };
+
+/// The policy of one of Claude's permission modes, as `system` `status`
+/// reports it. `dontAsk` has none.
+pub fn policy_of_mode(mode: &str) -> Option<PermissionPolicy> {
+    match mode {
+        "plan" => Some(PermissionPolicy::Plan),
+        // `manual` is the name 2.1.296's `--help` gives `default`.
+        "default" | "manual" => Some(PermissionPolicy::Ask),
+        "acceptEdits" => Some(PermissionPolicy::AcceptEdits),
+        "auto" => Some(PermissionPolicy::Auto),
+        "bypassPermissions" => Some(PermissionPolicy::Bypass),
+        _ => None,
+    }
+}
 
 /// unharness's id for the API Claude calls, from Claude's own name for it
 /// (`account.apiProvider` in the answer to `initialize`).
@@ -525,6 +540,17 @@ impl ClaudeParser {
                 )));
             }
             "compact_boundary" => out.push(AgentEvent::Notice("context compacted".into())),
+            // Sent when the mode changes: set by us, or by the model
+            // (`EnterPlanMode`, `fixtures/plan_enter.jsonl`).
+            "status" if val.get("permissionMode").is_some() => {
+                let mode = str_at(val, "permissionMode");
+                match policy_of_mode(mode) {
+                    Some(p) => out.push(AgentEvent::PolicyChanged(p)),
+                    None => out.push(AgentEvent::Notice(format!(
+                        "Claude switched to its '{mode}' mode, which unharness has no policy for"
+                    ))),
+                }
+            }
             // Shell commands are tasks too (`local_bash`); only agents are subagents.
             "task_started" if str_at(val, "task_type") == "local_agent" => {
                 let task = str_at(val, "task_id").to_string();
@@ -924,6 +950,11 @@ impl ClaudeParser {
                     PermissionKind::Question {
                         questions: parse_questions(&input),
                     }
+                } else if tool == "ExitPlanMode" {
+                    PermissionKind::PlanApproval {
+                        plan: str_at(&input, "plan").to_string(),
+                        plan_file: opt_str(&input, "planFilePath"),
+                    }
                 } else {
                     PermissionKind::ToolUse {
                         action: tool_action(&tool, &input),
@@ -1178,6 +1209,33 @@ mod tests {
     #[test]
     fn fixture_ask_previews() {
         fixture("ask_previews");
+    }
+
+    /// Started in plan mode (2.1.296): the plan file is written without a
+    /// request, `ExitPlanMode` asks, and the mode set before the approval
+    /// is the one that holds.
+    #[test]
+    fn fixture_plan_approved() {
+        fixture("plan_approved");
+    }
+
+    /// A rejected plan is revised and asked about again.
+    #[test]
+    fn fixture_plan_rejected() {
+        fixture("plan_rejected");
+    }
+
+    /// The model enters plan mode by itself: no request, a mode report.
+    #[test]
+    fn fixture_plan_enter() {
+        fixture("plan_enter");
+    }
+
+    /// Plan mode set on a session launched with bypass: a write is still
+    /// asked about.
+    #[test]
+    fn fixture_plan_after_bypass() {
+        fixture("plan_after_bypass");
     }
 
     #[test]

@@ -15,7 +15,7 @@ pub struct Config {
     /// Preferred default harness (agy, claude, codex, pi).
     pub default_harness: Option<String>,
 
-    /// Default permission policy (ask, accept-edits, auto, bypass).
+    /// Default permission policy (plan, ask, accept-edits, auto, bypass).
     pub default_policy: Option<String>,
 
     /// Whether to synchronize rules symlinks before running. Default: on.

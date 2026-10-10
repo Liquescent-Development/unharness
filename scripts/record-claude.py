@@ -56,6 +56,11 @@ def main() -> int:
                     help="when a turn ends with subagents still running, stop each one (stop_task)")
     ap.add_argument("--interrupt-tasks", action="store_true",
                     help="when a turn ends with subagents still running, interrupt (which stops them)")
+    ap.add_argument("--set-mode", help="send set_permission_mode with this mode before the first prompt")
+    ap.add_argument("--plan-approve", metavar="MODE",
+                    help="approve ExitPlanMode after sending set_permission_mode MODE, as unharness does")
+    ap.add_argument("--plan-reject", metavar="FEEDBACK",
+                    help="deny the first ExitPlanMode with this message (later ones are approved)")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -99,6 +104,10 @@ def main() -> int:
     if not args.no_initialize:
         send({"type": "control_request", "request_id": str(uuid.uuid4()),
               "request": {"subtype": "initialize"}})
+
+    if args.set_mode:
+        send({"type": "control_request", "request_id": str(uuid.uuid4()),
+              "request": {"subtype": "set_permission_mode", "mode": args.set_mode}})
 
     prompts = list(args.prompts)
     first = prompts.pop(0)
@@ -144,6 +153,7 @@ def main() -> int:
     steered = False
     compacted = False
     rewound = False
+    plan_rejected = False
     last_activity = time.time()
     while True:
         if proc.poll() is not None:
@@ -179,6 +189,17 @@ def main() -> int:
                         opts = q.get("options", [])
                         answers[q["question"]] = opts[0]["label"] if opts else "yes"
                     resp = {"behavior": "allow", "updatedInput": {**inp, "answers": answers}}
+                elif tool == "ExitPlanMode" and args.plan_reject and not plan_rejected:
+                    plan_rejected = True
+                    # Worded as Claude's own interface words a rejection with feedback.
+                    resp = {"behavior": "deny", "message": (
+                        "The user doesn't want to proceed with this tool use. The tool use was "
+                        "rejected (eg. if it was a file edit, the new_string was NOT written to "
+                        "the file). To tell you how to proceed, the user said:\n" + args.plan_reject)}
+                elif tool == "ExitPlanMode" and args.plan_approve:
+                    send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                          "request": {"subtype": "set_permission_mode", "mode": args.plan_approve}})
+                    resp = {"behavior": "allow", "updatedInput": inp}
                 elif args.deny:
                     resp = {"behavior": "deny", "message": "recording: denied by user"}
                 else:
