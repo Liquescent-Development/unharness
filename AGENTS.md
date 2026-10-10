@@ -697,7 +697,8 @@ recorded ones. For anything else:
   for, so `hung_up` asks for `POLLOUT`, whose filter ends once the
   socket cannot send, set by the peer's close and not by its
   `shutdown(SHUT_WR)` (read in XNU's `poll_nocancel`, `filt_sowrite`,
-  `unp_disconnect`, `unp_shutdown`; not run on a Mac). Seen with the variables inherited,
+  `unp_disconnect`, `unp_shutdown`), and the test passed there with
+  it. Seen with the variables inherited,
   before the proxy: pi's herdr extension reports
   only when `ctx.mode` is `tui`, so it is silent in unharness's `rpc`
   sessions; pi's A2A extension (`herdr-a2a`) fails with "client session
