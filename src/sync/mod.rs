@@ -67,13 +67,19 @@ pub(crate) fn open_regular(path: &Path, follow: bool) -> std::io::Result<fs::Fil
 
 /// All of `file`, if it is at most [`READ_LIMIT`] long.
 fn read_capped(file: &fs::File) -> std::io::Result<Vec<u8>> {
+    read_at_most(file, READ_LIMIT)
+}
+
+/// All of `file`, if it is at most `limit` (whole MiB) long; never more
+/// is read.
+pub(crate) fn read_at_most(file: &fs::File, limit: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let mut content = Vec::new();
-    file.take(READ_LIMIT + 1).read_to_end(&mut content)?;
-    if content.len() as u64 > READ_LIMIT {
+    file.take(limit + 1).read_to_end(&mut content)?;
+    if content.len() as u64 > limit {
         return Err(std::io::Error::other(format!(
             "larger than {} MiB",
-            READ_LIMIT >> 20
+            limit >> 20
         )));
     }
     Ok(content)
