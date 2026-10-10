@@ -21,7 +21,13 @@ pub enum Part {
 }
 
 impl Part {
-    fn span(&self) -> &Span<'static> {
+    pub fn span(&self) -> &Span<'static> {
+        match self {
+            Part::Text(s) | Part::Draw(s) | Part::Stand(s, _) => s,
+        }
+    }
+
+    pub fn span_mut(&mut self) -> &mut Span<'static> {
         match self {
             Part::Text(s) | Part::Draw(s) | Part::Stand(s, _) => s,
         }
@@ -128,6 +134,39 @@ impl Rows {
     pub fn push(&mut self, line: Line<'static>, copy: RowCopy) {
         self.lines.push(line);
         self.copy.push(copy);
+    }
+
+    /// A row drawn elsewhere, with `prefix` in front of it.
+    pub fn push_after(&mut self, prefix: Vec<Part>, line: Line<'static>, copy: RowCopy) {
+        let join = match &copy {
+            RowCopy::Text { join, .. } => *join,
+            RowCopy::Drawing => Join::Line,
+        };
+        let (mut head, head_copy) = build(prefix, join);
+        let RowCopy::Text {
+            pieces: mut head_pieces,
+            ..
+        } = head_copy
+        else {
+            unreachable!("build makes a text row")
+        };
+        let shift = head.spans.iter().map(|s| width(&s.content)).sum::<usize>();
+        let copy = match copy.shifted(shift as isize) {
+            RowCopy::Drawing if head_pieces.is_empty() => RowCopy::Drawing,
+            RowCopy::Drawing => RowCopy::Text {
+                join,
+                pieces: head_pieces,
+            },
+            RowCopy::Text { join, pieces } => {
+                head_pieces.extend(pieces);
+                RowCopy::Text {
+                    join,
+                    pieces: head_pieces,
+                }
+            }
+        };
+        head.spans.extend(line.spans);
+        self.push(head, copy);
     }
 
     pub fn append(&mut self, other: Rows) {
