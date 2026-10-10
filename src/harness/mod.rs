@@ -52,6 +52,23 @@ pub struct Probe {
     pub auth: AuthInfo,
 }
 
+/// The oldest release of a CLI unharness works with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MinVersion {
+    pub version: [u64; 3],
+    /// What that release brought that unharness uses.
+    pub needs: &'static str,
+    /// What to run to update the CLI.
+    pub upgrade: &'static str,
+}
+
+impl std::fmt::Display for MinVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let [major, minor, patch] = self.version;
+        write!(f, "{major}.{minor}.{patch}")
+    }
+}
+
 /// Options for the vendor's own interfaces (`-p --native` and `--no-tui`).
 #[derive(Debug, Clone, Default)]
 pub struct PrintConfig {
@@ -86,6 +103,13 @@ pub trait Harness: Send + Sync {
 
     /// Locate the binary, read its version and auth state. Cheap and synchronous.
     fn probe(&self, binary_override: Option<&Path>) -> Probe;
+
+    /// The oldest release this harness works with, which `doctor` checks
+    /// the probed version against. Declared only where an older release is
+    /// known to lack something unharness uses, saying where that was found.
+    fn min_version(&self) -> Option<MinVersion> {
+        None
+    }
 
     /// Whether the harness is signed in, for choosing a default at startup.
     /// Must stay cheap (a file read or a quick status command, no model

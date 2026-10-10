@@ -13,8 +13,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::{
-    AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
-    probe_version, resolve_binary,
+    AuthInfo, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
+    ProviderSource, probe_version, resolve_binary,
 };
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
@@ -47,6 +47,17 @@ pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     providers: ProviderSource::Dynamic,
 };
 
+/// From pi's changelog: `--session-id` came in 0.76.0, and the gate's
+/// `ctx.mode` in 0.78.1 (without it the gate words its dialog for a person,
+/// which no rule can answer). Recordings start at 0.87.1. The package
+/// before 0.74 (`@mariozechner`) moves to the current one with `pi update
+/// --self` (0.73.1 to 1.0.4, reported).
+pub const MIN_VERSION: MinVersion = MinVersion {
+    version: [0, 78, 1],
+    needs: "--session-id and the gate's ctx.mode",
+    upgrade: "pi update --self",
+};
+
 pub const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// How long to wait for `pi --mode rpc` to answer a catalog query.
@@ -55,6 +66,10 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 impl Harness for PiHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         &DESCRIPTOR
+    }
+
+    fn min_version(&self) -> Option<MinVersion> {
+        Some(MIN_VERSION)
     }
 
     fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {

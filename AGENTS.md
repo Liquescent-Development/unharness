@@ -213,6 +213,8 @@ recorded ones. For anything else:
    `quick_auth` only if sign-in can be checked in well under a second; it
    runs at startup to choose the default harness. Declare the CLI's own
    state directories in `sandbox_paths`, and run a turn with the sandbox on.
+   Declare `min_version` when an older release is known to lack a flag or
+   API unharness uses; `doctor` warns below it.
 3. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events` with `UNHARNESS_UPDATE_FIXTURES=1`.
 4. Register it in `Registry::from_config`.
@@ -552,6 +554,16 @@ recorded ones. For anything else:
   Unverified: a `failed` or `policy_disabled` state, an org that refuses
   Remote Control, a model or mode changed from the remote side (the mode
   would come as `status`, as the model's own changes do), macOS.
+- Harness versions (`Harness::min_version`, `doctor`): only pi declares
+  one, 0.78.1, read in its changelog (`--session-id` came in 0.76.0, the
+  gate's `ctx.mode` in 0.78.1); recordings start at 0.87.1. pi before
+  0.74 is the deprecated `@mariozechner` package: 0.73.1 refused
+  `--session-id` ("Error: Unknown option: --session-id", exit 1) and,
+  with stdin not a terminal, printed `--version` on stderr (run, with
+  its agent directory in scratch), which is why `probe_version` falls
+  back to stderr. `pi update --self` moved it to `@earendil-works` 1.0.4
+  (reported) and is still accepted on 1.1.0. A version doctor cannot
+  read is a warning for every harness.
 - `ask` per harness. Codex 0.157.0 app-server: `approvalPolicy:
   "untrusted"` with `sandbox: "workspace-write"` (unharness's sandbox off)
   asked before a file change and before every command, `cat` of a file

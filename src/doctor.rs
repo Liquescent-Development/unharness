@@ -16,6 +16,7 @@ use crate::core::sandbox::{
 use crate::core::{
     HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, resolve_policy,
 };
+use crate::harness::{MinVersion, parse_version};
 use crate::runner::{binary_overrides, configured_policy};
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -49,13 +50,26 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
         }
         match probe.binary {
             Some(path) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| d.binary_names[0].to_string());
+                let warning =
+                    version_warning(probe.version.as_deref(), h.min_version().as_ref(), &name);
                 println!(
-                    "  {} {} (v{}) at {}",
-                    "[✓]".green().bold(),
+                    "  {} {} ({}) at {}",
+                    if warning.is_some() {
+                        "[!]".yellow().bold()
+                    } else {
+                        "[✓]".green().bold()
+                    },
                     d.display_name.bold(),
-                    probe.version.as_deref().unwrap_or("unknown"),
+                    describe_version(probe.version.as_deref()),
                     path.display().to_string().dimmed()
                 );
+                if let Some(warning) = warning {
+                    println!("      {} Version: {}", "↳".dimmed(), warning.yellow());
+                }
                 let details = probe.auth.details.unwrap_or_else(|| {
                     if probe.auth.authenticated {
                         "logged in".into()
@@ -544,6 +558,44 @@ fn report_rules(root: &Path) {
     }
 }
 
+/// The version as doctor shows it: its three numbers when they can be
+/// read out of what `--version` printed, else that text.
+fn describe_version(version: Option<&str>) -> String {
+    match version.map(|v| (v, parse_version(v))) {
+        None => "version unknown".into(),
+        Some((_, Some([major, minor, patch]))) => format!("v{major}.{minor}.{patch}"),
+        Some((text, None)) => text.into(),
+    }
+}
+
+/// What is wrong with the version `<binary> --version` gave, if anything:
+/// none at all, one that cannot be read where a minimum is declared, or one
+/// below it.
+fn version_warning(
+    version: Option<&str>,
+    min: Option<&MinVersion>,
+    binary: &str,
+) -> Option<String> {
+    let Some(version) = version else {
+        return Some(format!(
+            "`{binary} --version` printed nothing unharness could read"
+        ));
+    };
+    let min = min?;
+    match parse_version(version) {
+        None => Some(format!(
+            "could not read a version from `{version}`, so it may be older than {min}, which \
+             unharness needs for {}: run `{}`",
+            min.needs, min.upgrade
+        )),
+        Some(v) if v < min.version => Some(format!(
+            "{version} is older than {min}, which unharness needs for {}: run `{}`",
+            min.needs, min.upgrade
+        )),
+        Some(_) => None,
+    }
+}
+
 /// A harness's default policy, where it is set, and what it comes to on
 /// that harness; and whether it runs as set.
 fn describe_default_policy(
@@ -592,6 +644,42 @@ fn describe_default_policy(
 mod tests {
     use super::*;
     use crate::config::HarnessSettings;
+
+    #[test]
+    fn a_version_that_cannot_be_read_or_is_too_old_is_warned_about() {
+        let min = crate::harness::pi::MIN_VERSION;
+        assert_eq!(
+            version_warning(None, None, "codex").as_deref(),
+            Some("`codex --version` printed nothing unharness could read")
+        );
+        assert_eq!(version_warning(Some("whatever"), None, "codex"), None);
+        assert_eq!(
+            version_warning(Some("whatever"), Some(&min), "pi").as_deref(),
+            Some(
+                "could not read a version from `whatever`, so it may be older than 0.78.1, \
+                 which unharness needs for --session-id and the gate's ctx.mode: run \
+                 `pi update --self`"
+            )
+        );
+        assert_eq!(
+            version_warning(Some("0.73.1"), Some(&min), "pi").as_deref(),
+            Some(
+                "0.73.1 is older than 0.78.1, which unharness needs for --session-id and the \
+                 gate's ctx.mode: run `pi update --self`"
+            )
+        );
+        assert!(version_warning(Some("0.78.0"), Some(&min), "pi").is_some());
+        assert_eq!(version_warning(Some("0.78.1"), Some(&min), "pi"), None);
+        assert_eq!(version_warning(Some("1.1.0"), Some(&min), "pi"), None);
+    }
+
+    #[test]
+    fn a_version_is_shown_as_its_numbers() {
+        assert_eq!(describe_version(Some("2.1.296 (Claude Code)")), "v2.1.296");
+        assert_eq!(describe_version(Some("codex-cli 0.157.0")), "v0.157.0");
+        assert_eq!(describe_version(Some("nightly")), "nightly");
+        assert_eq!(describe_version(None), "version unknown");
+    }
 
     #[test]
     fn a_default_policy_is_described_with_where_it_is_set_and_what_it_comes_to() {
