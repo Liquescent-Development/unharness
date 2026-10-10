@@ -318,11 +318,14 @@ async fn serve(client: UnixStream, upstream: Arc<PathBuf>, log: Arc<Log>) {
 
 /// Whether the peer of `fd` closed the connection, not only its sending
 /// side (a client that did `shutdown(SHUT_WR)` may still read). Linux
-/// says so with `POLLHUP`.
+/// says so with `POLLHUP` whatever is asked for. macOS's `poll` watches
+/// only what is asked for, and says `POLLHUP` for the end of either side:
+/// asked for `POLLOUT`, it does once this side cannot send, which the
+/// peer's close makes so and its `shutdown(SHUT_WR)` does not.
 fn hung_up(fd: RawFd) -> bool {
     let mut p = libc::pollfd {
         fd,
-        events: 0,
+        events: libc::POLLOUT,
         revents: 0,
     };
     // SAFETY: one `pollfd` on the stack, no timeout; `fd` is held open by

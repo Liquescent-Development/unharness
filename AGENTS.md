@@ -666,7 +666,7 @@ recorded ones. For anything else:
   a report has no other way through; an answer given in the proxy can
   overtake one of herdr's on a connection with several requests. A
   client that has closed its connection ends herdr's side (`POLLHUP`, so
-  that an idle subscription does not hold it; Linux), and a killed
+  that an idle subscription does not hold it), and a killed
   unharness's proxy directory is removed by the next. Without the
   pane id an agent's `herdr pane current --current` answered with the
   UI-focused pane, and `pane get --current` with `pane_not_found` (#67);
@@ -691,9 +691,13 @@ recorded ones. For anything else:
   there is `pane_not_found` in any pane. Checked before with a
   prototype: layout, run, wait-output, agent list and wait through it.
   Unverified: `events.subscribe` live (only against a stand-in), a
-  client that sends several requests on one connection, macOS (whether
-  a closed client shows as `POLLHUP` there; without it an idle
-  subscription holds herdr's side until herdr writes). Seen with the variables inherited,
+  client that sends several requests on one connection. On macOS
+  `poll` asked for nothing never said `POLLHUP` (the test failed on
+  GitHub's runner): it registers a kqueue filter only for what is asked
+  for, so `hung_up` asks for `POLLOUT`, whose filter ends once the
+  socket cannot send, set by the peer's close and not by its
+  `shutdown(SHUT_WR)` (read in XNU's `poll_nocancel`, `filt_sowrite`,
+  `unp_disconnect`, `unp_shutdown`; not run on a Mac). Seen with the variables inherited,
   before the proxy: pi's herdr extension reports
   only when `ctx.mode` is `tui`, so it is silent in unharness's `rpc`
   sessions; pi's A2A extension (`herdr-a2a`) fails with "client session
