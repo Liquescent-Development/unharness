@@ -355,4 +355,53 @@ mod tests {
             Some(0)
         );
     }
+
+    // What a CLI under unharness does to reach herdr through the proxy,
+    // whose socket is in the runtime directory, not writable inside.
+    #[test]
+    fn a_socket_outside_the_writable_paths_can_be_connected_to() {
+        if let Err(why) = Landlock::detect() {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        if Command::new("python3").arg("-V").output().is_err() {
+            eprintln!("skipping: no python3");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("ws")).unwrap();
+        std::fs::create_dir_all(root.join("run")).unwrap();
+        let sock = root.join("run/herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{BufRead, Write};
+            let (s, _) = listener.accept().unwrap();
+            let mut s = std::io::BufReader::new(s);
+            let mut line = String::new();
+            s.read_line(&mut line).unwrap();
+            s.get_mut().write_all(b"ok\n").unwrap();
+            line
+        });
+        let profile = SandboxProfile {
+            level: SandboxLevel::WorkspaceWrite,
+            workspace: root.join("ws"),
+            writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            deny_read: vec![],
+            allow_read: vec![],
+            protected: vec![],
+        };
+        let mut cmd = Command::new("python3");
+        cmd.arg("-I").arg("-c").arg(
+            "import socket, sys\n\
+             s = socket.socket(socket.AF_UNIX)\n\
+             s.connect(sys.argv[1])\n\
+             s.sendall(b'ping\\n')\n\
+             sys.exit(0 if s.makefile().readline() == 'ok\\n' else 1)",
+        );
+        cmd.arg(&sock);
+        let mut cmd = Landlock::detect().unwrap().wrap(cmd, &profile).unwrap();
+        assert_eq!(cmd.status().unwrap().code(), Some(0));
+        assert_eq!(server.join().unwrap(), "ping\n");
+    }
 }

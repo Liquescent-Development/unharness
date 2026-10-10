@@ -9,6 +9,8 @@ pub mod drop;
 pub mod editor;
 pub mod files;
 pub mod herdr;
+#[cfg(unix)]
+pub mod herdr_proxy;
 pub mod history;
 pub mod markdown;
 pub mod modal;
@@ -147,13 +149,19 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     }));
 
     MOUSE.store(launch.config.mouse.unwrap_or(true), Ordering::SeqCst);
-    let mut herdr = launch
+    let pane = launch
         .config
         .herdr
         .unwrap_or(true)
         .then(|| herdr::Pane::from_env(|k| std::env::var(k).ok()))
-        .flatten()
-        .map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
+        .flatten();
+    // The CLIs reach herdr through the proxy while unharness reports,
+    // so that their own herdr integrations do not report over it. Held
+    // until the event loop has waited for the CLIs to end (a hook may
+    // report as one does); what a cut-short wait leaves is killed with
+    // the runtime and finds no socket.
+    let herdr_proxy = pane.as_ref().and_then(herdr::start_proxy);
+    let mut herdr = pane.map(|pane| herdr::Reporter::start(pane, herdr::default_log()));
     // Before the terminal is taken, where an error can still be read.
     let frames = FrameLog::from_env()?;
     let mut out = stdout();
@@ -198,6 +206,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     if let Some(h) = herdr {
         h.release().await;
     }
+    drop(herdr_proxy);
 
     restore_terminal()?;
     terminal.show_cursor()?;

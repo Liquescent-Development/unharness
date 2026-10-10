@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -253,11 +253,14 @@ impl Sandbox {
         }
     }
 
-    /// Confine `cmd`, and take herdr's variables away from it whether or
-    /// not the sandbox is on: the socket they name drives every pane, and
-    /// a vendor's herdr integration would report over unharness's own.
+    /// Confine `cmd`, and give it herdr's variables as `set_herdr_env`
+    /// says, whether or not the sandbox is on.
     pub fn wrap(&self, mut cmd: Command) -> Result<Command> {
-        strip_herdr(&mut cmd, std::env::vars_os().map(|(key, _)| key));
+        apply_herdr_env(
+            &mut cmd,
+            std::env::vars_os().map(|(key, _)| key),
+            HERDR_ENV.get().unwrap_or(&HerdrEnv::Inherit),
+        );
         match self {
             Sandbox::Off { .. } => Ok(cmd),
             Sandbox::Active { backend, profile } => backend.wrap(cmd, profile),
@@ -474,13 +477,45 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
     })
 }
 
-/// Remove every `HERDR_*` variable `cmd` would inherit from `inherited` or
-/// was given itself.
-fn strip_herdr(cmd: &mut Command, inherited: impl Iterator<Item = OsString>) {
-    let own: Vec<OsString> = cmd.get_envs().map(|(key, _)| key.to_owned()).collect();
-    for key in inherited.chain(own) {
-        if key.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
-            cmd.env_remove(key);
+/// What the processes unharness starts get of herdr's `HERDR_*`
+/// variables, which name the pane unharness runs in and herdr's socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HerdrEnv {
+    /// What unharness got: the CLI is what runs in the pane (`--no-tui`)
+    /// or the user turned herdr off (`herdr = false`), so a CLI's own
+    /// herdr integration may report.
+    Inherit,
+    /// What unharness got, with the socket of its proxy
+    /// (`tui::herdr_proxy`), which keeps a CLI's integration from
+    /// reporting for the pane unharness runs in (the TUI, `--print`).
+    Proxy(PathBuf),
+    /// None: the proxy was wanted and did not start.
+    Strip,
+}
+
+static HERDR_ENV: OnceLock<HerdrEnv> = OnceLock::new();
+
+/// Decide what every process started from now on gets of herdr's
+/// variables; the first call wins. Unset, they get what unharness got.
+pub fn set_herdr_env(mode: HerdrEnv) {
+    let _ = HERDR_ENV.set(mode);
+}
+
+/// Give `cmd` herdr's variables as `mode` says, of those it inherits
+/// (`inherited`) and those it was given itself.
+fn apply_herdr_env(cmd: &mut Command, inherited: impl Iterator<Item = OsString>, mode: &HerdrEnv) {
+    match mode {
+        HerdrEnv::Inherit => {}
+        HerdrEnv::Proxy(socket) => {
+            cmd.env("HERDR_SOCKET_PATH", socket);
+        }
+        HerdrEnv::Strip => {
+            let own: Vec<OsString> = cmd.get_envs().map(|(key, _)| key.to_owned()).collect();
+            for key in inherited.chain(own) {
+                if key.to_str().is_some_and(|k| k.starts_with("HERDR_")) {
+                    cmd.env_remove(key);
+                }
+            }
         }
     }
 }
@@ -521,25 +556,77 @@ mod tests {
         Ok(Arc::new(NullBackend))
     }
 
-    #[test]
-    fn harness_processes_lose_herdrs_variables() {
+    /// What `mode` sets and removes on a command that set `HERDR_PANE_ID`
+    /// and `KEEP` itself and inherits herdr's other variables.
+    fn herdr_env_under(mode: &HerdrEnv) -> Vec<(String, Option<String>)> {
         let mut cmd = Command::new("true");
         cmd.env("HERDR_PANE_ID", "w1:p2").env("KEEP", "1");
         let inherited = ["HERDR_SOCKET_PATH", "HERDR_ENV", "PATH", "XHERDR_ENV"];
-        strip_herdr(&mut cmd, inherited.into_iter().map(OsString::from));
+        apply_herdr_env(&mut cmd, inherited.into_iter().map(OsString::from), mode);
         let mut envs: Vec<_> = cmd
             .get_envs()
-            .map(|(k, v)| (k.to_str().unwrap(), v.map(|v| v.to_str().unwrap())))
+            .map(|(k, v)| {
+                (
+                    k.to_str().unwrap().to_string(),
+                    v.map(|v| v.to_str().unwrap().to_string()),
+                )
+            })
             .collect();
         envs.sort();
+        envs
+    }
+
+    fn envs(pairs: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn harness_processes_keep_herdrs_variables_unless_unharness_reports() {
         assert_eq!(
-            envs,
-            [
+            herdr_env_under(&HerdrEnv::Inherit),
+            envs(&[("HERDR_PANE_ID", Some("w1:p2")), ("KEEP", Some("1"))])
+        );
+    }
+
+    #[test]
+    fn harness_processes_reach_herdr_through_the_proxy() {
+        let mut cmd = Command::new("true");
+        cmd.env("HERDR_SOCKET_PATH", "/run/herdr.sock");
+        apply_herdr_env(
+            &mut cmd,
+            std::iter::empty(),
+            &HerdrEnv::Proxy("/run/proxy.sock".into()),
+        );
+        assert_eq!(
+            cmd.get_envs()
+                .find(|(k, _)| *k == "HERDR_SOCKET_PATH")
+                .and_then(|(_, v)| v),
+            Some(std::ffi::OsStr::new("/run/proxy.sock")),
+            "the proxy also over the command's own"
+        );
+        assert_eq!(
+            herdr_env_under(&HerdrEnv::Proxy("/run/proxy.sock".into())),
+            envs(&[
+                ("HERDR_PANE_ID", Some("w1:p2")),
+                ("HERDR_SOCKET_PATH", Some("/run/proxy.sock")),
+                ("KEEP", Some("1")),
+            ])
+        );
+    }
+
+    #[test]
+    fn harness_processes_lose_herdrs_variables_without_the_proxy() {
+        assert_eq!(
+            herdr_env_under(&HerdrEnv::Strip),
+            envs(&[
                 ("HERDR_ENV", None),
                 ("HERDR_PANE_ID", None),
                 ("HERDR_SOCKET_PATH", None),
                 ("KEEP", Some("1")),
-            ]
+            ])
         );
     }
 

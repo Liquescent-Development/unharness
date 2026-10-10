@@ -235,6 +235,16 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
 
     if args.print && !args.native {
         let format = headless::Format::parse(args.format.as_deref())?;
+        // In a herdr pane the CLI reaches herdr through the proxy, as in
+        // the TUI: a report its herdr integration made would hold the
+        // pane after the run, and a TUI there later could not report.
+        let _herdr_proxy = config
+            .herdr
+            .unwrap_or(true)
+            .then(|| tui::herdr::Pane::from_env(|k| std::env::var(k).ok()))
+            .flatten()
+            .as_ref()
+            .and_then(tui::herdr::start_proxy);
         let prompt = match prompt {
             Some(p) => p,
             None => prompt_from_stdin()?,

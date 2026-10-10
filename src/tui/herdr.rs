@@ -121,6 +121,34 @@ impl Pane {
     }
 }
 
+#[cfg(unix)]
+pub type Proxy = super::herdr_proxy::Proxy;
+#[cfg(not(unix))]
+pub type Proxy = ();
+
+/// Start the proxy in front of `pane`'s socket and have the processes
+/// unharness starts from now on use it, or, failing that, get none of
+/// herdr's variables. For a run of unharness that is what runs in the
+/// pane: a report a CLI's integration makes there outlives the run.
+pub fn start_proxy(pane: &Pane) -> Option<Proxy> {
+    use crate::core::sandbox::{HerdrEnv, set_herdr_env};
+    #[cfg(unix)]
+    match super::herdr_proxy::Proxy::start(pane.socket.clone(), default_log()) {
+        Ok(proxy) => {
+            set_herdr_env(HerdrEnv::Proxy(proxy.path().to_path_buf()));
+            return Some(proxy);
+        }
+        Err(e) => {
+            if let Some(log) = default_log() {
+                log_line(&log, &format!("proxy: not started: {e}"));
+            }
+        }
+    }
+    let _ = pane;
+    set_herdr_env(HerdrEnv::Strip);
+    None
+}
+
 fn report_request(pane: &str, report: &Report, seq: u64) -> Value {
     json!({
         "id": format!("{SOURCE}:{seq}"),
@@ -205,17 +233,24 @@ impl Log {
             return;
         }
         self.last = Some(what.to_string());
-        let Some(path) = &self.path else { return };
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = append(path, &format!("{secs} {what}\n"));
+        if let Some(path) = &self.path {
+            log_line(path, what);
+        }
     }
 
     fn succeeded(&mut self) {
         self.last = None;
     }
+}
+
+/// Append `what` to the log at `path`, after the time in seconds since
+/// the epoch.
+pub(super) fn log_line(path: &Path, what: &str) {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = append(path, &format!("{secs} {what}\n"));
 }
 
 fn append(path: &Path, line: &str) -> std::io::Result<()> {

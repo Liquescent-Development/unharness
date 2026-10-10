@@ -23,7 +23,10 @@ By default a confined harness can:
   `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.config/gcloud`,
   `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials` and shell
   history;
-- use the network freely.
+- use the network freely, and connect to any local socket. A socket
+  can lead to a process that is not confined: herdr's drives every pane
+  and what runs in it, tmux's every session, Docker's the containers. The
+  sandbox does not stop a confined agent from using them.
 
 | Level | Writes |
 |---|---|
