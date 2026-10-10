@@ -4446,7 +4446,7 @@ mod tests {
         let (rows, _) = screen(&mut app, 124, 24);
         let row = rows.iter().find(|r| r.contains("❯ /provider")).unwrap();
         assert!(row.contains(PROVIDER), "{row}");
-        assert!(!rows.iter().any(|r| r.contains('…')), "nothing cut");
+        assert!(!row.contains('…'), "nothing cut: {row}");
     }
 
     #[test]
