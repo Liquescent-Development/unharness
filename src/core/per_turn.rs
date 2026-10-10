@@ -12,7 +12,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use super::caps::PermissionPolicy;
-use super::event::{AgentEvent, StopReason};
+use super::event::{AgentEvent, RemoteControl, StopReason};
 use super::ids::{HarnessId, ModelRef, ProviderId};
 use super::mcp::McpServer;
 use super::process::{LineProcess, RawLine};
@@ -122,6 +122,11 @@ async fn drive(
                 match cmd {
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => {}
+                    SessionCommand::RemoteControl { .. } => {
+                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
+                            reason: "this harness has no remote control".into(),
+                        })).await;
+                    }
                     SessionCommand::Steer { .. }
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. } => {

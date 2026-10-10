@@ -13,8 +13,8 @@ use super::parse::PiParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
-    shutdown_queued,
+    ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
+    StopReason, shutdown_queued,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -239,6 +239,12 @@ async fn drive(
                     }
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => None,
+                    SessionCommand::RemoteControl { .. } => {
+                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
+                            reason: "pi has no remote control".into(),
+                        })).await;
+                        None
+                    }
                     SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
                         Some(kind) => Some(encode_ui_response(&id, kind, &decision)),
                         None => {

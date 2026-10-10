@@ -940,6 +940,10 @@ async fn run_actions(
                         app.session_alive = true;
                         app.session_sandbox_level = Some(app.sandbox_level().0);
                         app.session_policy = app.effective_policy();
+                        // Remote Control the user had on, on the process before.
+                        if let Some(cmd) = app.remote_control_resend() {
+                            actions.push_front(Action::Command(cmd));
+                        }
                     }
                     Err(e) => {
                         app.start_failed(format!("could not start {}: {e:#}", app.short_name()));

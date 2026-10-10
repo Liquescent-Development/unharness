@@ -35,7 +35,8 @@ pub enum AgentEvent {
     },
     PermissionRequest(PermissionRequest),
     /// The harness no longer waits for the answer to request `id` (its turn
-    /// was stopped): the question is closed unanswered.
+    /// was stopped, or the request was answered elsewhere): the question is
+    /// closed unanswered.
     PermissionWithdrawn {
         id: String,
     },
@@ -107,12 +108,36 @@ pub enum AgentEvent {
     TurnCompleted {
         stop_reason: StopReason,
     },
+    /// The session's remote control (`SessionCommand::RemoteControl`).
+    RemoteControl(RemoteControl),
+    /// A prompt the user typed elsewhere (on the remote control), which the
+    /// harness takes as a turn of its own.
+    RemotePrompt {
+        text: String,
+    },
     /// Informational line (retries, compaction, degraded policy...).
     Notice(String),
     Error(String),
     ProcessExited {
         code: Option<i32>,
     },
+}
+
+/// What became of the session's remote control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteControl {
+    /// On; the session can be opened at `url`.
+    On { url: String },
+    /// How the connection stands, in the harness's words (`ready`,
+    /// `connected`...).
+    State {
+        state: String,
+        detail: Option<String>,
+    },
+    /// Taken off on request.
+    Off,
+    /// Could not be put on, or was ended by the harness.
+    Failed { reason: String },
 }
 
 /// How a subagent ended.
@@ -654,6 +679,18 @@ impl AgentEvent {
                 StopReason::Error(e) => format!("TurnCompleted Error {:?}", short(e)),
             },
             AgentEvent::PolicyChanged(p) => format!("PolicyChanged {p}"),
+            AgentEvent::RemoteControl(r) => match r {
+                RemoteControl::On { url } => format!("RemoteControl On url={url}"),
+                RemoteControl::State { state, detail } => match detail {
+                    Some(d) => format!("RemoteControl State {state} {:?}", short(d)),
+                    None => format!("RemoteControl State {state}"),
+                },
+                RemoteControl::Off => "RemoteControl Off".to_string(),
+                RemoteControl::Failed { reason } => {
+                    format!("RemoteControl Failed {:?}", short(reason))
+                }
+            },
+            AgentEvent::RemotePrompt { text } => format!("RemotePrompt {:?}", short(text)),
             AgentEvent::Notice(n) => format!("Notice {:?}", short(n)),
             AgentEvent::Error(e) => format!("Error {:?}", short(e)),
             AgentEvent::ProcessExited { code } => {

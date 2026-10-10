@@ -19,8 +19,8 @@ use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision,
-    PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason,
+    PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo, StopReason,
 };
 use crate::harness::which;
 
@@ -316,6 +316,12 @@ async fn drive(
                     }
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => Ok(()),
+                    SessionCommand::RemoteControl { .. } => {
+                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
+                            reason: "this agent has no remote control".into(),
+                        })).await;
+                        Ok(())
+                    }
                     SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
                             "this agent cannot be steered or rewound".into(),

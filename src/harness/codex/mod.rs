@@ -307,6 +307,7 @@ impl Harness for CodexHarness {
             // Checked on 0.157.0 (app-server): quit unprompted, no thread
             // was written.
             start_unprompted: true,
+            remote_control: false,
         }
     }
 

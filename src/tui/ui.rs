@@ -1434,7 +1434,7 @@ fn render_bottom(
     };
     // Effort goes first when the row is too narrow, then the model, then
     // the sandbox; the harness and its policy always stay.
-    let segments = [
+    let mut segments = vec![
         (
             format!("[{}]", app.short_name()),
             Style::default()
@@ -1459,6 +1459,11 @@ fn render_bottom(
             3,
         ),
     ];
+    // Dropped last of all when the row is too narrow: the remote side
+    // may answer for the user.
+    if let Some(remote) = app.remote_status() {
+        segments.push((remote, Style::default().fg(Color::LightMagenta), 4));
+    }
     let right1 = fit_segments(&segments, width.saturating_sub(SPLIT_LEFT_MIN));
     render_split(frame, rows[4], left1, right1, true);
 

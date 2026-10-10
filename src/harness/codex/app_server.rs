@@ -15,8 +15,8 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, PermissionDecision,
-    PermissionKind, PermissionPolicy, ProcessModel, SessionCommand, SessionConfig, SessionHandle,
-    SessionInfo, StopReason, shutdown_queued,
+    PermissionKind, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig,
+    SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -468,6 +468,12 @@ async fn drive(
                     }
                     SessionCommand::SetEffort(e) => {
                         d.effort = e;
+                        Ok(())
+                    }
+                    SessionCommand::RemoteControl { .. } => {
+                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
+                            reason: "Codex has no remote control".into(),
+                        })).await;
                         Ok(())
                     }
                     SessionCommand::SetPolicy(p) => {

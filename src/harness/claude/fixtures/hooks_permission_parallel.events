@@ -14,7 +14,7 @@ ToolCallStarted id=toolu_01PwiayBqZWTN5C91NvxVxzg name=Write input={"content":"a
 PermissionRequest id=efd2be1b-0952-46c8-8f0b-2d6cd7adf0ce ToolUse Write [edit /WORKSPACE/a.txt]
 HookStarted id=366b2683-4d35-40b3-8616-f5a857b3620e PermissionRequest:Write
 HookEnded id=366b2683-4d35-40b3-8616-f5a857b3620e PermissionRequest:Write blocked "writes are reviewed by hand here"
-Notice "permission request cancelled by harness"
+PermissionWithdrawn id=efd2be1b-0952-46c8-8f0b-2d6cd7adf0ce
 ToolCallResult id=toolu_01PwiayBqZWTN5C91NvxVxzg error=true "writes are reviewed by hand here"
 ToolCallDelta id=toolu_01HjSeynJPm7fiaYRQwrhWW6 name=Write "{\"file_path\": \"/WORKSPACE"
 ToolCallDelta id=toolu_01HjSeynJPm7fiaYRQwrhWW6 name=Write "/b.txt"
@@ -24,7 +24,7 @@ ToolCallStarted id=toolu_01HjSeynJPm7fiaYRQwrhWW6 name=Write input={"content":"b
 PermissionRequest id=7cd7d5f6-69f6-4fda-afed-0e7e88e91457 ToolUse Write [edit /WORKSPACE/b.txt]
 HookStarted id=25d67bec-ec3c-420e-bf08-f1a8a7d30fff PermissionRequest:Write
 HookEnded id=25d67bec-ec3c-420e-bf08-f1a8a7d30fff PermissionRequest:Write blocked "writes are reviewed by hand here"
-Notice "permission request cancelled by harness"
+PermissionWithdrawn id=7cd7d5f6-69f6-4fda-afed-0e7e88e91457
 ToolCallResult id=toolu_01HjSeynJPm7fiaYRQwrhWW6 error=true "writes are reviewed by hand here"
 RateLimit status=allowed five_hour=54% seven_day=7%
 Context used=26495 window=-

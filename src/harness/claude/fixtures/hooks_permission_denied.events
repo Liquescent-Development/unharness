@@ -25,7 +25,7 @@ ToolCallStarted id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write input={"content":"h
 PermissionRequest id=7a8f1e1c-d9cf-4bb3-98a0-fdefa767ab94 ToolUse Write [edit /WORKSPACE/note.txt]
 HookStarted id=83d64dbd-3eb1-435f-9d2c-42a6348b90c8 PermissionRequest:Write
 HookEnded id=83d64dbd-3eb1-435f-9d2c-42a6348b90c8 PermissionRequest:Write blocked "writes are reviewed by hand here"
-Notice "permission request cancelled by harness"
+PermissionWithdrawn id=7a8f1e1c-d9cf-4bb3-98a0-fdefa767ab94
 ToolCallResult id=toolu_01Br2ZqjQqQhgxPUzhy47iTF error=true "writes are reviewed by hand here"
 Context used=26649 window=-
 TextDelta "Waiting"

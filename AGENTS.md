@@ -514,6 +514,36 @@ recorded ones. For anything else:
 
   pi plans only through an extension, and agy's `--mode plan` does not
   wait (see above).
+- Remote Control (#113, `/remote-control`, `/rc`), Claude only
+  (`Capabilities::remote_control`). Claude Code 2.1.296 refuses its own
+  `/rc` over stream-json ("isn't available in this environment") but takes
+  the SDK's control request `remote_control` (`enabled`, `name`; read in
+  the binary), answered with `session_url` (the link; `connect_url` and
+  `environment_id` came empty) or an error, and `enabled: false` with an
+  empty success. `system` `bridge_state` says `ready`, then `connected`
+  (`failed` with a `failure_kind`, `terminal` when none is given, and
+  `policy_disabled` end it). Recorded with a person on the remote side
+  (`fixtures/remote_control_{permission,prompt}.jsonl`): a prompt typed
+  there runs as a turn unharness did not send, and is on stdout only under
+  `--replay-user-messages`, as a `user` line with `isReplay` and `origin:
+  {"kind": "human"}` (ours are echoed with no `origin`), which is why the
+  flag is passed; a `can_use_tool` request goes to both sides, and one
+  answered there comes to us as `control_cancel_request` (withdrawn). The
+  TUI keeps it across a new process of the same harness (sent again once
+  it starts) and takes it off on a switch, a fork, a resume, `/clear` and
+  quit. A remote prompt is checkpointed and titles a new conversation as
+  a typed one does, and leaves what the bridge owes for the next prompt
+  typed here; it has no rewind anchor (Claude was not recorded rewinding
+  to one), so a rewind to it starts a new session.
+  Checked in the TUI (tmux, Landlock, haiku): the link was shown, a prompt
+  typed remotely was shown as the user's and made the session the
+  conversation's, the modal of its Write closed when it was allowed
+  there, a `/sandbox` restart came back with the same link (Claude resumed
+  the session), `/rc off` and `/quit` left no Claude process, and the
+  guard said nothing. Not committed: the recording with only local turns.
+  Unverified: a `failed` or `policy_disabled` state, an org that refuses
+  Remote Control, a model or mode changed from the remote side (the mode
+  would come as `status`, as the model's own changes do), macOS.
 - `ask` per harness. Codex 0.157.0 app-server: `approvalPolicy:
   "untrusted"` with `sandbox: "workspace-write"` (unharness's sandbox off)
   asked before a file change and before every command, `cat` of a file
@@ -569,10 +599,11 @@ recorded ones. For anything else:
   parser checks for the server and tool (one recording); Claude's
   `NotebookEdit` and `MultiEdit` inputs (field names from the tool schemas,
   no request recorded). An ACP agent that offers `allow_always` and no
-  `allow_once` gets a cancel and the user a notice. Not done: a lock
-  around appending to a rules file (two unharness saving at once can lose
-  one rule), re-reading rules while running, closing the modal when Claude
-  cancels a request.
+  `allow_once` gets a cancel and the user a notice. A request Claude
+  cancels (`control_cancel_request`: a hook answered it, or it was
+  answered remotely) is withdrawn, which closes its modal. Not done: a
+  lock around appending to a rules file (two unharness saving at once can
+  lose one rule), re-reading rules while running.
 - herdr (`tui/herdr.rs`), checked on herdr 0.8.2 (socket protocol 20)
   in a named test session with Claude Code 2.1.289 and agy 1.2.17: the
   TUI sends `pane.report_agent` (`source` and `agent` both `unharness`,

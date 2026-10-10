@@ -12,11 +12,17 @@ line in both directions to the fixture file:
 Usage:
   scripts/record-claude.py OUT.jsonl [--model haiku] [--allow|--deny] PROMPT [PROMPT...]
 
+With --remote-control the session is put on Remote Control before the first
+prompt, and after the last local prompt the recorder keeps the session open
+for what arrives from claude.ai/code or the Claude app, until --until-file
+exists or nothing has come for --idle-timeout seconds.
+
 Run it from a scratch directory; the agent will act in the cwd.
 """
 import argparse
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
@@ -32,6 +38,8 @@ def redact(line: str, cwd: str) -> str:
         line = line.replace(home, "/HOME")
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
     line = re.sub(r"sk-ant-[A-Za-z0-9_-]+", "sk-ant-REDACTED", line)
+    # Remote Control's environment and bridge session ids, also inside URLs.
+    line = re.sub(r"\b(env|session|cse)_[A-Za-z0-9]{12,}", r"\1_REDACTED", line)
     return line
 
 
@@ -61,6 +69,12 @@ def main() -> int:
                     help="approve ExitPlanMode after sending set_permission_mode MODE, as unharness does")
     ap.add_argument("--plan-reject", metavar="FEEDBACK",
                     help="deny the first ExitPlanMode with this message (later ones are approved)")
+    ap.add_argument("--remote-control", nargs="?", const="", metavar="NAME",
+                    help="enable Remote Control (optionally named) before the first prompt")
+    ap.add_argument("--remote-off", action="store_true",
+                    help="with --remote-control, disable it before closing the session")
+    ap.add_argument("--until-file", metavar="PATH",
+                    help="with --remote-control, close the session once this file exists")
     args = ap.parse_args()
 
     cwd = os.getcwd()
@@ -101,9 +115,37 @@ def main() -> int:
 
     threading.Thread(target=pump_stderr, daemon=True).start()
 
+    # Read on a thread, so that waiting for remote turns can time out.
+    lines = queue.Queue()
+
+    def pump_stdout() -> None:
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump_stdout, daemon=True).start()
+
+    def drain() -> None:
+        while True:
+            try:
+                rest = lines.get(timeout=15)
+            except queue.Empty:
+                return
+            if rest is None:
+                return
+            record("", rest)
+
     if not args.no_initialize:
         send({"type": "control_request", "request_id": str(uuid.uuid4()),
               "request": {"subtype": "initialize"}})
+
+    remote_id = None
+    if args.remote_control is not None:
+        remote_id = str(uuid.uuid4())
+        request = {"subtype": "remote_control", "enabled": True}
+        if args.remote_control:
+            request["name"] = args.remote_control
+        send({"type": "control_request", "request_id": remote_id, "request": request})
 
     if args.set_mode:
         send({"type": "control_request", "request_id": str(uuid.uuid4()),
@@ -154,16 +196,35 @@ def main() -> int:
     compacted = False
     rewound = False
     plan_rejected = False
+    # Local prompts are done; waiting for what Remote Control brings.
+    remote_waiting = False
+
+    def close_remote() -> None:
+        if args.remote_off:
+            send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                  "request": {"subtype": "remote_control", "enabled": False}})
+            time.sleep(3)
+        proc.stdin.close()
+        drain()
+
     last_activity = time.time()
     while True:
-        if proc.poll() is not None:
+        try:
+            line = lines.get(timeout=0.2)
+        except queue.Empty:
+            line = ""
+        if line is None:
             break
-        line = proc.stdout.readline()
         if not line:
+            if remote_waiting and args.until_file and os.path.exists(args.until_file):
+                sys.stderr.write("until-file found\n")
+                close_remote()
+                break
             if time.time() - last_activity > args.idle_timeout:
                 sys.stderr.write("idle timeout\n")
+                if remote_waiting:
+                    close_remote()
                 break
-            time.sleep(0.05)
             continue
         last_activity = time.time()
         record("", line)
@@ -213,11 +274,17 @@ def main() -> int:
                             send(answer)
                         except (ValueError, BrokenPipeError):
                             pass
-                    threading.Timer(args.answer_delay, late).start()
+                    timer = threading.Timer(args.answer_delay, late)
+                    # Not one to wait for once the session has ended.
+                    timer.daemon = True
+                    timer.start()
                 else:
                     send(answer)
             else:
                 sys.stderr.write(f"[control_request] {json.dumps(req)[:200]}\n")
+        elif t == "control_response" and remote_id and obj.get("response", {}).get("request_id") == remote_id:
+            remote_id = None
+            sys.stderr.write(f"[remote_control] {json.dumps(obj.get('response'))}\n")
         elif t == "control_response" and rewind_id and obj.get("response", {}).get("request_id") == rewind_id:
             rewind_id = None
             send_turn(prompts.pop(0))
@@ -231,8 +298,7 @@ def main() -> int:
                 # to report it, so no `result` will come.
                 time.sleep(2)
                 proc.stdin.close()
-                for rest in proc.stdout:
-                    record("", rest)
+                drain()
                 break
         elif t == "result":
             if args.stop_tasks and running_tasks and not tasks_stopped:
@@ -257,11 +323,13 @@ def main() -> int:
             elif args.compact and not compacted:
                 compacted = True
                 send({"type": "user", "message": {"role": "user", "content": "/compact"}})
+            elif args.remote_control is not None:
+                if not remote_waiting:
+                    remote_waiting = True
+                    sys.stderr.write("[remote_control] local prompts done; waiting for remote turns\n")
             else:
                 proc.stdin.close()
-                # drain remaining output
-                for rest in proc.stdout:
-                    record("", rest)
+                drain()
                 break
 
     try:

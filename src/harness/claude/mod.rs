@@ -382,6 +382,9 @@ impl Harness for ClaudeHarness {
             slash_commands: true,
             // Checked on 2.1.295: quit unprompted, no session was written.
             start_unprompted: true,
+            // The `remote_control` control request (2.1.296); `/rc` itself
+            // is refused over stream-json.
+            remote_control: true,
         }
     }
 
