@@ -156,6 +156,14 @@ impl AcpParser {
         self.replaying = replaying;
     }
 
+    /// The protocol's kind (`edit`, `execute`, …) of a tool call, as merged
+    /// from every update and request seen for it so far; `None` for a call
+    /// never seen or one that named no kind.
+    pub fn tool_kind(&self, tool_call_id: &str) -> Option<&str> {
+        let tool = self.tools.get(tool_call_id)?;
+        (!tool.kind.is_empty()).then_some(tool.kind.as_str())
+    }
+
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
             Some(RpcMessage::Notification { method, params }) if method == "session/update" => {
@@ -371,7 +379,13 @@ impl AcpParser {
         let mut out = Vec::new();
         let call = params.get("toolCall").unwrap_or(&Value::Null);
         let id = s(call, "toolCallId").to_string();
-        let tool = self.tools.entry(id.clone()).or_default();
+        // A request without an id stands alone: it must not take what an
+        // earlier one without an id said.
+        let mut alone = ToolState::default();
+        let tool = match id.as_str() {
+            "" => &mut alone,
+            _ => self.tools.entry(id.clone()).or_default(),
+        };
         merge_tool(tool, call);
         if !tool.started && !id.is_empty() {
             tool.started = true;
@@ -765,6 +779,45 @@ mod tests {
         assert_eq!(hello.hint, None);
         let model = last.iter().find(|c| c.name == "model").unwrap();
         assert_eq!(model.hint.as_deref(), Some("<model>"));
+    }
+
+    /// vibe-acp 2.26.1 started in its own `ask` mode
+    /// (`VIBE_DEFAULT_AGENT=ask`): each request names its call by
+    /// `toolCallId` alone, and what it asks about is the `tool_call` before it.
+    #[test]
+    fn fixture_vibe_acp_ask() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut parser(), &dir, "vibe_acp_ask");
+        let text = std::fs::read_to_string(dir.join("vibe_acp_ask.jsonl")).unwrap();
+        let mut p = parser();
+        let mut asked = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with(['>', '!', '#'])) {
+            for ev in p.feed(line) {
+                if let AgentEvent::PermissionRequest(PermissionRequest {
+                    kind: PermissionKind::ToolUse { action, .. },
+                    tool_call_id: Some(id),
+                    ..
+                }) = ev
+                {
+                    asked.push((p.tool_kind(&id).map(str::to_string), action));
+                }
+            }
+        }
+        assert_eq!(
+            asked,
+            [
+                // The diff names `a.txt` as the model wrote it and the
+                // location is absolute: not the same file for certain.
+                (Some("edit".into()), ToolAction::Opaque),
+                (
+                    Some("execute".into()),
+                    ToolAction::Shell {
+                        command: "touch x".into(),
+                        cwd: None
+                    }
+                ),
+            ]
+        );
     }
 
     #[test]

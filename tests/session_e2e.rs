@@ -1581,6 +1581,54 @@ async fn acp_bypass_answers_permission_requests_itself() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// vibe-acp 2.26.1 names the call in a request by its id alone; the kind
+/// came on the `tool_call` before it.
+#[tokio::test]
+async fn acp_accept_edits_reads_the_kind_of_an_id_only_request() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_ask.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let asked = |events: &[AgentEvent]| {
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+    };
+
+    // The edit is answered by the policy: shown, not asked about.
+    handle
+        .send(SessionCommand::turn("write a.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "edit"))
+    );
+    assert!(!asked(&events));
+    // The command is asked about, and the user's answer is what is sent.
+    handle.send(SessionCommand::turn("touch x")).await.unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
+            reason: "no".into(),
+        })
+    })
+    .await;
+    assert!(asked(&events));
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
+        .collect();
+    assert_eq!(answers, ["allow_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn acp_resumes_a_session_and_applies_the_configured_model() {
     if !python_available() {

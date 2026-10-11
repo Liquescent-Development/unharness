@@ -329,7 +329,20 @@ recorded ones. For anything else:
   extension method has its leading `_` on the wire (`_rewind/preview`;
   vibe's router strips it), and vibe echoes each user message, live and
   when `session/load` replays it, with the `messageId` that `_rewind/*`
-  takes and `--ext` can name (`$USER_MESSAGE`).
+  takes and `--ext` can name (`$USER_MESSAGE`). The policy reads a request's
+  tool kind from the tool call as the parser has merged it
+  (`transport::screen_permission`): vibe-acp 2.26.1 names the call in
+  `session/request_permission` by `toolCallId` alone, its kind, input and
+  locations having come on the `tool_call` before it
+  (`fixtures/vibe_acp_ask.jsonl`, vibe started in its own `ask` mode with
+  `VIBE_DEFAULT_AGENT=ask`); a kind in the request replaces the earlier one,
+  as an update's does, and a request without an id has only its own. Checked
+  live (`--print --policy accept-edits`, `command = ["env",
+  "VIBE_DEFAULT_AGENT=ask", "vibe-acp"]`, Landlock): vibe asked about a
+  write and unharness allowed it with no request shown, and `touch y` was
+  asked about and denied. vibe's edit diff names the file as the model wrote
+  it (`a.txt`) beside an absolute location, so its action is `Opaque` and no
+  edit rule matches it.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
