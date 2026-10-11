@@ -53,6 +53,12 @@ presets do not have it until you add a table for them.
 
 - Models and effort levels come from the running session, so the pickers
   fill in once it has started (with the TUI, before the first prompt).
+  Choices the agent groups under headers are listed as one list.
+- Reasoning effort is the session option in the protocol's `thought_level`
+  category. An agent that offers its level under another category has no
+  effort in unharness, and `/effort` and `default_effort` are not sent to
+  it: Mistral Vibe 2.26.1 calls its option `thinking`, and setting that
+  rewrites its own `~/.vibe/config.toml`.
 - ACP agents run [headless](headless.md) with `-p` like any harness, but
   have no `--native` or `--no-tui` mode.
 - Sign in with the agent's own CLI.

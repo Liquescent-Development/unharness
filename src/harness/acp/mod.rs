@@ -74,6 +74,9 @@ pub struct AcpHarness {
     /// The user's config says this agent asks before it acts
     /// (`asks_permission`).
     asks: bool,
+    /// The config option that is this agent's reasoning effort, when it is
+    /// not under the spec's `thought_level` category.
+    effort_option: Option<String>,
 }
 
 impl AcpHarness {
@@ -98,6 +101,7 @@ impl AcpHarness {
             args: args.to_vec(),
             preset: false,
             asks: false,
+            effort_option: None,
         })
     }
 
@@ -105,6 +109,18 @@ impl AcpHarness {
     /// or reaches out, which is what the `ask` policy stands on.
     pub fn asking_permission(self, asks: bool) -> Self {
         AcpHarness { asks, ..self }
+    }
+
+    /// Take the config option with this id as the agent's reasoning effort,
+    /// whatever its category (Mistral Vibe offers its level as `thinking`).
+    /// For a harness that knows what setting the option does: unharness then
+    /// sends `session/set_config_option` for it on `/effort` and for a
+    /// configured effort. Nothing declares one from config.
+    pub fn declaring_effort_option(self, id: &str) -> Self {
+        AcpHarness {
+            effort_option: Some(id.to_string()),
+            ..self
+        }
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -229,7 +245,12 @@ impl Harness for AcpHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        transport::start(self.descriptor.id, self.args.clone(), cfg)
+        transport::start(
+            self.descriptor.id,
+            self.args.clone(),
+            self.effort_option.clone(),
+            cfg,
+        )
     }
 
     fn build_print_command(&self, _cfg: &PrintConfig) -> Result<std::process::Command> {
@@ -266,8 +287,18 @@ mod tests {
 
         // `ask` only for an agent the config says asks.
         assert!(caps.supports_policy(PermissionPolicy::Ask).is_none());
-        let caps = h.asking_permission(true).capabilities();
-        assert!(caps.supports_policy(PermissionPolicy::Ask).is_some());
+        let h = h.asking_permission(true);
+        assert!(
+            h.capabilities()
+                .supports_policy(PermissionPolicy::Ask)
+                .is_some()
+        );
+
+        // No effort option is assumed; a harness declares its own.
+        assert_eq!(h.effort_option, None);
+        let h = h.declaring_effort_option("thinking");
+        assert_eq!(h.effort_option.as_deref(), Some("thinking"));
+        assert!(h.asks, "declaring keeps the rest");
     }
 
     #[test]
