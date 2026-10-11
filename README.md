@@ -21,7 +21,7 @@
 <!-- Recorded with `vhs assets/demo.tape`. -->
 <p align="center"><img alt="Claude Code fixes a bug behind a permission prompt, then Codex picks up the same conversation" src="assets/demo.gif" width="900"></p>
 
-unharness runs Claude Code, Codex, pi, Antigravity and any
+unharness runs Claude Code, Codex, pi, Antigravity, Mistral Vibe and any
 [Agent Client Protocol](https://agentclientprotocol.com) agent behind one
 interface. The transcript, keys, permission prompts, model pickers and
 resume work the same whichever agent is running, and you can switch agents
@@ -59,7 +59,8 @@ cargo install --locked --git https://github.com/Liquescent-Development/unharness
 You also need at least one agent CLI, installed and signed in:
 [Claude Code](https://docs.anthropic.com/en/docs/claude-code),
 [Codex](https://github.com/openai/codex), [pi](https://pi.dev),
-Antigravity (`agy`), or an [ACP agent](docs/acp.md). The sandbox needs
+Antigravity (`agy`), [Mistral Vibe](docs/vibe.md), or an
+[ACP agent](docs/acp.md). The sandbox needs
 Linux 6.2 or newer; the macOS backend has not been run on a Mac yet.
 Managing skills needs Node.js.
 
@@ -107,6 +108,7 @@ See [Usage](docs/usage.md) for every command and flag.
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list`; built-in and configured providers |
 | pi | `pi --mode rpc` (long-lived) | yes, through an extension unharness loads | `--session-id` | `get_available_models`, many providers |
 | Antigravity | `agy --print= --input-format stream-json` (long-lived) | no | `--conversation` | `agy models` |
+| Mistral Vibe | `vibe-acp`, ACP over stdio (long-lived) | yes, in its `ask` mode | `session/load` | from the session, chosen when it starts |
 | ACP agents | Agent Client Protocol v1 over stdio (long-lived) | yes, when the agent asks | `session/resume` or `session/load` | from the session |
 
 unharness drives the vendor CLIs, which change more slowly than the agent
@@ -146,6 +148,9 @@ to use.
 
 `*` shown as a warning in the header.
 
+Mistral Vibe and the other ACP agents are in [ACP agents](docs/acp.md#permissions)
+and [Mistral Vibe](docs/vibe.md#policies).
+
 The sandbox is a separate setting. No policy changes it, not even
 `bypass`:
 
@@ -180,7 +185,7 @@ All keys and slash commands are listed in [The TUI](docs/tui.md).
 - [Permissions](docs/permissions.md): policies and allow rules
 - [Sandbox](docs/sandbox.md): what is confined and how
 - [Configuration](docs/configuration.md): `config.toml` reference
-- [MCP servers](docs/mcp.md) · [ACP agents](docs/acp.md) · [Rules, skills, commands and subagents](docs/skills.md)
+- [MCP servers](docs/mcp.md) · [ACP agents](docs/acp.md) · [Mistral Vibe](docs/vibe.md) · [Rules, skills, commands and subagents](docs/skills.md)
 
 ## Contributing
 
