@@ -499,6 +499,61 @@ recorded ones. For anything else:
   confirmation) from a real agent, optional fields (the modal still wants
   every question answered), and an elicitation scoped to a request
   (`requestId`) rather than a session.
+- Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
+  `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
+  name, `asks_permission` and modes), with `ask` → `ask` and `bypass` →
+  `auto-approve`, `thinking` its effort option, and its model and level
+  chosen at spawn (`AcpHarness::choosing_at_spawn`, `acp/spawn.rs`), never
+  with `session/set_config_option`: on vibe 2.26.1 that writes the choice
+  into `~/.vibe/config.toml` (`set_config_option` in `vibe/acp/agent.py`).
+  The process gets `VIBE_ACTIVE_MODEL=<alias>` and, for a level, a whole
+  entry `VIBE_MODELS='[{"alias","name","provider","thinking"}]'`: the
+  environment layer validates each entry as a full model, so a sparse one
+  fails the session, and merges the given fields over the model's own
+  (`vibe/core/config/layers/environment.py`, `exclude_unset`). The name is
+  the model option's `description`, so a run's first process that has a
+  level and does not know it yet is started again once its session has
+  answered, before anything is sent (the second process is numbered from
+  id 1 again); the provider is read, never written, from the user's
+  `config.toml` entry for the alias, else `mistral`. With a level and no
+  model chosen, the model the last session ran is pinned with it: in a
+  scratch `VIBE_HOME` the first process ran `mistral-medium-3.5` and the
+  next `glm-5-3`, the experiment's choice having arrived meanwhile. A
+  level outside `off, low, medium, high, max` is never put in the entry.
+  A session pins its model and level before every turn
+  (`_pin_session_model_choice`, `vibe/app_server/
+  _unified_harness_backend_adapter.py:6400-6460`) and a loaded or forked
+  session gets them back as session overrides (`_restore_session_pins`,
+  `:3015-3105`), a layer only an agent profile and admin config outrank
+  (`_session_model.py`), so above the environment: live, a prompted
+  session restarted with `thinking: high` in `VIBE_MODELS` loaded at `off`,
+  and with `VIBE_ACTIVE_MODEL=glm-5-3` on `mistral-medium-3.5`. ACP has no
+  write scoped to a session (`ext_method`, `agent.py:1140`). So, as
+  Richard decided, a change before the first prompt starts vibe again
+  with it, and after one the session is forgotten and a new one started
+  (`App::renew_session`, `Capabilities::model_per_process`), told the
+  conversation by the bridge with its budget and, over it, a handoff
+  summary from the old session as for a switch. After every session
+  answer the driver compares `model` and `thinking` with the choice and
+  says when they differ (vibe falls back to its default for an alias it
+  lacks and resets a level the model does not offer, silently).
+  Checked in the TUI (tmux, Landlock, a scratch `VIBE_HOME`): `/model`
+  and `/effort off` before a prompt, the turn on `mistral-medium-3.5` at
+  `off` (`runtime-state.json`, 3 output tokens, the model's prices);
+  after a turn on `glm-5-3`, `/effort off` started a new session
+  (`session/new` at `off`, `runtime-state.json` `off`, the old one still
+  `high`) that named the code word of the first turn from the bridge;
+  `--resume` in a new unharness started vibe with the entry (after one
+  restart for the name) and the next turn ran at `off` on the same
+  session; `~/.vibe/config.toml` byte-identical throughout. Seen: vibe
+  2.26.1 maps `low` to `reasoning_effort: "none"` for every model
+  (`_THINKING_TO_REASONING_EFFORT`, `vibe/core/llm/backend/mistral.py`)
+  and `glm-5-3` refuses that with a 400, also in vibe's own picker by the
+  code; unharness passes the level on as chosen. Fixture:
+  `acp/fixtures/vibe_acp_spawn_env.jsonl` (model and `off` by
+  environment). Unverified: a provider other than `mistral`, a model
+  pinned by an agent profile or admin config, `default_effort` on a first
+  run with no session yet (it waits for one, as above), macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
