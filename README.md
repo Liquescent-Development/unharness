@@ -127,7 +127,7 @@ caveat in the TUI instead of failing silently:
 | Context-window gauge | yes | yes | yes | yes | no |
 | Rate-limit windows | yes | yes | no | no | no |
 | Native rewind | yes | yes | yes | no (fresh session) | no (fresh session) |
-| Native fork | yes | yes | yes | no (fresh session) | no (fresh session) |
+| Native fork | yes | yes | yes | per agent (`session/fork`) | no (fresh session) |
 | MCP servers from unharness's config | yes | yes | no | yes (http ones per agent) | exec only |
 
 ## Permissions and sandbox

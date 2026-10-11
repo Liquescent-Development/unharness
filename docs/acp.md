@@ -157,6 +157,32 @@ Checked with Mistral Vibe 2.26.1 (a question answered in the TUI, one
 declined by `--print`, a multiple choice recorded) and claude-agent-acp
 0.85.1 (recorded).
 
+## Forks
+
+`/fork` branches the agent's session where the agent advertises
+`session/fork` (an unstable part of ACP v1; Mistral Vibe 2.26.1,
+codex-acp 2.1.1 and claude-agent-acp 0.85.1 all do). The copy of the
+conversation then continues in a new session of the agent that holds
+everything the original session held, and the original is left as it
+was: nothing is sent to it but what the fork needs. Mistral Vibe forks
+only a session it has open, so unharness loads the original first; an
+agent that resumes sessions has the new one resumed before the first
+prompt, since codex-acp and claude-agent-acp leave it closed. The
+agent's mode is then set for the policy, as for any session: a Vibe fork
+comes back in the mode the original was in.
+
+`/fork` copies the whole conversation, and `session/fork` copies the
+whole session, so the two agree. There is no fork at an earlier point:
+to go on from an earlier prompt, `/rewind` first, which starts the agent
+afresh with the transcript up to there (ACP has no rewind), and a fork
+after that is a fresh session too.
+
+Whether an agent forks is known once a session of it has started: an
+agent not run since unharness started, like one that does not advertise
+it, starts fresh in the copy with the transcript as context. If the fork
+itself fails, unharness starts a new session and says that it does not
+know the conversation.
+
 ## Limits
 
 - Models and effort levels come from the running session, so the pickers
