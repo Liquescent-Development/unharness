@@ -1,0 +1,22 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Error "Session not found: 9f1b157d-47e8-4f99-a17a-f0d98c9a179c"
+TextDelta "ok\\n\\nI'll remember the code word: pineapple."
+Context used=8334 window=800000
+CapabilitiesChanged efforts= plan_mode=false models=2
+CapabilitiesChanged commands=15 slash_commands=true
+SessionStarted id=8db2586d-4d39-b98f-20da-c7ea3669df58 model=glm-5-3
+CapabilitiesChanged efforts= plan_mode=false models=2
+Context used=0 window=800000
+CapabilitiesChanged efforts= models=2
+Context used=0 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+ThinkingDelta "The"
+Context used=0 window=800000
+ThinkingDelta " user asked me to remember the code word \"pineapple\" and ..."
+ThinkingDelta " me to reply with just the word."
+TextDelta "pineapple"
+Context used=0 window=800000
+Context used=8375 window=800000
+Context used=8375 window=800000
+Usage in=8347 out=28 cache_read=0 cache_write=0 cost=0.0118 cumulative=false
+TurnCompleted Done

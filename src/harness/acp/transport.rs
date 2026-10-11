@@ -1,6 +1,8 @@
 //! Long-lived ACP session over stdio: `initialize` → `session/new` (or
 //! `session/resume` / `session/load`) → one `session/prompt` per turn →
 //! `session/close`, where the agent takes it, answered before stdin closes.
+//! A fork (`SessionConfig::fork`) starts with `session/fork` of the stored
+//! session instead (see [`Driver::fork`]).
 //!
 //! unharness declares no `fs` or `terminal` client capabilities, so the
 //! agent uses its own file and terminal tools and reports them as tool
@@ -29,7 +31,7 @@ use tokio::time::Instant;
 use super::elicitation::{self, Form, Refusal};
 use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{
-    AcpParser, SessionOptions, can_close, can_load, can_resume, error_text, mcp_http,
+    AcpParser, SessionOptions, can_close, can_fork, can_load, can_resume, error_text, mcp_http,
 };
 use super::spawn::{SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 use crate::core::jsonrpc::{self, RpcMessage};
@@ -333,6 +335,13 @@ enum Outstanding {
     Session {
         reattach: bool,
     },
+    /// `session/fork` of the stored session; `retried` once it was
+    /// reattached for the agent to fork it.
+    Fork {
+        retried: bool,
+    },
+    /// The stored session reattached so that the agent can fork it.
+    ForkSource,
     Prompt,
     /// Setting the agent's mode for `policy`; `seq` tells the newest.
     Mode {
@@ -398,6 +407,9 @@ struct Driver {
     setup_pending: bool,
     /// The agent takes `session/close` (`sessionCapabilities.close`).
     can_close: bool,
+    /// How the agent reattaches a stored session: `session/resume`, else
+    /// `session/load`, or neither.
+    reattach_via: Option<&'static str>,
 }
 
 impl Driver {
@@ -828,6 +840,126 @@ impl Driver {
         }
     }
 
+    /// Branch the stored session `source` into a new one (`session/fork`,
+    /// unstable in ACP v1). Agents differ in what they need around it:
+    /// vibe-acp 2.26.1 forks only a session it has open ("Session not
+    /// found" otherwise), so on an error the source is reattached and
+    /// forked again; codex-acp 2.1.1 leaves the fork closed (its prompt was
+    /// never answered) and claude-agent-acp 0.85.1 forks the stored files,
+    /// so an agent that resumes sessions has the fork resumed before
+    /// anything goes to it. The source is never sent a prompt, a mode or a
+    /// config change.
+    async fn fork(&mut self, source: &str, retried: bool) -> Result<()> {
+        let params =
+            json!({"sessionId": source, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
+        self.request("session/fork", params, Outstanding::Fork { retried })
+            .await
+    }
+
+    /// The answer to `session/fork`.
+    async fn on_fork_answer(
+        &mut self,
+        line: &str,
+        result: &Value,
+        error: Option<&Value>,
+        retried: bool,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<()> {
+        let source = self.cfg.resume.clone().unwrap_or_default();
+        let fork = result.get("sessionId").and_then(Value::as_str);
+        let Some(fork) = fork.filter(|_| error.is_none()) else {
+            let why = error.map_or_else(|| "it named no session".to_string(), error_text);
+            return match self.reattach_via {
+                Some(method) if !retried => {
+                    if method == "session/load" {
+                        self.parser.set_replaying(true);
+                    }
+                    let params = json!({
+                        "sessionId": source, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers,
+                    });
+                    self.request(method, params, Outstanding::ForkSource).await
+                }
+                _ => self.fork_failed(&why, events).await,
+            };
+        };
+        if self.reattach_via == Some("session/resume") {
+            // The session reattached from here on is the fork: its id is
+            // announced with the answer.
+            self.cfg.resume = Some(fork.to_string());
+            let params =
+                json!({"sessionId": fork, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
+            return self
+                .request(
+                    "session/resume",
+                    params,
+                    Outstanding::Session { reattach: true },
+                )
+                .await;
+        }
+        // The fork is open, and its answer is a new session's.
+        self.on_session_answer(line, result, false, events).await
+    }
+
+    /// The source could not be forked: a new session, which knows nothing
+    /// of the conversation, rather than the source itself.
+    async fn fork_failed(&mut self, why: &str, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        self.parser.set_replaying(false);
+        let _ = events
+            .send(AgentEvent::Notice(format!(
+                "could not fork the session ({why}); starting a new one, which does not know this conversation"
+            )))
+            .await;
+        self.new_session().await
+    }
+
+    /// A session answer (new, reattached, or a fork's): take its options
+    /// and modes, then hold it to the policy's mode (`session_ready`).
+    async fn on_session_answer(
+        &mut self,
+        line: &str,
+        result: &Value,
+        reattach: bool,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<()> {
+        self.options = self
+            .parser
+            .session_options(result.get("configOptions"))
+            .unwrap_or_default();
+        if let Some(plan) = self.learn_from_session() {
+            self.restart_with(plan);
+            return Ok(());
+        }
+        self.parser.set_replaying(false);
+        if reattach {
+            self.parser.mark_reattached();
+        }
+        self.agent_modes = AgentModes::from_session(result, &self.options, reattach);
+        self.session_id = result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if reattach && self.session_id.is_none() {
+            // The spec's reattach result does not repeat the
+            // session id (some agents add it): announce it here.
+            let session_id = self.cfg.resume.clone().unwrap_or_default();
+            self.session_id = Some(session_id.clone());
+            let _ = events
+                .send(AgentEvent::SessionStarted {
+                    session_id,
+                    model: self.options.current_model.clone(),
+                })
+                .await;
+            let _ = events
+                .send(AgentEvent::CapabilitiesChanged(
+                    self.options.caps_update(self.harness),
+                ))
+                .await;
+        }
+        forward(self, line, events).await;
+        self.check_choice(events).await;
+        self.session_ready(events).await
+    }
+
     fn closing(&self) -> bool {
         self.outstanding.values().any(|o| *o == Outstanding::Close)
     }
@@ -896,6 +1028,7 @@ async fn drive(
         refused: Vec::new(),
         setup_pending: false,
         can_close: false,
+        reattach_via: None,
     };
     if let Err(e) = d
         .request("initialize", initialize_params(), Outstanding::Initialize)
@@ -1100,6 +1233,13 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                 (Some(Outstanding::Initialize), None) => {
                     let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
                     d.can_close = can_close(caps);
+                    d.reattach_via = if can_resume(caps) {
+                        Some("session/resume")
+                    } else if can_load(caps) {
+                        Some("session/load")
+                    } else {
+                        None
+                    };
                     let (servers, dropped) =
                         mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps), &d.cfg.cwd);
                     d.mcp_servers = servers;
@@ -1108,6 +1248,17 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         let _ = events.send(AgentEvent::Notice(warning)).await;
                     }
                     match d.cfg.resume.clone() {
+                        // The stored session is the original's: it is forked,
+                        // never reattached and written to.
+                        Some(id) if d.cfg.fork && can_fork(caps) => d.fork(&id, false).await?,
+                        Some(_) if d.cfg.fork => {
+                            let _ = events
+                                .send(AgentEvent::Notice(
+                                    "this agent cannot fork sessions; starting a new one, which does not know this conversation".into(),
+                                ))
+                                .await;
+                            d.new_session().await?;
+                        }
                         Some(id) if can_resume(caps) || can_load(caps) => {
                             // `resume` reattaches silently; `load` replays the
                             // history, which the transcript already has.
@@ -1135,43 +1286,22 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     }
                 }
                 (Some(Outstanding::Session { reattach }), None) => {
-                    d.options = d
-                        .parser
-                        .session_options(result.get("configOptions"))
-                        .unwrap_or_default();
-                    if let Some(plan) = d.learn_from_session() {
-                        d.restart_with(plan);
-                        return Ok(());
-                    }
+                    return d.on_session_answer(line, &result, reattach, events).await;
+                }
+                (Some(Outstanding::Fork { retried }), error) => {
+                    return d
+                        .on_fork_answer(line, &result, error.as_ref(), retried, events)
+                        .await;
+                }
+                // The source is open now: fork it again. Its answer (its
+                // modes, its options) is not this session's.
+                (Some(Outstanding::ForkSource), None) => {
                     d.parser.set_replaying(false);
-                    if reattach {
-                        d.parser.mark_reattached();
-                    }
-                    d.agent_modes = AgentModes::from_session(&result, &d.options, reattach);
-                    d.session_id = result
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    if reattach && d.session_id.is_none() {
-                        // The spec's reattach result does not repeat the
-                        // session id (some agents add it): announce it here.
-                        let session_id = d.cfg.resume.clone().unwrap_or_default();
-                        d.session_id = Some(session_id.clone());
-                        let _ = events
-                            .send(AgentEvent::SessionStarted {
-                                session_id,
-                                model: d.options.current_model.clone(),
-                            })
-                            .await;
-                        let _ = events
-                            .send(AgentEvent::CapabilitiesChanged(
-                                d.options.caps_update(d.harness),
-                            ))
-                            .await;
-                    }
-                    forward(d, line, events).await;
-                    d.check_choice(events).await;
-                    return d.session_ready(events).await;
+                    let source = d.cfg.resume.clone().unwrap_or_default();
+                    return d.fork(&source, true).await;
+                }
+                (Some(Outstanding::ForkSource), Some(e)) => {
+                    return d.fork_failed(&error_text(e), events).await;
                 }
                 (Some(Outstanding::Session { reattach: true }), Some(e)) => {
                     d.parser.set_replaying(false);

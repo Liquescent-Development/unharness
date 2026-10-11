@@ -275,6 +275,7 @@ impl AcpParser {
                         .unwrap_or(false),
                 ),
                 resume_by_id: Some(can_resume(caps) || can_load(caps)),
+                fork: Some(can_fork(caps)),
                 mcp_http: Some(mcp_http(caps)),
                 ..Default::default()
             }));
@@ -552,6 +553,13 @@ pub fn can_resume(caps: &Value) -> bool {
 /// frees what the agent holds for it.
 pub fn can_close(caps: &Value) -> bool {
     caps.pointer("/sessionCapabilities/close")
+        .is_some_and(|v| !v.is_null())
+}
+
+/// `agentCapabilities` allows `session/fork` (unstable in ACP v1): a new
+/// session that starts from what an existing one holds.
+pub fn can_fork(caps: &Value) -> bool {
+    caps.pointer("/sessionCapabilities/fork")
         .is_some_and(|v| !v.is_null())
 }
 
@@ -1146,6 +1154,48 @@ mod tests {
     #[test]
     fn fixture_codex_acp() {
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "codex_acp");
+    }
+
+    /// `session/fork` of a stored session in a new process, as the driver
+    /// sends it, from three agents that all advertise it: vibe-acp 2.26.1
+    /// (refused until the source was loaded, answered with the source's
+    /// mode), codex-acp 2.1.1 and claude-agent-acp 0.85.1 (forked from the
+    /// stored session, the fork then resumed). Each fork answered from the
+    /// first session's turn.
+    #[test]
+    fn fixture_fork() {
+        let dir = fixtures_dir(file!());
+        for case in ["vibe_acp_fork", "codex_acp_fork", "claude_agent_acp_fork"] {
+            assert_fixture(&mut parser(), &dir, case);
+            let text = std::fs::read_to_string(dir.join(format!("{case}.jsonl"))).unwrap();
+            let caps = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .find_map(|v| v.pointer("/result/agentCapabilities").cloned())
+                .unwrap();
+            assert!(can_fork(&caps), "{case}");
+            let events = crate::core::testing::replay(&mut parser(), &text);
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AgentEvent::CapabilitiesChanged(CapsUpdate {
+                        fork: Some(true),
+                        ..
+                    })
+                )),
+                "{case}"
+            );
+            let said: String = events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::TextDelta(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(said.contains("pineapple"), "{case}: {said}");
+        }
+        assert!(!can_fork(&json!({"sessionCapabilities": {"fork": null}})));
+        assert!(!can_fork(&json!({"sessionCapabilities": {}})));
     }
 
     #[test]

@@ -2517,6 +2517,180 @@ async fn acp_sets_the_mode_again_after_a_load() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// The session `fixtures/vibe_acp_fork.jsonl` forks, and its fork.
+const VIBE_FORK_SOURCE: &str = "9f1b157d-47e8-4f99-a17a-f0d98c9a179c";
+const VIBE_FORK: &str = "8db2586d-4d39-b98f-20da-c7ea3669df58";
+
+/// A fork (`SessionConfig::fork`) of a vibe-acp 2.26.1 session in a new
+/// process: `session/fork` of the stored session, refused until the
+/// source is loaded, then answered with a new session in the source's
+/// mode (`auto-approve`). The answer goes through `session_ready`, so the
+/// mode `ask` is set before the fork's first prompt, which goes to the
+/// fork and is answered from the source's turn; the source is sent no
+/// prompt, mode or close, and its replayed history is not shown.
+#[tokio::test]
+async fn acp_forks_a_stored_session_and_sets_its_mode_again() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_fork.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(VIBE_FORK_SOURCE.into());
+    cfg.fork = true;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let cwd = cfg.cwd.clone();
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("What was the code word?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::SessionStarted { session_id, .. } => Some(session_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [VIBE_FORK]);
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, "pineapple", "only the fork's turn: {events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_))),
+        "the refused first fork is the driver's: {events:?}"
+    );
+    assert!(!refused(&events, PermissionPolicy::Ask));
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/fork",
+            "session/load",
+            "session/fork",
+            "session/set_config_option",
+            "session/prompt",
+            "session/close",
+            "ended",
+        ]
+    );
+    let sent = fake.sent_lines();
+    for line in &sent[1..4] {
+        assert_eq!(
+            line["params"],
+            serde_json::json!({"sessionId": VIBE_FORK_SOURCE, "cwd": cwd, "mcpServers": []}),
+            "{line}"
+        );
+    }
+    assert_eq!(
+        sent[4]["params"],
+        serde_json::json!({"sessionId": VIBE_FORK, "configId": "mode", "value": "ask"})
+    );
+    assert_eq!(sent[5]["params"]["sessionId"], VIBE_FORK);
+    assert_eq!(sent[6]["params"]["sessionId"], VIBE_FORK);
+}
+
+/// codex-acp 2.1.1 forks a stored session without opening it and leaves
+/// the fork closed (unresumed, its first prompt was never answered): an
+/// agent that resumes sessions has the fork resumed, and the prompt goes
+/// to it.
+#[tokio::test]
+async fn acp_resumes_the_fork_where_the_agent_resumes_sessions() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/codex_acp_fork.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    cfg.resume = Some("01a12d15-cd81-7b92-b701-865f87098d7b".into());
+    cfg.fork = true;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("What was the code word?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let fork = "01a12d18-f272-7af2-b725-0965213dee58";
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::SessionStarted { session_id, .. } if session_id == fork)
+        ),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("pin")))
+    );
+    assert_eq!(
+        sent_methods(&fake),
+        [
+            "initialize",
+            "session/fork",
+            "session/resume",
+            "session/prompt"
+        ]
+    );
+    let sent = fake.sent_lines();
+    assert_eq!(sent[2]["params"]["sessionId"], fork);
+    assert_eq!(sent[3]["params"]["sessionId"], fork);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// An agent that does not advertise `session/fork` is never reattached to
+/// the session it was to fork (that one is the original conversation's):
+/// it gets a new session, and the user is told it does not know the
+/// conversation.
+#[tokio::test]
+async fn acp_starts_a_new_session_when_the_agent_cannot_fork() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl"))
+            .unwrap();
+    assert!(recorded.contains(r#""fork":{},"#));
+    let fixture = fake._tmp.path().join("no_fork.jsonl");
+    std::fs::write(&fixture, recorded.replace(r#""fork":{},"#, "")).unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("some-stored-session".into());
+    cfg.fork = true;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::Notice(n) if n.contains("cannot fork") && n.contains("new one"))
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        sent_methods(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt"
+        ]
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// An agent with modes of its own and no map has no policy below bypass:
 /// the prompt is failed, not sent, and the policy taken out of what the
 /// session offers. (A vibe session loaded in auto-approve would otherwise

@@ -1,0 +1,10 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
+SessionStarted id=01a12d18-f272-7af2-b725-0965213dee58 model=gpt-6.1-sol
+CapabilitiesChanged efforts=low,medium,high,xhigh,max,ultra plan_mode=false models=7
+CapabilitiesChanged efforts=low,medium,high,xhigh,max,ultra plan_mode=false models=7
+CapabilitiesChanged commands=61 slash_commands=true
+TextDelta "pine"
+TextDelta "apple"
+Context used=16236 window=258400
+Usage in=3942 out=6 cache_read=12288 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

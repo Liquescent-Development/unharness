@@ -275,6 +275,9 @@ impl Capabilities {
         if let Some(r) = update.resume_by_id {
             self.resume_by_id = r;
         }
+        if let Some(f) = update.fork {
+            self.fork = f;
+        }
         if let Some(h) = update.mcp_http {
             self.mcp.http = h;
         }
