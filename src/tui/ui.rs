@@ -26,8 +26,8 @@ use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
 use super::transcript::{
-    Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
-    truncate_chars, waits_on_user,
+    Block as TBlock, HookState, ToolBody, input_beyond_summary, tool_body, tool_summary,
+    tool_summary_full, truncate_chars, waits_on_user,
 };
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
@@ -1107,24 +1107,16 @@ fn tool_body_lines(
     is_error: bool,
     width: usize,
 ) -> Rows {
-    let get = |k: &str| input.get(k).and_then(serde_json::Value::as_str);
-    let path = get("file_path").or_else(|| get("path")).unwrap_or("");
-    let lname = name.to_lowercase();
     let mut lines = Rows::new();
-
-    if (lname.contains("edit") || lname == "str_replace" || lname == "replace")
-        && let (Some(old), Some(new)) = (
-            get("old_string").or_else(|| get("old_str")),
-            get("new_string").or_else(|| get("new_str")),
-        )
-    {
-        lines.append(replacement_lines(old, new, path, width));
-    } else if (lname == "write" || lname == "write_file" || lname == "create_file")
-        && let Some(content) = get("content").or_else(|| get("contents"))
-    {
-        lines.append(written_lines(content, path, width));
-    } else if (lname == "read" || lname == "read_file") && !output.is_empty() {
-        lines.append(code_lines(output, path, width));
+    match tool_body(name, input) {
+        ToolBody::Replace { old, new, path } => {
+            lines.append(replacement_lines(old, new, path, width));
+        }
+        ToolBody::Write { content, path } => lines.append(written_lines(content, path, width)),
+        ToolBody::Read { path } if !output.is_empty() => {
+            lines.append(code_lines(output, path, width));
+        }
+        ToolBody::Read { .. } | ToolBody::Output => {}
     }
 
     if !output.is_empty() && (lines.is_empty() || is_error) {

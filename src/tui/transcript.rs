@@ -923,6 +923,46 @@ pub fn tool_summary_full(name: &str, input: &Value) -> String {
     sanitize(&s).replace('\n', " ⏎ ")
 }
 
+/// What a tool call's body is, by its name and input: how the transcript
+/// draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolBody<'a> {
+    /// An edit of `path`: `old` replaced by `new`.
+    Replace {
+        old: &'a str,
+        new: &'a str,
+        path: &'a str,
+    },
+    /// `path` written whole.
+    Write { content: &'a str, path: &'a str },
+    /// `path` read: the output is the file.
+    Read { path: &'a str },
+    /// Anything else: the output.
+    Output,
+}
+
+pub fn tool_body<'a>(name: &str, input: &'a Value) -> ToolBody<'a> {
+    let get = |k: &str| input.get(k).and_then(Value::as_str);
+    let path = get("file_path").or_else(|| get("path")).unwrap_or("");
+    let lname = name.to_lowercase();
+    if (lname.contains("edit") || lname == "str_replace" || lname == "replace")
+        && let (Some(old), Some(new)) = (
+            get("old_string").or_else(|| get("old_str")),
+            get("new_string").or_else(|| get("new_str")),
+        )
+    {
+        ToolBody::Replace { old, new, path }
+    } else if (lname == "write" || lname == "write_file" || lname == "create_file")
+        && let Some(content) = get("content").or_else(|| get("contents"))
+    {
+        ToolBody::Write { content, path }
+    } else if lname == "read" || lname == "read_file" {
+        ToolBody::Read { path }
+    } else {
+        ToolBody::Output
+    }
+}
+
 /// Whether the summary line leaves part of a call's input out, so that the
 /// expanded call shows the input: a call [`known_summary`] has no case for,
 /// whose input is more than one line of text.
@@ -1064,6 +1104,48 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_call_body_is_told_by_its_name_and_input() {
+        let edit = json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"});
+        let replace = ToolBody::Replace {
+            old: "x",
+            new: "y",
+            path: "a.rs",
+        };
+        assert_eq!(tool_body("Edit", &edit), replace);
+        assert_eq!(tool_body("MultiEdit", &edit), replace);
+        let codex = json!({"path": "a.rs", "old_str": "x", "new_str": "y"});
+        assert_eq!(tool_body("str_replace", &codex), replace);
+        let write = json!({"file_path": "a.rs", "content": "y"});
+        assert_eq!(
+            tool_body("Write", &write),
+            ToolBody::Write {
+                content: "y",
+                path: "a.rs"
+            }
+        );
+        assert_eq!(
+            tool_body("create_file", &json!({"path": "a.rs", "contents": "y"})),
+            ToolBody::Write {
+                content: "y",
+                path: "a.rs"
+            }
+        );
+        assert_eq!(
+            tool_body("Read", &json!({"file_path": "a.rs"})),
+            ToolBody::Read { path: "a.rs" }
+        );
+        assert_eq!(
+            tool_body("Bash", &json!({"command": "ls"})),
+            ToolBody::Output
+        );
+        // An edit without its strings is output.
+        assert_eq!(
+            tool_body("Edit", &json!({"file_path": "a.rs"})),
+            ToolBody::Output
+        );
+    }
 
     #[test]
     fn assistant_deltas_merge_and_turn_stamps_duration() {
