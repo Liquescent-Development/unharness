@@ -19,6 +19,8 @@ What it sends, in this order:
      reattached (`session/resume` where the agent lists it, else
      `session/load`) and forked again, and where the agent lists
      `session/resume` the fork is resumed before anything is sent to it;
+     with --fallback-new, a reattach or fork that fails (a fork twice, or
+     its reattach once) is followed by `session/new`, as the driver does;
   3. once the session answers: --mode, and once that has answered (the
      unharness driver holds the prompt until the agent's mode is set,
      #155) --model, then each --config, in the order given, without
@@ -108,6 +110,9 @@ def parser() -> argparse.ArgumentParser:
     reattach.add_argument("--fork-from", metavar="ID",
                           help="start with session/fork of this stored session, as the unharness "
                                "driver does (see above)")
+    ap.add_argument("--fallback-new", action="store_true",
+                    help="should --resume, --load or --fork-from fail, start a new session with "
+                         "session/new and go on, as the unharness driver does")
     ap.add_argument("--mode", metavar="ID", help="set this session mode with session/set_mode")
     ap.add_argument("--mode-option", action="store_true",
                     help="send --mode as session/set_config_option of the session's option of "
@@ -282,6 +287,7 @@ def main() -> int:
     forked = closed = False
     agent_caps = {}
     fork_retried = False
+    fell_back = False
 
     def reattach_method():
         """How the agent reattaches a stored session, as the driver chooses."""
@@ -507,6 +513,13 @@ def main() -> int:
                     fork_retried = True
                     request(reattach_method(), {"sessionId": args.fork_from, "cwd": cwd,
                                                 "mcpServers": mcp_servers}, "fork-source")
+                elif (args.fallback_new and not fell_back
+                      and (kind in ("fork-start", "fork-source")
+                           or (kind == "session" and (args.resume or args.load or args.fork_from)))):
+                    # As the driver does: a new session in place of the one
+                    # that could not be reattached or forked.
+                    fell_back = True
+                    request("session/new", {"cwd": cwd, "mcpServers": mcp_servers}, "session")
                 elif kind == "ext":
                     advance()
                 elif kind == "close":
