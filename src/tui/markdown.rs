@@ -15,7 +15,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::code::{code_lines, diff_lines, sanitize};
+use super::code::{code_lines, diff_lines, sanitize, strip_controls};
 use super::rows::{Part, Rows};
 use super::selection::{Join, RowCopy};
 
@@ -53,6 +53,39 @@ pub fn render_markdown_rows(text: &str, max_width: usize, done: bool) -> Rows {
         }
     }
     lines
+}
+
+/// The text of each code block in `text`, fenced or indented, in the order
+/// [`render_markdown_rows`] marks them ([`Rows::code`]), with its tabs.
+pub fn code_blocks(text: &str) -> Vec<String> {
+    // Tabs are kept: CommonMark reads them at stops of four, as `sanitize`
+    // expands them, so the blocks are the same.
+    let (text, code) = close_outdented_fences(strip_controls(text));
+    let text = html_as_text(&text, &code);
+    let mut blocks = Vec::new();
+    for chunk in split_bare_diffs(&text, &code) {
+        let Chunk::Markdown(md) = chunk else {
+            continue;
+        };
+        let mut block: Option<String> = None;
+        for event in Parser::new_ext(md, OPTIONS) {
+            match event {
+                Event::Start(Tag::CodeBlock(_)) => block = Some(String::new()),
+                Event::Text(t) => {
+                    if let Some(b) = &mut block {
+                        b.push_str(&t);
+                    }
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    if let Some(b) = block.take() {
+                        blocks.push(b.trim_end_matches('\n').to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    blocks
 }
 
 fn is_blank(line: Option<&Line<'_>>) -> bool {
@@ -1109,6 +1142,34 @@ fn fit_columns(natural: &[usize], avail: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::tui::code::line_text;
+
+    #[test]
+    fn code_blocks_are_the_ones_drawn() {
+        let cases = [
+            "```rust\nfn a() {}\n```\ntext\n\n    indented\n\n~~~\nb\n~~~",
+            "1. step\n   ```sh\n   ls\n```\n2. next\n   ```\n   pwd\n   ```",
+            "> ```\n> quoted\n> ```",
+            "before\n@@ -1 +1 @@\n-a\n+b\nafter\n```diff\n-x\n+y\n```",
+            "<div>\n```\nhtml after\n```",
+            "```py\nstill streaming",
+            "| a | b |\n|---|---|\n| `x` | y |",
+        ];
+        for md in cases {
+            let drawn = render_markdown_rows(md, 40, true).code().len();
+            assert_eq!(code_blocks(md).len(), drawn, "{md}");
+        }
+        assert_eq!(
+            code_blocks(cases[0]),
+            ["fn a() {}", "indented", "b"].map(String::from)
+        );
+        // A fence its list item closed at column 0 is one block.
+        assert_eq!(code_blocks(cases[1]), ["ls", "pwd"].map(String::from));
+        assert_eq!(code_blocks(cases[3]), ["-x\n+y"].map(String::from));
+        assert_eq!(
+            code_blocks("```make\nall:\n\tcargo build\n```"),
+            ["all:\n\tcargo build"].map(String::from)
+        );
+    }
 
     fn copied(md: &str, width: usize) -> String {
         render_markdown_rows(md, width, true).copied()

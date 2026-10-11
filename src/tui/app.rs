@@ -591,6 +591,9 @@ pub struct TranscriptView {
     pub rendered: Vec<Line<'static>>,
     /// Per entry of `lines`, what a copy takes from it.
     pub copy: Vec<RowCopy>,
+    /// The code blocks in the responses, where a right click copies the
+    /// code alone.
+    pub code: Vec<CodeRows>,
     /// Per transcript block, where its lines are in `rendered` and `lines`.
     pub blocks: Vec<KeptBlock>,
     /// The blocks still running, whose status is drawn again on every
@@ -615,6 +618,18 @@ pub struct KeptBlock {
     pub top: usize,
     /// One past its last line.
     pub end: usize,
+}
+
+/// A code block in a response, by the rows it takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeRows {
+    /// Its response's index in [`TranscriptView::blocks`].
+    pub block: usize,
+    /// Which of the response's code blocks it is
+    /// ([`super::markdown::code_blocks`]).
+    pub nth: usize,
+    /// Its rows in `lines`, frame included.
+    pub rows: std::ops::Range<usize>,
 }
 
 /// A running block's first line, as laid out before it was fitted to the
@@ -4931,7 +4946,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -5537,11 +5552,27 @@ impl App {
         else {
             return;
         };
-        match self
-            .shown_blocks()
-            .get(i)
-            .and_then(super::transcript::block_text)
-        {
+        let block = self.shown_blocks().get(i);
+        let code = self
+            .transcript_view
+            .code
+            .iter()
+            .find(|c| c.block == i && c.rows.contains(&point.line));
+        let text = match (code, block) {
+            // On a code block in a response, that code.
+            (
+                Some(code),
+                Some(
+                    super::transcript::Block::Assistant { text, .. }
+                    | super::transcript::Block::Handoff { text, .. },
+                ),
+            ) => super::markdown::code_blocks(text)
+                .into_iter()
+                .nth(code.nth)
+                .filter(|c| !c.trim().is_empty()),
+            _ => block.and_then(super::transcript::block_text),
+        };
+        match text {
             Some(text) => {
                 self.selection = None;
                 self.copy_request = Some(text);

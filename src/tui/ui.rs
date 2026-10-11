@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
+use super::app::{App, CodeRows, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
     sanitize, wrap_words, wrap_words_joined, written_lines,
@@ -941,6 +941,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             let keep = i.checked_sub(1).map_or(0, |p| view.blocks[p].end);
             view.blocks.truncate(i);
             view.live.retain(|r| r.block < i);
+            view.code.retain(|c| c.block < i);
             view.rendered.truncate(keep);
             view.lines.truncate(keep);
             view.copy.truncate(keep);
@@ -977,7 +978,13 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             }
         }
         let top = view.rendered.len();
-        let (lines, copies, _) = lines.into_parts();
+        let (lines, copies, code) = lines.into_parts();
+        view.code
+            .extend(code.into_iter().enumerate().map(|(nth, rows)| CodeRows {
+                block: i,
+                nth,
+                rows: top + rows.start..top + rows.end,
+            }));
         view.lines.extend(lines.iter().map(|l| {
             l.spans
                 .iter()
@@ -997,6 +1004,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].end);
         view.blocks.truncate(fresh);
         view.live.retain(|r| r.block < fresh);
+        view.code.retain(|c| c.block < fresh);
         view.rendered.truncate(keep);
         view.lines.truncate(keep);
         view.copy.truncate(keep);
@@ -3485,6 +3493,28 @@ mod tests {
         assert_eq!(app.flash_text(), None);
         app.open_policy_picker();
         assert_eq!(right(&mut app, top), None);
+        app.modal = None;
+
+        // On a code block in a response, that code alone; elsewhere in the
+        // response, its markdown.
+        let reply = "Run this:\n\n```sh\nmake test\n```\n\nthen\n\n```\nmake\n```";
+        app.on_event(crate::core::AgentEvent::TextDelta(reply.into()));
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let row = |s: &str| rows.iter().position(|r| r.contains(s)).unwrap();
+        assert_eq!(right(&mut app, row("─ sh")).as_deref(), Some("make test"));
+        assert_eq!(
+            right(&mut app, row("make test")).as_deref(),
+            Some("make test")
+        );
+        let second = rows
+            .iter()
+            .position(|r| r.contains("│ make ") && !r.contains("make test"))
+            .unwrap();
+        assert_eq!(right(&mut app, second).as_deref(), Some("make"));
+        assert_eq!(right(&mut app, row("Run this")).as_deref(), Some(reply));
     }
 
     #[test]
@@ -3979,12 +4009,14 @@ mod tests {
         fn check(app: &mut App, width: u16, what: &str) {
             let (kept, _) = screen(app, width, 30);
             let kept_copy = app.transcript_view.copy.clone();
+            let kept_code = app.transcript_view.code.clone();
             assert_eq!(kept_copy.len(), app.transcript_view.lines.len(), "{what}");
             app.transcript_view = Default::default();
             let (fresh, _) = screen(app, width, 30);
             assert_eq!(kept, fresh, "{what}");
             // And what a copy takes from each row.
             assert_eq!(kept_copy, app.transcript_view.copy, "{what}");
+            assert_eq!(kept_code, app.transcript_view.code, "{what}");
         }
         let tool = |app: &mut App, id: &str, output: &str| {
             app.on_event(crate::core::AgentEvent::ToolCallStarted {
