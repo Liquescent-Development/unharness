@@ -4,6 +4,12 @@
 //! unharness declares no client capabilities, so the agent uses its own file
 //! and terminal tools and reports them as tool calls. The only agent → client
 //! request served is `session/request_permission`; the rest are refused.
+//!
+//! An agent with session modes is held to the one its policy maps to
+//! (`modes.rs`): after every session answer (new, load, resume) and every
+//! policy change the mode is set and read back before a prompt goes, and a
+//! policy whose mode does not take is refused for the session
+//! (`CapsUpdate::refused_policies`), its prompt failed rather than sent.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -13,12 +19,13 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
+use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{AcpParser, SessionOptions, can_load, can_resume, error_text, mcp_http};
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision,
+    AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, PermissionDecision,
     PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
     SessionInfo, StopReason,
 };
@@ -162,12 +169,21 @@ fn screen_permission(
     (allowed, evs)
 }
 
-/// `effort_option` is the config option id the harness declared as its
-/// agent's reasoning effort (`AcpHarness::declaring_effort_option`).
+/// What a harness knows about its agent that the protocol does not say.
+#[derive(Debug, Clone, Default)]
+pub struct AgentSpec {
+    /// The config option id that is the agent's reasoning effort
+    /// (`AcpHarness::declaring_effort_option`).
+    pub effort_option: Option<String>,
+    /// Which of the agent's session modes backs each policy
+    /// (`AcpHarness::with_modes`).
+    pub modes: ModeMap,
+}
+
 pub fn start(
     harness: HarnessId,
     args: Vec<String>,
-    effort_option: Option<String>,
+    spec: AgentSpec,
     cfg: SessionConfig,
 ) -> Result<SessionHandle> {
     let mut command = Command::new(&cfg.binary);
@@ -190,12 +206,14 @@ pub fn start(
         process_model: ProcessModel::LongLived,
     });
     handle.process_slot().set(&proc);
-    let parser = AcpParser::new(harness).declaring_effort(effort_option);
-    tokio::spawn(drive(harness, proc, parser, cfg, events_tx, cmd_rx));
+    let parser = AcpParser::new(harness).declaring_effort(spec.effort_option);
+    tokio::spawn(drive(
+        harness, proc, parser, spec.modes, cfg, events_tx, cmd_rx,
+    ));
     Ok(handle)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Outstanding {
     Initialize,
     /// `session/new`, or a reattach to an existing session.
@@ -203,8 +221,27 @@ enum Outstanding {
         reattach: bool,
     },
     Prompt,
+    /// Setting the agent's mode for `policy`; `seq` tells the newest.
+    Mode {
+        seq: u64,
+        policy: PermissionPolicy,
+        mode: String,
+        via: SetVia,
+    },
     /// Config changes: only an error matters, and the parser reports it.
     Other,
+}
+
+/// Where the agent's mode stands for the driver's policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModeState {
+    /// Prompts go: the agent is in `held`, the mode its policy maps to, or
+    /// nothing is mapped (`None`).
+    Ready { held: Option<String> },
+    /// A mode was asked for and has not answered: prompts wait.
+    Setting,
+    /// The policy cannot be held in this session: prompts fail with this.
+    Refused(String),
 }
 
 struct Driver {
@@ -222,9 +259,20 @@ struct Driver {
     policy: PermissionPolicy,
     /// Permission requests awaiting the user: our id → (rpc id, offered options).
     pending: HashMap<String, (Value, Value)>,
-    /// A turn sent before the session was ready.
+    /// A turn sent before the session and its mode were ready.
     queued_turn: Option<(String, Vec<Attachment>)>,
     last_stderr: Option<String>,
+    mode_map: ModeMap,
+    /// What the session said about its modes.
+    agent_modes: AgentModes,
+    mode: ModeState,
+    /// Numbers the mode requests; only the newest one's answer counts.
+    mode_seq: u64,
+    /// Policies this session could not hold, as reported.
+    refused: Vec<PermissionPolicy>,
+    /// The configured model and effort are still to be sent to the
+    /// session, once its mode is set.
+    setup_pending: bool,
 }
 
 impl Driver {
@@ -246,18 +294,50 @@ impl Driver {
         .await
     }
 
-    async fn send_turn(&mut self, text: String, attachments: Vec<Attachment>) -> Result<()> {
+    /// Send the waiting turn if the session and its mode are ready, or
+    /// fail it if its policy was refused.
+    async fn flush_turn(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
-            self.queued_turn = Some((text, attachments));
             return Ok(());
         };
-        let prompt = prompt_blocks(&text, &attachments)?;
-        self.request(
-            "session/prompt",
-            json!({"sessionId": session_id, "prompt": prompt}),
-            Outstanding::Prompt,
-        )
-        .await
+        match &self.mode {
+            ModeState::Setting => Ok(()),
+            ModeState::Refused(why) => {
+                if self.queued_turn.take().is_some() {
+                    let _ = events
+                        .send(AgentEvent::TurnCompleted {
+                            stop_reason: StopReason::Error(why.clone()),
+                        })
+                        .await;
+                }
+                Ok(())
+            }
+            ModeState::Ready { .. } => {
+                let Some((text, attachments)) = self.queued_turn.take() else {
+                    return Ok(());
+                };
+                let _ = events.send(AgentEvent::TurnStarted).await;
+                let sent = match prompt_blocks(&text, &attachments) {
+                    Ok(prompt) => {
+                        self.request(
+                            "session/prompt",
+                            json!({"sessionId": session_id, "prompt": prompt}),
+                            Outstanding::Prompt,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = sent {
+                    let _ = events
+                        .send(AgentEvent::TurnCompleted {
+                            stop_reason: StopReason::Error(e.to_string()),
+                        })
+                        .await;
+                }
+                Ok(())
+            }
+        }
     }
 
     async fn set_option(&mut self, option: Option<String>, value: &str) -> Result<bool> {
@@ -273,24 +353,192 @@ impl Driver {
         Ok(true)
     }
 
-    /// The session exists: apply the configured model and effort, then send
-    /// the turn that was waiting for it.
+    /// The session exists (created or reattached): hold it to the mode its
+    /// policy maps to, then send the configured model and effort and the
+    /// turn that was waiting for it.
     async fn session_ready(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
-        if let Some(model) = self.cfg.model.clone()
-            && self.options.current_model.as_deref() != Some(&model.model)
-        {
-            self.set_option(self.options.model_option.clone(), &model.model)
-                .await?;
+        self.setup_pending = true;
+        self.apply_mode(events).await
+    }
+
+    /// Bring the agent's mode in line with the policy; once it is, go on
+    /// with what waited for it.
+    async fn apply_mode(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        let Some(session_id) = self.session_id.clone() else {
+            return Ok(());
+        };
+        let policy = self.policy;
+        match mode_step(
+            self.harness.as_str(),
+            policy,
+            &self.mode_map,
+            &self.agent_modes,
+        ) {
+            ModeStep::Leave => {
+                self.mode = ModeState::Ready { held: None };
+                self.mode_ready(events).await
+            }
+            ModeStep::Keep(mode) => {
+                self.mode = ModeState::Ready { held: Some(mode) };
+                self.mode_ready(events).await
+            }
+            ModeStep::Set { mode, via } => {
+                self.mode_seq += 1;
+                let (method, params) = match &via {
+                    SetVia::Option(id) => (
+                        "session/set_config_option",
+                        json!({"sessionId": session_id, "configId": id, "value": mode}),
+                    ),
+                    SetVia::SetMode => (
+                        "session/set_mode",
+                        json!({"sessionId": session_id, "modeId": mode}),
+                    ),
+                };
+                self.mode = ModeState::Setting;
+                let seq = self.mode_seq;
+                self.request(
+                    method,
+                    params,
+                    Outstanding::Mode {
+                        seq,
+                        policy,
+                        mode,
+                        via,
+                    },
+                )
+                .await
+            }
+            ModeStep::Refuse(why) => self.refuse(why, events).await,
         }
-        if let Some(effort) = self.cfg.effort.clone() {
-            self.set_option(self.options.effort_option.clone(), &effort)
-                .await?;
+    }
+
+    /// The mode is what the policy needs: send what waited for it.
+    async fn mode_ready(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        if std::mem::take(&mut self.setup_pending) {
+            if let Some(model) = self.cfg.model.clone()
+                && self.options.current_model.as_deref() != Some(&model.model)
+            {
+                self.set_option(self.options.model_option.clone(), &model.model)
+                    .await?;
+            }
+            if let Some(effort) = self.cfg.effort.clone() {
+                self.set_option(self.options.effort_option.clone(), &effort)
+                    .await?;
+            }
         }
-        if let Some((text, attachments)) = self.queued_turn.take() {
-            let _ = events.send(AgentEvent::TurnStarted).await;
-            self.send_turn(text, attachments).await?;
+        self.flush_turn(events).await
+    }
+
+    /// The policy cannot be held in this session: say so, take it out of
+    /// what is offered, fail the turn that waited for it and stop one that
+    /// is running.
+    async fn refuse(&mut self, why: String, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        self.mode = ModeState::Refused(why.clone());
+        if !self.refused.contains(&self.policy) {
+            self.refused.push(self.policy);
+            self.refused.sort();
+            let _ = events
+                .send(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                    refused_policies: Some(self.refused.clone()),
+                    ..Default::default()
+                }))
+                .await;
         }
-        Ok(())
+        if self.queued_turn.is_none() {
+            let _ = events.send(AgentEvent::Error(why)).await;
+        }
+        // A turn running when the policy changed goes on in whatever mode
+        // the agent is in, which may run what the policy asks about.
+        if self.outstanding.values().any(|o| *o == Outstanding::Prompt) {
+            self.cancel_turn().await?;
+        }
+        self.flush_turn(events).await
+    }
+
+    /// The answer to a mode request: the mode took, or the policy is refused.
+    async fn on_mode_answer(
+        &mut self,
+        (seq, policy, mode, via): (u64, PermissionPolicy, String, SetVia),
+        result: &Value,
+        error: Option<&Value>,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<()> {
+        let options = self.parser.session_options(result.get("configOptions"));
+        if let Some(o) = &options {
+            self.agent_modes.take_options(o);
+            self.options = o.clone();
+        }
+        // A later policy change asked for another mode since.
+        if seq != self.mode_seq {
+            return Ok(());
+        }
+        let options = options.unwrap_or_default();
+        let answer = match error {
+            Some(e) => Err(error_text(e)),
+            None => Ok(&options),
+        };
+        match read_back(self.harness.as_str(), policy, &mode, &via, answer) {
+            Ok(()) => {
+                self.agent_modes.current = Some(mode.clone());
+                self.mode = ModeState::Ready { held: Some(mode) };
+                self.mode_ready(events).await
+            }
+            Err(why) => self.refuse(why, events).await,
+        }
+    }
+
+    /// The agent reported its mode (`current_mode_update`, or the mode
+    /// option of a `config_option_update`). One it went to by itself, away
+    /// from the mode the policy maps to, is set back; if being in it could
+    /// run what the policy asks about, the running turn is cancelled first.
+    async fn on_mode_report(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        let ModeState::Ready { held: Some(held) } = &self.mode else {
+            return Ok(());
+        };
+        let Some(now) = self.agent_modes.current.clone() else {
+            return Ok(());
+        };
+        if now == *held {
+            return Ok(());
+        }
+        let name = self.harness.as_str();
+        let policy = self.policy;
+        let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
+        if turn_running && !self.mode_map.within(policy, &now) {
+            let _ = events
+                .send(AgentEvent::Notice(format!(
+                    "{name} went into its mode '{now}', which can run what {policy} asks about; the turn is stopped and mode '{held}' set again"
+                )))
+                .await;
+            self.cancel_turn().await?;
+        } else {
+            let _ = events
+                .send(AgentEvent::Notice(format!(
+                    "{name} went into its mode '{now}'; mode '{held}' ({policy}) is set again"
+                )))
+                .await;
+        }
+        self.apply_mode(events).await
+    }
+
+    /// `session/cancel`, and every open permission request answered
+    /// `cancelled`, as the spec requires once a turn is cancelled.
+    async fn cancel_turn(&mut self) -> Result<()> {
+        let Some(session_id) = self.session_id.clone() else {
+            return Ok(());
+        };
+        let mut res = self
+            .proc
+            .write_line(&jsonrpc::notification(
+                "session/cancel",
+                json!({"sessionId": session_id}),
+            ))
+            .await;
+        for (_, (rpc_id, _)) in self.pending.drain() {
+            let line = jsonrpc::response(&rpc_id, json!({"outcome": {"outcome": "cancelled"}}));
+            res = res.and(self.proc.write_line(&line).await);
+        }
+        res
     }
 }
 
@@ -298,6 +546,7 @@ async fn drive(
     harness: HarnessId,
     proc: LineProcess,
     parser: AcpParser,
+    mode_map: ModeMap,
     cfg: SessionConfig,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
@@ -316,6 +565,12 @@ async fn drive(
         pending: HashMap::new(),
         queued_turn: None,
         last_stderr: None,
+        mode_map,
+        agent_modes: AgentModes::default(),
+        mode: ModeState::Setting,
+        mode_seq: 0,
+        refused: Vec::new(),
+        setup_pending: false,
     };
     let init = json!({
         "protocolVersion": 1,
@@ -340,18 +595,8 @@ async fn drive(
                 };
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => {
-                        if d.session_id.is_some() {
-                            let _ = events.send(AgentEvent::TurnStarted).await;
-                        }
-                        match d.send_turn(text, attachments).await {
-                            Ok(()) => Ok(()),
-                            Err(e) => {
-                                let _ = events.send(AgentEvent::TurnCompleted {
-                                    stop_reason: StopReason::Error(e.to_string()),
-                                }).await;
-                                Ok(())
-                            }
-                        }
+                        d.queued_turn = Some((text, attachments));
+                        d.flush_turn(&events).await
                     }
                     // No subagents are reported here, so none can be running.
                     SessionCommand::StopSubagent { .. } => Ok(()),
@@ -373,30 +618,17 @@ async fn drive(
                         }).await;
                         Ok(())
                     }
-                    SessionCommand::Interrupt => match d.session_id.clone() {
-                        Some(session_id) => {
-                            // The spec requires every open permission request to be
-                            // answered `cancelled` once the turn is cancelled.
-                            let mut res = d
-                                .proc
-                                .write_line(&jsonrpc::notification("session/cancel", json!({"sessionId": session_id})))
-                                .await;
-                            for (_, (rpc_id, _)) in d.pending.drain() {
-                                let line = jsonrpc::response(&rpc_id, json!({"outcome": {"outcome": "cancelled"}}));
-                                res = res.and(d.proc.write_line(&line).await);
-                            }
-                            res
-                        }
-                        // Waiting for the session: it is never sent.
-                        None => {
-                            if d.queued_turn.take().is_some() {
-                                let _ = events.send(AgentEvent::TurnCompleted {
-                                    stop_reason: StopReason::Interrupted,
-                                }).await;
-                            }
+                    SessionCommand::Interrupt => {
+                        // Waiting for the session or its mode: it is never sent.
+                        if d.queued_turn.take().is_some() {
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Interrupted,
+                            }).await;
                             Ok(())
+                        } else {
+                            d.cancel_turn().await
                         }
-                    },
+                    }
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
                         Some((rpc_id, options)) => {
                             let outcome = permission_outcome(&options, &decision);
@@ -435,7 +667,7 @@ async fn drive(
                     }
                     SessionCommand::SetPolicy(p) => {
                         d.policy = p;
-                        Ok(())
+                        d.apply_mode(&events).await
                     }
                     SessionCommand::Shutdown => {
                         shutting_down = true;
@@ -531,6 +763,7 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         .parser
                         .session_options(result.get("configOptions"))
                         .unwrap_or_default();
+                    d.agent_modes = AgentModes::from_session(&result, &d.options, reattach);
                     d.session_id = result
                         .get("sessionId")
                         .and_then(Value::as_str)
@@ -578,6 +811,23 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         .await;
                     return Ok(());
                 }
+                (
+                    Some(Outstanding::Mode {
+                        seq,
+                        policy,
+                        mode,
+                        via,
+                    }),
+                    error,
+                ) => {
+                    // An error is the driver's to report: the policy is refused.
+                    if error.is_none() {
+                        forward(d, line, events).await;
+                    }
+                    return d
+                        .on_mode_answer((seq, policy, mode, via), &result, error.as_ref(), events)
+                        .await;
+                }
                 (Some(Outstanding::Prompt), Some(e)) => {
                     let _ = events
                         .send(AgentEvent::TurnCompleted {
@@ -596,16 +846,34 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             }
         }
         Some(RpcMessage::Notification { method, params }) if method == "session/update" => {
-            // Keep the option ids current so model and effort changes go to the right one.
-            if params
+            match params
                 .pointer("/update/sessionUpdate")
                 .and_then(Value::as_str)
-                == Some("config_option_update")
-                && let Some(o) = d
-                    .parser
-                    .session_options(params.pointer("/update/configOptions"))
             {
-                d.options = o;
+                // Keep the option ids current so model and effort changes go
+                // to the right one, and the mode known.
+                Some("config_option_update") => {
+                    if let Some(o) = d
+                        .parser
+                        .session_options(params.pointer("/update/configOptions"))
+                    {
+                        d.agent_modes.take_options(&o);
+                        d.options = o;
+                        forward(d, line, events).await;
+                        return d.on_mode_report(events).await;
+                    }
+                }
+                Some("current_mode_update") => {
+                    if let Some(mode) = params
+                        .pointer("/update/currentModeId")
+                        .and_then(Value::as_str)
+                    {
+                        d.agent_modes.current = Some(mode.to_string());
+                        forward(d, line, events).await;
+                        return d.on_mode_report(events).await;
+                    }
+                }
+                _ => {}
             }
         }
         Some(RpcMessage::Request { id, method, params }) => {

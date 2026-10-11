@@ -28,7 +28,8 @@ A harness that cannot hold to that does not offer `ask`:
 - `codex exec` and headless Antigravity cannot prompt;
 - `--print --native` on Codex uses `codex exec`, and Codex's own
   interface (`--no-tui`) does not accept the `untrusted` approval policy;
-- an ACP agent offers `ask` only when you have marked it as one that asks
+- an ACP agent offers `ask` only when you have marked it as one that asks,
+  and, if it has session modes of its own, said which of them asks
   ([ACP agents](acp.md#permissions)).
 
 ### Plan

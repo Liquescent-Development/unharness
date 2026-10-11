@@ -91,6 +91,13 @@ fn check_configured_policies(config: &Config) -> Result<()> {
             bail!("unknown policy '{p}' in config (plan, ask, accept-edits, auto, bypass)");
         }
     }
+    // A mode map is about policies too: one that does not parse would
+    // leave the agent in a mode of its own choosing.
+    for (name, h) in &config.harnesses {
+        if let Err(e) = crate::harness::acp::ModeMap::from_config(&h.modes) {
+            bail!("[harnesses.{name}]: {e}");
+        }
+    }
     Ok(())
 }
 
@@ -560,6 +567,19 @@ mod tests {
         assert!(check_configured_policies(&cfg).is_ok());
         cfg.harnesses.get_mut("agy").unwrap().default_policy = Some("nah".into());
         assert!(check_configured_policies(&cfg).is_err());
+        cfg.harnesses.get_mut("agy").unwrap().default_policy = None;
+
+        // A mode map names policies too.
+        let vibe = cfg.harnesses.entry("vibe".into()).or_default();
+        vibe.modes = [("ask".to_string(), "ask".to_string())].into();
+        assert!(check_configured_policies(&cfg).is_ok());
+        let vibe = cfg.harnesses.get_mut("vibe").unwrap();
+        vibe.modes.insert("always".into(), "auto-approve".into());
+        let e = check_configured_policies(&cfg).unwrap_err().to_string();
+        assert!(
+            e.contains("[harnesses.vibe]") && e.contains("'always'"),
+            "{e}"
+        );
     }
 
     #[test]

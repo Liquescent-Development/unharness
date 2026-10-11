@@ -7,10 +7,13 @@
 //! can do is mostly learned at the handshake, so the static capabilities are
 //! the protocol's baseline and the session reports the rest.
 
+pub mod modes;
 pub mod parse;
 pub mod transport;
 
 use std::path::{Path, PathBuf};
+
+pub use modes::ModeMap;
 
 use anyhow::{Result, bail};
 
@@ -77,6 +80,8 @@ pub struct AcpHarness {
     /// The config option that is this agent's reasoning effort, when it is
     /// not under the spec's `thought_level` category.
     effort_option: Option<String>,
+    /// Which of the agent's own session modes backs each policy.
+    modes: ModeMap,
 }
 
 impl AcpHarness {
@@ -102,6 +107,7 @@ impl AcpHarness {
             preset: false,
             asks: false,
             effort_option: None,
+            modes: ModeMap::default(),
         })
     }
 
@@ -121,6 +127,14 @@ impl AcpHarness {
             effort_option: Some(id.to_string()),
             ..self
         }
+    }
+
+    /// Hold the agent to these of its session modes, one per policy (see
+    /// [`ModeMap`]): from `[harnesses.<name>] modes`, or declared by a
+    /// harness that knows its agent. An agent with modes and no map for
+    /// `ask` does not get `ask` (`modes::mode_step`).
+    pub fn with_modes(self, modes: ModeMap) -> Self {
+        AcpHarness { modes, ..self }
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -164,7 +178,9 @@ impl Harness for AcpHarness {
             interactive_permissions: true,
             // Enforced by unharness when the agent asks; an agent that never
             // asks cannot be made to, so `ask` is only for one known to
-            // (codex-acp 2.1.1 asked for nothing in three recordings).
+            // (codex-acp 2.1.1 asked for nothing in three recordings). One
+            // with session modes of its own also needs a mode map, or its
+            // session refuses `ask` (`modes::mode_step`).
             permission_policies: self
                 .asks
                 .then_some(PolicySupport::full(PermissionPolicy::Ask))
@@ -248,7 +264,10 @@ impl Harness for AcpHarness {
         transport::start(
             self.descriptor.id,
             self.args.clone(),
-            self.effort_option.clone(),
+            transport::AgentSpec {
+                effort_option: self.effort_option.clone(),
+                modes: self.modes.clone(),
+            },
             cfg,
         )
     }
@@ -299,6 +318,15 @@ mod tests {
         let h = h.declaring_effort_option("thinking");
         assert_eq!(h.effort_option.as_deref(), Some("thinking"));
         assert!(h.asks, "declaring keeps the rest");
+
+        // No mode map is assumed either.
+        assert!(h.modes.is_empty());
+        let h = h.with_modes(ModeMap::new([(PermissionPolicy::Ask, "ask")]));
+        assert_eq!(
+            h.modes.for_policy(PermissionPolicy::Bypass),
+            Some((PermissionPolicy::Ask, "ask"))
+        );
+        assert!(h.asks && h.effort_option.is_some());
     }
 
     #[test]

@@ -117,6 +117,14 @@ pub struct HarnessSettings {
     /// command or reaches out, so the `ask` policy can be offered for it.
     /// unharness cannot check that; set it for an agent seen to do so.
     pub asks_permission: Option<bool>,
+    /// ACP only: which of the agent's own session modes backs each policy,
+    /// e.g. `{ ask = "ask", bypass = "auto-approve" }`. unharness sets that
+    /// mode before the first prompt and on every policy change, and holds
+    /// the session when it does not take. A policy without an entry takes
+    /// the nearest less permissive one's. An agent with modes has no `ask`
+    /// without one (`harness::acp::modes`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, String>,
     /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
     /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
     /// existing `~/.claude.json` is copied there once. Default: on.
@@ -397,6 +405,13 @@ impl Config {
             },
             display_name: local.display_name.or(global.display_name),
             asks_permission: local.asks_permission.or(global.asks_permission),
+            // Whole, never entry by entry: a mode map is one statement
+            // about the agent.
+            modes: if !local.modes.is_empty() {
+                local.modes
+            } else {
+                global.modes
+            },
             relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }
@@ -713,6 +728,26 @@ url = "https://example.com/mcp"
                 denied
             );
         }
+    }
+
+    /// `modes` is a table of policy → agent mode, and a workspace's
+    /// replaces the global one whole.
+    #[test]
+    fn an_acp_agent_s_modes_are_one_table() {
+        let global: Config = toml::from_str(
+            "[harnesses.vibe]\nprotocol = \"acp\"\ncommand = [\"vibe-acp\"]\n\
+             modes = { ask = \"ask\", accept-edits = \"ask\", bypass = \"auto-approve\" }\n",
+        )
+        .unwrap();
+        let vibe = &global.harnesses["vibe"];
+        assert_eq!(vibe.modes.len(), 3);
+        assert_eq!(vibe.modes["accept-edits"], "ask");
+        let local: Config =
+            toml::from_str("[harnesses.vibe]\nmodes = { ask = \"ask\" }\n").unwrap();
+        let merged = Config::merge(global.clone(), local);
+        assert_eq!(merged.harnesses["vibe"].modes.len(), 1);
+        let merged = Config::merge(global, Config::default());
+        assert_eq!(merged.harnesses["vibe"].modes.len(), 3);
     }
 
     #[test]

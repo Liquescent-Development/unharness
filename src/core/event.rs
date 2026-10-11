@@ -275,6 +275,11 @@ pub struct CapsUpdate {
     /// Whether a prompt that starts with `/name` runs one
     /// (`Capabilities::slash_commands`).
     pub slash_commands: Option<bool>,
+    /// Policies the live session cannot hold although the harness declares
+    /// them (an ACP agent whose mode for the policy did not take, or that
+    /// has modes and no map for `ask`): taken out of what is offered, as a
+    /// policy the harness never had is. Each list replaces the last.
+    pub refused_policies: Option<Vec<PermissionPolicy>>,
 }
 
 /// A command a harness runs when a prompt starts with `/name`: one of its
@@ -350,6 +355,9 @@ impl CapsUpdate {
         }
         if newer.slash_commands.is_some() {
             self.slash_commands = newer.slash_commands;
+        }
+        if newer.refused_policies.is_some() {
+            self.refused_policies = newer.refused_policies;
         }
     }
 }
@@ -670,6 +678,10 @@ impl AgentEvent {
                 }
                 if let Some(s) = u.slash_commands {
                     parts.push(format!("slash_commands={s}"));
+                }
+                if let Some(r) = &u.refused_policies {
+                    let r: Vec<&str> = r.iter().map(|p| p.as_str()).collect();
+                    parts.push(format!("refused_policies={}", r.join(",")));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

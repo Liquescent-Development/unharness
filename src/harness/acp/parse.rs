@@ -35,6 +35,11 @@ pub struct SessionOptions {
     /// one the harness declared, else the one in category `thought_level`.
     pub effort_option: Option<String>,
     pub efforts: Vec<String>,
+    /// Id of the select option in category `mode` (the session's mode, as
+    /// an option), with its values and the one in effect.
+    pub mode_option: Option<String>,
+    pub mode_values: Vec<String>,
+    pub current_mode: Option<String>,
 }
 
 impl SessionOptions {
@@ -88,6 +93,14 @@ impl SessionOptions {
                         .collect();
                 }
                 "thought_level" => thought_level = Some((id, values())),
+                "mode" => {
+                    out.current_mode = opt
+                        .get("currentValue")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    out.mode_values = values();
+                    out.mode_option = Some(id);
+                }
                 _ => {}
             }
         }
@@ -358,8 +371,11 @@ impl AcpParser {
                     }));
                 }
             }
-            // user_message_chunk (our own prompt echoed), current_mode_update,
-            // session_info_update, and anything newer.
+            // The session's mode, and the mode option of a
+            // `config_option_update`, are the transport's: it holds the
+            // agent to the mode its policy maps to (`modes.rs`).
+            // user_message_chunk (our own prompt echoed), session_info_update,
+            // and anything newer.
             _ => {}
         }
         out
@@ -872,6 +888,43 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// vibe-acp 2.26.1 starts in accept-edits; the mode option, set to
+    /// `ask` before the first prompt, answers with the option list, whose
+    /// mode option reads it back. The write is then asked about.
+    #[test]
+    fn fixture_vibe_acp_mode() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut parser(), &dir, "vibe_acp_mode");
+        let text = std::fs::read_to_string(dir.join("vibe_acp_mode.jsonl")).unwrap();
+        let modes: Vec<Option<String>> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                parser()
+                    .session_options(v.pointer("/result/configOptions"))
+                    .map(|o| o.current_mode)
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                Some("accept-edits".into()),
+                Some("ask".into()),
+                Some("auto-approve".into())
+            ]
+        );
+        let o = parser().session_options(Some(&vibe_options())).unwrap();
+        assert_eq!(o.mode_option.as_deref(), Some("mode"));
+        assert_eq!(o.mode_values, ["ask", "accept-edits", "auto-approve"]);
+    }
+
+    /// A loaded vibe session comes back in the mode it was left in. (The
+    /// history it replays is dropped by the driver, not here.)
+    #[test]
+    fn fixture_vibe_acp_mode_load() {
+        assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp_mode_load");
     }
 
     #[test]

@@ -314,8 +314,9 @@ recorded ones. For anything else:
   opencode, goose, copilot, cursor, qwen, kiro) use launch commands from the
   ACP registry and were not installed when they were added: unverified until
   recorded. unharness declares no `fs`/`terminal` client capabilities, and
-  uses only stable v1 methods; `session/load` (history replay) is implemented
-  from the spec but only `session/resume` has been exercised.
+  uses only stable v1 methods; `session/load` (history replay) has been
+  exercised with vibe-acp 2.26.1 (`fixtures/vibe_acp_mode_load.jsonl`),
+  `session/resume` with claude-agent-acp.
   `scripts/record-acp.py` (#169) also sends client capabilities,
   `session/load`, a mode (`set_mode` or the mode option), any config
   option, `session/fork`, `session/close`, a timed `session/cancel` and
@@ -359,6 +360,44 @@ recorded ones. For anything else:
   rewrites `~/.vibe/config.toml` (#164). So a vibe config agent has no
   effort and is sent none, also with `default_effort` set (e2e test).
   Nothing declares an id yet.
+  Session modes (#155, `modes.rs`): vibe-acp 2.26.1 starts every session
+  in `accept-edits`, which wrote a file under `ask` with no request, and a
+  session loaded in a new process comes back in the mode it was left in
+  (`auto-approve` in `fixtures/vibe_acp_mode_load.jsonl`). So a harness
+  holds its agent to a mode per policy (`ModeMap`: declared with
+  `AcpHarness::with_modes`, or `[harnesses.<name>] modes`; a policy without
+  an entry takes the nearest less permissive one's). After every session
+  answer and policy change the driver sets the mode and holds the prompt
+  until it is read back: through the option of category `mode` when the
+  session offers it (vibe's `session/set_config_option` answers with the
+  whole option list, whose `currentValue` is the read-back, and left
+  `config.toml` alone, sha256 checked), else `session/set_mode` of a listed
+  mode, taken at its word, since vibe answers `{}` also for one it does not
+  list (`plan`) and changes nothing. Neither request was followed by a
+  `current_mode_update` or `config_option_update` from vibe in three runs.
+  A mode not offered, an error, a read-back that differs, or a reattach
+  whose answer names no modes refuses the policy for the session
+  (`CapsUpdate::refused_policies`): the waiting prompt fails unsent, a
+  running one is cancelled, the TUI gives way as to an unsupported policy
+  (the picker, or the nearest less permissive one sent as `SetPolicy`), and
+  `--print` exits 1. `ask` for an agent with modes and no map entry at or
+  below it is refused the same way (decided on #155), naming the
+  missing map; without a map the other policies leave the mode alone. A
+  mode the agent reports going into by itself (`current_mode_update`, the
+  mode option of `config_option_update`) is set back, and a running turn
+  cancelled first when that mode is not one the map gives a policy at or
+  below the current one. `scripts/record-acp.py --mode` now waits for the
+  mode's answer before the model, options and prompts, as the driver does.
+  Checked live (scratch `VIBE_HOME`, Landlock, `modes = { ask = "ask",
+  bypass = "auto-approve" }`): `--print --policy ask` had vibe's write
+  asked about and denied, and the file was not created; without the map
+  `--print` exited 1 naming it, and the TUI opened the picker with `ask`
+  not offered. Unverified: an agent that sends `current_mode_update` (the
+  e2e test's line is the spec's), `session/set_mode` with a read-back,
+  `session/fork` (not driven yet; its answer must go through
+  `Driver::session_ready` as the others do), an agent that resumes with
+  `{}` but has modes and no map (taken to have none), and claude-agent-acp
+  under a map (its recordings start in `default`, so nothing was sent).
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

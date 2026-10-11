@@ -1402,6 +1402,7 @@ async fn agy_auth_failure_ends_turn_with_error() {
     );
 }
 
+/// An ACP agent the config says asks, with no mode map.
 fn acp_harness() -> unharness::harness::acp::AcpHarness {
     unharness::harness::acp::AcpHarness::new(
         "fake-acp",
@@ -1410,6 +1411,27 @@ fn acp_harness() -> unharness::harness::acp::AcpHarness {
     )
     .unwrap()
     .asking_permission(true)
+}
+
+fn acp_with_modes(modes: &[(PermissionPolicy, &str)]) -> unharness::harness::acp::AcpHarness {
+    acp_harness().with_modes(unharness::harness::acp::ModeMap::new(
+        modes.iter().map(|(p, m)| (*p, *m)),
+    ))
+}
+
+/// claude-agent-acp 0.85.1, whose `default` mode asks (and which every
+/// recording starts in, so nothing is sent to set it).
+fn claude_acp() -> unharness::harness::acp::AcpHarness {
+    acp_with_modes(&[(PermissionPolicy::Ask, "default")])
+}
+
+/// vibe-acp 2.26.1: `ask` asks before every write and command; the agent
+/// stays in it under accept-edits too, and unharness answers the edits.
+fn vibe_acp() -> unharness::harness::acp::AcpHarness {
+    acp_with_modes(&[
+        (PermissionPolicy::Ask, "ask"),
+        (PermissionPolicy::Bypass, "auto-approve"),
+    ])
 }
 
 #[tokio::test]
@@ -1421,7 +1443,7 @@ async fn acp_handshake_turns_and_permission_round_trip() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let mut handle = claude_acp().start_session(cfg).unwrap();
 
     // Sent before the handshake finishes: the driver holds it until the
     // session exists.
@@ -1513,7 +1535,7 @@ async fn acp_session_gets_the_mcp_servers_and_runs_their_tools() {
             },
         },
     ];
-    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let mut handle = claude_acp().start_session(cfg).unwrap();
 
     handle.send(SessionCommand::turn("call it")).await.unwrap();
     let events = run_turn(&mut handle, |e| {
@@ -1556,7 +1578,7 @@ async fn acp_bypass_answers_permission_requests_itself() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
     cfg.model = None;
-    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let mut handle = claude_acp().start_session(cfg).unwrap();
 
     handle.send(SessionCommand::turn("pong?")).await.unwrap();
     run_turn(&mut handle, |_| None).await;
@@ -1638,7 +1660,7 @@ async fn acp_resumes_a_session_and_applies_the_configured_model() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_resume.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.resume = Some("201664ad-6914-49da-8f50-0e36f73b8d3b".into());
-    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let mut handle = claude_acp().start_session(cfg).unwrap();
 
     handle
         .send(SessionCommand::turn("what was it?"))
@@ -1687,7 +1709,8 @@ async fn acp_sends_no_effort_to_an_option_it_was_not_told_is_one() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
-    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    // Left in the mode it starts in: no map, and not `ask`.
+    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
     cfg.model = None;
     cfg.effort = Some("high".into());
     let mut handle = acp_harness().start_session(cfg).unwrap();
@@ -1714,6 +1737,346 @@ async fn acp_sends_no_effort_to_an_option_it_was_not_told_is_one() {
         .collect();
     assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
     handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// The methods the driver sent, in order.
+fn sent_methods(fake: &Fake) -> Vec<String> {
+    fake.sent_lines()
+        .iter()
+        .filter_map(|v| v["method"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn refused(events: &[AgentEvent], policy: PermissionPolicy) -> bool {
+    events.iter().any(|e| {
+        matches!(e, AgentEvent::CapabilitiesChanged(CapsUpdate { refused_policies: Some(r), .. }) if r.contains(&policy))
+    })
+}
+
+fn turn_error(events: &[AgentEvent]) -> Option<&str> {
+    events.iter().find_map(|e| match e {
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(why),
+        } => Some(why.as_str()),
+        _ => None,
+    })
+}
+
+/// vibe-acp 2.26.1 starts in its accept-edits mode, which writes without
+/// asking. Under `ask` the mapped mode is set, and read back from the
+/// answer, before the first prompt goes, and the write then comes as a
+/// request. A policy change sets the mode again before the next prompt.
+#[tokio::test]
+async fn acp_sets_the_mapped_mode_before_the_first_prompt() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_mode.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+
+    // Sent before the handshake: it waits for the session and its mode.
+    handle
+        .send(SessionCommand::turn("write p.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
+            reason: "no".into(),
+        })
+    })
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_))),
+        "{events:?}"
+    );
+    let sent = fake.sent_lines();
+    assert_eq!(sent[1]["method"], "session/new");
+    assert_eq!(sent[2]["method"], "session/set_config_option");
+    assert_eq!(sent[2]["params"]["configId"], "mode");
+    assert_eq!(sent[2]["params"]["value"], "ask");
+    assert_eq!(sent[3]["method"], "session/prompt");
+    assert_eq!(sent[4]["result"]["outcome"]["optionId"], "reject_once");
+
+    // bypass maps to auto-approve: set before the next prompt, whose
+    // write then runs without a request.
+    handle
+        .send(SessionCommand::SetPolicy(PermissionPolicy::Bypass))
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("write q.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult {
+            is_error: false,
+            ..
+        }
+    )));
+    let sent = fake.sent_lines();
+    assert_eq!(sent[5]["method"], "session/set_config_option");
+    assert_eq!(sent[5]["params"]["value"], "auto-approve");
+    assert_eq!(sent[6]["method"], "session/prompt");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A loaded vibe session comes back in the mode it was left in
+/// (auto-approve): it is set again before the prompt.
+#[tokio::test]
+async fn acp_sets_the_mode_again_after_a_load() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_mode_load.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("6addc339-ecf5-d995-a253-f231a4c8b779".into());
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+    assert_eq!(
+        sent_methods(&fake),
+        [
+            "initialize",
+            "session/load",
+            "session/set_config_option",
+            "session/prompt"
+        ]
+    );
+    assert_eq!(fake.sent_lines()[2]["params"]["value"], "ask");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// An agent with modes of its own and no map has no `ask`: the prompt is
+/// failed, not sent, and the policy taken out of what the session offers.
+#[tokio::test]
+async fn acp_refuses_ask_for_an_agent_with_modes_and_no_map() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(
+        why.contains("policy 'ask' is not available for fake-acp")
+            && why.contains("[harnesses.fake-acp] has no `modes` map"),
+        "{why}"
+    );
+    assert!(refused(&events, PermissionPolicy::Ask), "{events:?}");
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A mapped mode the agent does not offer is never sent (vibe-acp answers
+/// `session/set_mode` of one with `{}` and stays where it is).
+#[tokio::test]
+async fn acp_refuses_a_mode_the_agent_does_not_offer() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = acp_with_modes(&[(PermissionPolicy::Ask, "plan")])
+        .start_session(cfg)
+        .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(why.contains("does not offer mode 'plan'"), "{why}");
+    assert!(refused(&events, PermissionPolicy::Ask));
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A read-back that differs from the mode asked for holds the session: no
+/// prompt goes. (The lines are vibe-acp 2.26.1's, the answer changed.)
+#[tokio::test]
+async fn acp_refuses_a_mode_whose_read_back_differs() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let option = |current: &str| {
+        format!(
+            r#"[{{"id":"mode","category":"mode","type":"select","currentValue":"{current}","options":[{{"value":"ask"}},{{"value":"accept-edits"}}]}}]"#
+        )
+    };
+    let new = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s1","modes":{{"currentModeId":"accept-edits","availableModes":[{{"id":"ask"}},{{"id":"accept-edits"}}]}},"configOptions":{}}}}}"#,
+        option("accept-edits")
+    );
+    let answer = format!(
+        r#"{{"jsonrpc":"2.0","id":3,"result":{{"configOptions":{}}}}}"#,
+        option("accept-edits")
+    );
+    let (mut cfg, _gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            &new,
+            r#">> {"method": "session/set_config_option"}"#,
+            &answer,
+        ],
+    );
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(
+        why.contains("was set to mode 'ask' and is in 'accept-edits'"),
+        "{why}"
+    );
+    assert!(refused(&events, PermissionPolicy::Ask));
+    assert_eq!(
+        sent_methods(&fake),
+        ["initialize", "session/new", "session/set_config_option"]
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A resumed session whose answer names no modes cannot be checked: a
+/// mapped policy is refused rather than left to the mode it was left in.
+#[tokio::test]
+async fn acp_refuses_a_mapped_policy_after_a_resume_that_names_no_modes() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (mut cfg, _gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"sessionCapabilities":{"resume":{}}}}}"#,
+            r#">> {"method": "session/resume"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{}}"#,
+        ],
+    );
+    cfg.policy = PermissionPolicy::Ask;
+    cfg.resume = Some("s1".into());
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(why.contains("did not say which modes"), "{why}");
+    assert_eq!(sent_methods(&fake), ["initialize", "session/resume"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// The agent going into a wider mode by itself mid-turn stops the turn and
+/// is set back. (vibe-acp 2.26.1 was not seen to change its own mode; the
+/// update is the spec's.)
+#[tokio::test]
+async fn acp_sets_the_mode_back_when_the_agent_leaves_it() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let option = r#"[{"id":"mode","category":"mode","type":"select","currentValue":"ask","options":[{"value":"ask"},{"value":"auto-approve"}]}]"#;
+    let new = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s1","modes":{{"currentModeId":"ask","availableModes":[{{"id":"ask"}},{{"id":"auto-approve"}}]}},"configOptions":{option}}}}}"#
+    );
+    let (mut cfg, _gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            &new,
+            r#">> {"method": "session/prompt"}"#,
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"current_mode_update","currentModeId":"auto-approve"}}}"#,
+            r#">> {"method": "session/cancel"}"#,
+            r#">> {"method": "session/set_config_option"}"#,
+            r#"{"jsonrpc":"2.0","id":4,"result":{"configOptions":[{"id":"mode","category":"mode","type":"select","currentValue":"ask","options":[{"value":"ask"},{"value":"auto-approve"}]}]}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#,
+        ],
+    );
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(interrupted(&events), "{events:?}");
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::Notice(n) if n.contains("went into its mode 'auto-approve'"))
+    ));
+    let sent = fake.sent_lines();
+    assert_eq!(
+        sent_methods(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/prompt",
+            "session/cancel",
+            "session/set_config_option"
+        ]
+    );
+    assert_eq!(sent[4]["params"]["value"], "ask");
+    // The mode took again: the next prompt goes.
+    assert!(!refused(&events, PermissionPolicy::Ask));
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// `--print` fails where the TUI would ask for another policy.
+#[tokio::test]
+async fn headless_fails_when_an_acp_agent_cannot_hold_ask() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let handle = acp_harness().start_session(cfg).unwrap();
+    let mut run = headless_run(&fake, unharness::headless::Format::Json, false);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "pong?".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "error");
+    assert!(
+        result["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("has no `modes` map")),
+        "{result}"
+    );
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
 }
 
 #[tokio::test]
@@ -2134,7 +2497,7 @@ async fn headless_runs_an_acp_agent() {
     let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let handle = acp_harness().start_session(cfg).unwrap();
+    let handle = claude_acp().start_session(cfg).unwrap();
     let mut run = headless_run(&fake, unharness::headless::Format::StreamJson, false);
     tokio::time::timeout(
         Duration::from_secs(10),

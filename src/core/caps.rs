@@ -278,6 +278,10 @@ impl Capabilities {
         if let Some(s) = update.slash_commands {
             self.slash_commands = s;
         }
+        if let Some(refused) = &update.refused_policies {
+            self.permission_policies
+                .retain(|p| !refused.contains(&p.policy));
+        }
     }
 
     pub fn supports_policy(&self, policy: PermissionPolicy) -> Option<&PolicySupport> {
