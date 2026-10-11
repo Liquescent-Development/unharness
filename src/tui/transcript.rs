@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::code::sanitize;
+use super::code::{sanitize, strip_controls};
 use crate::core::conversations::{AgentRecord, BlockRecord, ShellStatus};
 use crate::core::{HookOutcome, SubagentStatus};
 
@@ -923,6 +923,134 @@ pub fn tool_summary_full(name: &str, input: &Value) -> String {
     sanitize(&s).replace('\n', " ⏎ ")
 }
 
+/// What a tool call's body is, by its name and input: how the transcript
+/// draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolBody<'a> {
+    /// An edit of `path`: `old` replaced by `new`.
+    Replace {
+        old: &'a str,
+        new: &'a str,
+        path: &'a str,
+    },
+    /// `path` written whole.
+    Write { content: &'a str, path: &'a str },
+    /// `path` read: the output is the file.
+    Read { path: &'a str },
+    /// Anything else: the output.
+    Output,
+}
+
+pub fn tool_body<'a>(name: &str, input: &'a Value) -> ToolBody<'a> {
+    let get = |k: &str| input.get(k).and_then(Value::as_str);
+    let path = get("file_path").or_else(|| get("path")).unwrap_or("");
+    let lname = name.to_lowercase();
+    if (lname.contains("edit") || lname == "str_replace" || lname == "replace")
+        && let (Some(old), Some(new)) = (
+            get("old_string").or_else(|| get("old_str")),
+            get("new_string").or_else(|| get("new_str")),
+        )
+    {
+        ToolBody::Replace { old, new, path }
+    } else if (lname == "write" || lname == "write_file" || lname == "create_file")
+        && let Some(content) = get("content").or_else(|| get("contents"))
+    {
+        ToolBody::Write { content, path }
+    } else if lname == "read" || lname == "read_file" {
+        ToolBody::Read { path }
+    } else {
+        ToolBody::Output
+    }
+}
+
+/// A tool that runs a shell command.
+fn is_command(name: &str) -> bool {
+    // `exec_command` is codex-acp's, `execute` the ACP kind.
+    matches!(
+        name,
+        "Bash" | "bash" | "shell" | "command_execution" | "exec_command" | "execute"
+    )
+}
+
+/// Everything a block says, as it was written, for a copy of all of it:
+/// also what the transcript does not show (a collapsed call's output, a
+/// command's lines after its first, a hook's after its first, a response's
+/// markdown). `None` when it says nothing.
+pub fn block_text(b: &Block) -> Option<String> {
+    let lines = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|p| p.trim_end_matches('\n'))
+            .filter(|p| !blank(p))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let text = match b {
+        Block::User { text }
+        | Block::Assistant { text, .. }
+        | Block::Thought { text, .. }
+        | Block::Handoff { text, .. } => text.clone(),
+        Block::System(t) | Block::Notice(t) | Block::Error(t) => t.clone(),
+        Block::Hook { output, .. } => output.clone(),
+        Block::Shell {
+            command, output, ..
+        } => lines(&[command, output]),
+        // A subagent's report, or why it did not start.
+        Block::Tool {
+            agent: Some(run),
+            output,
+            ..
+        } => match run.report() {
+            "" => output.clone(),
+            report => report.to_string(),
+        },
+        Block::Tool {
+            name,
+            input,
+            output,
+            is_error,
+            ..
+        } => {
+            let body = match tool_body(name, input) {
+                ToolBody::Replace { old, new, .. } => old
+                    .lines()
+                    .map(|l| format!("-{l}"))
+                    .chain(new.lines().map(|l| format!("+{l}")))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                ToolBody::Write { content, .. } => content.to_string(),
+                ToolBody::Read { .. } => output.clone(),
+                ToolBody::Output => {
+                    let command = input
+                        .get("command")
+                        .or_else(|| input.get("cmd"))
+                        .and_then(Value::as_str)
+                        .filter(|_| is_command(name));
+                    let call = match command {
+                        Some(command) => command.to_string(),
+                        None if input_beyond_summary(name, input) => {
+                            serde_json::to_string_pretty(input).unwrap_or_default()
+                        }
+                        None => tool_summary_full(name, input),
+                    };
+                    return finish(lines(&[&call, output]));
+                }
+            };
+            if *is_error {
+                lines(&[&body, output])
+            } else {
+                body
+            }
+        }
+    };
+    finish(text)
+}
+
+fn finish(text: String) -> Option<String> {
+    let text = strip_controls(&text);
+    (!blank(&text)).then_some(text)
+}
+
 /// Whether the summary line leaves part of a call's input out, so that the
 /// expanded call shows the input: a call [`known_summary`] has no case for,
 /// whose input is more than one line of text.
@@ -956,9 +1084,7 @@ fn known_summary(name: &str, input: &Value) -> Option<String> {
     };
     match name {
         // `exec_command` is codex-acp's, `execute` the ACP kind.
-        "Bash" | "bash" | "shell" | "command_execution" | "exec_command" | "execute" => {
-            pick(&["command", "cmd"])
-        }
+        name if is_command(name) => pick(&["command", "cmd"]),
         "Read" | "Write" | "Edit" | "MultiEdit" | "read" | "write" | "edit" => {
             pick(&["file_path", "path", "filename"])
         }
@@ -1064,6 +1190,144 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn call(name: &str, input: Value, output: &str, is_error: bool) -> Block {
+        Block::Tool {
+            id: "t".into(),
+            name: name.into(),
+            input,
+            output: output.into(),
+            is_error,
+            done: true,
+            collapsed: true,
+            started: Instant::now(),
+            duration: None,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn a_whole_block_copies_all_it_says_as_written() {
+        let output: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+        let output = output.join("\n");
+        // All of a collapsed call's output, and all of a command.
+        let bash = call(
+            "Bash",
+            json!({"command": "cd src &&\n  ls -la"}),
+            &output,
+            false,
+        );
+        assert_eq!(
+            block_text(&bash).unwrap(),
+            format!("cd src &&\n  ls -la\n{output}")
+        );
+        let write = call(
+            "Write",
+            json!({"file_path": "Makefile", "content": "all:\n\tcargo build\n"}),
+            "File created",
+            false,
+        );
+        assert_eq!(block_text(&write).as_deref(), Some("all:\n\tcargo build\n"));
+        let edit = json!({"file_path": "a.rs", "old_string": "a\nb", "new_string": "c"});
+        assert_eq!(
+            block_text(&call("Edit", edit.clone(), "ok", false)).as_deref(),
+            Some("-a\n-b\n+c")
+        );
+        assert_eq!(
+            block_text(&call("Edit", edit, "no match", true)).as_deref(),
+            Some("-a\n-b\n+c\nno match")
+        );
+        let read = call("Read", json!({"file_path": "a.rs"}), "fn a() {}", false);
+        assert_eq!(block_text(&read).as_deref(), Some("fn a() {}"));
+        // A call whose summary leaves its input out: the input as JSON.
+        let mcp = call(
+            "mcp__forge__search",
+            json!({"q": "x", "n": 5}),
+            "3 found",
+            false,
+        );
+        assert_eq!(
+            block_text(&mcp).as_deref(),
+            Some("{\n  \"n\": 5,\n  \"q\": \"x\"\n}\n3 found")
+        );
+        let grep = call("Grep", json!({"pattern": "fn main"}), "", false);
+        assert_eq!(block_text(&grep).as_deref(), Some("fn main"));
+
+        let reply = Block::Assistant {
+            text: "Use **this**:\n\n```sh\nls\n```".into(),
+            sender: "Claude".into(),
+            duration: None,
+        };
+        assert_eq!(
+            block_text(&reply).as_deref(),
+            Some("Use **this**:\n\n```sh\nls\n```")
+        );
+        let shell = Block::Shell {
+            command: "ls".into(),
+            output: "a\nb\n".into(),
+            dropped: 0,
+            status: ShellStatus::Exited { code: 0 },
+            sent: false,
+            started: Instant::now(),
+            duration: None,
+        };
+        assert_eq!(block_text(&shell).as_deref(), Some("ls\na\nb"));
+        let hook = Block::Hook {
+            id: "h".into(),
+            name: "PreToolUse:Bash".into(),
+            state: HookState::Running,
+            output: "first\nsecond".into(),
+            turn: 0,
+        };
+        assert_eq!(block_text(&hook).as_deref(), Some("first\nsecond"));
+        assert_eq!(
+            block_text(&Block::Notice("\x1b[1mbold\x1b[0m".into())).as_deref(),
+            Some("bold")
+        );
+        assert_eq!(block_text(&call("Bash", json!({}), "", false)), None);
+    }
+
+    #[test]
+    fn a_call_body_is_told_by_its_name_and_input() {
+        let edit = json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"});
+        let replace = ToolBody::Replace {
+            old: "x",
+            new: "y",
+            path: "a.rs",
+        };
+        assert_eq!(tool_body("Edit", &edit), replace);
+        assert_eq!(tool_body("MultiEdit", &edit), replace);
+        let codex = json!({"path": "a.rs", "old_str": "x", "new_str": "y"});
+        assert_eq!(tool_body("str_replace", &codex), replace);
+        let write = json!({"file_path": "a.rs", "content": "y"});
+        assert_eq!(
+            tool_body("Write", &write),
+            ToolBody::Write {
+                content: "y",
+                path: "a.rs"
+            }
+        );
+        assert_eq!(
+            tool_body("create_file", &json!({"path": "a.rs", "contents": "y"})),
+            ToolBody::Write {
+                content: "y",
+                path: "a.rs"
+            }
+        );
+        assert_eq!(
+            tool_body("Read", &json!({"file_path": "a.rs"})),
+            ToolBody::Read { path: "a.rs" }
+        );
+        assert_eq!(
+            tool_body("Bash", &json!({"command": "ls"})),
+            ToolBody::Output
+        );
+        // An edit without its strings is output.
+        assert_eq!(
+            tool_body("Edit", &json!({"file_path": "a.rs"})),
+            ToolBody::Output
+        );
+    }
 
     #[test]
     fn assistant_deltas_merge_and_turn_stamps_duration() {

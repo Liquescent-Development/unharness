@@ -15,14 +15,23 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::code::{code_lines, diff_lines, sanitize};
+use super::code::{code_lines, diff_lines, sanitize, strip_controls};
+use super::rows::{Part, Rows};
+use super::selection::{Join, RowCopy};
 
 /// `done` when no more of `text` is coming: a fence it leaves open is
 /// then not still streaming.
 pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec<Line<'static>> {
+    render_markdown_rows(text, max_width, done).into_lines()
+}
+
+/// [`render_markdown_to_lines`], with what a copy takes from each row:
+/// the text, a list's markers as markdown writes them, not the margin,
+/// quote bars, code block frames or table rules.
+pub fn render_markdown_rows(text: &str, max_width: usize, done: bool) -> Rows {
     let (text, code) = close_outdented_fences(sanitize(text));
     let text = html_as_text(&text, &code);
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut lines = Rows::new();
     let chunks = split_bare_diffs(&text, &code);
     for (i, &chunk) in chunks.iter().enumerate() {
         let (Chunk::Markdown(part) | Chunk::Diff(part)) = chunk;
@@ -30,20 +39,53 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec
         // neither side draws.
         let start = part.as_ptr() as usize - text.as_ptr() as usize;
         let blank = text[..start].ends_with("\n\n") || part.starts_with('\n');
-        if blank && !lines.is_empty() && !is_blank(lines.last()) {
-            lines.push(Line::default());
+        if blank && !lines.is_empty() && !is_blank(lines.lines().last()) {
+            lines.blank();
         }
         match chunk {
             // Text before a hunk is all there: a fence it leaves open is
             // ended by the hunk.
             Chunk::Markdown(md) => {
                 let done = done || i + 1 < chunks.len();
-                lines.extend(Renderer::new(md, max_width, done).run());
+                lines.append(Renderer::new(md, max_width, done).run());
             }
-            Chunk::Diff(diff) => lines.extend(diff_lines(diff, max_width.saturating_sub(2))),
+            Chunk::Diff(diff) => lines.append(diff_lines(diff, max_width.saturating_sub(2))),
         }
     }
     lines
+}
+
+/// The text of each code block in `text`, fenced or indented, in the order
+/// [`render_markdown_rows`] marks them ([`Rows::code`]), with its tabs.
+pub fn code_blocks(text: &str) -> Vec<String> {
+    // Tabs are kept: CommonMark reads them at stops of four, as `sanitize`
+    // expands them, so the blocks are the same.
+    let (text, code) = close_outdented_fences(strip_controls(text));
+    let text = html_as_text(&text, &code);
+    let mut blocks = Vec::new();
+    for chunk in split_bare_diffs(&text, &code) {
+        let Chunk::Markdown(md) = chunk else {
+            continue;
+        };
+        let mut block: Option<String> = None;
+        for event in Parser::new_ext(md, OPTIONS) {
+            match event {
+                Event::Start(Tag::CodeBlock(_)) => block = Some(String::new()),
+                Event::Text(t) => {
+                    if let Some(b) = &mut block {
+                        b.push_str(&t);
+                    }
+                }
+                Event::End(TagEnd::CodeBlock) => {
+                    if let Some(b) = block.take() {
+                        blocks.push(b.trim_end_matches('\n').to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    blocks
 }
 
 fn is_blank(line: Option<&Line<'_>>) -> bool {
@@ -327,7 +369,7 @@ struct Renderer<'a> {
     width: usize,
     /// No more of the source is coming.
     done: bool,
-    out: Vec<Line<'static>>,
+    out: Rows,
     containers: Vec<Container>,
     /// The inline text of the block being read; a `\n` in it breaks the
     /// line.
@@ -355,7 +397,7 @@ impl<'a> Renderer<'a> {
             source,
             width,
             done,
-            out: Vec::new(),
+            out: Rows::new(),
             containers: Vec::new(),
             inline: Vec::new(),
             styles: Vec::new(),
@@ -366,7 +408,7 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn run(mut self) -> Vec<Line<'static>> {
+    fn run(mut self) -> Rows {
         for (event, range) in Parser::new_ext(self.source, OPTIONS).into_offset_iter() {
             match event {
                 Event::Start(tag) => self.start(tag, range.start),
@@ -388,7 +430,12 @@ impl<'a> Renderer<'a> {
                 Event::Rule => {
                     self.block_start(range.start);
                     let width = self.avail().min(40);
-                    self.push_line(vec![Span::styled("─".repeat(width), DIM)]);
+                    // As markdown writes it: nothing would leave two
+                    // blank lines in a copy.
+                    self.push_line(
+                        vec![Part::Stand(Span::styled("─".repeat(width), DIM), "---")],
+                        Join::Line,
+                    );
                     self.block_end(range.end);
                 }
             }
@@ -494,9 +541,9 @@ impl<'a> Renderer<'a> {
                 // An empty item (or one whose text is still on its way)
                 // is its marker alone.
                 if let Some(Container::Item { fresh: true, .. }) = self.containers.last() {
-                    let mut line = self.prefix();
+                    let mut line = self.prefix(Some(Join::Line));
                     trim_end(&mut line);
-                    self.out.push(Line::from(line));
+                    self.out.text(line, Join::Line);
                 }
                 self.containers.pop();
             }
@@ -576,8 +623,8 @@ impl<'a> Renderer<'a> {
                 l.trim_matches(|c: char| c.is_whitespace() || c == '>')
                     .is_empty()
             });
-        if blank && !self.out.is_empty() && !is_blank(self.out.last()) {
-            self.out.push(Line::default());
+        if blank && !self.out.is_empty() && !is_blank(self.out.lines().last()) {
+            self.out.blank();
         }
     }
 
@@ -626,48 +673,78 @@ impl<'a> Renderer<'a> {
     }
 
     /// The margin, a bar per quote and the item markers: an item's marker
-    /// on its first line, spaces as wide on the others.
-    fn prefix(&mut self) -> Vec<Span<'static>> {
-        let mut spans = vec![Span::raw("  ")];
+    /// on its first line, spaces as wide on the others. For a copy the
+    /// markers are markdown's (`• ` as `- `), and the spaces an item's own
+    /// lines are indented by in it, which `join` says a row is the first
+    /// of; `None` for a row of drawing.
+    fn prefix(&mut self, join: Option<Join>) -> Vec<Part> {
+        let mut parts = vec![Part::Draw(Span::raw("  "))];
         for c in &mut self.containers {
             match c {
-                Container::Quote => spans.push(Span::styled("│ ", DIM)),
+                Container::Quote => parts.push(Part::Draw(Span::styled("│ ", DIM))),
                 Container::List(_) => {}
                 Container::Item { marker, fresh } => {
                     if std::mem::take(fresh) {
-                        spans.push(Span::styled(
+                        let span = Span::styled(
                             marker.clone(),
                             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                        ));
+                        );
+                        parts.push(if marker == "• " {
+                            Part::Stand(span, "- ")
+                        } else {
+                            Part::Text(span)
+                        });
                     } else {
-                        spans.push(Span::raw(" ".repeat(text_width(marker))));
+                        let span = Span::raw(" ".repeat(text_width(marker)));
+                        parts.push(if join == Some(Join::Line) {
+                            Part::Text(span)
+                        } else {
+                            Part::Draw(span)
+                        });
                     }
                 }
             }
         }
-        spans
+        parts
     }
 
-    fn push_line(&mut self, content: Vec<Span<'static>>) {
-        let mut line = self.prefix();
+    fn push_line(&mut self, content: Vec<Part>, join: Join) {
+        let mut line = self.prefix(Some(join));
         line.extend(content);
-        self.out.push(Line::from(line));
+        self.out.text(line, join);
     }
 
-    /// A line drawn elsewhere with its own two-cell margin (code), moved in
-    /// by the containers it is inside.
-    fn push_drawn(&mut self, line: Line<'static>) {
+    /// A row of drawing (a rule, a code block's frame).
+    fn push_drawing(&mut self, content: Vec<Span<'static>>) {
+        let mut line = self.prefix(None);
+        line.extend(content.into_iter().map(Part::Draw));
+        self.out.drawing(line);
+    }
+
+    /// Rows drawn elsewhere with their own two-cell margin (code), moved
+    /// in by the containers they are inside.
+    fn push_drawn(&mut self, rows: Rows) {
         if self.containers.is_empty() {
-            self.out.push(line);
+            self.out.append(rows);
             return;
         }
-        let mut spans = line.spans;
-        if let Some(first) = spans.first_mut()
-            && let Some(rest) = first.content.strip_prefix("  ")
-        {
-            first.content = rest.to_string().into();
+        let (lines, copies, _) = rows.into_parts();
+        for (line, copy) in lines.into_iter().zip(copies) {
+            let mut spans = line.spans;
+            let mut copy = copy;
+            if let Some(first) = spans.first_mut()
+                && let Some(rest) = first.content.strip_prefix("  ")
+            {
+                first.content = rest.to_string().into();
+                copy = copy.shifted(-2);
+            }
+            let join = match &copy {
+                RowCopy::Text { join, .. } => Some(*join),
+                RowCopy::Drawing => None,
+            };
+            let prefix = self.prefix(join);
+            self.out.push_after(prefix, Line::from(spans), copy);
         }
-        self.push_line(spans);
     }
 
     /// Draws the inline text read so far, wrapped to the room left.
@@ -694,8 +771,8 @@ impl<'a> Renderer<'a> {
                 .into_iter()
                 .map(|s| Span::styled(s.content, base.patch(s.style)))
                 .collect();
-            for wrapped in wrap_styled(&line, self.avail()) {
-                self.push_line(wrapped);
+            for (wrapped, join) in wrap_styled(&line, self.avail()) {
+                self.push_line(wrapped.into_iter().map(Part::Text).collect(), join);
             }
         }
     }
@@ -707,7 +784,8 @@ impl<'a> Renderer<'a> {
             code.label.as_str()
         };
         let avail = self.width.saturating_sub(self.prefix_width());
-        self.push_line(vec![
+        let start = self.out.len();
+        self.push_drawing(vec![
             Span::styled("┌─ ", DIM),
             Span::styled(
                 label.to_string(),
@@ -721,9 +799,7 @@ impl<'a> Renderer<'a> {
                 DIM,
             ),
         ]);
-        for line in code_lines(&code.text, &code.label, avail) {
-            self.push_drawn(line);
-        }
+        self.push_drawn(code_lines(&code.text, &code.label, avail));
         let end = if closed {
             Span::styled(
                 format!("└{}", "─".repeat(avail.saturating_sub(2).min(40))),
@@ -732,34 +808,40 @@ impl<'a> Renderer<'a> {
         } else {
             Span::styled("┆ …", DIM.add_modifier(Modifier::ITALIC))
         };
-        self.push_line(vec![end]);
+        self.push_drawing(vec![end]);
+        self.out.mark_code(start..self.out.len());
     }
 
     fn table_block(&mut self, t: TableBuild) {
-        let lines = table_lines(&t, self.avail()).unwrap_or_else(|| {
-            // Too narrow for a few cells a column: each row as a line of
-            // text, its cells between pipes.
-            std::iter::once(&t.header)
-                .chain(&t.rows)
-                .flat_map(|row| {
-                    let mut spans = Vec::new();
-                    for (c, cell) in row.iter().enumerate() {
-                        if c > 0 {
-                            spans.push(Span::styled(" | ", DIM));
-                        }
-                        for (i, line) in cell.iter().enumerate() {
-                            if i > 0 {
-                                spans.push(Span::raw(" "));
-                            }
-                            spans.extend(line.iter().cloned());
-                        }
+        if let Some(lines) = table_lines(&t, self.avail()) {
+            for line in lines {
+                if line.iter().all(|p| matches!(p, Part::Draw(_))) {
+                    self.push_drawing(line.into_iter().map(|p| p.span().clone()).collect());
+                } else {
+                    self.push_line(line, Join::Line);
+                }
+            }
+            return;
+        }
+        // Too narrow for a few cells a column: each row as a line of text,
+        // its cells between pipes.
+        let avail = self.avail();
+        for row in std::iter::once(&t.header).chain(&t.rows) {
+            let mut spans = Vec::new();
+            for (c, cell) in row.iter().enumerate() {
+                if c > 0 {
+                    spans.push(Span::styled(" | ", DIM));
+                }
+                for (i, line) in cell.iter().enumerate() {
+                    if i > 0 {
+                        spans.push(Span::raw(" "));
                     }
-                    wrap_styled(&spans, self.avail())
-                })
-                .collect()
-        });
-        for line in lines {
-            self.push_line(line);
+                    spans.extend(line.iter().cloned());
+                }
+            }
+            for (wrapped, join) in wrap_styled(&spans, avail) {
+                self.push_line(wrapped.into_iter().map(Part::Text).collect(), join);
+            }
         }
     }
 }
@@ -858,8 +940,9 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
 /// Word wrap of styled text to `width` cells. Spaces between words on a
 /// line are kept as written (inside inline code, say); where a line breaks
 /// they are dropped. A word wider than a line is broken by grapheme.
-/// Always at least one (maybe empty) line.
-fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
+/// Always at least one (maybe empty) line, each with how it goes on from
+/// the one before (the first is a [`Join::Line`]).
+fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<(Vec<Span<'static>>, Join)> {
     let width = width.max(1);
     let graphemes: Vec<(&str, Style, usize)> = spans
         .iter()
@@ -869,8 +952,9 @@ fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>>
                 .map(move |g| (g, s.style, UnicodeWidthStr::width(g)))
         })
         .collect();
-    let mut lines: Vec<Vec<(&str, Style)>> = Vec::new();
+    let mut lines: Vec<(Vec<(&str, Style)>, Join)> = Vec::new();
     let mut line: Vec<(&str, Style)> = Vec::new();
+    let mut join = Join::Line;
     let mut used = 0;
     let mut i = 0;
     while i < graphemes.len() {
@@ -894,22 +978,24 @@ fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>>
             continue;
         }
         if used > 0 {
-            lines.push(std::mem::take(&mut line));
+            lines.push((std::mem::take(&mut line), join));
+            join = Join::Spaces(gap.len());
             used = 0;
         }
         for &(g, style, w) in word {
             if used > 0 && used + w > width {
-                lines.push(std::mem::take(&mut line));
+                lines.push((std::mem::take(&mut line), join));
+                join = Join::Nothing;
                 used = 0;
             }
             line.push((g, style));
             used += w;
         }
     }
-    lines.push(line);
+    lines.push((line, join));
     lines
         .into_iter()
-        .map(|l| {
+        .map(|(l, join)| {
             let mut out: Vec<Span<'static>> = Vec::new();
             for (g, style) in l {
                 match out.last_mut() {
@@ -917,7 +1003,7 @@ fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>>
                     _ => out.push(Span::styled(g.to_string(), style)),
                 }
             }
-            out
+            (out, join)
         })
         .collect()
 }
@@ -926,7 +1012,9 @@ fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>>
 /// that fits, else the widest narrowed first and each cell wrapped in its
 /// column, with a rule under the header and, when a row wraps, between
 /// rows. `None` when there is no room for a few cells a column.
-fn table_lines(t: &TableBuild, avail: usize) -> Option<Vec<Vec<Span<'static>>>> {
+/// A rule is all drawing; a copy takes a row's cells with a tab between
+/// them.
+fn table_lines(t: &TableBuild, avail: usize) -> Option<Vec<Vec<Part>>> {
     let n = t.aligns.len().max(1);
     let fill = |row: &[Cell]| -> Vec<Cell> {
         let mut row = row.to_vec();
@@ -952,19 +1040,23 @@ fn table_lines(t: &TableBuild, avail: usize) -> Option<Vec<Vec<Span<'static>>>> 
     let wrap = |row: &[Cell]| -> Vec<Cell> {
         row.iter()
             .zip(&widths)
-            .map(|(cell, w)| cell.iter().flat_map(|l| wrap_styled(l, *w)).collect())
+            .map(|(cell, w)| {
+                cell.iter()
+                    .flat_map(|l| wrap_styled(l, *w).into_iter().map(|(l, _)| l))
+                    .collect()
+            })
             .collect()
     };
     let header = wrap(&header);
     let rows: Vec<Vec<Cell>> = rows.iter().map(|r| wrap(r)).collect();
-    let rule = vec![Span::styled(
+    let rule = vec![Part::Draw(Span::styled(
         widths
             .iter()
             .map(|w| "─".repeat(*w))
             .collect::<Vec<_>>()
             .join("─┼─"),
         DIM,
-    )];
+    ))];
     // Rows that wrap run into each other without a rule between them.
     let ruled = rows.iter().any(|r| r.iter().any(|c| c.len() > 1));
     let mut out = row_lines(&header, &widths, &t.aligns);
@@ -978,14 +1070,14 @@ fn table_lines(t: &TableBuild, avail: usize) -> Option<Vec<Vec<Span<'static>>>> 
     Some(out)
 }
 
-fn row_lines(row: &[Cell], widths: &[usize], aligns: &[Alignment]) -> Vec<Vec<Span<'static>>> {
+fn row_lines(row: &[Cell], widths: &[usize], aligns: &[Alignment]) -> Vec<Vec<Part>> {
     let height = row.iter().map(Vec::len).max().unwrap_or(1);
     (0..height)
         .map(|k| {
             let mut spans = Vec::new();
             for (c, cell) in row.iter().enumerate() {
                 if c > 0 {
-                    spans.push(Span::styled(" │ ", DIM));
+                    spans.push(Part::Stand(Span::styled(" │ ", DIM), "\t"));
                 }
                 let content = cell.get(k).cloned().unwrap_or_default();
                 let pad = widths[c].saturating_sub(spans_width(&content));
@@ -994,9 +1086,9 @@ fn row_lines(row: &[Cell], widths: &[usize], aligns: &[Alignment]) -> Vec<Vec<Sp
                     Some(Alignment::Right) => (pad, 0),
                     _ => (0, pad),
                 };
-                spans.push(Span::raw(" ".repeat(left)));
-                spans.extend(content);
-                spans.push(Span::raw(" ".repeat(right)));
+                spans.push(Part::Draw(Span::raw(" ".repeat(left))));
+                spans.extend(content.into_iter().map(Part::Text));
+                spans.push(Part::Draw(Span::raw(" ".repeat(right))));
             }
             trim_end(&mut spans);
             spans
@@ -1006,14 +1098,15 @@ fn row_lines(row: &[Cell], widths: &[usize], aligns: &[Alignment]) -> Vec<Vec<Sp
 
 /// Drops the spaces a row ends with, so that a copy has no padding at the
 /// end of each line.
-fn trim_end(spans: &mut Vec<Span<'static>>) {
-    while let Some(last) = spans.last_mut() {
-        let kept = last.content.trim_end().len();
+fn trim_end(parts: &mut Vec<Part>) {
+    while let Some(last) = parts.last_mut() {
+        let span = last.span_mut();
+        let kept = span.content.trim_end().len();
         if kept > 0 {
-            last.content.to_mut().truncate(kept);
+            span.content.to_mut().truncate(kept);
             return;
         }
-        spans.pop();
+        parts.pop();
     }
 }
 
@@ -1049,6 +1142,95 @@ fn fit_columns(natural: &[usize], avail: usize) -> Vec<usize> {
 mod tests {
     use super::*;
     use crate::tui::code::line_text;
+
+    #[test]
+    fn code_blocks_are_the_ones_drawn() {
+        let cases = [
+            "```rust\nfn a() {}\n```\ntext\n\n    indented\n\n~~~\nb\n~~~",
+            "1. step\n   ```sh\n   ls\n```\n2. next\n   ```\n   pwd\n   ```",
+            "> ```\n> quoted\n> ```",
+            "before\n@@ -1 +1 @@\n-a\n+b\nafter\n```diff\n-x\n+y\n```",
+            "<div>\n```\nhtml after\n```",
+            "```py\nstill streaming",
+            "| a | b |\n|---|---|\n| `x` | y |",
+        ];
+        for md in cases {
+            let drawn = render_markdown_rows(md, 40, true).code().len();
+            assert_eq!(code_blocks(md).len(), drawn, "{md}");
+        }
+        assert_eq!(
+            code_blocks(cases[0]),
+            ["fn a() {}", "indented", "b"].map(String::from)
+        );
+        // A fence its list item closed at column 0 is one block.
+        assert_eq!(code_blocks(cases[1]), ["ls", "pwd"].map(String::from));
+        assert_eq!(code_blocks(cases[3]), ["-x\n+y"].map(String::from));
+        assert_eq!(
+            code_blocks("```make\nall:\n\tcargo build\n```"),
+            ["all:\n\tcargo build"].map(String::from)
+        );
+    }
+
+    fn copied(md: &str, width: usize) -> String {
+        render_markdown_rows(md, width, true).copied()
+    }
+
+    #[test]
+    fn a_copy_takes_a_wrapped_paragraph_as_one_line() {
+        let md = "one two three four five six seven\nnext line";
+        assert!(render_markdown_rows(md, 16, true).len() > 3);
+        assert_eq!(copied(md, 16), md);
+        // A word longer than the line goes on without a space.
+        let long = "x".repeat(30);
+        assert_eq!(
+            copied(&format!("see {long} end"), 12),
+            format!("see {long} end")
+        );
+        assert_eq!(
+            copied("> quoted text that wraps around", 14),
+            "quoted text that wraps around"
+        );
+        assert_eq!(copied("## A heading", 40), "## A heading");
+        // The spaces where it wrapped, as many as there were.
+        assert_eq!(copied("aaa  bbb", 4), "aaa  bbb");
+    }
+
+    #[test]
+    fn a_copy_takes_lists_as_markdown() {
+        assert_eq!(
+            copied("- first item that wraps\n- second\n  - nested", 16),
+            "- first item that wraps\n- second\n  - nested"
+        );
+        assert_eq!(copied("1. one\n2. two", 40), "1. one\n2. two");
+        assert_eq!(
+            copied("1. step\n\n   more about it", 40),
+            "1. step\n\n   more about it"
+        );
+    }
+
+    #[test]
+    fn a_copy_takes_code_without_its_frame() {
+        let md = "before\n\n```rust\nfn main() {\n    run();\n}\n```\nafter";
+        let rows = render_markdown_rows(md, 40, true);
+        assert_eq!(rows.copied(), "before\n\nfn main() {\n    run();\n}\nafter");
+        let frame = rows.code()[0].clone();
+        assert_eq!(frame.len(), 5);
+        assert!(line_text(&rows.lines()[frame.start]).contains("rust"));
+        assert_eq!(rows.copies()[frame.start], RowCopy::Drawing);
+        assert_eq!(rows.copies()[frame.end - 1], RowCopy::Drawing);
+        // In a list item the code keeps the item's indentation.
+        assert_eq!(
+            copied("1. step\n\n   ```sh\n   ls -la\n   ```", 40),
+            "1. step\n\n   ls -la"
+        );
+    }
+
+    #[test]
+    fn a_copy_takes_a_table_with_tabs_and_no_rule() {
+        let md = "| name | size |\n|---|--:|\n| a.rs | 10 |\n| b.rs | 200 |";
+        assert_eq!(copied(md, 40), "name\tsize\na.rs\t10\nb.rs\t200");
+        assert_eq!(copied("a\n\n---\n\nb", 40), "a\n\n---\n\nb");
+    }
 
     #[test]
     fn test_render_headers() {

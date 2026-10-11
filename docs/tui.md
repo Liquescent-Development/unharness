@@ -61,7 +61,8 @@ harness does not have, a sandbox level with no sandbox to enforce it.
 | `Shift+Up` / `Shift+Down` | Scroll two lines |
 | Mouse wheel, scrollbar | Scroll. Drag the thumb or click the track |
 | `↓ Jump to bottom` | Shown while scrolled up. Click it to follow new output again |
-| Drag, double click, triple click | Select text, a word (paths stay whole) or a row, copied on release |
+| Drag, double click, triple click | Select text, a word (paths stay whole) or a line, copied on release without the drawing around it |
+| Right click on a block | Copy all of it, also what is not shown: a call's command and whole output, a file it wrote, a response's markdown. On a code block in a response, that code alone |
 | `Ctrl+O` | Expand or collapse the last tool call's output |
 | `Ctrl+T` | Expand or collapse every tool call |
 | Click on a tool call | Expand or collapse it. On a call that spawned a subagent, open the subagent's transcript |
@@ -297,8 +298,22 @@ bottom edge scrolls.
   through the terminal: herdr hands it to the client you are attached
   with, which knows better than the pane whether you are at the desktop or
   over ssh.
-- The rows are copied as drawn, so a wrapped paragraph keeps its line
-  breaks and indent.
+- A copy takes the text and leaves out what is drawn around it: block
+  headers, a tool call's label and status, gutters, wrap marks, a
+  thought's box, code block frames, table rules and the row counting
+  hidden lines. A line wrapped over several rows comes out as one line.
+  Only what is copied is highlighted. A list keeps its `-` and numbers
+  and a table its cells, a tab between them; an edit keeps its `-` and
+  `+`, a written file does not. A drag over nothing but drawing (a label)
+  copies that as drawn. A table whose cells wrap is copied a row of the
+  screen at a time, and one too narrow for its columns with its `|`; a
+  right click on it copies the markdown.
+- A right click on a block copies all of it as it was written, also what
+  the transcript does not show: a tool call's whole command and output
+  (collapsed or not), the content of a file it wrote, an edit as `-` and
+  `+` lines, a response as markdown, a subagent's report. On a code block
+  in a response it copies that code alone, with its tabs. A `!` command's
+  output is what was kept of it.
 - Holding `Shift` while dragging gives you the terminal's own selection in
   most terminals. `mouse = false` in the config turns all of this off.
 

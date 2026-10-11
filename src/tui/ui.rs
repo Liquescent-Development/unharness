@@ -13,19 +13,21 @@ use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
+use super::app::{App, CodeRows, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
-    sanitize, wrap_words,
+    sanitize, wrap_words, wrap_words_joined, written_lines,
 };
-use super::markdown::render_markdown_to_lines;
+use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
     AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, takes_text,
 };
 use super::prompt;
+use super::rows::{Part, Rows, clamp_row};
+use super::selection::{self, Join, RowCopy};
 use super::transcript::{
-    Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
-    truncate_chars, waits_on_user,
+    Block as TBlock, HookState, ToolBody, input_beyond_summary, tool_body, tool_summary,
+    tool_summary_full, truncate_chars, waits_on_user,
 };
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
@@ -296,32 +298,36 @@ fn block_lines(
     thinking_live: bool,
     elapsed: f32,
 ) -> Vec<Line<'static>> {
-    block_layout(b, width, followed, thinking_live, elapsed).0
+    block_layout(b, width, followed, thinking_live, elapsed)
+        .0
+        .into_lines()
 }
 
-/// The rendered lines of one transcript block, `followed` by another, and
-/// which span of the first line is its status (a tool call's, a `!`
+/// The rendered rows of one transcript block, `followed` by another, and
+/// which span of the first row is its status (a tool call's, a `!`
 /// command's), drawn again on every frame while it runs ([`patch_running`]).
-/// Depends on nothing but its arguments, so the result can be kept until
-/// `block_key` changes.
+/// A copy takes the block's text, not its header, label, status, gutter or
+/// box. Depends on nothing but its arguments, so the result can be kept
+/// until `block_key` changes.
 fn block_layout(
     b: &TBlock,
     width: usize,
     followed: bool,
     thinking_live: bool,
     elapsed: f32,
-) -> (Vec<Line<'static>>, Option<usize>) {
-    let mut lines: Vec<Line<'static>> = Vec::new();
+) -> (Rows, Option<usize>) {
+    let mut lines = Rows::new();
     let mut status_span = None;
+    let header = |text: String, style: Style| vec![Part::Draw(Span::styled(text, style))];
     match b {
         TBlock::User { text } => {
-            lines.push(Line::from(Span::styled(
-                "❯ You",
+            lines.drawing(header(
+                "❯ You".to_string(),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(wrap_prefixed_text("  ", text, width, Style::default()));
+            ));
+            lines.append(wrap_prefixed_rows("  ", text, width, Style::default()));
         }
         TBlock::Assistant {
             text,
@@ -331,24 +337,24 @@ fn block_layout(
             let dur = duration
                 .map(|d| format!(" ({:.1}s)", d.as_secs_f32()))
                 .unwrap_or_default();
-            lines.push(Line::from(Span::styled(
+            lines.drawing(header(
                 format!("● {sender}{dur}"),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
-            )));
+            ));
             // Text is added only to the last block, until the turn ends.
             let done = followed || duration.is_some();
-            lines.extend(render_markdown_to_lines(text, width, done));
+            lines.append(render_markdown_rows(text, width, done));
         }
         TBlock::Handoff { text, sender, to } => {
-            lines.push(Line::from(Span::styled(
+            lines.drawing(header(
                 format!("● {sender} · handoff summary for {to}"),
                 Style::default()
                     .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
-            )));
-            lines.extend(render_markdown_to_lines(text, width, true));
+            ));
+            lines.append(render_markdown_rows(text, width, true));
         }
         TBlock::Thought { text, duration } => {
             let title = match duration {
@@ -356,7 +362,7 @@ fn block_layout(
                 None if thinking_live => format!("  ┌─ 💭 Thinking ({elapsed:.1}s) "),
                 None => "  ┌─ 💭 Thinking ".to_string(),
             };
-            lines.push(Line::from(Span::styled(
+            lines.drawing(header(
                 format!(
                     "{title}{}",
                     "─".repeat(width.saturating_sub(title.len()).min(40))
@@ -364,25 +370,28 @@ fn block_layout(
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::ITALIC),
-            )));
+            ));
             let inner_w = width.saturating_sub(6).max(10);
             for raw in text.lines() {
-                for w in wrap_words(raw, inner_w) {
-                    lines.push(Line::from(vec![
-                        Span::styled("  │ ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            w,
-                            Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::ITALIC),
-                        ),
-                    ]));
+                for (w, join) in wrap_words_joined(raw, inner_w) {
+                    lines.text(
+                        vec![
+                            Part::Draw(Span::styled("  │ ", Style::default().fg(Color::DarkGray))),
+                            Part::Text(Span::styled(
+                                w,
+                                Style::default()
+                                    .fg(Color::DarkGray)
+                                    .add_modifier(Modifier::ITALIC),
+                            )),
+                        ],
+                        join,
+                    );
                 }
             }
-            lines.push(Line::from(Span::styled(
+            lines.drawing(header(
                 "  └".to_string() + &"─".repeat(width.saturating_sub(3).min(50)),
                 Style::default().fg(Color::DarkGray),
-            )));
+            ));
         }
         TBlock::Tool {
             name,
@@ -450,33 +459,46 @@ fn block_layout(
             } else {
                 (name.clone(), beside, width - beside - STATUS_ROOM)
             };
-            let mut summary_lines = wrap_words(&summary, head_width).into_iter();
+            let mut summary_lines = wrap_words_joined(&summary, head_width).into_iter();
+            // The label, the name and the status are drawing: a copy takes
+            // the summary (the command) alone.
             let mut first = vec![
-                Span::styled(marker, Style::default().fg(Color::Yellow)),
-                Span::styled(
+                Part::Draw(Span::styled(marker, Style::default().fg(Color::Yellow))),
+                Part::Draw(Span::styled(
                     shown_name,
                     Style::default()
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
-                ),
+                )),
             ];
+            let mut words = String::new();
             if !own_line {
-                let mut words = summary_lines.next().unwrap_or_default();
+                words = summary_lines.next().map(|(w, _)| w).unwrap_or_default();
+                first.extend([
+                    Part::Draw(Span::raw("  ")),
+                    Part::Text(Span::raw(words.clone())),
+                ]);
                 if summary_lines.len() > 0 {
                     let pad =
                         (head_width + 1).saturating_sub(UnicodeWidthStr::width(words.as_str()));
-                    words.push_str(&" ".repeat(pad));
+                    first.push(Part::Draw(Span::raw(" ".repeat(pad))));
                 }
-                first.extend([Span::raw("  "), Span::raw(words)]);
             }
             status_span = Some(first.len());
-            first.push(status);
-            lines.push(Line::from(first));
-            for seg in summary_lines.filter(|s| !s.is_empty()) {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::raw(seg),
-                ]));
+            first.push(Part::Draw(status));
+            if words.is_empty() {
+                lines.drawing(first);
+            } else {
+                lines.text(first, Join::Line);
+            }
+            for (seg, join) in summary_lines.filter(|(s, _)| !s.is_empty()) {
+                lines.text(
+                    vec![
+                        Part::Draw(Span::raw(" ".repeat(indent))),
+                        Part::Text(Span::raw(seg)),
+                    ],
+                    join,
+                );
             }
 
             let body_width = width.saturating_sub(2);
@@ -485,7 +507,7 @@ fn block_layout(
                 // transcript of its own. Only a failed spawn says more here.
                 Some(_) => {
                     if *is_error && !output.is_empty() {
-                        lines.extend(plain_lines(
+                        lines.append(plain_lines(
                             output,
                             body_width,
                             Style::default().fg(Color::Red),
@@ -493,7 +515,7 @@ fn block_layout(
                     }
                 }
                 None => {
-                    let body = tool_body_lines(name, input, output, *is_error, body_width);
+                    let mut body = tool_body_lines(name, input, output, *is_error, body_width);
                     // What the summary line left out of the input, after the
                     // output on an expanded call; a collapsed one counts it.
                     let left_out = if input_beyond_summary(name, input)
@@ -501,32 +523,34 @@ fn block_layout(
                     {
                         code_lines(&json, "json", body_width)
                     } else {
-                        Vec::new()
+                        Rows::new()
                     };
                     let hidden = if *collapsed {
                         body.len().saturating_sub(4) + left_out.len()
                     } else {
                         0
                     };
-                    let shown = if *collapsed { 4 } else { usize::MAX };
-                    lines.extend(body.into_iter().take(shown));
+                    if *collapsed {
+                        body.truncate(4);
+                    }
+                    lines.append(body);
                     if !*collapsed {
-                        lines.extend(left_out);
+                        lines.append(left_out);
                     }
                     if hidden > 0 {
-                        lines.push(Line::from(Span::styled(
+                        lines.drawing(header(
                             format!(
                                 "  │ … {hidden} more lines (click the call, or Ctrl+T, to expand)"
                             ),
                             faint(),
-                        )));
+                        ));
                     }
                 }
             }
-            close_gutter(&mut lines);
+            close_gutter(lines.lines_mut());
         }
         TBlock::System(t) => {
-            lines.extend(wrap_prefixed_text(
+            lines.append(wrap_prefixed_rows(
                 "  ℹ ",
                 t,
                 width,
@@ -536,7 +560,7 @@ fn block_layout(
             ));
         }
         TBlock::Notice(t) => {
-            lines.extend(wrap_prefixed_text(
+            lines.append(wrap_prefixed_rows(
                 "  · ",
                 t,
                 width,
@@ -544,7 +568,7 @@ fn block_layout(
             ));
         }
         TBlock::Error(t) => {
-            lines.extend(wrap_prefixed_text(
+            lines.append(wrap_prefixed_rows(
                 "  ✗ ",
                 t,
                 width,
@@ -571,7 +595,7 @@ fn block_layout(
             } else {
                 format!("hook {name}{state}: {said}")
             };
-            lines.extend(wrap_prefixed_text(
+            lines.append(wrap_prefixed_rows(
                 "  ⚙ ",
                 &text,
                 width,
@@ -586,7 +610,7 @@ fn block_layout(
             duration,
             ..
         } => {
-            lines.extend(shell_lines(
+            lines.append(shell_lines(
                 command, output, *dropped, status, *duration, width,
             ));
             status_span = Some(1);
@@ -603,15 +627,16 @@ fn shell_lines(
     status: &ShellStatus,
     duration: Option<std::time::Duration>,
     width: usize,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
+) -> Rows {
+    let mut lines = Rows::new();
+    lines.drawing(vec![
+        Part::Draw(Span::styled(
             "❯ You ran ",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
+        )),
+        Part::Draw(Span::styled(
             match status {
                 ShellStatus::Running => "⠿ running".to_string(),
                 ShellStatus::Exited { code: 0 } => format!(
@@ -628,11 +653,11 @@ fn shell_lines(
                 ShellStatus::Killed => Color::DarkGray,
                 _ => Color::Red,
             }),
-        ),
-    ])];
+        )),
+    ]);
     let mut first = true;
     for raw in command.lines() {
-        lines.extend(wrap_prefixed_text(
+        lines.append(wrap_prefixed_rows(
             if first { "  $ " } else { "    " },
             raw,
             width,
@@ -644,13 +669,13 @@ fn shell_lines(
     }
     let body_width = width.saturating_sub(2);
     if dropped > 0 {
-        lines.push(Line::from(Span::styled(
+        lines.drawing(vec![Part::Draw(Span::styled(
             format!("  │ … {dropped} earlier lines not kept"),
             faint(),
-        )));
+        ))]);
     }
-    lines.extend(plain_lines(output, body_width, faint()));
-    close_gutter(&mut lines);
+    lines.append(plain_lines(output, body_width, faint()));
+    close_gutter(lines.lines_mut());
     lines
 }
 
@@ -716,16 +741,16 @@ fn patch_running(view: &mut TranscriptView, spinner: &str, width: usize) {
             continue;
         };
         let mut line = row.line.clone();
+        let mut copy = row.copy.clone();
         let live = row.live;
         let secs = live.clock.then(|| live.since.elapsed().as_secs_f32());
         if let Some(span) = line.spans.get_mut(row.span) {
             span.content = running_status(spinner, secs, live.shell).into();
         }
-        let mut lines = [line];
-        clamp_lines(&mut lines, width);
-        let [line] = lines;
+        clamp_row(&mut line, &mut copy, width);
         view.lines[top] = line.spans.iter().map(|s| s.content.as_ref()).collect();
         view.rendered[top] = line;
+        view.copy[top] = copy;
     }
 }
 
@@ -916,36 +941,50 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             let keep = i.checked_sub(1).map_or(0, |p| view.blocks[p].end);
             view.blocks.truncate(i);
             view.live.retain(|r| r.block < i);
+            view.code.retain(|c| c.block < i);
             view.rendered.truncate(keep);
             view.lines.truncate(keep);
+            view.copy.truncate(keep);
         }
         let (mut lines, status_span) = block_layout(b, width, followed, thinking_live, elapsed);
         // The gap is the only space between blocks.
-        while lines.last().is_some_and(is_blank) {
-            lines.pop();
+        while lines.lines().last().is_some_and(is_blank) {
+            lines.truncate(lines.len() - 1);
         }
         // A running row's first line is kept as it is before being fitted
         // to the width, so that its status can be drawn again and fitted.
         if let Some(live) = running_since(b)
             && let Some(span) = status_span
-            && let Some(first) = lines.first()
+            && let Some(first) = lines.lines().first()
             && span < first.spans.len()
         {
             view.live.push(LiveRow {
                 block: i,
                 line: first.clone(),
+                copy: lines.copies()[0].clone(),
                 span,
                 live,
             });
         }
-        clamp_lines(&mut lines, inner.width as usize);
+        lines.clamp(inner.width as usize);
         if !lines.is_empty() {
             for _ in 0..gap {
                 view.lines.push(String::new());
                 view.rendered.push(Line::default());
+                view.copy.push(RowCopy::Text {
+                    join: Join::Line,
+                    pieces: Vec::new(),
+                });
             }
         }
         let top = view.rendered.len();
+        let (lines, copies, code) = lines.into_parts();
+        view.code
+            .extend(code.into_iter().enumerate().map(|(nth, rows)| CodeRows {
+                block: i,
+                nth,
+                rows: top + rows.start..top + rows.end,
+            }));
         view.lines.extend(lines.iter().map(|l| {
             l.spans
                 .iter()
@@ -953,6 +992,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
                 .collect::<String>()
         }));
         view.rendered.extend(lines);
+        view.copy.extend(copies);
         view.blocks.push(KeptBlock {
             key,
             top,
@@ -964,8 +1004,10 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         let keep = fresh.checked_sub(1).map_or(0, |p| view.blocks[p].end);
         view.blocks.truncate(fresh);
         view.live.retain(|r| r.block < fresh);
+        view.code.retain(|c| c.block < fresh);
         view.rendered.truncate(keep);
         view.lines.truncate(keep);
+        view.copy.truncate(keep);
     }
     patch_running(&mut view, app.spinner(), inner.width as usize);
     view.took = started.elapsed();
@@ -1006,8 +1048,11 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     app.transcript_view = view;
     frame.render_widget(Paragraph::new(visible).block(block), area);
 
-    // The mouse selection, drawn over the text it covers.
+    // The mouse selection, drawn over the text a copy takes, or over all
+    // it covers when that is only drawing, which is then what it takes.
     if let Some((start, end)) = app.selection_range() {
+        let view = &app.transcript_view;
+        let drawn = selection::copies_drawing(&view.lines, &view.copy, start, end);
         let buf = frame.buffer_mut();
         for row in 0..inner.height {
             let line = app.scroll as usize + row as usize;
@@ -1020,9 +1065,12 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 usize::MAX
             };
+            let copy = view.copy.get(line);
             for col in from..=to.min(inner.width.saturating_sub(1) as usize) {
-                buf[(inner.x + col as u16, inner.y + row)]
-                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                if drawn || copy.is_none_or(|c| c.covers(col)) {
+                    buf[(inner.x + col as u16, inner.y + row)]
+                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                }
             }
         }
     }
@@ -1066,25 +1114,17 @@ fn tool_body_lines(
     output: &str,
     is_error: bool,
     width: usize,
-) -> Vec<Line<'static>> {
-    let get = |k: &str| input.get(k).and_then(serde_json::Value::as_str);
-    let path = get("file_path").or_else(|| get("path")).unwrap_or("");
-    let lname = name.to_lowercase();
-    let mut lines = Vec::new();
-
-    if (lname.contains("edit") || lname == "str_replace" || lname == "replace")
-        && let (Some(old), Some(new)) = (
-            get("old_string").or_else(|| get("old_str")),
-            get("new_string").or_else(|| get("new_str")),
-        )
-    {
-        lines.extend(replacement_lines(old, new, path, width));
-    } else if (lname == "write" || lname == "write_file" || lname == "create_file")
-        && let Some(content) = get("content").or_else(|| get("contents"))
-    {
-        lines.extend(replacement_lines("", content, path, width));
-    } else if (lname == "read" || lname == "read_file") && !output.is_empty() {
-        lines.extend(code_lines(output, path, width));
+) -> Rows {
+    let mut lines = Rows::new();
+    match tool_body(name, input) {
+        ToolBody::Replace { old, new, path } => {
+            lines.append(replacement_lines(old, new, path, width));
+        }
+        ToolBody::Write { content, path } => lines.append(written_lines(content, path, width)),
+        ToolBody::Read { path } if !output.is_empty() => {
+            lines.append(code_lines(output, path, width));
+        }
+        ToolBody::Read { .. } | ToolBody::Output => {}
     }
 
     if !output.is_empty() && (lines.is_empty() || is_error) {
@@ -1094,9 +1134,9 @@ fn tool_body_lines(
             faint()
         };
         if !is_error && looks_like_diff(output) {
-            lines.extend(diff_lines(output, width));
+            lines.append(diff_lines(output, width));
         } else {
-            lines.extend(plain_lines(output, width, style));
+            lines.append(plain_lines(output, width, style));
         }
     }
     lines
@@ -1216,22 +1256,34 @@ pub fn wrap_prefixed_text(
     max_width: usize,
     style: Style,
 ) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
+    wrap_prefixed_rows(prefix, text, max_width, style).into_lines()
+}
+
+/// [`wrap_prefixed_text`], with what a copy takes: the text, not `prefix`
+/// or the indentation under it.
+fn wrap_prefixed_rows(prefix: &'static str, text: &str, max_width: usize, style: Style) -> Rows {
+    let mut lines = Rows::new();
     let prefix_width = UnicodeWidthStr::width(prefix);
     let indent = " ".repeat(prefix_width);
     let content_width = max_width.saturating_sub(prefix_width).max(10);
     for raw in text.lines() {
         if raw.is_empty() {
-            lines.push(Line::default());
+            lines.blank();
             continue;
         }
-        for (i, seg) in wrap_words(raw, content_width).into_iter().enumerate() {
+        for (i, (seg, join)) in wrap_words_joined(raw, content_width)
+            .into_iter()
+            .enumerate()
+        {
             let head = if i == 0 {
                 Span::styled(prefix, style)
             } else {
                 Span::raw(indent.clone())
             };
-            lines.push(Line::from(vec![head, Span::styled(seg, style)]));
+            lines.text(
+                vec![Part::Draw(head), Part::Text(Span::styled(seg, style))],
+                join,
+            );
         }
     }
     lines
@@ -3312,18 +3364,28 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Up(left), x + 8, y));
         assert_eq!(
             app.take_copy_request().as_deref(),
-            Some("  open src/tui/app.rs please")
+            Some("open src/tui/app.rs please")
         );
 
-        // A drag over several rows copies them as rows; one that ends below
-        // the transcript keeps to its last row and starts scrolling.
+        // A drag over several rows copies their text, not the header between
+        // them, which is not highlighted either; one that ends below the
+        // transcript keeps to its last row and starts scrolling.
         app.last_click_forget();
         app.handle_mouse(mouse(MouseEventKind::Down(left), x + 5, y));
         app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, y + 3));
         assert_eq!(
             app.selected_text().as_deref(),
-            Some("src/tui/app.rs please\n\n❯ You\n  second")
+            Some("src/tui/app.rs please\n\nsecond")
         );
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let reversed_at = |term: &Terminal<TestBackend>, x: u16, y: u16| {
+            term.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed_at(&term, x - 2, y + 2), "the header");
+        assert!(!reversed_at(&term, x - 1, y + 3), "the margin");
+        assert!(reversed_at(&term, x, y + 3) && reversed_at(&term, x + 5, y + 3));
         app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, 23));
         assert!(app.tick_mouse());
         app.handle_mouse(mouse(MouseEventKind::Up(left), x + 5, 23));
@@ -3331,7 +3393,7 @@ mod tests {
         // The transcript ends with that prompt, so the drag stops in it.
         assert_eq!(
             app.take_copy_request().as_deref(),
-            Some("src/tui/app.rs please\n\n❯ You\n  second")
+            Some("src/tui/app.rs please\n\nsecond")
         );
 
         // A press outside the transcript, or a key, drops the selection.
@@ -3342,6 +3404,129 @@ mod tests {
         app.flash("Copied 4 lines");
         let (rows, _) = screen(&mut app, 80, 24);
         assert!(rows.iter().any(|r| r.starts_with("── Copied 4 lines ─")));
+    }
+
+    #[test]
+    fn a_drag_over_a_tool_call_copies_its_command_and_output() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let left = MouseButton::Left;
+        let command = format!(
+            "cd ~/code && uv run python {}extract.py",
+            "--flag ".repeat(6)
+        );
+        let output = format!("zoxide: {}issue\nok", "a possible configuration ".repeat(3));
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": command }),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t1".into(),
+            output: output.clone(),
+            is_error: false,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let top = rows.iter().position(|r| r.contains("Bash  cd")).unwrap();
+        let last = rows.iter().position(|r| r.contains("└ ok")).unwrap();
+        assert!(last > top + 3, "{rows:?}");
+        let drag = |app: &mut App, from: (u16, usize), to: (u16, usize)| {
+            app.last_click_forget();
+            app.handle_mouse(mouse(MouseEventKind::Down(left), from.0, from.1 as u16));
+            app.handle_mouse(mouse(MouseEventKind::Drag(left), to.0, to.1 as u16));
+            app.handle_mouse(mouse(MouseEventKind::Up(left), to.0, to.1 as u16));
+            app.take_copy_request()
+        };
+        // The command wrapped beside its status and the output wrapped in its
+        // gutter come out as they were written.
+        assert_eq!(
+            drag(&mut app, (1, top), (58, last)),
+            Some(format!("{command}\n{output}"))
+        );
+        // Over the label alone: the label, as drawn.
+        // A cell of the screen per char, the wide `⚡` and the one after it.
+        let label = rows[top].chars().position(|c| c == '⚡').unwrap();
+        assert_eq!(
+            drag(&mut app, (label as u16, top), (label as u16 + 6, top)).as_deref(),
+            Some("⚡ Bash")
+        );
+    }
+
+    #[test]
+    fn a_right_click_on_a_block_copies_all_of_it() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let right = |app: &mut App, row: usize| {
+            let at = mouse(MouseEventKind::Down(MouseButton::Right), 10, row as u16);
+            app.handle_mouse(at);
+            app.take_copy_request()
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        let output: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+        let output = output.join("\n");
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": "ls" }),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t1".into(),
+            output: output.clone(),
+            is_error: false,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let top = rows.iter().position(|r| r.contains("Bash  ls")).unwrap();
+        let footer = rows.iter().position(|r| r.contains("more lines")).unwrap();
+        // Any row of the call, and all of its output though most is hidden.
+        let all = Some(format!("ls\n{output}"));
+        assert_eq!(right(&mut app, top), all);
+        assert_eq!(right(&mut app, footer), all);
+        let prompt = rows.iter().position(|r| r.contains("❯ You")).unwrap();
+        assert_eq!(right(&mut app, prompt).as_deref(), Some("go"));
+        // The gap between two blocks, and anywhere under a dialog: nothing.
+        assert_eq!(right(&mut app, top - 1), None);
+        assert_eq!(app.flash_text(), None);
+        app.open_policy_picker();
+        assert_eq!(right(&mut app, top), None);
+        app.modal = None;
+
+        // On a code block in a response, that code alone; elsewhere in the
+        // response, its markdown.
+        let reply = "Run this:\n\n```sh\nmake test\n```\n\nthen\n\n```\nmake\n```";
+        app.on_event(crate::core::AgentEvent::TextDelta(reply.into()));
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let row = |s: &str| rows.iter().position(|r| r.contains(s)).unwrap();
+        assert_eq!(right(&mut app, row("─ sh")).as_deref(), Some("make test"));
+        assert_eq!(
+            right(&mut app, row("make test")).as_deref(),
+            Some("make test")
+        );
+        let second = rows
+            .iter()
+            .position(|r| r.contains("│ make ") && !r.contains("make test"))
+            .unwrap();
+        assert_eq!(right(&mut app, second).as_deref(), Some("make"));
+        assert_eq!(right(&mut app, row("Run this")).as_deref(), Some(reply));
+
+        // An empty code block: the response.
+        let empty = "Nothing here:\n\n```\n```";
+        app.submit_prompt("again".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::TextDelta(empty.into()));
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let frame = rows.iter().rposition(|r| r.contains("─ code")).unwrap();
+        assert_eq!(right(&mut app, frame).as_deref(), Some(empty));
     }
 
     #[test]
@@ -3573,6 +3758,71 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_of_a_block_takes_its_text_not_its_drawing() {
+        let command = format!("grep {}file", "pattern ".repeat(12));
+        let bash = |output: &str, collapsed: bool| TBlock::Tool {
+            id: "t".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": command }),
+            output: output.into(),
+            is_error: false,
+            done: true,
+            collapsed,
+            started: std::time::Instant::now(),
+            duration: Some(std::time::Duration::from_millis(700)),
+            agent: None,
+        };
+        let copied = |b: &TBlock, width: usize| {
+            let (mut rows, _) = block_layout(b, width, false, false, 0.0);
+            rows.clamp(width + 4);
+            rows.copied()
+        };
+        // The command wraps beside its status, which a copy leaves out.
+        let output = "found it\nand more";
+        let rows = block_layout(&bash(output, false), 80, false, false, 0.0).0;
+        assert!(rows.len() > 3);
+        assert_eq!(rows.copied(), format!("{command}\n{output}"));
+        // Collapsed: what is shown, not the row counting what is not.
+        let output = "1\n2\n3\n4\n5\n6";
+        assert_eq!(
+            copied(&bash(output, true), 80),
+            format!("{command}\n1\n2\n3\n4")
+        );
+        // A name with a line of its own.
+        let mut long = bash("ok", false);
+        if let TBlock::Tool { name, .. } = &mut long {
+            *name = "mcp__claude_ai_Google_Sheets__copy_sheet_to_another_spreadsheet".into();
+        }
+        assert_eq!(copied(&long, 64), format!("{command}\nok"));
+
+        let thought = TBlock::Thought {
+            text: "a first thought that goes on for a while\n\nthen another".into(),
+            duration: Some(std::time::Duration::from_millis(1500)),
+        };
+        assert_eq!(
+            copied(&thought, 24),
+            "a first thought that goes on for a while\n\nthen another"
+        );
+        let user = TBlock::User {
+            text: "please look at the files in src and tell me".into(),
+        };
+        assert_eq!(
+            copied(&user, 20),
+            "please look at the files in src and tell me"
+        );
+        let shell = TBlock::Shell {
+            command: "ls -la".into(),
+            output: "total 0\n.\n..".into(),
+            dropped: 3,
+            status: ShellStatus::Exited { code: 0 },
+            sent: false,
+            started: std::time::Instant::now(),
+            duration: Some(std::time::Duration::from_millis(100)),
+        };
+        assert_eq!(copied(&shell, 40), "ls -la\ntotal 0\n.\n..");
+    }
+
+    #[test]
     fn a_long_tool_name_keeps_its_status_in_view() {
         let block = |name: &str, done: bool| TBlock::Tool {
             id: "t".into(),
@@ -3770,9 +4020,15 @@ mod tests {
         // nothing.
         fn check(app: &mut App, width: u16, what: &str) {
             let (kept, _) = screen(app, width, 30);
+            let kept_copy = app.transcript_view.copy.clone();
+            let kept_code = app.transcript_view.code.clone();
+            assert_eq!(kept_copy.len(), app.transcript_view.lines.len(), "{what}");
             app.transcript_view = Default::default();
             let (fresh, _) = screen(app, width, 30);
             assert_eq!(kept, fresh, "{what}");
+            // And what a copy takes from each row.
+            assert_eq!(kept_copy, app.transcript_view.copy, "{what}");
+            assert_eq!(kept_code, app.transcript_view.code, "{what}");
         }
         let tool = |app: &mut App, id: &str, output: &str| {
             app.on_event(crate::core::AgentEvent::ToolCallStarted {
