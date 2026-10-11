@@ -40,6 +40,15 @@ impl Registry {
             Box::new(CodexHarness::new(codex_transport)),
             Box::new(crate::harness::pi::PiHarness::default()),
         ];
+        // A `[harnesses.vibe]` table sets its command, modes and the rest
+        // in place of the built-in's; one whose modes do not parse is an
+        // error at startup (`runner::check_configured_policies`).
+        harnesses.push(Box::new(
+            config
+                .harness("vibe")
+                .and_then(|s| crate::harness::vibe::VibeHarness::from_settings(s).ok())
+                .unwrap_or_default(),
+        ));
 
         // ACP agents: the ones defined in config (by name, for a stable
         // order), then the presets found on PATH. Neither may take a

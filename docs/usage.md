@@ -42,11 +42,12 @@ unharness --no-tui                          # run the vendor's own TUI instead
 
 Without `-H` and without `default_harness` in the config, unharness picks
 the first installed harness that is signed in, in this order: Antigravity,
-Claude Code, Codex, pi, then ACP agents.
+Claude Code, Codex, pi, Mistral Vibe, then ACP agents.
 
-Antigravity, Claude Code and Codex can report their sign-in quickly. pi and
-ACP agents cannot: pi needs a model query and an ACP agent needs a session.
-So pi and ACP agents are chosen only when none of the first three is signed
+Antigravity, Claude Code and Codex can report their sign-in quickly. pi,
+Mistral Vibe and ACP agents cannot: pi needs a model query and an ACP agent
+(vibe is one) needs a session.
+So pi, Mistral Vibe and ACP agents are chosen only when none of the first three is signed
 in, and ahead of any harness that is known to be signed out. `unharness
 doctor` shows the choice as "Active Default".
 
@@ -112,6 +113,7 @@ Policy, model and effort changes apply from the next turn on every harness:
 | Codex | each `turn/start` |
 | pi | an RPC command |
 | Antigravity | its process is restarted on the same conversation |
+| Mistral Vibe | policy: its session mode; model and effort: a new process, and a new session once it was prompted ([ACP agents](acp.md#mistral-vibe)) |
 
 Antigravity has no separate effort setting. The effort is the last part
 of its model ids, and `--effort` is never passed to it.

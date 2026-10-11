@@ -133,6 +133,12 @@ pub struct Capabilities {
     /// The provider is chosen when the process starts, so a session that
     /// changes it starts again (resumed); otherwise it goes with the model.
     pub provider_per_process: bool,
+    /// The model and effort are chosen when the process starts, and a
+    /// session keeps the ones it last ran: a change starts a session
+    /// nothing was sent to again with it, and leaves one that was prompted
+    /// for a new session told the conversation through the bridge.
+    /// Otherwise they are sent to the running session.
+    pub model_per_process: bool,
     /// The agent can ask the user structured questions.
     pub ask_user_question: bool,
     pub interrupt: bool,

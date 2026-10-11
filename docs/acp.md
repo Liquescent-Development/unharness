@@ -16,6 +16,35 @@ modes            = { ask = "default" }       # its session mode that asks (see M
 The table name is the harness id: `unharness -H claude-acp`, or
 `/harness claude-acp` in the TUI.
 
+## Mistral Vibe
+
+Mistral Vibe's `vibe-acp` is built in: `unharness -H vibe` with nothing in
+the config, `ask` mapped to vibe's `ask` mode and `bypass` to
+`auto-approve` (see Modes below). A `[harnesses.vibe]` table sets its
+`command`, `display_name`, `asks_permission` and `modes` in place of the
+built-in ones; the rest stays.
+
+Its model and reasoning level (`/model`, `/effort`, `default_model`,
+`default_effort`) are never set over ACP, because vibe 2.26.1 writes a
+choice made that way into your `~/.vibe/config.toml`. unharness starts
+`vibe-acp` with them in its environment instead (`VIBE_ACTIVE_MODEL`, and
+the level in a `VIBE_MODELS` entry for the model), which vibe reads for that
+process only:
+
+- before the first prompt a change starts vibe again with it;
+- after it, vibe starts a new session: a vibe session keeps the model and
+  level it last ran, also when it is loaded again. Your next prompt tells
+  the new session the conversation so far, the way a harness you switch to
+  is told, and when the conversation is too long for that the old session
+  writes a handoff summary first.
+- With a level and no model chosen, the model the session ran is kept.
+- If vibe runs another model or level than the one chosen (one it does not
+  have, or a level the model does not offer), unharness says so.
+
+The level's entry needs the model's provider, which unharness reads from
+your `~/.vibe/config.toml` (or `$VIBE_HOME/config.toml`) and never writes;
+a model not defined there is `mistral`'s.
+
 ## Presets
 
 Gemini CLI, OpenCode, Goose, GitHub Copilot, Cursor Agent, Qwen Code and
@@ -60,18 +89,20 @@ what such a mode lets through, so `modes` says which of the agent's modes
 backs each policy:
 
 ```toml
-[harnesses.vibe]
+[harnesses.my-agent]
 protocol        = "acp"
-command         = ["vibe-acp"]
+command         = ["my-agent", "--acp"]
 asks_permission = true
 modes           = { ask = "ask", bypass = "auto-approve" }
 ```
+
+(Mistral Vibe has this map built in.)
 
 The keys are policies, the values the agent's mode ids (the agent lists
 them when a session starts, and the message that refuses `ask` for want of
 a map names them). A policy without an entry takes the entry of the
 nearest less permissive policy that has one, never a more permissive one's:
-above, `accept-edits` keeps vibe in its `ask` mode and unharness answers the
+above, `accept-edits` keeps the agent in its `ask` mode and unharness answers the
 edits itself. Keeping the agent in the mode that asks and letting unharness
 decide is the safe form; map a policy to the agent's own `accept-edits`
 only if you know it approves nothing but edits.
@@ -134,8 +165,8 @@ declined by `--print`, a multiple choice recorded) and claude-agent-acp
 - Reasoning effort is the session option in the protocol's `thought_level`
   category. An agent that offers its level under another category has no
   effort in unharness, and `/effort` and `default_effort` are not sent to
-  it: Mistral Vibe 2.26.1 calls its option `thinking`, and setting that
-  rewrites its own `~/.vibe/config.toml`.
+  it. (Mistral Vibe calls its option `thinking`; unharness knows it, see
+  above.)
 - ACP agents run [headless](headless.md) with `-p` like any harness, but
   have no `--native` or `--no-tui` mode.
 - Sign in with the agent's own CLI.

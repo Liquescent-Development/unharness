@@ -33,6 +33,10 @@ A `# gate` line in the fixture waits until the file named by
 $UNHARNESS_FAKE_GATE exists, so that a test can hold the fake's next line
 until the driver has seen something first.
 
+$UNHARNESS_FAKE_ENV names variables (comma-separated) whose values the
+fake logs as it starts, as `{"env": {name: value or null}}`, for a test of
+what the driver put in the agent's environment.
+
 $UNHARNESS_FAKE_PROBE makes the fake try the filesystem before it replays,
 for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
 `;`. Each result is appended to the log as `{"probe", "path", "ok"}`.
@@ -70,6 +74,10 @@ def main() -> int:
     log = open(log_path, "a") if log_path else None
     hang = os.environ.get("UNHARNESS_FAKE_HANG") == "1"
     exit_code = int(os.environ.get("UNHARNESS_FAKE_EXIT_CODE", "0"))
+    if log and os.environ.get("UNHARNESS_FAKE_ENV"):
+        names = filter(None, os.environ["UNHARNESS_FAKE_ENV"].split(","))
+        log.write(json.dumps({"env": {n: os.environ.get(n) for n in names}}) + "\n")
+        log.flush()
     if log and os.environ.get("UNHARNESS_FAKE_PROBE"):
         probe(os.environ["UNHARNESS_FAKE_PROBE"], log)
     background = os.environ.get("UNHARNESS_FAKE_BACKGROUND")

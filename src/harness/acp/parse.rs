@@ -36,6 +36,7 @@ pub struct SessionOptions {
     /// one the harness declared, else the one in category `thought_level`.
     pub effort_option: Option<String>,
     pub efforts: Vec<String>,
+    pub current_effort: Option<String>,
     /// Id of the select option in category `mode` (the session's mode, as
     /// an option), with its values and the one in effect.
     pub mode_option: Option<String>,
@@ -66,8 +67,13 @@ impl SessionOptions {
             };
             let id = s(opt, "id").to_string();
             let values = || choices.iter().map(|c| s(c, "value").to_string()).collect();
+            let current = || {
+                opt.get("currentValue")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            };
             if declared_effort.is_some_and(|d| d == id) {
-                declared = Some((id, values()));
+                declared = Some((id, values(), current()));
                 continue;
             }
             match s(opt, "category") {
@@ -93,7 +99,7 @@ impl SessionOptions {
                         })
                         .collect();
                 }
-                "thought_level" => thought_level = Some((id, values())),
+                "thought_level" => thought_level = Some((id, values(), current())),
                 "mode" => {
                     out.current_mode = opt
                         .get("currentValue")
@@ -105,9 +111,10 @@ impl SessionOptions {
                 _ => {}
             }
         }
-        if let Some((id, efforts)) = declared.or(thought_level) {
+        if let Some((id, efforts, current)) = declared.or(thought_level) {
             out.effort_option = Some(id);
             out.efforts = efforts;
+            out.current_effort = current;
         }
         Some(out)
     }
@@ -1168,6 +1175,15 @@ mod tests {
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp");
     }
 
+    /// vibe-acp 2.26.1 started with `VIBE_ACTIVE_MODEL` and a model entry
+    /// in `VIBE_MODELS` at thinking `off` (#164), parsed as the vibe
+    /// harness does, with `thinking` declared its effort.
+    #[test]
+    fn fixture_vibe_acp_spawn_env() {
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_spawn_env");
+    }
+
     #[test]
     fn effort_is_read_from_thought_level() {
         let options = json!([
@@ -1179,6 +1195,7 @@ mod tests {
         let o = SessionOptions::from_config_options(Some(&options), None).unwrap();
         assert_eq!(o.effort_option.as_deref(), Some("reasoning"));
         assert_eq!(o.efforts, ["low", "high"]);
+        assert_eq!(o.current_effort.as_deref(), Some("low"));
         // A declaration that names no option leaves `thought_level` to it.
         let o = SessionOptions::from_config_options(Some(&options), Some("thinking")).unwrap();
         assert_eq!(o.effort_option.as_deref(), Some("reasoning"));
@@ -1198,6 +1215,7 @@ mod tests {
         let o = SessionOptions::from_config_options(Some(&options), Some("thinking")).unwrap();
         assert_eq!(o.effort_option.as_deref(), Some("thinking"));
         assert_eq!(o.efforts, ["off", "high"]);
+        assert_eq!(o.current_effort.as_deref(), Some("high"));
         assert_eq!(o.model_option.as_deref(), Some("model"));
 
         // The declared option wins over one in `thought_level`.

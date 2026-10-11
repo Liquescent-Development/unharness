@@ -1,0 +1,14 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=209715
+SessionStarted id=0e5b3c15-b6b0-3623-71db-69efcf0748af model=mistral-medium-3.5
+CapabilitiesChanged efforts=off,high plan_mode=false models=1
+CapabilitiesChanged efforts=off,high models=1
+Context used=0 window=209715
+CapabilitiesChanged commands=15 slash_commands=true
+TextDelta "p"
+Context used=0 window=209715
+TextDelta "ong"
+Context used=8059 window=209715
+Context used=8059 window=209715
+Usage in=8056 out=3 cache_read=0 cache_write=0 cost=0.0121 cumulative=false
+TurnCompleted Done

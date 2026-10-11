@@ -136,7 +136,8 @@ pub struct ShellRun {
 }
 
 /// The harness the user is switching away from writing a summary for the
-/// next one: the switch happens when its turn ends.
+/// next one, or for a new session of its own (`renew`): the switch, or the
+/// new session, happens when its turn ends.
 #[derive(Debug, Clone, Copy)]
 struct Handoff {
     to: HarnessId,
@@ -145,6 +146,9 @@ struct Handoff {
     /// Prompts were held when it was asked for (after an interrupt): the
     /// user sends those, also after the switch.
     held: bool,
+    /// The next session is a new one of the same harness, for another
+    /// model or effort (`App::renew_session`).
+    renew: bool,
 }
 
 /// A subagent that is at work.
@@ -3348,22 +3352,28 @@ impl App {
     fn on_permission_request(&mut self, req: PermissionRequest) {
         let planning = self.asked_planning.remove(&req.id)
             || self.effective_policy() == Some(PermissionPolicy::Plan);
-        if self.handoff.is_some() {
+        if let Some(handoff) = self.handoff {
+            let moving = if handoff.renew {
+                "The user is moving this conversation to a new session."
+            } else {
+                "The user is switching to another agent."
+            };
             let decision = match &req.kind {
                 PermissionKind::ToolUse { tool, .. } => {
                     self.transcript
                         .push_notice(format!("denied {tool}: a handoff summary uses no tools"));
                     PermissionDecision::Deny {
-                        reason: "The user is switching to another agent. Write the handoff \
-                                 summary from what you already know, without tools."
-                            .into(),
+                        reason: format!(
+                            "{moving} Write the handoff summary from what you already know, \
+                             without tools."
+                        ),
                     }
                 }
                 // Never approved unseen.
                 PermissionKind::PlanApproval { .. } => PermissionDecision::Deny {
-                    reason: "The user is switching to another agent. Do not carry out the \
-                             plan; write the handoff summary."
-                        .into(),
+                    reason: format!(
+                        "{moving} Do not carry out the plan; write the handoff summary."
+                    ),
                 },
                 _ => PermissionDecision::Answer(Value::Null),
             };
@@ -3494,8 +3504,8 @@ impl App {
         if self.refused_while_start_held() {
             return;
         }
-        if self.handoff_wanted(next) {
-            self.ask_handoff(next);
+        if self.handoff_wanted_for(self.bridge_start(next), self.bridge_budget(next)) {
+            self.ask_handoff(next, false);
             return;
         }
         self.switch_now(next);
@@ -3506,7 +3516,10 @@ impl App {
     /// live or one it can resume (a fresh one would summarize nothing), and
     /// that session saw the whole transcript. Not while its subagents are
     /// at work: what they ask or report would land in the summary's turn.
-    fn handoff_wanted(&self, next: HarnessId) -> bool {
+    ///
+    /// `from` is where the bridge to the next session starts and `budget`
+    /// its length.
+    fn handoff_wanted_for(&self, from: usize, budget: usize) -> bool {
         self.bridge_summary == BridgeSummary::Auto
             && (self.session_seen()
                 || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
@@ -3515,38 +3528,54 @@ impl App {
             && self.shell.is_none()
             && self.effective_policy().is_some()
             && super::bridge::needs_summary(
-                self.transcript
-                    .blocks
-                    .get(self.bridge_start(next)..)
-                    .unwrap_or_default(),
-                self.bridge_budget(next),
+                self.transcript.blocks.get(from..).unwrap_or_default(),
+                budget,
             )
     }
 
     /// Ask the active harness for a summary for `next`, switching when its
     /// turn ends (Esc switches without it). It is told to use no tools,
     /// and what it asks permission for is denied.
-    fn ask_handoff(&mut self, next: HarnessId) {
-        let to = self
-            .registry
-            .get(next)
-            .map_or("another agent", |h| h.descriptor().short_name);
+    /// `renew`: the next session is a new one of the active harness
+    /// (`renew_session`), not `next`'s.
+    fn ask_handoff(&mut self, next: HarnessId, renew: bool) {
+        let to = self.handoff_target(next, renew);
         self.transcript.push_system(format!(
-            "The conversation is longer than the bridge to {to}: asking {} for a handoff summary first (Esc switches without one)",
-            self.short_name()
+            "The conversation is longer than the bridge to {to}: asking {} for a handoff summary first (Esc {} without one)",
+            self.short_name(),
+            if renew { "goes on" } else { "switches" }
         ));
         self.handoff = Some(Handoff {
             to: next,
             start: self.transcript.blocks.len(),
             held: !self.queued.is_empty(),
+            renew,
         });
         self.start_generation();
         self.ensure_session();
         self.mark_prompted();
+        let budget = self.bridge_budget(next);
         self.actions.push_back(Action::SendTurn {
-            text: handoff_prompt(to, self.bridge_budget(next)),
+            text: if renew {
+                renew_handoff_prompt(budget)
+            } else {
+                handoff_prompt(&to, budget)
+            },
             attachments: Vec::new(),
         });
+    }
+
+    /// What the next session is called in a handoff's messages.
+    fn handoff_target(&self, next: HarnessId, renew: bool) -> String {
+        let name = self
+            .registry
+            .get(next)
+            .map_or("another agent", |h| h.descriptor().short_name);
+        if renew {
+            format!("a new {name} session")
+        } else {
+            name.to_string()
+        }
     }
 
     /// The handoff turn is over, however it ended: the switch goes ahead.
@@ -3554,16 +3583,17 @@ impl App {
         let Some(h) = self.handoff.take() else {
             return;
         };
-        let to = self
-            .registry
-            .get(h.to)
-            .map_or("another agent", |h| h.descriptor().short_name);
-        if !(done && self.transcript.mark_handoff(h.start, to)) {
+        let to = self.handoff_target(h.to, h.renew);
+        if !(done && self.transcript.mark_handoff(h.start, &to)) {
             self.transcript.push_notice(format!(
                 "no handoff summary; {to} gets the conversation as it is"
             ));
         }
-        self.switch_now(h.to);
+        if h.renew {
+            self.renew_now();
+        } else {
+            self.switch_now(h.to);
+        }
     }
 
     fn switch_now(&mut self, next: HarnessId) {
@@ -3890,16 +3920,23 @@ impl App {
     }
 
     pub fn set_model(&mut self, model: String) {
+        if !self.may_restart_for("model") {
+            return;
+        }
         let provider = self
             .current_provider()
             .cloned()
             .unwrap_or_else(|| ProviderId::new("default"));
         let m = ModelRef::new(self.active, provider, model);
-        self.transcript.push_system(format!("Model: {}", m.label()));
         self.models.insert(self.active, m.clone());
         self.chosen_models.insert(self.active);
         self.run_models.insert(self.active);
         self.idle_start_paused = false;
+        self.transcript.push_system(format!("Model: {}", m.label()));
+        if self.renews_for_choice() {
+            self.renew_session(&format!("model {}", m.model));
+            return;
+        }
         if self.session_alive && self.session_blank {
             // Nothing was sent to it: it starts again with the model.
             self.shutdown_session();
@@ -3907,6 +3944,44 @@ impl App {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetModel(m)));
         }
+    }
+
+    /// Whether a change of the model or effort starts a new session of the
+    /// active harness: its sessions keep the ones they last ran
+    /// (`Capabilities::model_per_process`), and the conversation has one.
+    /// One nothing was sent to yet starts again with the choice instead.
+    fn renews_for_choice(&self) -> bool {
+        self.caps().model_per_process && self.session_ids.contains_key(&self.active)
+    }
+
+    /// Whether the session may be ended for a change of `what` (its model
+    /// or effort) where those are chosen when it starts
+    /// (`Capabilities::model_per_process`); if not, the user is told why.
+    fn may_restart_for(&mut self, what: &str) -> bool {
+        if !self.caps().model_per_process {
+            return true;
+        }
+        if self.refused_while_start_held() {
+            return false;
+        }
+        if !self.session_alive {
+            return true;
+        }
+        if self.is_generating {
+            self.transcript.push_error(format!(
+                "finish or interrupt the current turn before changing the {what}"
+            ));
+            return false;
+        }
+        // They would end with the process.
+        if !self.subagents.is_empty() {
+            self.transcript.push_error(format!(
+                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the {what}",
+                self.subagents.len()
+            ));
+            return false;
+        }
+        true
     }
 
     pub fn set_effort(&mut self, effort: String) {
@@ -3928,11 +4003,18 @@ impl App {
             ));
             return;
         }
+        if !self.may_restart_for("effort") {
+            return;
+        }
         self.efforts.insert(self.active, effort.clone());
         self.chosen_efforts.insert(self.active);
         self.run_efforts.insert(self.active);
-        self.transcript.push_system(format!("Effort: {effort}"));
         self.idle_start_paused = false;
+        self.transcript.push_system(format!("Effort: {effort}"));
+        if self.renews_for_choice() {
+            self.renew_session(&format!("effort {effort}"));
+            return;
+        }
         if self.session_alive && self.session_blank {
             // Claude would take the change as a turn: it starts again with
             // the effort instead.
@@ -3941,6 +4023,33 @@ impl App {
             self.actions
                 .push_back(Action::Command(SessionCommand::SetEffort(Some(effort))));
         }
+    }
+
+    /// Leave the active harness's session for a new one that runs
+    /// `choice`: its sessions keep the model and effort they last ran
+    /// (Mistral Vibe 2.26.1 pins them, and setting them in the session
+    /// would rewrite its own configuration). The new session is told the
+    /// conversation so far with the next prompt, as a harness switched to
+    /// is, and the one left writes a handoff summary first when the
+    /// conversation does not fit in that bridge.
+    fn renew_session(&mut self, choice: &str) {
+        let name = self.display_name();
+        self.transcript.push_notice(format!(
+            "{name} starts a new session for {choice}: its sessions keep the model and effort they last ran, and changing them in one would rewrite its own settings. Your next prompt tells it the conversation so far."
+        ));
+        if self.handoff_wanted_for(0, self.bridge_budget(self.active)) {
+            self.ask_handoff(self.active, true);
+        } else {
+            self.renew_now();
+        }
+    }
+
+    /// Forget the active harness's session: the next one starts new, with
+    /// the conversation in its first prompt's bridge.
+    fn renew_now(&mut self) {
+        self.forget_session(self.active);
+        self.idle_start_paused = false;
+        self.persist();
     }
 
     /// Replace the current state with a saved conversation.
@@ -5895,6 +6004,21 @@ fn handoff_prompt(to: &str, budget: usize) -> String {
          your own setup (tools, connectors, MCP servers) unless the task depends on it. For \
          this reply only, use no tools and change nothing: answer from what you already know. \
          The conversation may come back to you later, with your tools as before."
+    )
+}
+
+/// What a session left for a new one of the same harness is asked for
+/// (`App::renew_session`), as [`handoff_prompt`] is.
+fn renew_handoff_prompt(budget: usize) -> String {
+    let words = (budget / 2 / 6).clamp(50, HANDOFF_MAX_WORDS);
+    format!(
+        "[unharness] The user is moving this conversation to a new session of yours, with \
+         another model or reasoning effort, that will see only part of it. Write a handoff \
+         summary for that session, in at most {words} words: the user's goal and constraints, \
+         the decisions made and why, what has been done (files changed, commands run and what \
+         came of them), what is unfinished or failing, and the next steps. Be specific (paths, \
+         names, error messages). For this reply only, use no tools and change nothing: answer \
+         from what you already know."
     )
 }
 
@@ -9327,6 +9451,7 @@ pub(crate) mod tests {
             to: HarnessId::CODEX,
             start: 0,
             held: false,
+            renew: false,
         });
         app.on_event(plan_request());
         assert!(app.modal.is_none());
@@ -11232,6 +11357,152 @@ pub(crate) mod tests {
             &app.take_actions()[..],
             [Action::Command(SessionCommand::SetModel(_))]
         ));
+    }
+
+    /// An app on the built-in vibe harness, whose model and effort are
+    /// chosen when its process starts (`model_per_process`).
+    fn vibe_app() -> (App, tempfile::TempDir) {
+        let cwd = tempfile::tempdir().unwrap();
+        let registry =
+            Arc::new(Registry::empty().with(Box::new(crate::harness::vibe::VibeHarness::new())));
+        let app = test_app_with(
+            cwd.path().to_path_buf(),
+            HarnessId::VIBE,
+            None,
+            false,
+            Config::default(),
+            registry,
+        );
+        (app, cwd)
+    }
+
+    /// A vibe session, live, after one turn.
+    fn prompted_vibe(app: &mut App) {
+        app.submit_prompt("remember the word kumquat".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "v1".into(),
+            model: Some("mistral-medium-3.5".into()),
+        });
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec![
+            "off".into(),
+            "high".into(),
+        ])));
+    }
+
+    /// Before the first prompt a change starts the session again with it.
+    #[test]
+    fn a_choice_at_spawn_before_the_first_prompt_restarts_the_session() {
+        let (mut app, _cwd) = vibe_app();
+        assert!(app.caps().model_per_process);
+        blank_session(&mut app);
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec![
+            "off".into(),
+            "high".into(),
+        ])));
+        app.set_effort("off".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
+    }
+
+    /// vibe keeps the model and effort a session last ran: after a prompt
+    /// a change starts a new session, never sent to the old one, and the
+    /// next prompt tells it the conversation so far. Not while a turn runs.
+    #[test]
+    fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
+        let (mut app, _cwd) = vibe_app();
+        prompted_vibe(&mut app);
+
+        // Mid-turn: refused, nothing chosen.
+        app.set_effort("off".into());
+        app.set_model("glm-5-3".into());
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.current_effort(), None);
+        assert_eq!(app.current_model(), None);
+
+        app.on_event(AgentEvent::TextDelta("noted".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.set_effort("off".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_effort(), Some("off"));
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("starts a new session"))
+        );
+        // The conversation no longer names the old session.
+        assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+        assert!(!app.conversation.sessions.contains_key(&HarnessId::VIBE));
+
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
+        app.session_alive = true;
+        app.session_blank = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "v2".into(),
+            model: Some("mistral-medium-3.5".into()),
+        });
+        let sent = {
+            app.submit_prompt("which word?".into());
+            sent_turn(&mut app)
+        };
+        assert!(sent.contains("remember the word kumquat"), "{sent}");
+        assert!(sent.contains("noted"), "{sent}");
+        assert!(sent.ends_with("which word?"));
+        assert_eq!(
+            app.session_ids.get(&HarnessId::VIBE).map(String::as_str),
+            Some("v2")
+        );
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+
+        // A model change goes the same way, and the bridge holds both turns.
+        app.set_model("glm-5-3".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_model().unwrap().model, "glm-5-3");
+        assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    }
+
+    /// A conversation too long for the new session's bridge: the session
+    /// left writes a handoff summary first, as for a switch.
+    #[test]
+    fn a_new_session_for_a_choice_gets_a_handoff_when_over_budget() {
+        let (mut app, _cwd) = vibe_app();
+        app.bridge_max_chars = Some(300);
+        prompted_vibe(&mut app);
+        app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.set_effort("off".into());
+        let ask = sent_turn(&mut app);
+        assert!(ask.contains("new session of yours"), "{ask}");
+        assert!(app.is_generating);
+        // The old session is still the one asked.
+        assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+        app.on_event(AgentEvent::TextDelta("Goal: remember kumquat.".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(app.take_actions().contains(&Action::Shutdown));
+        assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+        assert!(app.transcript.blocks.iter().any(|b| matches!(
+            b,
+            super::super::transcript::Block::Handoff { to, .. } if to == "a new Mistral Vibe session"
+        )));
     }
 
     #[test]

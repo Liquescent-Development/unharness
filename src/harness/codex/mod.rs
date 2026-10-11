@@ -270,6 +270,7 @@ impl Harness for CodexHarness {
             // `-c model_provider=…` when the process starts.
             multi_provider: true,
             provider_per_process: true,
+            model_per_process: false,
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,
