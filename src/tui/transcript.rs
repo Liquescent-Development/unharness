@@ -963,13 +963,42 @@ pub fn tool_body<'a>(name: &str, input: &'a Value) -> ToolBody<'a> {
     }
 }
 
-/// A tool that runs a shell command.
-fn is_command(name: &str) -> bool {
-    // `exec_command` is codex-acp's, `execute` the ACP kind.
+/// A tool that runs a shell command. `exec_command` is codex-acp's,
+/// `execute` the ACP kind, `run_command` agy's.
+pub fn is_command(name: &str) -> bool {
     matches!(
         name,
-        "Bash" | "bash" | "shell" | "command_execution" | "exec_command" | "execute"
+        "Bash"
+            | "bash"
+            | "shell"
+            | "command_execution"
+            | "exec_command"
+            | "execute"
+            | "run_command"
     )
+}
+
+/// The command of a shell call's input, as it was sent.
+fn shell_command(input: &Value) -> Option<&str> {
+    ["command", "cmd", "CommandLine"]
+        .iter()
+        .find_map(|k| input.get(*k).and_then(Value::as_str).filter(|s| !blank(s)))
+}
+
+/// The lines of a shell call's command after the first, which is all its
+/// summary shows (a heredoc script), and how many they are.
+pub fn command_beyond_summary<'a>(name: &str, input: &'a Value) -> Option<(&'a str, usize)> {
+    if !is_command(name) {
+        return None;
+    }
+    let command = shell_command(input)?.trim_end();
+    let first = command.lines().position(|l| !blank(l))?;
+    let rest = command
+        .split_inclusive('\n')
+        .skip(first + 1)
+        .collect::<Vec<_>>();
+    let start = command.len() - rest.iter().map(|l| l.len()).sum::<usize>();
+    (!rest.is_empty()).then(|| (&command[start..], rest.len()))
 }
 
 /// Everything a block says, as it was written, for a copy of all of it:
@@ -1021,11 +1050,7 @@ pub fn block_text(b: &Block) -> Option<String> {
                 ToolBody::Write { content, .. } => content.to_string(),
                 ToolBody::Read { .. } => output.clone(),
                 ToolBody::Output => {
-                    let command = input
-                        .get("command")
-                        .or_else(|| input.get("cmd"))
-                        .and_then(Value::as_str)
-                        .filter(|_| is_command(name));
+                    let command = shell_command(input).filter(|_| is_command(name));
                     let call = match command {
                         Some(command) => command.to_string(),
                         None if input_beyond_summary(name, input) => {
@@ -1084,7 +1109,7 @@ fn known_summary(name: &str, input: &Value) -> Option<String> {
     };
     match name {
         // `exec_command` is codex-acp's, `execute` the ACP kind.
-        name if is_command(name) => pick(&["command", "cmd"]),
+        name if is_command(name) => shell_command(input).map(first_line),
         "Read" | "Write" | "Edit" | "MultiEdit" | "read" | "write" | "edit" => {
             pick(&["file_path", "path", "filename"])
         }
@@ -1505,6 +1530,39 @@ mod tests {
         assert!(!input_beyond_summary("Weird", &Value::Null));
         assert!(!input_beyond_summary("Bash", &json!({"command":"ls"})));
         assert_eq!(truncate_chars("abcdef", 4), "abc…");
+    }
+
+    #[test]
+    fn a_command_of_several_lines_is_more_than_its_summary() {
+        let script = json!({"command": "\n\n  cd x && python3 - <<'EOF'\nprint(1)\n\nEOF\n\n"});
+        assert_eq!(
+            tool_summary_full("Bash", &script),
+            "  cd x && python3 - <<'EOF'"
+        );
+        assert_eq!(
+            command_beyond_summary("Bash", &script),
+            Some(("print(1)\n\nEOF", 3))
+        );
+        assert_eq!(
+            command_beyond_summary("exec_command", &json!({"cmd": "a\r\nb"})),
+            Some(("b", 1))
+        );
+        // agy's, as its steps carry it (fixtures/bypass.jsonl).
+        let agy = json!({"CommandLine": "cat <<EOF\nhi\nEOF"});
+        assert_eq!(tool_summary_full("run_command", &agy), "cat <<EOF");
+        assert_eq!(
+            command_beyond_summary("run_command", &agy),
+            Some(("hi\nEOF", 2))
+        );
+        assert_eq!(
+            command_beyond_summary("Bash", &json!({"command": "ls\n"})),
+            None
+        );
+        // Not a shell call: its summary is all there is.
+        assert_eq!(
+            command_beyond_summary("Weird", &json!({"command": "a\nb"})),
+            None
+        );
     }
 
     #[test]

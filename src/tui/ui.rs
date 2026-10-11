@@ -26,8 +26,8 @@ use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
 use super::transcript::{
-    Block as TBlock, HookState, ToolBody, input_beyond_summary, tool_body, tool_summary,
-    tool_summary_full, truncate_chars, waits_on_user,
+    Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
+    tool_summary, tool_summary_full, truncate_chars, waits_on_user,
 };
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
@@ -438,6 +438,13 @@ fn block_layout(
             if let Some(kind) = agent.as_ref().and_then(|a| a.kind.as_deref()) {
                 summary.push_str(&format!(" ({kind})"));
             }
+            // A command of several lines (a heredoc script) shows its first
+            // line here and how many follow, which the expanded call shows.
+            let beyond = agent
+                .is_none()
+                .then(|| command_beyond_summary(name, input))
+                .flatten();
+            let more = beyond.map(|(_, n)| format!("(+{n} line{})", if n == 1 { "" } else { "s" }));
             // The command in the terminal's own colour, its output dimmed
             // below it, and the status on the first line: at the end of the
             // line's width when the summary wraps, not inside the command. A
@@ -459,7 +466,30 @@ fn block_layout(
             } else {
                 (name.clone(), beside, width - beside - STATUS_ROOM)
             };
-            let mut summary_lines = wrap_words_joined(&summary, head_width).into_iter();
+            let mut rows: Vec<(Vec<Part>, Join)> = wrap_words_joined(&summary, head_width)
+                .into_iter()
+                .map(|(row, join)| match row.is_empty() {
+                    true => (Vec::new(), join),
+                    false => (vec![Part::Text(Span::raw(row))], join),
+                })
+                .collect();
+            // The count, dimmed, after the command where it fits, else below.
+            // It is drawing: a copy takes the command alone.
+            if let Some(more) = &more
+                && let Some((last, _)) = rows.last_mut()
+            {
+                let used: usize = last.iter().map(|p| p.span().width()).sum();
+                if used + 1 + UnicodeWidthStr::width(more.as_str()) <= head_width {
+                    last.push(Part::Draw(Span::styled(format!(" {more}"), faint())));
+                } else {
+                    rows.push((
+                        vec![Part::Draw(Span::styled(more.clone(), faint()))],
+                        Join::Line,
+                    ));
+                }
+            }
+            let has_text = |parts: &[Part]| parts.iter().any(|p| matches!(p, Part::Text(_)));
+            let mut rows = rows.into_iter();
             // The label, the name and the status are drawing: a copy takes
             // the summary (the command) alone.
             let mut first = vec![
@@ -471,34 +501,30 @@ fn block_layout(
                         .add_modifier(Modifier::BOLD),
                 )),
             ];
-            let mut words = String::new();
-            if !own_line {
-                words = summary_lines.next().map(|(w, _)| w).unwrap_or_default();
-                first.extend([
-                    Part::Draw(Span::raw("  ")),
-                    Part::Text(Span::raw(words.clone())),
-                ]);
-                if summary_lines.len() > 0 {
-                    let pad =
-                        (head_width + 1).saturating_sub(UnicodeWidthStr::width(words.as_str()));
+            if !own_line && let Some((words, _)) = rows.next() {
+                let used: usize = words.iter().map(|p| p.span().width()).sum();
+                first.push(Part::Draw(Span::raw("  ")));
+                first.extend(words);
+                if rows.len() > 0 {
+                    let pad = (head_width + 1).saturating_sub(used);
                     first.push(Part::Draw(Span::raw(" ".repeat(pad))));
                 }
             }
             status_span = Some(first.len());
             first.push(Part::Draw(status));
-            if words.is_empty() {
-                lines.drawing(first);
-            } else {
+            if has_text(&first) {
                 lines.text(first, Join::Line);
+            } else {
+                lines.drawing(first);
             }
-            for (seg, join) in summary_lines.filter(|(s, _)| !s.is_empty()) {
-                lines.text(
-                    vec![
-                        Part::Draw(Span::raw(" ".repeat(indent))),
-                        Part::Text(Span::raw(seg)),
-                    ],
-                    join,
-                );
+            for (row, join) in rows.filter(|(row, _)| !row.is_empty()) {
+                let mut line = vec![Part::Draw(Span::raw(" ".repeat(indent)))];
+                line.extend(row);
+                if has_text(&line) {
+                    lines.text(line, join);
+                } else {
+                    lines.drawing(line);
+                }
             }
 
             let body_width = width.saturating_sub(2);
@@ -516,6 +542,12 @@ fn block_layout(
                 }
                 None => {
                     let mut body = tool_body_lines(name, input, output, *is_error, body_width);
+                    // The rest of a command of several lines, in the
+                    // terminal's own colour as its first line is, before the
+                    // output on an expanded call; a collapsed one counts it.
+                    let command = beyond
+                        .map(|(rest, _)| plain_lines(rest, body_width, Style::default()))
+                        .unwrap_or_default();
                     // What the summary line left out of the input, after the
                     // output on an expanded call; a collapsed one counts it.
                     let left_out = if input_beyond_summary(name, input)
@@ -526,12 +558,14 @@ fn block_layout(
                         Rows::new()
                     };
                     let hidden = if *collapsed {
-                        body.len().saturating_sub(4) + left_out.len()
+                        body.len().saturating_sub(4) + left_out.len() + command.len()
                     } else {
                         0
                     };
                     if *collapsed {
                         body.truncate(4);
+                    } else {
+                        lines.append(command);
                     }
                     lines.append(body);
                     if !*collapsed {
@@ -3563,6 +3597,58 @@ mod tests {
         // A known call shows no input of its own.
         let bash = tool("Bash", serde_json::json!({"command": "ls"}), "a", false);
         assert_eq!(bash.len(), 2, "{bash:?}");
+
+        // Unless it is a command of several lines: the header says how many
+        // follow, and the expanded call shows them, then the output.
+        let script = serde_json::json!({"command":
+            "cd x && python3 - <<'EOF'\nprint('one')\nprint('two')\nEOF"});
+        let collapsed = tool("Bash", script.clone(), "one\ntwo", true);
+        assert!(
+            collapsed[0].contains("cd x && python3 - <<'EOF' (+3 lines)"),
+            "{collapsed:?}"
+        );
+        assert!(!collapsed.join("\n").contains("print"), "{collapsed:?}");
+        assert!(collapsed[3].contains("3 more lines"), "{collapsed:?}");
+        let expanded = tool("Bash", script, "one\ntwo", false);
+        assert_eq!(
+            expanded[1..],
+            [
+                "  │ print('one')",
+                "  │ print('two')",
+                "  │ EOF",
+                "  │ one",
+                "  └ two",
+            ],
+        );
+        // A count with no room beside the command goes whole to a row of
+        // its own, under the command.
+        let long = format!("{}\nb", "a".repeat(55));
+        let rows = tool("Bash", serde_json::json!({ "command": long }), "", true);
+        assert!(rows[0].contains(&"a".repeat(55)), "{rows:?}");
+        assert_eq!(rows[1].trim(), "(+1 line)", "{rows:?}");
+        // A copy takes the command as written and never the count: its
+        // first line collapsed, all of it expanded.
+        let copied = |command: &str, collapsed: bool| {
+            let block = TBlock::Tool {
+                id: "t".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": command }),
+                output: "out".into(),
+                is_error: false,
+                done: true,
+                collapsed,
+                started: std::time::Instant::now(),
+                duration: None,
+                agent: None,
+            };
+            block_layout(&block, 80, false, false, 0.0).0.copied()
+        };
+        assert_eq!(copied("a <<EOF\nb\nEOF", true), "a <<EOF\nout");
+        assert_eq!(copied("a <<EOF\nb\nEOF", false), "a <<EOF\nb\nEOF\nout");
+        assert_eq!(
+            copied(&format!("{}\nb", "a".repeat(55)), false),
+            format!("{}\nb\nout", "a".repeat(55))
+        );
 
         let question = serde_json::json!({"questions": [{"question": "Verify?", "header": "H",
             "multiSelect": false, "options": [{"label": "Yes", "description": "d"}]}]});

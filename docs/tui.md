@@ -299,10 +299,11 @@ bottom edge scrolls.
   with, which knows better than the pane whether you are at the desktop or
   over ssh.
 - A copy takes the text and leaves out what is drawn around it: block
-  headers, a tool call's label and status, gutters, wrap marks, a
-  thought's box, code block frames, table rules and the row counting
-  hidden lines. A line wrapped over several rows comes out as one line.
-  Only what is copied is highlighted. A list keeps its `-` and numbers
+  headers, a tool call's label and status, the count of a command's
+  further lines, gutters, wrap marks, a thought's box, code block
+  frames, table rules and the row counting hidden lines. A line wrapped
+  over several rows comes out as one line. Only what is copied is
+  highlighted. A list keeps its `-` and numbers
   and a table its cells, a tab between them; an edit keeps its `-` and
   `+`, a written file does not. A drag over nothing but drawing (a label)
   copies that as drawn. A table whose cells wrap is copied a row of the
@@ -358,7 +359,9 @@ is in the terminal's own colour and its output dimmed below it.
 
 Tool calls render as blocks:
 
-- shell output in a gutter;
+- shell output in a gutter; a command of several lines (a heredoc
+  script) shows its first line and how many follow, and the expanded call
+  shows the rest of it above the output;
 - file edits as syntax-coloured red/green replacements;
 - reads highlighted by file type;
 - unified diffs in red/green.
