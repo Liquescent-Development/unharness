@@ -11397,6 +11397,54 @@ pub(crate) mod tests {
         assert_eq!(starts(&app.take_actions()), 1);
     }
 
+    /// An ACP agent that is not signed in fails the turn (or the session
+    /// started early) with what to run, and its driver ends the process:
+    /// told once, and nothing starts again until the user does something.
+    #[test]
+    fn an_agent_that_is_not_signed_in_is_told_once_and_waits_for_the_user() {
+        let why = "vibe is not signed in (Missing API key for mistral provider). It offers: \
+                   \"Sign in through Mistral AI Studio\". unharness does not sign agents in: \
+                   run `vibe --setup` in a terminal, then try again";
+        let told = |app: &App| {
+            let notices = notices(app);
+            assert!(!notices.iter().any(|n| n.contains("exited")), "{notices:?}");
+            notices
+                .iter()
+                .filter(|n| n.contains("vibe --setup"))
+                .count()
+        };
+        let failed = || AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(why.into()),
+        };
+
+        // Started before the first prompt.
+        let mut app = test_app(HarnessId::CODEX);
+        blank_session(&mut app);
+        app.on_event(failed());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        assert_eq!(told(&app), 1);
+
+        // Prompted: the turn fails and the process goes by itself.
+        let mut app = test_app(HarnessId::CODEX);
+        app.start_when_idle();
+        app.take_actions();
+        app.session_alive = true;
+        app.submit_prompt("hello".into());
+        app.take_actions();
+        assert!(app.is_generating);
+        app.on_event(failed());
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        assert!(!app.is_generating);
+        assert_eq!(told(&app), 1);
+        app.start_when_idle();
+        assert!(app.take_actions().is_empty());
+        app.submit_prompt("hello".into());
+        assert_eq!(starts(&app.take_actions()), 1);
+    }
+
     #[test]
     fn a_choice_before_the_first_prompt_starts_the_session_again_with_it() {
         let mut app = test_app(HarnessId::CLAUDE);

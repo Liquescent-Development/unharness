@@ -3944,3 +3944,166 @@ async fn vibe_says_when_the_session_runs_another_model_or_level() {
     );
     shut_down(&mut handle).await;
 }
+
+/// vibe-acp 2.26.1 with no API key (`fixtures/vibe_acp_not_signed_in.jsonl`).
+fn vibe_not_signed_in() -> PathBuf {
+    repo().join("src/harness/acp/fixtures/vibe_acp_not_signed_in.jsonl")
+}
+
+/// vibe as a config agent that names its sign-in command.
+fn vibe_signing_in() -> unharness::harness::acp::AcpHarness {
+    vibe_acp().signing_in_with(Some("vibe --setup"))
+}
+
+/// What a turn failed with for want of sign-in, once the process has gone
+/// by itself (nothing was sent to end it): no other error on the way, the
+/// stderr vibe wrote included.
+async fn not_signed_in(handle: &mut SessionHandle) -> String {
+    let events = until_exited(handle).await;
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+        "{events:?}"
+    );
+    turn_error(&events).expect("the turn fails").to_string()
+}
+
+/// vibe-acp 2.26.1 without a key answers `session/new` with the spec's
+/// auth-required error. The turn fails with the methods it offered and
+/// what to run; no other session is asked for, and the process is ended
+/// so that the next prompt starts one that reads the key afresh.
+#[tokio::test]
+async fn acp_not_signed_in_tells_the_methods_and_what_to_run() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let mut cfg = fake.config(&vibe_not_signed_in(), PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = vibe_signing_in().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("say hi")).await.unwrap();
+    let why = not_signed_in(&mut handle).await;
+    assert_eq!(
+        why,
+        "fake-acp is not signed in (Missing API key for mistral provider). It offers: \
+         \"Sign in through Mistral AI Studio\" (Sign into Mistral Vibe through your Mistral \
+         AI Studio account). unharness does not sign agents in: run `vibe --setup` in a \
+         terminal, then try again"
+    );
+    assert_eq!(
+        sent_until_ended(&fake),
+        ["initialize", "session/new", "ended"]
+    );
+    // No terminal sign-in is declared, so vibe offers none.
+    assert_eq!(
+        fake.sent_lines()[0]["params"]["clientCapabilities"],
+        serde_json::json!({"elicitation": {"form": {}}})
+    );
+}
+
+/// The same answer to a session started before the first prompt (the
+/// TUI's): the failure is a turn's all the same, which the TUI shows and
+/// holds the session on.
+#[tokio::test]
+async fn acp_not_signed_in_before_a_prompt_fails_the_same_way() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let mut cfg = fake.config(&vibe_not_signed_in(), PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let why = not_signed_in(&mut handle).await;
+    assert!(
+        why.starts_with("fake-acp is not signed in (Missing API key")
+            && why.contains("\"Sign in through Mistral AI Studio\"")
+            && why.ends_with("sign in with fake-acp's own command line, then try again"),
+        "{why}"
+    );
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+}
+
+/// A reattach (vibe loads) or a fork answered with auth-required is not
+/// followed by a new session, which would not know the conversation, nor
+/// by the reattach-and-fork-again a refused fork gets.
+#[tokio::test]
+async fn acp_not_signed_in_at_a_load_or_a_fork_starts_no_other_session() {
+    if !python_available() {
+        return;
+    }
+    for (fork, sent) in [(false, "session/load"), (true, "session/fork")] {
+        let fake = Fake::new();
+        let mut cfg = fake.config(&vibe_not_signed_in(), PermissionPolicy::Bypass, true);
+        cfg.model = None;
+        cfg.resume = Some("stored".into());
+        cfg.fork = fork;
+        let mut handle = vibe_signing_in().start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("say hi")).await.unwrap();
+        let why = not_signed_in(&mut handle).await;
+        assert!(why.contains("run `vibe --setup`"), "{why}");
+        assert_eq!(sent_methods(&fake), ["initialize", sent], "fork: {fork}");
+    }
+}
+
+/// A prompt answered with auth-required fails its turn the same way, and
+/// the process is ended.
+#[tokio::test]
+async fn acp_not_signed_in_at_a_prompt_fails_the_turn_and_ends_the_process() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (mut cfg, _gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{},"authMethods":[{"id":"login","name":"Log in"}]}}"#,
+            r#">> {"method": "session/new"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+            r#">> {"method": "session/prompt"}"#,
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"Authentication required"}}"#,
+        ],
+    );
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    let why = not_signed_in(&mut handle).await;
+    assert!(
+        why.starts_with(
+            "fake-acp is not signed in (Authentication required). It offers: \"Log in\"."
+        ),
+        "{why}"
+    );
+    assert_eq!(
+        sent_until_ended(&fake),
+        ["initialize", "session/new", "session/prompt", "ended"]
+    );
+}
+
+/// Another error at `session/new` is reported as before, with no sign-in
+/// text of its own beyond the hint.
+#[tokio::test]
+async fn acp_other_session_errors_are_not_taken_for_sign_in() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (cfg, _gate) = gated_config(
+        &fake,
+        &[
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32603,"message":"Internal error"}}"#,
+        ],
+    );
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(
+        why.starts_with("Internal error (if this is an authentication error"),
+        "{why}"
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
