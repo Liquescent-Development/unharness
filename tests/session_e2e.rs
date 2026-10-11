@@ -1973,6 +1973,208 @@ async fn acp_sets_the_mapped_mode_before_the_first_prompt() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// Events until the process has exited.
+async fn until_exited(handle: &mut SessionHandle) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(handle).await;
+        let exited = matches!(ev, AgentEvent::ProcessExited { .. });
+        events.push(ev);
+        if exited {
+            return events;
+        }
+    }
+}
+
+/// The methods the driver sent, in order, with `ended` where the fake saw
+/// its stdin close (`UNHARNESS_FAKE_LINGER`).
+fn sent_until_ended(fake: &Fake) -> Vec<String> {
+    fake.sent_lines()
+        .iter()
+        .map(|v| match (v.get("method"), v.get("ended")) {
+            (Some(m), _) => m.as_str().unwrap_or("").to_string(),
+            (None, Some(_)) => "ended".into(),
+            (None, None) => "answer".into(),
+        })
+        .collect()
+}
+
+/// vibe-acp 2.26.1 advertises `sessionCapabilities.close`: a shutdown
+/// between turns sends `session/close` for the session before stdin
+/// closes, and the agent's `{}` answer is no event.
+#[tokio::test]
+async fn acp_closes_the_session_before_stdin_at_shutdown() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong")),
+        "{events:?}"
+    );
+
+    let started = tokio::time::Instant::now();
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    let tail = until_exited(&mut handle).await;
+    // Answered: stdin closed then, not after the wait.
+    assert!(
+        started.elapsed() < unharness::harness::acp::transport::CLOSE_WAIT,
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        !tail.iter().any(|e| matches!(e, AgentEvent::Error(_))),
+        "{tail:?}"
+    );
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "session/close",
+            "ended",
+        ]
+    );
+    let close = &fake.sent_lines()[4];
+    assert_eq!(
+        close["params"]["sessionId"],
+        fake.sent_lines()[3]["params"]["sessionId"]
+    );
+    assert!(close["id"].is_u64(), "a request: {close}");
+}
+
+/// An agent that does not advertise `session/close` is not sent it: its
+/// session ends with its stdin, as before.
+#[tokio::test]
+async fn acp_sends_no_close_to_an_agent_that_does_not_take_it() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl"))
+            .unwrap();
+    assert!(recorded.contains(r#","close":{}}"#));
+    let fixture = fake._tmp.path().join("no_close.jsonl");
+    let lines: Vec<&str> = recorded
+        .lines()
+        .take_while(|l| !(l.starts_with(">>") && l.contains("session/close")))
+        .collect();
+    std::fs::write(&fixture, lines.join("\n").replace(r#","close":{}}"#, "}")).unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "ended",
+        ]
+    );
+}
+
+/// An agent that does not answer `session/close` has its stdin closed
+/// after `CLOSE_WAIT`, and its grace then as at any shutdown.
+#[tokio::test]
+async fn acp_closes_stdin_when_session_close_is_not_answered() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl"))
+            .unwrap();
+    // Everything up to the close, which is read and never answered.
+    let fixture = fake._tmp.path().join("unanswered.jsonl");
+    let mut lines = Vec::new();
+    for l in recorded.lines() {
+        lines.push(l);
+        if l.starts_with(">>") && l.contains("session/close") {
+            break;
+        }
+    }
+    std::fs::write(&fixture, lines.join("\n")).unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    let started = tokio::time::Instant::now();
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    let wait = unharness::harness::acp::transport::CLOSE_WAIT;
+    let took = started.elapsed();
+    assert!(took >= wait, "{took:?}");
+    assert!(
+        took < wait + unharness::core::process::END_GRACE,
+        "{took:?}"
+    );
+    assert_eq!(sent_until_ended(&fake)[4..], ["session/close", "ended"]);
+}
+
+/// Mid-turn the agent is killed at once, with nothing sent first: given
+/// its grace, `session/close` or not, it could go on with the turn.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn acp_sends_no_close_mid_turn() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl"))
+            .unwrap();
+    // The prompt is never answered.
+    let fixture = fake._tmp.path().join("mid_turn.jsonl");
+    let mut lines = Vec::new();
+    for l in recorded.lines() {
+        lines.push(l);
+        if l.starts_with(">>") && l.contains("session/prompt") {
+            break;
+        }
+    }
+    std::fs::write(&fixture, lines.join("\n")).unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "60".into()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    fake.sent_lines_eventually(4).await;
+    let started = tokio::time::Instant::now();
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert!(started.elapsed() < unharness::core::process::END_GRACE);
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+        ]
+    );
+}
+
 /// A loaded vibe session comes back in the mode it was left in
 /// (auto-approve): it is set again before the prompt.
 #[tokio::test]
@@ -2221,7 +2423,14 @@ async fn headless_fails_when_an_acp_agent_cannot_hold_ask() {
             .is_some_and(|e| e.contains("has no `modes` map")),
         "{result}"
     );
-    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    // No prompt went; the session may be closed by now (vibe takes
+    // `session/close`).
+    let methods = sent_methods(&fake);
+    assert_eq!(methods[..2], ["initialize", "session/new"]);
+    assert!(
+        methods[2..].iter().all(|m| m == "session/close"),
+        "{methods:?}"
+    );
 }
 
 #[tokio::test]

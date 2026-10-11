@@ -1,5 +1,6 @@
 //! Long-lived ACP session over stdio: `initialize` → `session/new` (or
-//! `session/resume` / `session/load`) → one `session/prompt` per turn.
+//! `session/resume` / `session/load`) → one `session/prompt` per turn →
+//! `session/close`, where the agent takes it, answered before stdin closes.
 //!
 //! unharness declares no client capabilities, so the agent uses its own file
 //! and terminal tools and reports them as tool calls. The only agent → client
@@ -14,14 +15,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
-use super::parse::{AcpParser, SessionOptions, can_load, can_resume, error_text, mcp_http};
+use super::parse::{
+    AcpParser, SessionOptions, can_close, can_load, can_resume, error_text, mcp_http,
+};
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
@@ -182,6 +187,12 @@ fn request_key(id: &Value) -> String {
     }
 }
 
+/// How long a shutdown waits for the answer to `session/close` before it
+/// closes stdin. The agent's [`END_GRACE`](crate::core::process::END_GRACE)
+/// starts then: the whole stays within what the TUI waits for an agent to
+/// end before it kills it.
+pub const CLOSE_WAIT: Duration = Duration::from_secs(1);
+
 /// What a harness knows about its agent that the protocol does not say.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSpec {
@@ -243,6 +254,9 @@ enum Outstanding {
     },
     /// Config changes: only an error matters, and the parser reports it.
     Other,
+    /// `session/close` at shutdown: its answer, `{}` or an error, says
+    /// nothing anyone is waiting for.
+    Close,
 }
 
 /// Where the agent's mode stands for the driver's policy.
@@ -289,6 +303,8 @@ struct Driver {
     /// The configured model and effort are still to be sent to the
     /// session, once its mode is set.
     setup_pending: bool,
+    /// The agent takes `session/close` (`sessionCapabilities.close`).
+    can_close: bool,
 }
 
 impl Driver {
@@ -565,6 +581,31 @@ impl Driver {
             .await
     }
 
+    /// `session/close` for the session, if the agent takes it, at a
+    /// shutdown between turns, so that an agent that outlives its stdin, or
+    /// serves more than one session, lets go of it. Whether it was sent:
+    /// stdin is then closed once it is answered, or after [`CLOSE_WAIT`]
+    /// (vibe-acp 2.26.1 left it unanswered when stdin closed right behind
+    /// it).
+    async fn close_session(&mut self) -> bool {
+        let Some(session_id) = self.session_id.clone() else {
+            return false;
+        };
+        self.can_close
+            && self
+                .request(
+                    "session/close",
+                    json!({"sessionId": session_id}),
+                    Outstanding::Close,
+                )
+                .await
+                .is_ok()
+    }
+
+    fn closing(&self) -> bool {
+        self.outstanding.values().any(|o| *o == Outstanding::Close)
+    }
+
     /// `session/cancel`, and every open permission request answered
     /// `cancelled`, as the spec requires once a turn is cancelled.
     async fn cancel_turn(&mut self) -> Result<()> {
@@ -616,6 +657,7 @@ async fn drive(
         mode_seq: 0,
         refused: Vec::new(),
         setup_pending: false,
+        can_close: false,
     };
     let init = json!({
         "protocolVersion": 1,
@@ -628,16 +670,25 @@ async fn drive(
             .await;
     }
     let mut shutting_down = false;
+    // Until when stdin stays open for the answer to `session/close`.
+    let mut close_by: Option<Instant> = None;
 
     loop {
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else {
-                    if !shutting_down {
+                    if close_by.is_some() {
+                        // Its grace starts now rather than with the answer.
+                        d.proc.end();
+                    } else if !shutting_down {
                         d.proc.kill().await;
                     }
                     return;
                 };
+                // The session is ending: nothing more goes to it.
+                if shutting_down {
+                    continue;
+                }
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => {
                         d.queued_turn = Some((text, attachments));
@@ -720,7 +771,12 @@ async fn drive(
                         shutting_down = true;
                         let turn_open = d.queued_turn.is_some()
                             || d.outstanding.values().any(|o| *o == Outstanding::Prompt);
-                        d.proc.end_or_kill(turn_open).await;
+                        // Mid-turn the agent is killed, with nothing sent first.
+                        if !turn_open && d.close_session().await {
+                            close_by = Some(Instant::now() + CLOSE_WAIT);
+                        } else {
+                            d.proc.end_or_kill(turn_open).await;
+                        }
                         Ok(())
                     }
                 };
@@ -728,11 +784,19 @@ async fn drive(
                     let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
                 }
             }
+            _ = tokio::time::sleep_until(close_by.unwrap_or_else(Instant::now)), if close_by.is_some() => {
+                close_by = None;
+                d.proc.end();
+            }
             raw = d.proc.lines.recv() => {
                 match raw {
                     Some(RawLine::Stdout(line)) => {
                         if let Err(e) = on_line(&mut d, &line, &events).await {
                             let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
+                        }
+                        if close_by.is_some() && !d.closing() {
+                            close_by = None;
+                            d.proc.end();
                         }
                     }
                     // Agents log freely to stderr; keep the last line for a crash report.
@@ -767,6 +831,7 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             match (kind, error) {
                 (Some(Outstanding::Initialize), None) => {
                     let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
+                    d.can_close = can_close(caps);
                     let (servers, dropped) =
                         mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps), &d.cfg.cwd);
                     d.mcp_servers = servers;
@@ -883,6 +948,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         .await;
                     return Ok(());
                 }
+                // The session is over; an error closing it is not news.
+                (Some(Outstanding::Close), _) => return Ok(()),
                 // A config change answers with the option list as it now stands.
                 (Some(Outstanding::Other), None) => {
                     if let Some(o) = d.parser.session_options(result.get("configOptions")) {
