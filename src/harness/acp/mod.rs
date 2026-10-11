@@ -7,6 +7,7 @@
 //! can do is mostly learned at the handshake, so the static capabilities are
 //! the protocol's baseline and the session reports the rest.
 
+pub mod elicitation;
 pub mod modes;
 pub mod parse;
 pub mod transport;
@@ -196,6 +197,8 @@ impl Harness for AcpHarness {
             live_model_list: true,
             multi_provider: false,
             provider_per_process: false,
+            // Form elicitation is declared at `initialize`; whether the
+            // agent asks is reported once it sends one.
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,

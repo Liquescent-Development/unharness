@@ -1,0 +1,29 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=c7ee2ea7-e937-9c21-9d84-1c36eb4bb5e2 model=glm-5-3
+CapabilitiesChanged efforts= plan_mode=false models=2
+Context used=0 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=8399 window=800000
+ToolCallStarted id=effect-0acf3a2b-d0ef-507a-95ab-1141fdb9cb56 name=other input={"footerNote":null,"questions":[{"header":"Colors","hideO...
+CapabilitiesChanged ask_user_question=true
+PermissionRequest id=0 Question n=1 [Colors multi: Red|Green|Blue]
+ToolCallResult id=effect-0acf3a2b-d0ef-507a-95ab-1141fdb9cb56 error=false "{\"answers\": [{\"question\": \"Which of Red, Green and Blue d..."
+TextDelta "You like Red and Blue."
+Context used=8399 window=800000
+Context used=8448 window=800000
+Context used=8448 window=800000
+Usage in=16777 out=70 cache_read=0 cache_write=0 cost=0.0238 cumulative=false
+TurnCompleted Done
+Context used=8448 window=800000
+Context used=8550 window=800000
+ToolCallStarted id=effect-0bb7f61e-6fb0-531e-b1ee-e74266c98de2 name=other input={"footerNote":null,"questions":[{"header":"Drink","hideOt...
+PermissionRequest id=1 Question n=1 [Drink: Tea|Coffee]
+ToolCallResult id=effect-0bb7f61e-6fb0-531e-b1ee-e74266c98de2 error=false "{\"answers\": [], \"cancelled\": true}\\nCancelled by user"
+TextDelta "You cancelled the question without choosing"
+Context used=8550 window=800000
+TextDelta " tea or coffee."
+Context used=8575 window=800000
+Context used=8575 window=800000
+Usage in=33815 out=157 cache_read=0 cache_write=0 cost=0.0242 cumulative=false
+TurnCompleted Done

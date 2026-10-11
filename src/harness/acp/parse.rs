@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
+use super::elicitation::Form;
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
@@ -166,6 +167,12 @@ pub struct AcpParser {
     cost_baseline_pending: bool,
     /// The option id the harness declared as its agent's reasoning effort.
     effort_option: Option<String>,
+    /// Calls whose input holds questions (`rawInput.questions`), oldest
+    /// first: a form elicitation that names another id is tied to the
+    /// newest open one that asks what it asks (vibe-acp 2.26.1).
+    question_calls: Vec<String>,
+    /// A form elicitation has come (`CapsUpdate::ask_user_question`).
+    asked: bool,
 }
 
 impl AcpParser {
@@ -178,6 +185,8 @@ impl AcpParser {
             replaying: false,
             cost_baseline_pending: false,
             effort_option: None,
+            question_calls: Vec::new(),
+            asked: false,
         }
     }
 
@@ -226,6 +235,9 @@ impl AcpParser {
                 if method == "session/request_permission" =>
             {
                 self.on_permission(&id, &params)
+            }
+            Some(RpcMessage::Request { id, method, params }) if method == "elicitation/create" => {
+                self.on_elicitation(line, &id, &params)
             }
             // The driver refuses every other agent → client request.
             Some(RpcMessage::Request { .. }) => vec![],
@@ -399,6 +411,11 @@ impl AcpParser {
         }
         let tool = self.tools.entry(id.clone()).or_default();
         merge_tool(tool, update);
+        if tool.input.get("questions").is_some_and(Value::is_array)
+            && !self.question_calls.contains(&id)
+        {
+            self.question_calls.push(id.clone());
+        }
 
         let status = s(update, "status");
         let ended = matches!(status, "completed" | "failed");
@@ -462,6 +479,58 @@ impl AcpParser {
                 description: (!tool.title.is_empty()).then(|| tool.title.clone()),
             },
             tool_call_id: (!id.is_empty()).then_some(id),
+        }));
+        out
+    }
+
+    /// A form elicitation: the questions it asks, tied to the tool call
+    /// that asks them. One the driver refuses (a URL, a field no question
+    /// stands for) gives nothing here.
+    fn on_elicitation(&mut self, line: &str, rpc_id: &Value, params: &Value) -> Vec<AgentEvent> {
+        let Ok(form) = Form::from_request(line, params) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        if !std::mem::replace(&mut self.asked, true) {
+            out.push(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                ask_user_question: Some(true),
+                ..Default::default()
+            }));
+        }
+        // The call the form names (claude-agent-acp 0.85.1), else the
+        // newest open one that asks these questions: vibe-acp 2.26.1 names
+        // an id no tool call has.
+        let tools = &self.tools;
+        self.question_calls
+            .retain(|id| tools.get(id).is_some_and(|t| !t.finished));
+        let call = form
+            .tool_call_id
+            .clone()
+            .filter(|id| tools.contains_key(id))
+            .or_else(|| {
+                self.question_calls
+                    .iter()
+                    .rev()
+                    .find(|id| tools.get(*id).is_some_and(|t| form.asked_by(&t.input)))
+                    .cloned()
+            });
+        let mut input = None;
+        if let Some(id) = &call
+            && let Some(tool) = self.tools.get_mut(id)
+        {
+            if !tool.started {
+                tool.started = true;
+                out.push(started_event(id, tool));
+            }
+            input = Some(tool.input.clone());
+        }
+        out.push(AgentEvent::PermissionRequest(PermissionRequest {
+            id: match rpc_id {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+            kind: form.kind(input.as_ref()),
+            tool_call_id: call,
         }));
         out
     }
@@ -979,6 +1048,92 @@ mod tests {
         }
         assert!(!can_close(&json!({"sessionCapabilities": {"close": null}})));
         assert!(!can_close(&json!({"sessionCapabilities": {}})));
+    }
+
+    /// The questions of every request in a fixture, with the tool call
+    /// each is tied to.
+    fn asked_questions(case: &str) -> Vec<(Option<String>, Vec<crate::core::Question>)> {
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl"))).unwrap();
+        crate::core::testing::replay(&mut parser(), &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::PermissionRequest(PermissionRequest {
+                    kind: PermissionKind::Question { questions },
+                    tool_call_id,
+                    ..
+                }) => Some((tool_call_id, questions)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// vibe-acp 2.26.1 with form elicitation declared: `ask_user_question`
+    /// is a tool call, then `elicitation/create` names an id no call has,
+    /// so the question is tied to the open call that asks it. The call
+    /// says `hideOther: false`: a typed answer is offered.
+    #[test]
+    fn fixture_vibe_acp_question() {
+        assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp_question");
+        let asked = asked_questions("vibe_acp_question");
+        let [(call, questions)] = asked.as_slice() else {
+            panic!("{asked:?}")
+        };
+        assert_eq!(
+            call.as_deref(),
+            Some("effect-70979aa9-c4d8-54a8-a3d8-de5d4837ca50")
+        );
+        let q = &questions[0];
+        assert_eq!((q.id.as_str(), q.header.as_str()), ("q0", "Colour"));
+        assert_eq!(q.text, "What is your favourite colour?");
+        assert!(q.allow_other && !q.multi);
+    }
+
+    /// A multiple choice, then a single one declined; the second call's
+    /// option descriptions are only in its `rawInput`.
+    #[test]
+    fn fixture_vibe_acp_question_multi() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "vibe_acp_question_multi",
+        );
+        let asked = asked_questions("vibe_acp_question_multi");
+        assert_eq!(asked.len(), 2);
+        assert!(asked[0].1[0].multi);
+        assert_eq!(
+            asked[1].0.as_deref(),
+            Some("effect-0bb7f61e-6fb0-531e-b1ee-e74266c98de2")
+        );
+        assert_eq!(
+            asked[1].1[0].options[0],
+            crate::core::QuestionOption::new("Tea", "Brewed leaves, hot or iced")
+        );
+    }
+
+    /// claude-agent-acp 0.85.1: the elicitation names the AskUserQuestion
+    /// call, still pending (announced with it), and the free answer is a
+    /// property of its own beside each question (its "Other").
+    #[test]
+    fn fixture_claude_agent_acp_question() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "claude_agent_acp_question",
+        );
+        let asked = asked_questions("claude_agent_acp_question");
+        assert_eq!(asked.len(), 2);
+        for (call, questions) in &asked {
+            assert!(call.as_deref().is_some_and(|c| c.starts_with("toolu_")));
+            assert_eq!(questions.len(), 1);
+            assert!(questions[0].allow_other);
+        }
+        assert_eq!(asked[0].1[0].text, "What's your favourite colour?");
+        assert_eq!(
+            asked[0].1[0].options[1],
+            crate::core::QuestionOption::new("Blue", "Cool, calm, serene")
+        );
+        assert!(asked[1].1[0].multi);
     }
 
     #[test]

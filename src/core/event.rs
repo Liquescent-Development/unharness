@@ -280,6 +280,9 @@ pub struct CapsUpdate {
     /// has modes and no map, below `bypass`): taken out of what is offered, as a
     /// policy the harness never had is. Each list replaces the last.
     pub refused_policies: Option<Vec<PermissionPolicy>>,
+    /// The agent asks the user questions (`Capabilities::ask_user_question`):
+    /// an ACP agent is seen to once it sends a form elicitation.
+    pub ask_user_question: Option<bool>,
 }
 
 /// A command a harness runs when a prompt starts with `/name`: one of its
@@ -358,6 +361,9 @@ impl CapsUpdate {
         }
         if newer.refused_policies.is_some() {
             self.refused_policies = newer.refused_policies;
+        }
+        if newer.ask_user_question.is_some() {
+            self.ask_user_question = newer.ask_user_question;
         }
     }
 }
@@ -682,6 +688,9 @@ impl AgentEvent {
                 if let Some(r) = &u.refused_policies {
                     let r: Vec<&str> = r.iter().map(|p| p.as_str()).collect();
                     parts.push(format!("refused_policies={}", r.join(",")));
+                }
+                if let Some(q) = u.ask_user_question {
+                    parts.push(format!("ask_user_question={q}"));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

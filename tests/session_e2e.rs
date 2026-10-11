@@ -1742,6 +1742,315 @@ async fn acp_cancel_request_for_an_answered_or_unknown_request_is_ignored() {
     assert_eq!(answers[0]["result"]["outcome"]["optionId"], "allow-once");
 }
 
+/// The answers the driver sent to the agent's request `id`.
+fn answers_to(sent: &[Value], id: u64) -> Vec<Value> {
+    sent.iter()
+        .filter(|v| v["id"] == id && v.get("method").is_none())
+        .cloned()
+        .collect()
+}
+
+/// A vibe fixture whose session is left in the mode it starts in: under
+/// bypass, with no mode map and no model, the driver sends nothing the
+/// recording did not.
+fn vibe_as_recorded(fake: &Fake, fixture: &Path) -> SessionHandle {
+    let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    acp_harness().start_session(cfg).unwrap()
+}
+
+/// vibe-acp 2.26.1 asks with a form elicitation once unharness declares
+/// it: the question goes to the user also under bypass, and the answer
+/// is the form's content.
+#[tokio::test]
+async fn acp_form_elicitation_is_asked_and_answered() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_question.jsonl");
+    let mut handle = vibe_as_recorded(&fake, &fixture);
+    handle
+        .send(SessionCommand::turn("ask me my colour"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| match e {
+        AgentEvent::PermissionRequest(req) => {
+            let PermissionKind::Question { questions } = &req.kind else {
+                panic!("{req:?}")
+            };
+            assert_eq!(questions[0].options.len(), 2);
+            Some(PermissionDecision::Answer(
+                serde_json::json!({"q0": "Blue"}),
+            ))
+        }
+        _ => None,
+    })
+    .await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::CapabilitiesChanged(CapsUpdate {
+            ask_user_question: Some(true),
+            ..
+        })
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::PermissionRequest(req)
+            if req.tool_call_id.as_deref() == Some("effect-70979aa9-c4d8-54a8-a3d8-de5d4837ca50")
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert_eq!(
+        sent[0]["params"]["clientCapabilities"],
+        serde_json::json!({"elicitation": {"form": {}}})
+    );
+    assert_eq!(
+        answers_to(&sent, 0),
+        [serde_json::json!({"jsonrpc": "2.0", "id": 0,
+            "result": {"action": "accept", "content": {"q0": "Blue"}}})]
+    );
+}
+
+/// A multiple choice answered, then a question dismissed (Esc, or
+/// `--print`, which has nobody to ask): declined.
+#[tokio::test]
+async fn acp_dismissed_elicitation_is_declined() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_question_multi.jsonl");
+    let mut handle = vibe_as_recorded(&fake, &fixture);
+    handle.send(SessionCommand::turn("colours")).await.unwrap();
+    run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+            .then(|| PermissionDecision::Answer(serde_json::json!({"q0": ["Red", "Blue"]})))
+    })
+    .await;
+    handle.send(SessionCommand::turn("drinks")).await.unwrap();
+    run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+            .then_some(PermissionDecision::Answer(Value::Null))
+    })
+    .await;
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert_eq!(
+        answers_to(&sent, 0)[0]["result"],
+        serde_json::json!({"action": "accept", "content": {"q0": ["Red", "Blue"]}})
+    );
+    assert_eq!(
+        answers_to(&sent, 1)[0]["result"],
+        serde_json::json!({"action": "decline"})
+    );
+}
+
+/// claude-agent-acp 0.85.1 names the AskUserQuestion call; a typed answer
+/// goes to the "Other" property it puts beside the question.
+#[tokio::test]
+async fn acp_typed_answer_goes_to_claude_agent_acps_other_property() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_question.jsonl");
+    let mut handle = claude_acp()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("colour")).await.unwrap();
+    run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+            .then(|| PermissionDecision::Answer(serde_json::json!({"question_0": "Blue"})))
+    })
+    .await;
+    handle.send(SessionCommand::turn("colours")).await.unwrap();
+    run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+            .then(|| PermissionDecision::Answer(serde_json::json!({"question_0": "Teal"})))
+    })
+    .await;
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert_eq!(
+        answers_to(&sent, 0)[0]["result"],
+        serde_json::json!({"action": "accept", "content": {"question_0": "Blue"}})
+    );
+    assert_eq!(
+        answers_to(&sent, 1)[0]["result"],
+        serde_json::json!({"action": "accept", "content": {"question_0_custom": "Teal"}})
+    );
+}
+
+/// The vibe question recording with what follows the elicitation changed:
+/// `edit` gets each line and returns the lines to replay instead.
+fn vibe_question_with(edit: impl Fn(&str) -> Vec<String>) -> (tempfile::TempDir, PathBuf) {
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_question.jsonl"))
+            .unwrap();
+    let lines: Vec<String> = recorded.lines().flat_map(&edit).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("question.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    (dir, fixture)
+}
+
+/// `$/cancel_request` for an open elicitation closes its modal and answers
+/// it as a cancelled request; the user's answer given meanwhile is not
+/// sent. Synthetic: no agent was seen to withdraw an elicitation.
+#[tokio::test]
+async fn acp_cancel_request_withdraws_an_open_elicitation() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (_dir, fixture) = vibe_question_with(|line| {
+        if line.contains("\"elicitation/create\"") {
+            vec![
+                line.to_string(),
+                r#"{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":0}}"#.into(),
+            ]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    let mut handle = vibe_as_recorded(&fake, &fixture);
+    handle.send(SessionCommand::turn("colour")).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionWithdrawn { id } = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: id.clone(),
+                    decision: PermissionDecision::Answer(serde_json::json!({"q0": "Red"})),
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        events.push(ev);
+        if done {
+            break;
+        }
+    }
+    assert!(events.contains(&AgentEvent::PermissionWithdrawn { id: "0".into() }));
+    shut_down(&mut handle).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(_) | AgentEvent::Error(_))),
+        "{events:?}"
+    );
+    assert_eq!(
+        answers_to(&fake.sent_lines(), 0),
+        [serde_json::json!({"jsonrpc": "2.0", "id": 0,
+            "error": {"code": -32800, "message": "Request cancelled"}})]
+    );
+}
+
+/// An interrupt with an elicitation open: `session/cancel`, then the
+/// elicitation answered `cancel`. Synthetic, from the vibe recording.
+#[tokio::test]
+async fn acp_interrupt_cancels_an_open_elicitation() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (_dir, fixture) = vibe_question_with(|line| {
+        if line.starts_with(">> ") && line.contains("\"action\"") {
+            vec![
+                r#">> {"method": "session/cancel"}"#.into(),
+                r#">> {"id": 0, "result": {"action": "cancel"}}"#.into(),
+                r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#.into(),
+            ]
+        } else if line.contains("\"stopReason\"") || line.contains("tool_call_update") {
+            vec![]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    let mut handle = vibe_as_recorded(&fake, &fixture);
+    handle.send(SessionCommand::turn("colour")).await.unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if matches!(ev, AgentEvent::PermissionRequest(_)) {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        events.push(ev);
+        if done {
+            break;
+        }
+    }
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert_eq!(
+        answers_to(&sent, 0),
+        [serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {"action": "cancel"}})]
+    );
+    let cancel = sent
+        .iter()
+        .position(|v| v["method"] == "session/cancel")
+        .unwrap();
+    let answer = sent.iter().position(|v| v["id"] == 0).unwrap();
+    assert!(cancel < answer);
+}
+
+/// A URL elicitation, never declared, is refused with an error and the
+/// user told. Synthetic: the vibe recording's elicitation in URL mode.
+#[tokio::test]
+async fn acp_url_elicitation_is_refused() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let (_dir, fixture) = vibe_question_with(|line| {
+        if line.contains("\"elicitation/create\"") {
+            vec![r#"{"jsonrpc":"2.0","id":0,"method":"elicitation/create","params":{"sessionId":"s","mode":"url","elicitationId":"e1","url":"https://example.com/auth","message":"Sign in"}}"#.into()]
+        } else {
+            vec![line.to_string()]
+        }
+    });
+    let mut handle = vibe_as_recorded(&fake, &fixture);
+    handle.send(SessionCommand::turn("colour")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::PermissionRequest(_)
+                | AgentEvent::CapabilitiesChanged(CapsUpdate {
+                    ask_user_question: Some(_),
+                    ..
+                })
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(n) if n.contains("url elicitation"))),
+        "{events:?}"
+    );
+    shut_down(&mut handle).await;
+    let answers = answers_to(&fake.sent_lines(), 0);
+    assert_eq!(answers.len(), 1, "{answers:?}");
+    assert_eq!(answers[0]["error"]["code"], -32602);
+}
+
 /// vibe-acp 2.26.1 names the call in a request by its id alone; the kind
 /// came on the `tool_call` before it.
 #[tokio::test]
@@ -2879,6 +3188,47 @@ async fn headless_runs_an_acp_agent() {
         result["session_id"]
             .as_str()
             .is_some_and(|id| id.starts_with("201664ad"))
+    );
+}
+
+/// `--print` has nobody to answer an ACP agent's question: it is
+/// declined, as Claude's AskUserQuestion is dismissed, and the run goes on.
+#[tokio::test]
+async fn headless_declines_an_acp_question() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_question_multi.jsonl");
+    let handle = vibe_as_recorded(&fake, &fixture);
+    let mut run = headless_run(&fake, unharness::headless::Format::StreamJson, false);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "colours".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 0);
+    let lines: Vec<Value> = String::from_utf8_lossy(&run.out)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert!(lines.iter().any(|l| l["type"] == "permission_request"
+        && l["kind"] == "question"
+        && l["questions"][0]["multi"] == true));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["type"] == "permission_answered" && l["decision"] == "dismiss")
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["type"] == "capabilities_changed" && l["ask_user_question"] == true)
+    );
+    assert_eq!(
+        answers_to(&fake.sent_lines(), 0)[0]["result"],
+        serde_json::json!({"action": "decline"})
     );
 }
 
