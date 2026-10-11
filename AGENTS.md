@@ -313,8 +313,9 @@ recorded ones. For anything else:
   `@agentclientprotocol/codex-acp` 2.1.1. The presets in `PRESETS` (gemini,
   opencode, goose, copilot, cursor, qwen, kiro) use launch commands from the
   ACP registry and were not installed when they were added: unverified until
-  recorded. unharness declares no `fs`/`terminal` client capabilities, and
-  uses only stable v1 methods; `session/load` (history replay) has been
+  recorded. unharness declares no `fs`/`terminal` client capabilities
+  (form elicitation only, #157), and uses only stable v1 methods;
+  `session/load` (history replay) has been
   exercised with vibe-acp 2.26.1 (`fixtures/vibe_acp_mode_load.jsonl`),
   `session/resume` with claude-agent-acp.
   `scripts/record-acp.py` (#169) also sends client capabilities,
@@ -422,7 +423,8 @@ recorded ones. For anything else:
   "callback result has no pending registration" once the `cancelled`
   answer followed the cancel; answered `cancelled` with no
   `session/cancel`, its turn ended. Unverified: codex-acp, a string request
-  id, elicitation (#157, to be withdrawn through the same map).
+  id. An elicitation is withdrawn through the same map (#157; a synthetic
+  e2e test, no agent was seen to withdraw one).
   Ending a session (#161): a shutdown between turns sends `session/close`
   where the agent lists `sessionCapabilities.close` (claude-agent-acp
   0.85.1, codex-acp 2.1.1 and vibe-acp 2.26.1 all do) and closes stdin once
@@ -448,6 +450,55 @@ recorded ones. For anything else:
   Codex's own titles are not taken either. Unverified: an agent that
   answers `session/close` with an error (ignored) or serves more than
   one session per process.
+  Questions (#157, `elicitation.rs`): `initialize` declares
+  `elicitation: {form: {}}` (not `url`); without it vibe-acp 2.26.1 does
+  not offer `ask_user_question` and claude-agent-acp 0.85.1 turns
+  AskUserQuestion off (both read in their source). vibe's
+  `exit_plan_mode`, which the capability also turns on, stays disabled in
+  every one of its modes but `plan` (its agent profiles), which its runtime
+  hides (#166). With the capability declared, vibe sends a
+  `tool_call` (kind `other`, `rawInput.questions[]` with `question`,
+  `header`, `options[{label, description}]`, `multiSelect`, `hideOther`)
+  and then `elicitation/create` (`mode: "form"`, `message: "User input
+  required"`, one property `q<n>` per question: a string with `oneOf`
+  `[{const, title}]`, or an array whose `items` have `anyOf`; all
+  required, option descriptions only in the call), whose `toolCallId` is
+  an id no tool call has (`chatcmpl-tool-…` for the call's `effect-…`), so
+  the parser ties it to the newest open call whose `rawInput` asks the same
+  questions (`Form::asked_by`). vibe takes a value outside the options
+  (its source says so, the tool result marks it `isOther`), so a choice
+  takes a typed answer when the call says `hideOther: false`; the model
+  set it to `true` in one live run. claude-agent-acp names its pending
+  AskUserQuestion call (its `rawInput` arrives after the elicitation, which
+  announces the call), puts the question in `message` and option
+  descriptions in the schema, requires nothing, and adds a string property
+  `question_<n>_custom` ("Other") beside each question: it becomes that
+  choice's typed answer and the text goes there (`fixtures/
+  claude_agent_acp_question.jsonl`; recorded, a typed answer beside picks
+  reached the model as `Red, Blue, Teal`). The answer is `{"action":
+  "accept", "content": {...}}` with the schema's `const` values; the
+  modal's Esc and `--print` (which answers every question with
+  `Answer(Null)`, as it dismisses Claude's) send `decline`: vibe then
+  reports the question cancelled to the model, and claude-agent-acp
+  answers the tool with no answers (read in its source), where `cancel`
+  would abort its tool call. An interrupt answers an open elicitation
+  `cancel` after `session/cancel`. A URL (or unknown) mode is answered
+  with the error -32602 and a notice; a form with a field no question
+  stands for (an object, a list without choices) is declined with a
+  notice. The properties keep the order of the line (`serde_json` sorts
+  object keys). The first form elicitation reports
+  `CapsUpdate::ask_user_question`. Recorded: vibe a single choice
+  accepted, a multiple choice accepted and a single one declined
+  (`fixtures/vibe_acp_question*.jsonl`). Checked live (tmux, Landlock,
+  scratch `VIBE_HOME`, `modes = { ask = "ask", bypass = "auto-approve" }`):
+  a vibe question answered in the TUI's modal (descriptions from the call)
+  and the model said the answer; `--print --policy ask` declined one and
+  the model said it was cancelled, exit 0. Unverified: codex-acp's
+  `request_user_input` through elicitation, an agent that withdraws an
+  elicitation, number, integer and boolean fields and an empty form (a
+  confirmation) from a real agent, optional fields (the modal still wants
+  every question answered), and an elicitation scoped to a request
+  (`requestId`) rather than a session.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
