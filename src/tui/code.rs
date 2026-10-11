@@ -251,8 +251,14 @@ fn wrap_spans(
     width: usize,
     first_prefix: Vec<Part>,
     cont_prefix: Vec<Part>,
-    prefix_width: usize,
 ) -> Rows {
+    let cells = |parts: &[Part]| -> usize {
+        parts
+            .iter()
+            .map(|p| unicode_width::UnicodeWidthStr::width(p.span().content.as_ref()))
+            .sum()
+    };
+    let prefix_width = cells(&first_prefix).max(cells(&cont_prefix));
     let avail = width.saturating_sub(prefix_width).max(8);
     let mut rows = Rows::new();
     let mut current: Vec<Part> = first_prefix;
@@ -315,7 +321,7 @@ pub fn code_lines(text: &str, hint: &str, width: usize) -> Rows {
     let mut out = Rows::new();
     for line in text.lines() {
         let segs = highlight_spans(&mut hl, line);
-        out.append(wrap_spans(segs, width, gutter(), cont(), CONT.len()));
+        out.append(wrap_spans(segs, width, gutter(), cont()));
     }
     out
 }
@@ -330,7 +336,6 @@ pub fn plain_lines(text: &str, width: usize, style: Style) -> Rows {
             width,
             gutter(),
             cont(),
-            CONT.len(),
         ));
     }
     out
@@ -409,13 +414,7 @@ pub fn diff_lines(text: &str, width: usize) -> Rows {
             )
         };
         let first = vec![Part::Draw(Span::styled(GUTTER, faint())), marker];
-        out.append(wrap_spans(
-            vec![(style, body)],
-            width,
-            first,
-            cont(),
-            CONT.len() + 2,
-        ));
+        out.append(wrap_spans(vec![(style, body)], width, first, cont()));
     }
     out
 }
@@ -467,7 +466,7 @@ fn marked_lines(text: &str, hint: &str, width: usize, marker: Marker) -> Rows {
                 Marker::Old | Marker::New => Part::Stand(shown, sign),
             },
         ];
-        out.append(wrap_spans(segs, width, first, cont(), CONT.len() + 2));
+        out.append(wrap_spans(segs, width, first, cont()));
     }
     out
 }
@@ -542,6 +541,20 @@ mod tests {
         ));
         let out = plain_lines("total 4\ndrwxr-xr-x  2 me me 4096 .", 80, faint());
         assert_eq!(out.copied(), "total 4\ndrwxr-xr-x  2 me me 4096 .");
+    }
+
+    #[test]
+    fn wrapped_code_fills_the_width_it_is_given() {
+        let cells = |l: &Line<'_>| unicode_width::UnicodeWidthStr::width(line_text(l).as_str());
+        for rows in [
+            code_lines(&"x".repeat(80), "txt", 30),
+            diff_lines(&format!("+{}", "x".repeat(80)), 30),
+            replacement_lines("", &"x".repeat(80), "a.txt", 30),
+        ] {
+            let widths: Vec<usize> = rows.lines().iter().map(cells).collect();
+            assert!(widths.iter().all(|w| *w <= 30), "{widths:?}");
+            assert_eq!(widths[1], 30, "{widths:?}");
+        }
     }
 
     #[test]
