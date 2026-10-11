@@ -446,6 +446,22 @@ recorded ones. For anything else:
   the server and pastes its path (read from the source; the file is
   removed when that client detaches), and reading an image in a pane
   whose server env names a display the user is no longer at.
+- Copying from the transcript (#152, `tui/rows.rs`, `tui/selection.rs`,
+  `transcript::block_text`): every rendered row carries what a copy takes
+  (`RowCopy`), its text without the drawing around it and how it goes on
+  from the row above (the space a word wrap dropped, nothing inside a
+  word), built with the row (`Rows`), so a renderer that adds drawing has
+  to say so. A drag copies that; one over nothing but drawing copies it as
+  drawn. A right click copies a block's `block_text` (a call's whole
+  command and output, a written file with its tabs, a response's
+  markdown), and on a code block in a response that block's code
+  (`markdown::code_blocks`, matched by order to the rows `Rows::code`
+  marks). Checked live (tmux, Claude Code haiku, a stand-in `wl-copy`):
+  drags over a wrapped Bash call and its output, its label alone, a
+  Write, a list and a code block; right clicks on a collapsed call, a
+  Write (its tab kept), a code block and prose; a real right click
+  through a tmux with `mouse on` reached unharness, not tmux's menu.
+  Unverified: herdr, other terminals' right button, macOS.
 - MCP servers (`core/mcp.rs`, `[mcp_servers.<name>]`), each run with a stdio
   and an http server defined only in unharness's config, which the model
   then called: Claude Code 2.1.289 `--mcp-config <file>` (added to its own
