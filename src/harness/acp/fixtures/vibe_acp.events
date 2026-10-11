@@ -1,0 +1,17 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=209715
+SessionStarted id=5e564f70-1e41-d840-1891-b8fcc7008871 model=mistral-medium-3.5
+CapabilitiesChanged efforts= plan_mode=false models=1
+Context used=0 window=209715
+ThinkingDelta "The user wants"
+Context used=0 window=209715
+ThinkingDelta " me to reply with"
+ThinkingDelta " a single word: \"pong\". This is a straightforward request..."
+ThinkingDelta " no ambiguity. I should simply output \""
+ThinkingDelta "pong\" and nothing else."
+TextDelta "pong"
+Context used=0 window=209715
+Context used=8097 window=209715
+Context used=8097 window=209715
+Usage in=8056 out=41 cache_read=0 cache_write=0 cost=0.0124 cumulative=false
+TurnCompleted Done

@@ -31,22 +31,39 @@ pub struct SessionOptions {
     pub model_option: Option<String>,
     pub models: Vec<(String, String, Option<String>)>,
     pub current_model: Option<String>,
-    /// Id of the select option in category `thought_level`, with its values.
+    /// Id of the select option for reasoning effort, with its values: the
+    /// one the harness declared, else the one in category `thought_level`.
     pub effort_option: Option<String>,
     pub efforts: Vec<String>,
 }
 
 impl SessionOptions {
     /// Read `configOptions` (from a session result or a `config_option_update`).
-    pub fn from_config_options(options: Option<&Value>) -> Option<Self> {
+    ///
+    /// `declared_effort` is the id of the option a harness knows to be its
+    /// agent's reasoning effort under a category the spec does not name
+    /// (Mistral Vibe's `thinking`). No such id is assumed for an agent that
+    /// did not declare one: setting an option can do more than the name
+    /// says (vibe's rewrites its own config file).
+    pub fn from_config_options(
+        options: Option<&Value>,
+        declared_effort: Option<&str>,
+    ) -> Option<Self> {
         let options = options?.as_array()?;
         let mut out = SessionOptions::default();
+        let mut declared = None;
+        let mut thought_level = None;
         for opt in options {
             // Boolean options carry no choices to offer.
-            let Some(choices) = opt.get("options").and_then(Value::as_array) else {
+            let Some(choices) = select_choices(opt) else {
                 continue;
             };
             let id = s(opt, "id").to_string();
+            let values = || choices.iter().map(|c| s(c, "value").to_string()).collect();
+            if declared_effort.is_some_and(|d| d == id) {
+                declared = Some((id, values()));
+                continue;
+            }
             match s(opt, "category") {
                 "model" => {
                     out.model_option = Some(id);
@@ -70,12 +87,13 @@ impl SessionOptions {
                         })
                         .collect();
                 }
-                "thought_level" => {
-                    out.effort_option = Some(id);
-                    out.efforts = choices.iter().map(|c| s(c, "value").to_string()).collect();
-                }
+                "thought_level" => thought_level = Some((id, values())),
                 _ => {}
             }
+        }
+        if let Some((id, efforts)) = declared.or(thought_level) {
+            out.effort_option = Some(id);
+            out.efforts = efforts;
         }
         Some(out)
     }
@@ -133,6 +151,8 @@ pub struct AcpParser {
     /// The next cost total includes turns from before this process (a
     /// reattached session): take it as the baseline, not as this turn's cost.
     cost_baseline_pending: bool,
+    /// The option id the harness declared as its agent's reasoning effort.
+    effort_option: Option<String>,
 }
 
 impl AcpParser {
@@ -144,7 +164,22 @@ impl AcpParser {
             turn_cost: 0.0,
             replaying: false,
             cost_baseline_pending: false,
+            effort_option: None,
         }
+    }
+
+    /// Read reasoning effort from the config option with this id, whatever
+    /// its category (see [`SessionOptions::from_config_options`]).
+    pub fn declaring_effort(self, option: Option<String>) -> Self {
+        AcpParser {
+            effort_option: option,
+            ..self
+        }
+    }
+
+    /// Read `configOptions` with the effort option this parser was given.
+    pub fn session_options(&self, options: Option<&Value>) -> Option<SessionOptions> {
+        SessionOptions::from_config_options(options, self.effort_option.as_deref())
     }
 
     /// The session was reattached: its cost total did not start at zero.
@@ -212,7 +247,7 @@ impl AcpParser {
                 ..Default::default()
             }));
         } else if let Some(session_id) = result.get("sessionId").and_then(Value::as_str) {
-            let options = SessionOptions::from_config_options(result.get("configOptions"));
+            let options = self.session_options(result.get("configOptions"));
             out.push(AgentEvent::SessionStarted {
                 session_id: session_id.to_string(),
                 model: options.as_ref().and_then(|o| o.current_model.clone()),
@@ -246,7 +281,7 @@ impl AcpParser {
                 other => StopReason::Error(format!("turn stopped: {other}")),
             };
             out.push(AgentEvent::TurnCompleted { stop_reason });
-        } else if let Some(o) = SessionOptions::from_config_options(result.get("configOptions")) {
+        } else if let Some(o) = self.session_options(result.get("configOptions")) {
             // `session/set_config_option` answers with the whole option list:
             // a model switch can change which effort levels exist. A
             // reattached session answers with its options and modes too.
@@ -306,7 +341,7 @@ impl AcpParser {
                 }
             }
             "config_option_update" => {
-                if let Some(o) = SessionOptions::from_config_options(update.get("configOptions")) {
+                if let Some(o) = self.session_options(update.get("configOptions")) {
                     out.push(AgentEvent::CapabilitiesChanged(o.caps_update(self.harness)));
                 }
             }
@@ -442,6 +477,25 @@ fn command(c: &Value) -> Option<HarnessCommand> {
 fn plan_mode(result: &Value) -> Option<bool> {
     let modes = result.pointer("/modes/availableModes")?.as_array()?;
     Some(modes.iter().any(|m| s(m, "id") == "plan"))
+}
+
+/// The values of a select config option, or `None` for one that has none
+/// to offer (a boolean). The spec lets `options` be a list of values or a
+/// list of groups (`{group, name, options: [values]}`); groups are
+/// flattened in order. A value without a `value` cannot be chosen and is
+/// left out.
+fn select_choices(opt: &Value) -> Option<Vec<&Value>> {
+    let options = opt.get("options")?.as_array()?;
+    Some(
+        options
+            .iter()
+            .flat_map(|o| match o.get("options").and_then(Value::as_array) {
+                Some(group) => group.iter().collect(),
+                None => vec![o],
+            })
+            .filter(|c| !s(c, "value").is_empty())
+            .collect(),
+    )
 }
 
 pub fn error_text(error: &Value) -> String {
@@ -833,6 +887,130 @@ mod tests {
             "claude_agent_acp_file",
         );
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "codex_acp_file");
+    }
+
+    /// The option list Mistral Vibe 2.26.1 answered `session/new` with
+    /// (`fixtures/vibe_acp.jsonl`): its reasoning level is the option
+    /// `thinking` in category `thinking`, which the spec does not name.
+    fn vibe_options() -> Value {
+        let text = std::fs::read_to_string(fixtures_dir(file!()).join("vibe_acp.jsonl")).unwrap();
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find_map(|v| v.pointer("/result/configOptions").cloned())
+            .unwrap()
+    }
+
+    /// Undeclared, vibe's `thinking` gives no effort levels.
+    #[test]
+    fn fixture_vibe_acp() {
+        assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp");
+    }
+
+    #[test]
+    fn effort_is_read_from_thought_level() {
+        let options = json!([
+            {"id": "reasoning", "name": "Reasoning", "category": "thought_level", "type": "select",
+             "currentValue": "low",
+             "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
+            {"id": "verbose", "name": "Verbose", "type": "boolean", "currentValue": true},
+        ]);
+        let o = SessionOptions::from_config_options(Some(&options), None).unwrap();
+        assert_eq!(o.effort_option.as_deref(), Some("reasoning"));
+        assert_eq!(o.efforts, ["low", "high"]);
+        // A declaration that names no option leaves `thought_level` to it.
+        let o = SessionOptions::from_config_options(Some(&options), Some("thinking")).unwrap();
+        assert_eq!(o.effort_option.as_deref(), Some("reasoning"));
+    }
+
+    /// vibe's `thinking` is effort only for a harness that declares it:
+    /// setting it rewrites vibe's own config file.
+    #[test]
+    fn effort_under_another_category_needs_a_declaration() {
+        let options = vibe_options();
+        let o = SessionOptions::from_config_options(Some(&options), None).unwrap();
+        assert_eq!(o.effort_option, None);
+        assert!(o.efforts.is_empty());
+        assert_eq!(o.model_option.as_deref(), Some("model"));
+        assert_eq!(o.current_model.as_deref(), Some("mistral-medium-3.5"));
+
+        let o = SessionOptions::from_config_options(Some(&options), Some("thinking")).unwrap();
+        assert_eq!(o.effort_option.as_deref(), Some("thinking"));
+        assert_eq!(o.efforts, ["off", "high"]);
+        assert_eq!(o.model_option.as_deref(), Some("model"));
+
+        // The declared option wins over one in `thought_level`.
+        let mut both = options.as_array().unwrap().clone();
+        both.push(
+            json!({"id": "reasoning", "name": "Reasoning", "category": "thought_level",
+            "type": "select", "currentValue": "a", "options": [{"value": "a", "name": "A"}]}),
+        );
+        let both = Value::Array(both);
+        let o = SessionOptions::from_config_options(Some(&both), Some("thinking")).unwrap();
+        assert_eq!(o.effort_option.as_deref(), Some("thinking"));
+        let o = SessionOptions::from_config_options(Some(&both), None).unwrap();
+        assert_eq!(o.effort_option.as_deref(), Some("reasoning"));
+    }
+
+    /// The parser reports what the transport sends to: an undeclared
+    /// `thinking` gives no effort levels (`/effort` then says the agent
+    /// exposes none), a declared one gives its values.
+    #[test]
+    fn parser_reports_a_declared_effort_option() {
+        let line = json!({"jsonrpc": "2.0", "id": 2,
+            "result": {"sessionId": "s", "configOptions": vibe_options()}})
+        .to_string();
+        let efforts = |p: &mut AcpParser| {
+            p.feed(&line).into_iter().find_map(|e| match e {
+                AgentEvent::CapabilitiesChanged(u) => u.effort_levels,
+                _ => None,
+            })
+        };
+        assert_eq!(efforts(&mut parser()), Some(vec![]));
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_eq!(efforts(&mut p), Some(vec!["off".into(), "high".into()]));
+    }
+
+    /// The spec's grouped form: `options` is a list of `{group, name,
+    /// options}`, flattened in order for the model and the effort lists.
+    #[test]
+    fn grouped_select_options_are_flattened() {
+        let options = json!([
+            {"id": "model", "name": "Model", "category": "model", "type": "select",
+             "currentValue": "b",
+             "options": [
+                {"group": "fast", "name": "Fast", "options": [
+                    {"value": "a", "name": "Model A"}]},
+                {"group": "smart", "name": "Smart", "options": [
+                    {"value": "b", "name": "Model B", "description": "big"},
+                    {"value": "c", "name": ""}]},
+                {"group": "empty", "name": "Empty", "options": []},
+             ]},
+            {"id": "effort", "name": "Effort", "category": "thought_level", "type": "select",
+             "currentValue": "low",
+             "options": [
+                {"group": "g1", "name": "G1", "options": [{"value": "low", "name": "Low"}]},
+                {"group": "g2", "name": "G2", "options": [{"value": "high", "name": "High"}]},
+             ]},
+        ]);
+        let o = SessionOptions::from_config_options(Some(&options), None).unwrap();
+        assert_eq!(
+            o.models,
+            [
+                ("a".into(), "Model A".into(), None),
+                ("b".into(), "Model B".into(), Some("big".into())),
+                ("c".into(), "c".into(), None),
+            ]
+        );
+        assert_eq!(o.current_model.as_deref(), Some("b"));
+        assert_eq!(o.efforts, ["low", "high"]);
+
+        // Groups of a declared option too.
+        let thinking = json!([{"id": "thinking", "name": "Thinking", "category": "thinking",
+            "type": "select", "currentValue": "off",
+            "options": [{"group": "g", "name": "G", "options": [
+                {"value": "off", "name": "Off"}, {"value": "max", "name": "Max"}]}]}]);
+        let o = SessionOptions::from_config_options(Some(&thinking), Some("thinking")).unwrap();
+        assert_eq!(o.efforts, ["off", "max"]);
     }
 
     #[test]

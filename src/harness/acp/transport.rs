@@ -162,7 +162,14 @@ fn screen_permission(
     (allowed, evs)
 }
 
-pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Result<SessionHandle> {
+/// `effort_option` is the config option id the harness declared as its
+/// agent's reasoning effort (`AcpHarness::declaring_effort_option`).
+pub fn start(
+    harness: HarnessId,
+    args: Vec<String>,
+    effort_option: Option<String>,
+    cfg: SessionConfig,
+) -> Result<SessionHandle> {
     let mut command = Command::new(&cfg.binary);
     command
         .args(&args)
@@ -183,7 +190,8 @@ pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Resul
         process_model: ProcessModel::LongLived,
     });
     handle.process_slot().set(&proc);
-    tokio::spawn(drive(harness, proc, cfg, events_tx, cmd_rx));
+    let parser = AcpParser::new(harness).declaring_effort(effort_option);
+    tokio::spawn(drive(harness, proc, parser, cfg, events_tx, cmd_rx));
     Ok(handle)
 }
 
@@ -289,6 +297,7 @@ impl Driver {
 async fn drive(
     harness: HarnessId,
     proc: LineProcess,
+    parser: AcpParser,
     cfg: SessionConfig,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
@@ -296,7 +305,7 @@ async fn drive(
     let mut d = Driver {
         harness,
         proc,
-        parser: AcpParser::new(harness),
+        parser,
         policy: cfg.policy,
         cfg,
         next_id: 0,
@@ -518,7 +527,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     if reattach {
                         d.parser.mark_reattached();
                     }
-                    d.options = SessionOptions::from_config_options(result.get("configOptions"))
+                    d.options = d
+                        .parser
+                        .session_options(result.get("configOptions"))
                         .unwrap_or_default();
                     d.session_id = result
                         .get("sessionId")
@@ -577,9 +588,7 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                 }
                 // A config change answers with the option list as it now stands.
                 (Some(Outstanding::Other), None) => {
-                    if let Some(o) =
-                        SessionOptions::from_config_options(result.get("configOptions"))
-                    {
+                    if let Some(o) = d.parser.session_options(result.get("configOptions")) {
                         d.options = o;
                     }
                 }
@@ -592,8 +601,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                 .pointer("/update/sessionUpdate")
                 .and_then(Value::as_str)
                 == Some("config_option_update")
-                && let Some(o) =
-                    SessionOptions::from_config_options(params.pointer("/update/configOptions"))
+                && let Some(o) = d
+                    .parser
+                    .session_options(params.pointer("/update/configOptions"))
             {
                 d.options = o;
             }

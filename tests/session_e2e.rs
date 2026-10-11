@@ -1676,6 +1676,46 @@ async fn acp_resumes_a_session_and_applies_the_configured_model() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// Mistral Vibe's reasoning level is the option `thinking` under a category
+/// the spec does not name, and setting it rewrites vibe's own config file.
+/// An agent that did not declare it as its effort is never sent it, also
+/// with an effort configured.
+#[tokio::test]
+async fn acp_sends_no_effort_to_an_option_it_was_not_told_is_one() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.effort = Some("high".into());
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+
+    handle
+        .send(SessionCommand::turn("Reply with the single word: pong"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::CapabilitiesChanged(u) if u.effort_levels.as_deref() == Some(&[][..])
+    )));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong"))
+    );
+
+    let methods: Vec<String> = fake
+        .sent_lines()
+        .iter()
+        .filter_map(|v| v["method"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(methods, ["initialize", "session/new", "session/prompt"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
     if !python_available() {

@@ -343,6 +343,22 @@ recorded ones. For anything else:
   asked about and denied. vibe's edit diff names the file as the model wrote
   it (`a.txt`) beside an absolute location, so its action is `Opaque` and no
   edit rule matches it.
+  Config options (`SessionOptions::from_config_options`): the schema lets
+  a select option's values come in groups (`options: [{group, name,
+  options: [...]}]`, read in the schema of `@agentclientprotocol/sdk`
+  1.7.0 and of the Python `agent-client-protocol` 0.11.0, schema 1.16.0),
+  which are flattened in order for the model and effort lists. No agent
+  was seen sending groups (claude-agent-acp 0.85.1, codex-acp 2.1.1 and
+  vibe-acp 2.26.1 send flat lists), so that is only unit-tested. Effort is
+  the option in category `thought_level`, or the one whose id a harness
+  declares (`AcpHarness::declaring_effort_option`), which wins. No id is
+  assumed for an agent and none can be declared from config: Mistral Vibe
+  2.26.1 offers its level as option `thinking` in category `thinking`
+  (`fixtures/vibe_acp.jsonl`; `off` and `high` for its default model), a
+  category the spec reserves without naming, and setting it over ACP
+  rewrites `~/.vibe/config.toml` (#164). So a vibe config agent has no
+  effort and is sent none, also with `default_effort` set (e2e test).
+  Nothing declares an id yet.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
