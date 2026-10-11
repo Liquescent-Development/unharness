@@ -4931,7 +4931,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line)\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -5518,7 +5518,35 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => self.mouse_press(ev.column, ev.row),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(ev.column, ev.row),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_release(),
+            MouseEventKind::Down(MouseButton::Right) => self.copy_block_at(ev.column, ev.row),
             _ => {}
+        }
+    }
+
+    /// A right click on a block copies all of it, also what is not shown
+    /// ([`super::transcript::block_text`]).
+    fn copy_block_at(&mut self, column: u16, row: u16) {
+        let Some(point) = self.transcript_point(column, row, false) else {
+            return;
+        };
+        let Some(i) = self
+            .transcript_view
+            .blocks
+            .iter()
+            .position(|b| b.top <= point.line && point.line < b.end)
+        else {
+            return;
+        };
+        match self
+            .shown_blocks()
+            .get(i)
+            .and_then(super::transcript::block_text)
+        {
+            Some(text) => {
+                self.selection = None;
+                self.copy_request = Some(text);
+            }
+            None => self.flash("Nothing to copy here"),
         }
     }
 

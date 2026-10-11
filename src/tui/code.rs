@@ -33,6 +33,16 @@ const CONT: &str = "  │ ↪ ";
 /// (newlines are kept). Anything that moves the cursor on its own corrupts
 /// ratatui's diff and leaves artifacts on screen.
 pub fn sanitize(text: &str) -> String {
+    clean(text, true)
+}
+
+/// Text for the clipboard: escape sequences, carriage returns and other
+/// control characters out, as [`sanitize`] does, but tabs kept.
+pub fn strip_controls(text: &str) -> String {
+    clean(text, false)
+}
+
+fn clean(text: &str, expand_tabs: bool) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut col = 0usize;
@@ -70,6 +80,10 @@ pub fn sanitize(text: &str) -> String {
             '\n' => {
                 out.push('\n');
                 col = 0;
+            }
+            '\t' if !expand_tabs => {
+                out.push('\t');
+                col += 4 - (col % 4);
             }
             '\t' => {
                 let pad = 4 - (col % 4);
@@ -580,6 +594,7 @@ mod tests {
         assert_eq!(sanitize("\x1b]0;title\x07x"), "x");
         assert_eq!(sanitize("x\ty\n\tz"), "x   y\n    z");
         assert_eq!(sanitize("line\r\nnext\x07"), "line\nnext");
+        assert_eq!(strip_controls("a\x1b[31m\tb\r\n\tc\x07"), "a\tb\n\tc");
     }
 
     #[test]

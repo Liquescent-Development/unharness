@@ -3448,6 +3448,46 @@ mod tests {
     }
 
     #[test]
+    fn a_right_click_on_a_block_copies_all_of_it() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let right = |app: &mut App, row: usize| {
+            let at = mouse(MouseEventKind::Down(MouseButton::Right), 10, row as u16);
+            app.handle_mouse(at);
+            app.take_copy_request()
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        let output: Vec<String> = (1..=9).map(|n| format!("line {n}")).collect();
+        let output = output.join("\n");
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": "ls" }),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t1".into(),
+            output: output.clone(),
+            is_error: false,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let top = rows.iter().position(|r| r.contains("Bash  ls")).unwrap();
+        let footer = rows.iter().position(|r| r.contains("more lines")).unwrap();
+        // Any row of the call, and all of its output though most is hidden.
+        let all = Some(format!("ls\n{output}"));
+        assert_eq!(right(&mut app, top), all);
+        assert_eq!(right(&mut app, footer), all);
+        let prompt = rows.iter().position(|r| r.contains("❯ You")).unwrap();
+        assert_eq!(right(&mut app, prompt).as_deref(), Some("go"));
+        // The gap between two blocks, and anywhere under a dialog: nothing.
+        assert_eq!(right(&mut app, top - 1), None);
+        assert_eq!(app.flash_text(), None);
+        app.open_policy_picker();
+        assert_eq!(right(&mut app, top), None);
+    }
+
+    #[test]
     fn a_call_shows_what_its_summary_left_out_and_a_question_no_time() {
         let tool = |name: &str, input: serde_json::Value, output: &str, collapsed: bool| {
             let block = TBlock::Tool {

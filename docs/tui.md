@@ -62,6 +62,7 @@ harness does not have, a sandbox level with no sandbox to enforce it.
 | Mouse wheel, scrollbar | Scroll. Drag the thumb or click the track |
 | `↓ Jump to bottom` | Shown while scrolled up. Click it to follow new output again |
 | Drag, double click, triple click | Select text, a word (paths stay whole) or a line, copied on release without the drawing around it |
+| Right click on a block | Copy all of it, also what is not shown: a call's command and whole output, a file it wrote, a response's markdown |
 | `Ctrl+O` | Expand or collapse the last tool call's output |
 | `Ctrl+T` | Expand or collapse every tool call |
 | Click on a tool call | Expand or collapse it. On a call that spawned a subagent, open the subagent's transcript |
@@ -305,6 +306,11 @@ bottom edge scrolls.
   and a table its cells, a tab between them; an edit keeps its `-` and
   `+`, a written file does not. A drag over nothing but drawing (a label)
   copies that as drawn.
+- A right click on a block copies all of it as it was written, also what
+  the transcript does not show: a tool call's whole command and output
+  (collapsed or not), the content of a file it wrote, an edit as `-` and
+  `+` lines, a response as markdown, a subagent's report. A `!` command's
+  output is what was kept of it.
 - Holding `Shift` while dragging gives you the terminal's own selection in
   most terminals. `mouse = false` in the config turns all of this off.
 
