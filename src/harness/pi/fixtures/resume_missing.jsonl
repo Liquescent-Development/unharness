@@ -1,0 +1,9 @@
+# pi 1.1.0, scripts/record-pi.py --resume <a session id pi has no session for> --no-models --no-extensions --no-context-files --no-skills --no-prompt-templates: pi warns on stderr and creates an empty session under that id, so the resumed session's listing has no user messages. Nothing was prompted.
+>> {"id": "req-1", "type": "get_state"}
+>> {"id": "req-2", "type": "get_commands"}
+>> {"id": "req-3", "type": "get_fork_messages"}
+!! Warning: No project session found with id '3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62'; creating a new session with that id.
+{"id":"req-1","type":"response","command":"get_state","success":true,"data":{"model":{"id":"gpt-5.6-sol","name":"GPT-5.6 Sol","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","reasoning":true,"input":["text","image"],"cost":{"input":4,"output":20,"cacheRead":0.4,"cacheWrite":5,"tiers":[{"inputTokensAbove":272000,"input":8,"output":30,"cacheRead":0.8,"cacheWrite":10}]},"contextWindow":272000,"maxTokens":128000,"thinkingLevelMap":{"xhigh":"xhigh","max":"max","minimal":"low"},"compat":{"supportsOpenAIGrammarTools":true,"supportsAdditionalTools":true,"supportsToolSearch":true,"supportsMidConvoSystemMessages":true},"inputLimits":{"images":{"resize":{"maxWidth":2000,"maxHeight":2000,"maxBytes":4718592,"jpegQuality":80}}},"type":"chat"},"thinkingLevel":"medium","isStreaming":false,"isCompacting":false,"steeringMode":"one-at-a-time","followUpMode":"one-at-a-time","sessionFile":"/HOME/.pi/agent/sessions/--WORKSPACE--/2026-10-11T23-24-34-876Z_3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62.jsonl","sessionId":"3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62","autoCompactionEnabled":true,"messageCount":0,"pendingMessageCount":0}}
+{"id":"req-2","type":"response","command":"get_commands","success":true,"data":{"commands":[]}}
+{"id":"req-3","type":"response","command":"get_fork_messages","success":true,"data":{"messages":[]}}
+# exit=0

@@ -2652,8 +2652,8 @@ async fn acp_resumes_the_fork_where_the_agent_resumes_sessions() {
 
 /// An agent that does not advertise `session/fork` is never reattached to
 /// the session it was to fork (that one is the original conversation's):
-/// it gets a new session, and the user is told it does not know the
-/// conversation.
+/// it gets a new session, reported as one that replaces the fork, so that
+/// the TUI sends it the conversation.
 #[tokio::test]
 async fn acp_starts_a_new_session_when_the_agent_cannot_fork() {
     if !python_available() {
@@ -2675,7 +2675,7 @@ async fn acp_starts_a_new_session_when_the_agent_cannot_fork() {
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
         events.iter().any(
-            |e| matches!(e, AgentEvent::Notice(n) if n.contains("cannot fork") && n.contains("new one"))
+            |e| matches!(e, AgentEvent::SessionReplaced { reason } if reason == "this agent cannot fork sessions")
         ),
         "{events:?}"
     );
@@ -2689,6 +2689,124 @@ async fn acp_starts_a_new_session_when_the_agent_cannot_fork() {
         ]
     );
     handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// How a session that could not be reattached or forked started
+/// (`fixtures/vibe_acp_{load,fork}_missing.jsonl`): the driver reports
+/// that a new session replaces it before that session's `SessionStarted`,
+/// and the turn goes to the new one.
+async fn replaced_session(fixture: &str, fork: bool) -> (Fake, String) {
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures").join(fixture);
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(
+        if fork {
+            MISSING_FORK_SOURCE
+        } else {
+            MISSING_SESSION
+        }
+        .into(),
+    );
+    cfg.fork = fork;
+    cfg.env.push(("UNHARNESS_FAKE_LINGER".into(), "0.2".into()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("Reply with the single word: pong"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    let starts: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::SessionReplaced { reason } => Some(format!("replaced: {reason}")),
+            AgentEvent::SessionStarted { session_id, .. } => Some(format!("started {session_id}")),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Error(_) | AgentEvent::Notice(_))),
+        "the failed answer is the driver's: {events:?}"
+    );
+    assert_eq!(said, "pong");
+    (fake, starts.join("\n"))
+}
+
+/// Sessions vibe-acp 2.26.1 did not have when asked for them.
+const MISSING_SESSION: &str = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f60";
+const MISSING_FORK_SOURCE: &str = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f61";
+
+/// A resume the agent refuses (vibe-acp 2.26.1 `session/load` of a session
+/// it does not have) starts a new session, reported as one that replaces
+/// the session to resume (#187), so that the TUI tells it the
+/// conversation.
+#[tokio::test]
+async fn acp_reports_the_new_session_in_place_of_one_it_could_not_resume() {
+    if !python_available() {
+        return;
+    }
+    let (fake, starts) = replaced_session("vibe_acp_load_missing.jsonl", false).await;
+    assert_eq!(
+        starts,
+        format!(
+            "replaced: could not resume the session (Session not found: {MISSING_SESSION})\n\
+             started 4b47571d-ea77-0161-9bf3-0f91f0369bbf"
+        )
+    );
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/load",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "session/close",
+            "ended",
+        ]
+    );
+}
+
+/// A fork that fails twice (vibe-acp 2.26.1: the source is neither forked
+/// nor loaded, since it does not have it) starts a new session, reported
+/// as one that replaces the fork (#187).
+#[tokio::test]
+async fn acp_reports_the_new_session_in_place_of_a_fork_that_failed() {
+    if !python_available() {
+        return;
+    }
+    let (fake, starts) = replaced_session("vibe_acp_fork_missing.jsonl", true).await;
+    assert_eq!(
+        starts,
+        format!(
+            "replaced: could not fork the session (Session not found: {MISSING_FORK_SOURCE})\n\
+             started 2cda0472-ef5b-7b86-2b00-1694a93b61b2"
+        )
+    );
+    assert_eq!(
+        sent_until_ended(&fake),
+        [
+            "initialize",
+            "session/fork",
+            "session/load",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt",
+            "session/close",
+            "ended",
+        ]
+    );
 }
 
 /// An agent with modes of its own and no map has no policy below bypass:

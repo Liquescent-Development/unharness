@@ -149,6 +149,9 @@ struct Handoff {
     /// The next session is a new one of the same harness, for another
     /// model or effort (`App::renew_session`).
     renew: bool,
+    /// The session asked for it could not be resumed and runs new
+    /// (`AgentEvent::SessionReplaced`): what it writes summarizes nothing.
+    blind: bool,
 }
 
 /// A subagent that is at work.
@@ -1786,6 +1789,44 @@ impl App {
         }
     }
 
+    /// The active harness could not resume or fork its session and runs a
+    /// new one, which knows nothing of the conversation
+    /// (`AgentEvent::SessionReplaced`). It is taken as a session started
+    /// for a harness switched to: the next prompt tells it the
+    /// conversation so far (within the bridge's budget), and the
+    /// conversation keeps its id once a prompt has gone to it. What
+    /// pointed into the old session (rewind anchors, a pending fork) goes.
+    fn session_replaced(&mut self, reason: &str) {
+        let harness = self.active;
+        let name = self.short_name().to_string();
+        self.fork_pending.remove(&harness);
+        self.anchors.retain(|a| a.harness != harness);
+        if self.session_blank {
+            // The new session's id waits in `blank_session` for the first
+            // prompt; the old one is not this conversation's any more.
+            self.session_ids.remove(&harness);
+            self.last_active_index.remove(&harness);
+            self.transcript.push_notice(format!(
+                "{reason}: {name} starts a new session, and your next prompt tells it the conversation so far"
+            ));
+            return;
+        }
+        // A prompt went with the start, without the conversation: the
+        // next one tells it all of it. The session's id is committed by
+        // its `SessionStarted`, before or after this.
+        self.last_active_index.insert(harness, 0);
+        if let Some(handoff) = self.handoff.as_mut() {
+            handoff.blind = true;
+            self.transcript.push_notice(format!(
+                "{reason}: {name} runs a new session, which has no conversation to summarize"
+            ));
+        } else {
+            self.transcript.push_notice(format!(
+                "{reason}: {name} runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+            ));
+        }
+    }
+
     /// How long the bridge to `harness` may be: `bridge_max_chars` when
     /// set, else a quarter of the context window its model last reported
     /// here at about four characters a token, else the default.
@@ -2834,6 +2875,7 @@ impl App {
                     self.commit_session(session_id, model);
                 }
             }
+            AgentEvent::SessionReplaced { reason } => self.session_replaced(&reason),
             AgentEvent::TurnStarted => {
                 if !self.is_generating {
                     self.start_generation();
@@ -3560,6 +3602,7 @@ impl App {
             start: self.transcript.blocks.len(),
             held: !self.queued.is_empty(),
             renew,
+            blind: false,
         });
         self.start_generation();
         self.ensure_session();
@@ -3594,15 +3637,21 @@ impl App {
             return;
         };
         let to = self.handoff_target(h.to, h.renew);
-        if !(done && self.transcript.mark_handoff(h.start, &to)) {
+        if !(done && !h.blind && self.transcript.mark_handoff(h.start, &to)) {
             self.transcript.push_notice(format!(
                 "no handoff summary; {to} gets the conversation as it is"
             ));
         }
+        let left = self.active;
         if h.renew {
             self.renew_now();
         } else {
             self.switch_now(h.to);
+            // The session left was new and saw only the request for a
+            // summary: coming back starts afresh, with the conversation.
+            if h.blind {
+                self.forget_session(left);
+            }
         }
     }
 
@@ -7962,6 +8011,186 @@ pub(crate) mod tests {
         ));
     }
 
+    fn has_notice(app: &App, text: &str) -> bool {
+        use super::super::transcript::Block;
+        app.transcript
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Notice(n) if n == text))
+    }
+
+    /// A harness that could not resume the conversation's session runs a
+    /// new one (#187): the next prompt tells it the conversation, within
+    /// the bridge's budget, and the conversation keeps the new session.
+    #[test]
+    fn a_session_in_place_of_one_not_resumed_is_told_the_conversation() {
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.start_when_idle();
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }] if id == "claude-1"
+        ));
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionReplaced {
+            reason: "could not resume the session (Session not found)".into(),
+        });
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        assert!(has_notice(
+            &app,
+            "could not resume the session (Session not found): Claude starts a new session, and your next prompt tells it the conversation so far"
+        ));
+        app.submit_prompt("what was the task?".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.starts_with("[Context: earlier conversation") && sent.contains("User: the task"),
+            "{sent}"
+        );
+        // Within the budget of 500 characters.
+        assert!(!sent.contains(&"x".repeat(600)), "{sent}");
+        assert!(sent.ends_with("what was the task?"), "{sent}");
+        assert_eq!(
+            app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+            Some("claude-2")
+        );
+        let saved = app.store.load(&app.conversation.id).unwrap();
+        assert_eq!(
+            saved.sessions.get(&HarnessId::CLAUDE).map(String::as_str),
+            Some("claude-2")
+        );
+    }
+
+    /// pi reports the session it made in place of a missing one under the
+    /// id it was given, and before the listing that shows it empty.
+    #[test]
+    fn a_session_replaced_under_the_same_id_is_told_the_conversation() {
+        let mut app = test_app(HarnessId::PI);
+        app.transcript.push_user("The code word is pineapple.");
+        app.transcript.append_assistant("pi", "ok");
+        app.session_ids.insert(HarnessId::PI, "pi-1".into());
+        app.session_alive = true;
+        app.session_blank = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "pi-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::SessionReplaced {
+            reason: "could not resume the session".into(),
+        });
+        app.submit_prompt("What was the code word?".into());
+        let sent = sent_turn(&mut app);
+        assert!(sent.contains("pineapple"), "{sent}");
+        assert_eq!(
+            app.session_ids.get(&HarnessId::PI).map(String::as_str),
+            Some("pi-1")
+        );
+    }
+
+    /// A replacement found after the prompt that started it went (without
+    /// the conversation, the old session having seen it): the next prompt
+    /// tells the new session all of it.
+    #[test]
+    fn a_session_replaced_under_a_prompt_is_told_the_conversation_next() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("The code word is pineapple. Reply with: ok".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("ok".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        // It ended by itself: the next prompt starts it to resume.
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        app.take_actions();
+        app.submit_prompt("Say hi".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { text, .. }]
+                if id == "claude-1" && text == "Say hi"
+        ));
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionReplaced {
+            reason: "this agent cannot resume sessions".into(),
+        });
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        assert!(has_notice(
+            &app,
+            "this agent cannot resume sessions: Claude runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+        ));
+        app.on_event(AgentEvent::TextDelta("hi".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.submit_prompt("What was the code word?".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.starts_with("[Context: earlier conversation") && sent.contains("pineapple"),
+            "{sent}"
+        );
+        assert_eq!(
+            app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+            Some("claude-2")
+        );
+        // Told once.
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.submit_prompt("Thanks".into());
+        assert_eq!(sent_turn(&mut app), "Thanks");
+    }
+
+    /// A handoff asked of a session that could not be resumed is written by
+    /// a new one, which knows nothing to summarize: the switch goes ahead
+    /// without it, and the new session is not kept.
+    #[test]
+    fn a_handoff_from_a_replaced_session_is_no_summary() {
+        use super::super::transcript::Block;
+        let mut app = over_budget_app();
+        app.session_alive = false;
+        app.switch_harness(HarnessId::CODEX);
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
+        ));
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionReplaced {
+            reason: "could not resume the session (Session not found)".into(),
+        });
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-2".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta(
+            "There is nothing to summarize.".into(),
+        ));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert_eq!(app.active, HarnessId::CODEX);
+        assert!(
+            !app.transcript
+                .blocks
+                .iter()
+                .any(|b| matches!(b, Block::Handoff { .. }))
+        );
+        assert!(has_notice(
+            &app,
+            "no handoff summary; Codex gets the conversation as it is"
+        ));
+        assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+        assert_eq!(app.bridge_start(HarnessId::CLAUDE), 0);
+    }
+
     #[test]
     fn steering_a_handoff_summary_queues_the_message_for_the_next_harness() {
         use super::super::transcript::Block;
@@ -9517,6 +9746,7 @@ pub(crate) mod tests {
             start: 0,
             held: false,
             renew: false,
+            blind: false,
         });
         app.on_event(plan_request());
         assert!(app.modal.is_none());

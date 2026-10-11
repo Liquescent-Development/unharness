@@ -24,6 +24,8 @@ pub struct PiParser {
     /// User messages already seen in `get_fork_messages`; `None` until the
     /// first listing of a session, which only sets the baseline.
     fork_messages_seen: Option<usize>,
+    /// The session was to be resumed, and has not been listed yet.
+    resumed_unlisted: bool,
 }
 
 impl PiParser {
@@ -38,8 +40,13 @@ impl PiParser {
 
     /// The session already has history (it was resumed): the next
     /// `get_fork_messages` listing is a baseline, not a finished turn.
+    /// An empty one is a session pi did not have: given a `--session-id`
+    /// it has no session for, pi 1.1.0 creates an empty one under that id
+    /// (with a warning on stderr), so it is reported as a new session in
+    /// place of the one to resume (`SessionReplaced`).
     pub fn expect_fork_baseline(&mut self) {
         self.fork_messages_seen = None;
+        self.resumed_unlisted = true;
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -386,6 +393,11 @@ impl PiParser {
                 {
                     out.push(AgentEvent::TurnAnchor { id: id.to_string() });
                 }
+                if std::mem::take(&mut self.resumed_unlisted) && messages.is_empty() {
+                    out.push(AgentEvent::SessionReplaced {
+                        reason: "could not resume the session (pi has none under its id, and started an empty one)".into(),
+                    });
+                }
                 self.fork_messages_seen = Some(messages.len());
             }
             // The fork is a new session: the listing that follows is its baseline.
@@ -654,6 +666,42 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    /// pi 1.1.0 given a `--session-id` it has no session for creates an
+    /// empty one under that id: the listing of the session to resume has
+    /// no user messages, which is a new session in its place. A listing
+    /// with messages, or one that is not the first, is not.
+    #[test]
+    fn fixture_resume_missing() {
+        let dir = fixtures_dir(file!());
+        let mut p = PiParser::new(Some("3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62".into()));
+        p.expect_fork_baseline();
+        assert_fixture(&mut p, &dir, "resume_missing");
+
+        let listing = |n: usize| {
+            let messages: Vec<Value> = (0..n)
+                .map(|i| serde_json::json!({"entryId": format!("e{i}"), "text": "hi"}))
+                .collect();
+            serde_json::json!({"type": "response", "command": "get_fork_messages", "success": true,
+                   "data": {"messages": messages}})
+            .to_string()
+        };
+        let replaced = |evs: &[AgentEvent]| {
+            evs.iter()
+                .any(|e| matches!(e, AgentEvent::SessionReplaced { .. }))
+        };
+        let mut resumed = PiParser::new(Some("s".into()));
+        resumed.expect_fork_baseline();
+        assert!(!replaced(&resumed.feed(&listing(2))));
+        let mut new = PiParser::new(Some("s".into()));
+        assert!(!replaced(&new.feed(&listing(0))));
+        // A rewind's fork of the first prompt lists nothing either.
+        let mut rewound = PiParser::new(Some("s".into()));
+        rewound.expect_fork_baseline();
+        rewound.feed(&listing(1));
+        rewound.feed(r#"{"type":"response","command":"fork","success":true,"data":{}}"#);
+        assert!(!replaced(&rewound.feed(&listing(0))));
     }
 
     #[test]
