@@ -1103,6 +1103,98 @@ mod tests {
         assert_eq!(absolute_edit_path("/w/a".into(), None), Some("/w/a".into()));
     }
 
+    /// A parser as the vibe harness has it: `thinking` its effort, and a
+    /// relative edit path in the session's directory.
+    fn vibe_parser() -> AcpParser {
+        parser()
+            .declaring_effort(Some("thinking".into()))
+            .resolving_relative_edits(Some("/WORKSPACE".into()))
+    }
+
+    /// The tool calls a fixture asks about, as the vibe harness reads them.
+    fn vibe_asked(case: &str) -> Vec<(String, ToolAction)> {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut vibe_parser(), &dir, case);
+        let text = std::fs::read_to_string(dir.join(format!("{case}.jsonl"))).unwrap();
+        let mut p = vibe_parser();
+        let mut asked = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with(['>', '!', '#'])) {
+            for ev in p.feed(line) {
+                if let AgentEvent::PermissionRequest(PermissionRequest {
+                    kind: PermissionKind::ToolUse { tool, action, .. },
+                    ..
+                }) = ev
+                {
+                    asked.push((tool, action));
+                }
+            }
+        }
+        asked
+    }
+
+    /// vibe-acp 2.26.1 in its `ask` mode (set through the mode option, as
+    /// the driver does): a write allowed, then a command denied, which
+    /// vibe reports as a failed call ("Tool execution denied by approval
+    /// callback"). The write's relative path is the session's.
+    #[test]
+    fn fixture_vibe_acp_allow_deny() {
+        assert_eq!(
+            vibe_asked("vibe_acp_allow_deny"),
+            [
+                (
+                    "edit".to_string(),
+                    ToolAction::Edit {
+                        paths: vec!["/WORKSPACE/a.txt".into()]
+                    }
+                ),
+                (
+                    "execute".to_string(),
+                    ToolAction::Shell {
+                        command: "touch /WORKSPACE/b.txt".into(),
+                        cwd: None
+                    }
+                ),
+            ]
+        );
+    }
+
+    /// A stdio MCP server's tool (`mcp_<server>.<tool>` in vibe's own
+    /// `_meta.tool_name`, which unharness does not read) comes as kind
+    /// `other` with only its arguments: asked about, and no rule can know
+    /// it. vibe first searches for it (`search_tool_functions`, asked
+    /// about by nobody).
+    #[test]
+    fn fixture_vibe_acp_mcp() {
+        assert_eq!(
+            vibe_asked("vibe_acp_mcp"),
+            [("other".to_string(), ToolAction::Opaque)]
+        );
+    }
+
+    /// `session/cancel` while a command runs: the command stops and the
+    /// prompt answers `cancelled`.
+    #[test]
+    fn fixture_vibe_acp_cancel() {
+        assert_eq!(
+            vibe_asked("vibe_acp_cancel"),
+            [(
+                "execute".to_string(),
+                ToolAction::Shell {
+                    command: "sleep 45".into(),
+                    cwd: None
+                }
+            )]
+        );
+    }
+
+    /// `session/load` of the allow-and-deny session in a new process: the
+    /// history is replayed (dropped by the driver, not here) and the next
+    /// turn knows it.
+    #[test]
+    fn fixture_vibe_acp_load() {
+        assert!(vibe_asked("vibe_acp_load").is_empty());
+    }
+
     /// vibe-acp 2.26.1 starts in accept-edits; the mode option, set to
     /// `ask` before the first prompt, answers with the option list, whose
     /// mode option reads it back. The write is then asked about.

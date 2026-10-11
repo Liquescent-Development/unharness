@@ -1,0 +1,18 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+ThinkingDelta "Simple task: create a.txt with \"hi\" using write_file, the..."
+ToolCallStarted id=effect-f35bb70c-b923-5aee-931f-f5c2f69eb206 name=edit input={"content":"hi","filePath":"/WORKSPACE/a.txt"}
+ToolCallResult id=effect-f35bb70c-b923-5aee-931f-f5c2f69eb206 error=false "--- /WORKSPACE/a.txt\\n+++ /WORKSPACE/a.txt\\n@@\\n+hi\\n\\nCr..."
+ToolCallStarted id=effect-cfa026bb-efb0-5a11-851e-9c044736281b name=execute input={"command":"touch /WORKSPACE/b.txt"}
+ToolCallResult id=effect-cfa026bb-efb0-5a11-851e-9c044736281b error=true "Tool execution denied by approval callback"
+TextDelta "Done, with one issue:\\n\\n- `a.txt` created with content `..."
+Context used=8181 window=800000
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=2
+CapabilitiesChanged efforts=off,low,medium,high,max models=2
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=8181 window=800000
+TextDelta "a.txt"
+Context used=8181 window=800000
+Context used=8200 window=800000
+Context used=8200 window=800000
+Usage in=32197 out=295 cache_read=0 cache_write=0 cost=0.0464 cumulative=false
+TurnCompleted Done
