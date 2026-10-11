@@ -3586,3 +3586,187 @@ async fn claude_remote_control_turns_on_withdraws_remote_answers_and_turns_off()
         ]
     );
 }
+
+/// The built-in vibe harness, its command the fake.
+fn vibe_harness() -> unharness::harness::vibe::VibeHarness {
+    unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
+        command: vec![fake_harness().to_string_lossy().into_owned()],
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+/// A vibe session for `model` at `effort`, its VIBE_HOME an empty `home`.
+fn vibe_config(fake: &Fake, home: &Path, model: &str, effort: &str) -> SessionConfig {
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_spawn_env.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = Some(ModelRef::new(HarnessId::VIBE, "agent", model));
+    cfg.effort = Some(effort.into());
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "VIBE_ACTIVE_MODEL,VIBE_MODELS".to_string(),
+        ),
+        ("VIBE_HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]);
+    cfg
+}
+
+/// What the fake logged: each process's environment (`env`) and the
+/// methods the driver sent, in order.
+fn env_and_methods(fake: &Fake) -> Vec<String> {
+    fake.sent_lines()
+        .iter()
+        .filter_map(|v| match (v.get("env"), v["method"].as_str()) {
+            (Some(env), _) => Some(format!("env {env}")),
+            (None, Some(m)) if m == "session/set_config_option" => {
+                Some(format!("{m} {}", v["params"]["configId"]))
+            }
+            (None, Some(m)) => Some(m.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// vibe-acp 2.26.1 writes a model or thinking level set over ACP into its
+/// own config.toml (#164): the vibe harness puts them in the agent's
+/// environment instead and never sends either option. The level needs
+/// the model's name, which only a session says: the first process of a
+/// run is started again once its session has said it, before anything
+/// is sent to it; a later session of the run starts with it.
+#[tokio::test]
+async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
+    if !python_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let vibe = vibe_harness();
+    let entry = r#"[{"alias":"mistral-medium-3.5","name":"mistral-vibe-cli-latest","provider":"mistral","thinking":"off"}]"#;
+    let model_only = r#"env {"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":null}"#;
+    let with_entry = format!(
+        r#"env {{"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":{}}}"#,
+        serde_json::to_string(entry).unwrap()
+    );
+
+    let fake = Fake::new();
+    let cfg = vibe_config(&fake, home.path(), "mistral-medium-3.5", "off");
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("Reply with the single word: pong"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "ong")),
+        "{events:?}"
+    );
+    // The first process's session is never announced.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Notice(_))));
+    assert_eq!(
+        env_and_methods(&fake),
+        [
+            model_only,
+            "initialize",
+            "session/new",
+            &with_entry,
+            "initialize",
+            "session/new",
+            "session/set_config_option \"mode\"",
+            "session/prompt",
+        ]
+    );
+    shut_down(&mut handle).await;
+
+    // The next session of the run starts with the entry.
+    let fake = Fake::new();
+    let cfg = vibe_config(&fake, home.path(), "mistral-medium-3.5", "off");
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("again")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        env_and_methods(&fake),
+        [
+            with_entry.as_str(),
+            "initialize",
+            "session/new",
+            "session/set_config_option \"mode\"",
+            "session/prompt",
+        ]
+    );
+    // A change sent to the running session is not passed on: the TUI
+    // starts the session again for it (`model_per_process`).
+    handle
+        .send(SessionCommand::SetEffort(Some("high".into())))
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::SetModel(ModelRef::new(
+            HarnessId::VIBE,
+            "agent",
+            "other",
+        )))
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert!(matches!(
+            next_event(&mut handle).await,
+            AgentEvent::Notice(_)
+        ));
+    }
+    assert!(
+        !fake
+            .sent_lines()
+            .iter()
+            .any(|v| v["params"]["configId"] == "model" || v["params"]["configId"] == "thinking")
+    );
+    shut_down(&mut handle).await;
+}
+
+/// vibe falls back to its default model for one it does not have, and
+/// resets a level the model does not offer, both without an error: the
+/// session's answer is compared with the choice.
+#[tokio::test]
+async fn vibe_says_when_the_session_runs_another_model_or_level() {
+    if !python_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    // The model and its name from the user's config: nothing to wait for.
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[[models]]\nalias = \"gone\"\nname = \"gone-model\"\nprovider = \"mistral\"\n",
+    )
+    .unwrap();
+    let fake = Fake::new();
+    let cfg = vibe_config(&fake, home.path(), "gone", "high");
+    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let notices: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::Notice(n) => Some(n.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    assert!(notices[0].contains("'mistral-medium-3.5', not 'gone'"));
+    assert!(notices[1].contains("'off', not 'high'"));
+    assert_eq!(
+        env_and_methods(&fake)
+            .iter()
+            .filter(|l| *l == "initialize")
+            .count(),
+        1
+    );
+    shut_down(&mut handle).await;
+}

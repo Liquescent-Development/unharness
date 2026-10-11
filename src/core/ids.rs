@@ -17,13 +17,15 @@ impl HarnessId {
     pub const CLAUDE: HarnessId = HarnessId("claude");
     pub const CODEX: HarnessId = HarnessId("codex");
     pub const PI: HarnessId = HarnessId("pi");
+    pub const VIBE: HarnessId = HarnessId("vibe");
 
     /// The harnesses with a dedicated adapter, in default resolution order.
-    pub const BUILTIN: [HarnessId; 4] = [
+    pub const BUILTIN: [HarnessId; 5] = [
         HarnessId::AGY,
         HarnessId::CLAUDE,
         HarnessId::CODEX,
         HarnessId::PI,
+        HarnessId::VIBE,
     ];
 
     /// A built-in harness by name or alias. Config-defined harnesses are
@@ -34,6 +36,7 @@ impl HarnessId {
             "claude" | "claude-code" => Some(HarnessId::CLAUDE),
             "codex" => Some(HarnessId::CODEX),
             "pi" => Some(HarnessId::PI),
+            "vibe" | "mistral-vibe" => Some(HarnessId::VIBE),
             _ => None,
         }
     }
@@ -168,6 +171,7 @@ mod tests {
         assert_eq!(HarnessId::parse("claude-code"), Some(HarnessId::CLAUDE));
         assert_eq!(HarnessId::parse("CODEX"), Some(HarnessId::CODEX));
         assert_eq!(HarnessId::parse("pi"), Some(HarnessId::PI));
+        assert_eq!(HarnessId::parse("Mistral-Vibe"), Some(HarnessId::VIBE));
         assert_eq!(HarnessId::parse("gemini"), None);
     }
 

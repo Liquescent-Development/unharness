@@ -5,6 +5,7 @@ pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod pi;
+pub mod vibe;
 
 use std::path::{Path, PathBuf};
 
