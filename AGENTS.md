@@ -549,8 +549,9 @@ recorded ones. For anything else:
   second fork) or `session/prompt` fails the turn with the `authMethods`
   the agent offered at `initialize` (names, descriptions, an `env_var`
   method's variables) and the command to run where it is known
-  (`[harnesses.<name>] sign_in`, `AcpHarness::signing_in_with`; else the
-  agent's own command line), with no retry and no new session in place
+  (`[harnesses.<name>] sign_in`, `AcpHarness::signing_in_with`: the
+  built-in vibe declares `vibe --setup`, which its table's `sign_in`
+  replaces; else the agent's own command line), with no retry and no new session in place
   of a resume or fork, and the driver ends the process, so that the next
   prompt starts one that reads the sign-in afresh. A terminal sign-in is
   a command the agent names, run outside the sandbox in the user's

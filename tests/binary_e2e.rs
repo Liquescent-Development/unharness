@@ -753,9 +753,9 @@ fn a_hangup_while_the_prompt_is_in_the_editor_still_ends_the_session_in_order() 
 }
 
 /// `--print` with an ACP agent that is not signed in (vibe-acp 2.26.1's
-/// recording, played by an ACP agent from config with a `sign_in`): the run
+/// recording, played by the fake as the built-in vibe's command): the run
 /// fails with exit 1, and stderr names the methods the agent offers and
-/// what to run.
+/// what to run (vibe's own `vibe --setup`).
 #[test]
 fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     if !python_available() {
@@ -769,15 +769,13 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     std::fs::write(
         root.join("config/unharness/config.toml"),
         format!(
-            "[harnesses.my-vibe]\nprotocol = \"acp\"\ncommand = [\"python3\", \"{}\"]\n\
-             modes = {{ ask = \"ask\", bypass = \"auto-approve\" }}\n\
-             sign_in = \"vibe --setup\"\n",
+            "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\n",
             repo().join("scripts/fake-harness.py").display()
         ),
     )
     .unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
-        .args(["-H", "my-vibe", "--sandbox", "off", "--policy", "bypass"])
+        .args(["-H", "vibe", "--sandbox", "off", "--policy", "bypass"])
         .args(["--print", "say hi"])
         .current_dir(root.join("ws"))
         .env("HOME", root.join("home"))
@@ -796,7 +794,7 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
     assert!(
-        stderr.contains("my-vibe is not signed in (Missing API key for mistral provider)")
+        stderr.contains("vibe is not signed in (Missing API key for mistral provider)")
             && stderr.contains("\"Sign in through Mistral AI Studio\"")
             && stderr.contains("run `vibe --setup` in a terminal"),
         "{stderr}"

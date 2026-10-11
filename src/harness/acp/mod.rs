@@ -183,6 +183,11 @@ impl AcpHarness {
         }
     }
 
+    /// The command that signs the agent in, if one is known.
+    pub fn sign_in(&self) -> Option<&str> {
+        self.sign_in.as_deref()
+    }
+
     /// The presets whose binary is installed and whose name is not taken.
     pub fn installed_presets(taken: &[HarnessId]) -> Vec<AcpHarness> {
         PRESETS

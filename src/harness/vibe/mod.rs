@@ -89,12 +89,19 @@ impl VibeHarness {
         } else {
             ModeMap::from_config(&settings.modes).map_err(anyhow::Error::msg)?
         };
-        Ok(Self::build(
+        let vibe = Self::build(
             &command,
             settings.display_name.as_deref(),
             settings.asks_permission.unwrap_or(true),
             modes,
-        ))
+        );
+        // `sign_in` in the table replaces vibe's own command.
+        Ok(match settings.sign_in.as_deref() {
+            Some(command) => VibeHarness {
+                acp: vibe.acp.signing_in_with(Some(command)),
+            },
+            None => vibe,
+        })
     }
 
     fn build(command: &[String], display: Option<&str>, asks: bool, modes: ModeMap) -> Self {
@@ -108,6 +115,8 @@ impl VibeHarness {
         .asking_permission(asks)
         .with_modes(modes)
         .declaring_effort_option(EFFORT_OPTION)
+        // Told when vibe is not signed in, never run (`acp/auth.rs`).
+        .signing_in_with(Some("vibe --setup"))
         .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
             spawn_env(&vibe_home(choice.env), choice)
         }));
@@ -344,6 +353,26 @@ mod tests {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Without a key vibe-acp 2.26.1 fails `session/new`
+    /// (`acp/fixtures/vibe_acp_not_signed_in.jsonl`): unharness says to run
+    /// `vibe --setup`, or what a `[harnesses.vibe] sign_in` names.
+    #[test]
+    fn its_sign_in_command_is_vibe_setup_unless_the_table_names_one() {
+        let sign_in = |h: &VibeHarness| h.acp.sign_in().map(str::to_string);
+        assert_eq!(
+            sign_in(&VibeHarness::new()).as_deref(),
+            Some("vibe --setup")
+        );
+        let h = VibeHarness::from_settings(&HarnessSettings::default()).unwrap();
+        assert_eq!(sign_in(&h).as_deref(), Some("vibe --setup"));
+        let table = HarnessSettings {
+            sign_in: Some("vibe-acp --setup".into()),
+            ..Default::default()
+        };
+        let h = VibeHarness::from_settings(&table).unwrap();
+        assert_eq!(sign_in(&h).as_deref(), Some("vibe-acp --setup"));
     }
 
     #[test]
