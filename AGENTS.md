@@ -401,6 +401,28 @@ recorded ones. For anything else:
   `{}` but has modes and no map (taken to have none, so nothing is
   refused), and claude-agent-acp
   under a map (its recordings start in `default`, so nothing was sent).
+  Withdrawn requests (#158, `Driver::withdraw`): claude-agent-acp 0.85.1
+  sends `$/cancel_request` (`{"requestId": 0}`) for a
+  `session/request_permission` the client has not answered once the call is
+  decided elsewhere: a `PermissionRequest` hook in the workspace's
+  `.claude/settings.json` denied the Write first, and the call failed with
+  the hook's message (`fixtures/claude_agent_acp_withdrawn.jsonl`,
+  `record-acp.py --hold`). The driver drops the request, sends
+  `PermissionWithdrawn`, answers it with the error -32800 the protocol's
+  cancellation RFD names, and drops an answer the user gave meanwhile; an id
+  that waits for nothing (unknown, answered by the user or by the policy) is
+  ignored. Checked in the TUI (tmux, haiku, `modes = { ask = "default" }`):
+  the modal opened, closed with "stopped waiting for your answer", and the
+  file was not written. With `session/cancel` followed at once by the
+  request answered `cancelled` (what the driver sends on an interrupt, and
+  what `--hold --cancel-after` sends), claude-agent-acp sent no
+  `$/cancel_request`. vibe-acp 2.26.1 sent none in the same run in its
+  `ask` mode (its Python `acp` package has no sender for one), and never
+  answered the `session/prompt` (40 s): its session store failed with
+  "callback result has no pending registration" once the `cancelled`
+  answer followed the cancel; answered `cancelled` with no
+  `session/cancel`, its turn ended. Unverified: codex-acp, a string request
+  id, elicitation (#157, to be withdrawn through the same map).
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

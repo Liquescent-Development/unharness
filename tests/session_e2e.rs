@@ -1603,6 +1603,145 @@ async fn acp_bypass_answers_permission_requests_itself() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// Events until the process has exited, after a shutdown.
+async fn shut_down(handle: &mut SessionHandle) {
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    while !matches!(next_event(handle).await, AgentEvent::ProcessExited { .. }) {}
+}
+
+/// As recorded on claude-agent-acp 0.85.1: a PermissionRequest hook denies
+/// the Write while the request waits for the user, and the agent withdraws
+/// the request with `$/cancel_request`. The modal is closed, the request
+/// answered as cancelled, and the user's answer given meanwhile not sent.
+#[tokio::test]
+async fn acp_cancel_request_withdraws_an_open_permission_request() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/claude_agent_acp_withdrawn.jsonl");
+    let cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    let mut handle = claude_acp().start_session(cfg).unwrap();
+
+    handle
+        .send(SessionCommand::turn(
+            "Write the word hi into a new file note.txt with the Write tool. Do nothing else.",
+        ))
+        .await
+        .unwrap();
+    let mut asked = None;
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            asked = Some(req.id.clone());
+        }
+        // The user answers just as the agent withdraws the request.
+        if let AgentEvent::PermissionWithdrawn { id } = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        events.push(ev);
+        if done {
+            break;
+        }
+    }
+    let asked = asked.expect("the Write was asked about");
+    assert!(events.contains(&AgentEvent::PermissionWithdrawn { id: asked }));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult { is_error: true, output, .. }
+            if output.contains("reviewed by hand")
+    )));
+    shut_down(&mut handle).await;
+    // The late answer said nothing either.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Notice(_) | AgentEvent::Error(_))),
+        "{events:?}"
+    );
+    // The only answer to the request is the protocol's for a cancelled one.
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["id"] == 0 && v.get("method").is_none())
+        .collect();
+    assert_eq!(
+        answers,
+        [serde_json::json!({
+            "jsonrpc": "2.0", "id": 0,
+            "error": {"code": -32800, "message": "Request cancelled"},
+        })]
+    );
+}
+
+/// A `$/cancel_request` for a request already answered, or for one never
+/// sent, is ignored. Synthetic: the recording above with the request
+/// answered before the agent withdraws it, and an unknown id withdrawn too
+/// (no agent was seen to send either).
+#[tokio::test]
+async fn acp_cancel_request_for_an_answered_or_unknown_request_is_ignored() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let recorded = std::fs::read_to_string(
+        repo().join("src/harness/acp/fixtures/claude_agent_acp_withdrawn.jsonl"),
+    )
+    .unwrap();
+    let mut lines = Vec::new();
+    for line in recorded.lines() {
+        if line.contains("\"$/cancel_request\"") {
+            lines.push(r#">> {"jsonrpc": "2.0", "id": 0, "result": {"outcome": {"outcome": "selected", "optionId": "allow-once"}}}"#);
+            lines.push(line);
+            lines.push(
+                r#"{"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":"never-sent"}}"#,
+            );
+        } else if !line.contains("-32800") {
+            lines.push(line);
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("answered_then_withdrawn.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let mut handle = claude_acp()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+
+    handle.send(SessionCommand::turn("write it")).await.unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::PermissionWithdrawn { .. } | AgentEvent::Notice(_) | AgentEvent::Error(_)
+        )),
+        "{events:?}"
+    );
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert!(!sent.iter().any(|v| v.get("error").is_some()), "{sent:?}");
+    let answers: Vec<&Value> = sent
+        .iter()
+        .filter(|v| v["id"] == 0 && v.get("method").is_none())
+        .collect();
+    assert_eq!(answers.len(), 1, "{sent:?}");
+    assert_eq!(answers[0]["result"]["outcome"]["optionId"], "allow-once");
+}
+
 /// vibe-acp 2.26.1 names the call in a request by its id alone; the kind
 /// came on the `tool_call` before it.
 #[tokio::test]

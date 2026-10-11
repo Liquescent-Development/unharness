@@ -38,6 +38,13 @@ When a request does not offer the option the answer needs (`allow_once`,
 `reject_once`) it is answered `cancelled`; an "always" option is never
 picked.
 
+With --hold a permission request is not answered: it stays open until the
+agent withdraws it with `$/cancel_request` (answered with the error -32800,
+"Request cancelled", as the driver does) or, with --cancel-after, until the
+`session/cancel`, right after which every open one is answered `cancelled`
+(as the driver does). A `$/cancel_request` for anything else is recorded
+and not answered.
+
 Without the flags added for #169 the lines sent are the ones the recorder
 sent before them, so a fixture re-recorded that way keeps its `>>` lines (an
 e2e test needs a fixture's `>>` lines to be what the driver sends).
@@ -109,6 +116,9 @@ def parser() -> argparse.ArgumentParser:
                     help="send session/close for the current session before closing stdin")
     ap.add_argument("--cancel-after", type=float, metavar="SECONDS",
                     help="send session/cancel this long after the last prompt, if it is still running")
+    ap.add_argument("--hold", action="store_true",
+                    help="leave permission requests open until the agent withdraws them with "
+                         "$/cancel_request, or --cancel-after cancels the turn (see above)")
     ap.add_argument("--deny", action="store_true",
                     help="reject permission requests instead of allowing them (also after --answers)")
     ap.add_argument("--answers", metavar="LIST",
@@ -150,6 +160,8 @@ def main() -> int:
         ap.error("--fork sends the last PROMPT to the fork, so it needs at least two prompts")
     if args.mode_option and not args.mode:
         ap.error("--mode-option needs --mode")
+    if args.hold and (args.answers or args.deny):
+        ap.error("--hold answers no permission request, so it takes neither --answers nor --deny")
 
     try:
         client_caps = json.loads(args.client_capabilities)
@@ -263,6 +275,7 @@ def main() -> int:
     first = True
     cancel_timer = None
     permissions = 0
+    held = {}  # --hold: open permission requests, by id as JSON
     elicitations = 0
     message_ids = {"USER": [], "AGENT": []}
 
@@ -276,6 +289,13 @@ def main() -> int:
     def send_cancel(sid):
         sys.stderr.write(f"[cancel] session/cancel after {args.cancel_after}s\n")
         send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
+        # The protocol has a cancelled turn's open permission requests
+        # answered `cancelled`.
+        with send_lock:
+            open_ids = list(held.values())
+            held.clear()
+        for hid in open_ids:
+            send({"jsonrpc": "2.0", "id": hid, "result": {"outcome": {"outcome": "cancelled"}}})
 
     def next_prompt():
         nonlocal first, cancel_timer
@@ -413,9 +433,24 @@ def main() -> int:
             if kind and isinstance(mid, str) and mid not in message_ids[kind]:
                 message_ids[kind].append(mid)
 
+        # The agent withdraws a request it sent.
+        if method == "$/cancel_request":
+            wid = (obj.get("params") or {}).get("requestId")
+            with send_lock:
+                was_held = held.pop(json.dumps(wid), None) is not None
+            sys.stderr.write(f"[withdrawn] request {wid} ({'open' if was_held else 'not open'})\n")
+            if was_held:
+                send({"jsonrpc": "2.0", "id": wid,
+                      "error": {"code": -32800, "message": "Request cancelled"}})
+            continue
+
         # Agent → client requests.
         if method and rid is not None:
-            if method == "session/request_permission":
+            if method == "session/request_permission" and args.hold:
+                sys.stderr.write(f"[hold] permission request {rid} left open\n")
+                with send_lock:
+                    held[json.dumps(rid)] = rid
+            elif method == "session/request_permission":
                 options = (obj.get("params") or {}).get("options") or []
                 permissions += 1
                 if permissions <= len(answers):

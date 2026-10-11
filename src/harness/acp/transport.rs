@@ -3,7 +3,8 @@
 //!
 //! unharness declares no client capabilities, so the agent uses its own file
 //! and terminal tools and reports them as tool calls. The only agent → client
-//! request served is `session/request_permission`; the rest are refused.
+//! request served is `session/request_permission`; the rest are refused. The
+//! agent may withdraw one that waits for the user (`$/cancel_request`).
 //!
 //! An agent with session modes is held to the one its policy maps to
 //! (`modes.rs`): after every session answer (new, load, resume) and every
@@ -11,7 +12,7 @@
 //! policy whose mode does not take is refused for the session
 //! (`CapsUpdate::refused_policies`), its prompt failed rather than sent.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -169,6 +170,18 @@ fn screen_permission(
     (allowed, evs)
 }
 
+/// The JSON-RPC error that answers a request cancelled by its sender
+/// (`$/cancel_request`).
+const REQUEST_CANCELLED: i64 = -32800;
+
+/// Our id of an agent → client request: the TUI's request ids are strings.
+fn request_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// What a harness knows about its agent that the protocol does not say.
 #[derive(Debug, Clone, Default)]
 pub struct AgentSpec {
@@ -259,6 +272,9 @@ struct Driver {
     policy: PermissionPolicy,
     /// Permission requests awaiting the user: our id → (rpc id, offered options).
     pending: HashMap<String, (Value, Value)>,
+    /// Requests the agent withdrew while they waited for the user: an
+    /// answer the user gave meanwhile is dropped.
+    withdrawn: HashSet<String>,
     /// A turn sent before the session and its mode were ready.
     queued_turn: Option<(String, Vec<Attachment>)>,
     last_stderr: Option<String>,
@@ -521,6 +537,34 @@ impl Driver {
         self.apply_mode(events).await
     }
 
+    /// `$/cancel_request`: the agent withdraws a request it sent. One that
+    /// waits for the user is dropped, so that the user's answer is not sent,
+    /// the TUI is told (`PermissionWithdrawn` closes its modal), and it is
+    /// answered with the error the protocol gives a cancelled request. An
+    /// id that waits for nothing (unknown, already answered, or answered by
+    /// the policy) is ignored: its answer has gone.
+    ///
+    /// An elicitation (`elicitation/create`, #157) that waits for the user is
+    /// withdrawn the same way: kept under its id with the permission
+    /// requests, it needs nothing more here.
+    async fn withdraw(&mut self, params: &Value, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        let Some(id) = params.get("requestId").map(request_key) else {
+            return Ok(());
+        };
+        let Some((rpc_id, _)) = self.pending.remove(&id) else {
+            return Ok(());
+        };
+        self.withdrawn.insert(id.clone());
+        let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
+        self.proc
+            .write_line(&jsonrpc::error_response(
+                &rpc_id,
+                REQUEST_CANCELLED,
+                "Request cancelled",
+            ))
+            .await
+    }
+
     /// `session/cancel`, and every open permission request answered
     /// `cancelled`, as the spec requires once a turn is cancelled.
     async fn cancel_turn(&mut self) -> Result<()> {
@@ -563,6 +607,7 @@ async fn drive(
         mcp_servers: json!([]),
         options: SessionOptions::default(),
         pending: HashMap::new(),
+        withdrawn: HashSet::new(),
         queued_turn: None,
         last_stderr: None,
         mode_map,
@@ -641,6 +686,8 @@ async fn drive(
                             }
                             d.proc.write_line(&jsonrpc::response(&rpc_id, outcome)).await
                         }
+                        // Withdrawn by the agent while the user answered.
+                        None if d.withdrawn.remove(&id) => Ok(()),
                         None => {
                             let _ = events.send(AgentEvent::Notice(format!("no pending permission request {id}"))).await;
                             Ok(())
@@ -876,6 +923,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                 _ => {}
             }
         }
+        Some(RpcMessage::Notification { method, params }) if method == "$/cancel_request" => {
+            return d.withdraw(params, events).await;
+        }
         Some(RpcMessage::Request { id, method, params }) => {
             if method != "session/request_permission" {
                 return d
@@ -897,10 +947,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     .write_line(&jsonrpc::response(id, permission_outcome(&options, &allow)))
                     .await?;
             } else {
-                let rid = match id {
-                    Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
+                let rid = request_key(id);
+                d.withdrawn.remove(&rid);
                 d.pending.insert(rid, (id.clone(), options));
             }
             for ev in evs {
