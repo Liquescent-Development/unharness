@@ -274,6 +274,12 @@ pub fn text(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> Str
     }
 }
 
+/// Whether a copy of the cells between two points takes them as drawn,
+/// having no text in them.
+pub fn copies_drawing(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> bool {
+    copied_text(lines, rows, start, end).trim().is_empty()
+}
+
 fn copied_text(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> String {
     let whole = [Piece {
         cells: 0..usize::MAX,

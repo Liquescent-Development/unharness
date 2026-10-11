@@ -24,7 +24,7 @@ use super::modal::{
 };
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
-use super::selection::{Join, RowCopy};
+use super::selection::{self, Join, RowCopy};
 use super::transcript::{
     Block as TBlock, HookState, input_beyond_summary, tool_summary, tool_summary_full,
     truncate_chars, waits_on_user,
@@ -1040,8 +1040,11 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     app.transcript_view = view;
     frame.render_widget(Paragraph::new(visible).block(block), area);
 
-    // The mouse selection, drawn over the text it covers.
+    // The mouse selection, drawn over the text a copy takes, or over all
+    // it covers when that is only drawing, which is then what it takes.
     if let Some((start, end)) = app.selection_range() {
+        let view = &app.transcript_view;
+        let drawn = selection::copies_drawing(&view.lines, &view.copy, start, end);
         let buf = frame.buffer_mut();
         for row in 0..inner.height {
             let line = app.scroll as usize + row as usize;
@@ -1054,9 +1057,12 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 usize::MAX
             };
+            let copy = view.copy.get(line);
             for col in from..=to.min(inner.width.saturating_sub(1) as usize) {
-                buf[(inner.x + col as u16, inner.y + row)]
-                    .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                if drawn || copy.is_none_or(|c| c.covers(col)) {
+                    buf[(inner.x + col as u16, inner.y + row)]
+                        .set_style(Style::default().add_modifier(Modifier::REVERSED));
+                }
             }
         }
     }
@@ -3358,18 +3364,28 @@ mod tests {
         app.handle_mouse(mouse(MouseEventKind::Up(left), x + 8, y));
         assert_eq!(
             app.take_copy_request().as_deref(),
-            Some("  open src/tui/app.rs please")
+            Some("open src/tui/app.rs please")
         );
 
-        // A drag over several rows copies them as rows; one that ends below
-        // the transcript keeps to its last row and starts scrolling.
+        // A drag over several rows copies their text, not the header between
+        // them, which is not highlighted either; one that ends below the
+        // transcript keeps to its last row and starts scrolling.
         app.last_click_forget();
         app.handle_mouse(mouse(MouseEventKind::Down(left), x + 5, y));
         app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, y + 3));
         assert_eq!(
             app.selected_text().as_deref(),
-            Some("src/tui/app.rs please\n\n❯ You\n  second")
+            Some("src/tui/app.rs please\n\nsecond")
         );
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let reversed_at = |term: &Terminal<TestBackend>, x: u16, y: u16| {
+            term.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        assert!(!reversed_at(&term, x - 2, y + 2), "the header");
+        assert!(!reversed_at(&term, x - 1, y + 3), "the margin");
+        assert!(reversed_at(&term, x, y + 3) && reversed_at(&term, x + 5, y + 3));
         app.handle_mouse(mouse(MouseEventKind::Drag(left), x + 5, 23));
         assert!(app.tick_mouse());
         app.handle_mouse(mouse(MouseEventKind::Up(left), x + 5, 23));
@@ -3377,7 +3393,7 @@ mod tests {
         // The transcript ends with that prompt, so the drag stops in it.
         assert_eq!(
             app.take_copy_request().as_deref(),
-            Some("src/tui/app.rs please\n\n❯ You\n  second")
+            Some("src/tui/app.rs please\n\nsecond")
         );
 
         // A press outside the transcript, or a key, drops the selection.
@@ -3388,6 +3404,55 @@ mod tests {
         app.flash("Copied 4 lines");
         let (rows, _) = screen(&mut app, 80, 24);
         assert!(rows.iter().any(|r| r.starts_with("── Copied 4 lines ─")));
+    }
+
+    #[test]
+    fn a_drag_over_a_tool_call_copies_its_command_and_output() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let left = MouseButton::Left;
+        let command = format!(
+            "cd ~/code && uv run python {}extract.py",
+            "--flag ".repeat(6)
+        );
+        let output = format!("zoxide: {}issue\nok", "a possible configuration ".repeat(3));
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.submit_prompt("go".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::ToolCallStarted {
+            id: "t1".into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": command }),
+        });
+        app.on_event(crate::core::AgentEvent::ToolCallResult {
+            id: "t1".into(),
+            output: output.clone(),
+            is_error: false,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let top = rows.iter().position(|r| r.contains("Bash  cd")).unwrap();
+        let last = rows.iter().position(|r| r.contains("└ ok")).unwrap();
+        assert!(last > top + 3, "{rows:?}");
+        let drag = |app: &mut App, from: (u16, usize), to: (u16, usize)| {
+            app.last_click_forget();
+            app.handle_mouse(mouse(MouseEventKind::Down(left), from.0, from.1 as u16));
+            app.handle_mouse(mouse(MouseEventKind::Drag(left), to.0, to.1 as u16));
+            app.handle_mouse(mouse(MouseEventKind::Up(left), to.0, to.1 as u16));
+            app.take_copy_request()
+        };
+        // The command wrapped beside its status and the output wrapped in its
+        // gutter come out as they were written.
+        assert_eq!(
+            drag(&mut app, (1, top), (58, last)),
+            Some(format!("{command}\n{output}"))
+        );
+        // Over the label alone: the label, as drawn.
+        // A cell of the screen per char, the wide `⚡` and the one after it.
+        let label = rows[top].chars().position(|c| c == '⚡').unwrap();
+        assert_eq!(
+            drag(&mut app, (label as u16, top), (label as u16 + 6, top)).as_deref(),
+            Some("⚡ Bash")
+        );
     }
 
     #[test]
