@@ -829,6 +829,18 @@ mod tests {
         );
     }
 
+    /// The request a hook answered first, then the agent's `$/cancel_request`
+    /// for it (handled by the driver, so not among the parser's events) and
+    /// the call failing with the hook's message.
+    #[test]
+    fn fixture_claude_agent_acp_withdrawn() {
+        assert_fixture(
+            &mut parser(),
+            &fixtures_dir(file!()),
+            "claude_agent_acp_withdrawn",
+        );
+    }
+
     /// Every `available_commands_update` replaces the list; a project's
     /// command is among them, and a prompt of `/hello world` ran it.
     #[test]

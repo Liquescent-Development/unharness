@@ -1,0 +1,25 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
+SessionStarted id=81362ba5-e2e0-436a-a24f-a48d851acadc model=opus
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
+CapabilitiesChanged efforts= models=12
+Context used=21654 window=200000
+ToolCallStarted id=toolu_019hkquhdAsnztCwUtFAWVEv name=Write input={"content":"hi","file_path":"/WORKSPACE/note.txt"}
+PermissionRequest id=0 ToolUse Write [edit /WORKSPACE/note.txt]
+Context used=21803 window=200000
+ToolCallResult id=toolu_019hkquhdAsnztCwUtFAWVEv error=true "writes are reviewed by hand here"
+Context used=25342 window=200000
+TextDelta "Your"
+TextDelta " write to"
+TextDelta " note"
+TextDelta "."
+TextDelta "txt"
+TextDelta " is"
+TextDelta " pending"
+TextDelta " manual"
+TextDelta " review"
+TextDelta ". Please approve it"
+TextDelta " to proceed."
+Context used=25463 window=200000
+Context used=25463 window=200000
+Usage in=18 out=278 cache_read=21638 cache_write=25332 cost=0.0552 cumulative=false
+TurnCompleted Done
