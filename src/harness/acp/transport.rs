@@ -18,6 +18,10 @@
 //! policy whose mode does not take is refused for the session
 //! (`CapsUpdate::refused_policies`), its prompt failed rather than sent.
 //!
+//! An interrupt answers the turn's open requests `cancelled` first and
+//! sends `session/cancel` once their tool calls have ended (see
+//! [`Driver::cancel_turn`]).
+//!
 //! An agent that wants the user signed in (the spec's auth-required error
 //! at a session request or a prompt) gets no `authenticate` and no retry:
 //! the turn fails with what the agent offers and what to run (`auth.rs`),
@@ -212,19 +216,34 @@ pub fn client_capabilities() -> Value {
     json!({"elicitation": {"form": {}}})
 }
 
-/// An agent → client request that waits for the user.
+/// An agent → client request that waits for the user, with the tool call
+/// it is for as the parser tied it (`PermissionRequest::tool_call_id`).
 #[derive(Debug)]
 enum Pending {
     /// `session/request_permission`, with the options it offered.
-    Permission { rpc_id: Value, options: Value },
+    Permission {
+        rpc_id: Value,
+        options: Value,
+        call: Option<String>,
+    },
     /// `elicitation/create` in form mode.
-    Elicitation { rpc_id: Value, form: Form },
+    Elicitation {
+        rpc_id: Value,
+        form: Form,
+        call: Option<String>,
+    },
 }
 
 impl Pending {
     fn rpc_id(&self) -> &Value {
         match self {
             Pending::Permission { rpc_id, .. } | Pending::Elicitation { rpc_id, .. } => rpc_id,
+        }
+    }
+
+    fn call(&self) -> Option<&String> {
+        match self {
+            Pending::Permission { call, .. } | Pending::Elicitation { call, .. } => call.as_ref(),
         }
     }
 
@@ -242,6 +261,29 @@ impl Pending {
 /// starts then: the whole stays within what the TUI waits for an agent to
 /// end before it kills it.
 pub const CLOSE_WAIT: Duration = Duration::from_secs(1);
+
+/// How long an interrupt's `session/cancel` waits for the tool calls of the
+/// requests it answered `cancelled` to end (see [`Driver::cancel_turn`]).
+/// vibe-acp 2.26.1 reported its call failed within milliseconds.
+pub const SETTLE_WAIT: Duration = Duration::from_secs(2);
+
+/// The tool call a request event is for, as the parser tied it.
+fn requested_call(evs: &[AgentEvent]) -> Option<String> {
+    evs.iter().find_map(|ev| match ev {
+        AgentEvent::PermissionRequest(req) => req.tool_call_id.clone(),
+        _ => None,
+    })
+}
+
+/// A turn being cancelled: its requests are answered `cancelled`, and the
+/// `session/cancel` waits for their calls to end.
+struct Cancelling {
+    session_id: String,
+    /// Calls of answered requests not yet reported `completed` or `failed`.
+    calls: HashSet<String>,
+    /// When the `session/cancel` goes whatever is left; `None` once sent.
+    by: Option<Instant>,
+}
 
 /// What a harness knows about its agent that the protocol does not say.
 #[derive(Clone, Default)]
@@ -426,6 +468,8 @@ struct Driver {
     auth_methods: Vec<AuthMethod>,
     /// The agent wants the user signed in: the process is to end.
     signed_out: bool,
+    /// The running turn is being cancelled, until its prompt answers.
+    cancelling: Option<Cancelling>,
 }
 
 impl Driver {
@@ -604,7 +648,7 @@ impl Driver {
         // A turn running when the policy changed goes on in whatever mode
         // the agent is in, which may run what the policy asks about.
         if self.outstanding.values().any(|o| *o == Outstanding::Prompt) {
-            self.cancel_turn().await?;
+            self.cancel_turn(events).await?;
         }
         self.flush_turn(events).await
     }
@@ -664,7 +708,7 @@ impl Driver {
                     "{name} went into its mode '{now}', which can run what {policy} asks about; the turn is stopped and mode '{held}' set again"
                 )))
                 .await;
-            self.cancel_turn().await?;
+            self.cancel_turn(events).await?;
         } else {
             let _ = events
                 .send(AgentEvent::Notice(format!(
@@ -738,16 +782,21 @@ impl Driver {
         let name = self.harness.as_str();
         match Form::from_request(line, params) {
             Ok(form) => {
+                let evs = self.parser.feed(line);
+                let pending = Pending::Elicitation {
+                    rpc_id: id.clone(),
+                    form,
+                    call: requested_call(&evs),
+                };
+                if self.cancelling.is_some() {
+                    return self.refuse_late(pending).await;
+                }
                 let rid = request_key(id);
                 self.withdrawn.remove(&rid);
-                self.pending.insert(
-                    rid,
-                    Pending::Elicitation {
-                        rpc_id: id.clone(),
-                        form,
-                    },
-                );
-                forward(self, line, events).await;
+                self.pending.insert(rid, pending);
+                for ev in evs {
+                    let _ = events.send(ev).await;
+                }
                 Ok(())
             }
             Err(refusal) => {
@@ -1015,25 +1064,117 @@ impl Driver {
         self.outstanding.values().any(|o| *o == Outstanding::Close)
     }
 
-    /// `session/cancel`, and every open permission request answered
-    /// `cancelled`, as the spec requires once a turn is cancelled; an open
-    /// elicitation is answered `cancel`.
-    async fn cancel_turn(&mut self) -> Result<()> {
+    /// Cancel the running turn: every open permission request answered
+    /// `cancelled`, as the spec requires of a cancelled turn, and an open
+    /// elicitation `cancel` (the TUI is told each was withdrawn), then
+    /// `session/cancel` once the tool calls they were for are reported
+    /// `completed` or `failed`, or after [`SETTLE_WAIT`]. Until the prompt
+    /// answers, a request that comes is answered the same way.
+    ///
+    /// The other order breaks vibe-acp 2.26.1: its interrupt and the
+    /// answer each resolve the request's callback in its session store,
+    /// whose next read then fails ("callback result has no pending
+    /// registration") and the prompt is never answered; the answer sent
+    /// just before the cancel races the same way. Answered first, the call
+    /// fails at once, and the cancel then ends the turn `cancelled`
+    /// (`fixtures/vibe_acp_interrupt.jsonl`); claude-agent-acp 0.85.1 and
+    /// codex-acp 2.1.1 did the same.
+    async fn cancel_turn(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
         };
-        let mut res = self
-            .proc
+        // Asked again while it waits: the cancel goes now.
+        if self.cancelling.as_ref().is_some_and(|c| c.by.is_some()) {
+            return self.send_cancel().await;
+        }
+        let mut res = Ok(());
+        let mut calls = HashSet::new();
+        let mut untied = false;
+        for (id, pending) in self.pending.drain() {
+            match pending.call() {
+                Some(call) => {
+                    calls.insert(call.clone());
+                }
+                None => untied = true,
+            }
+            let line = jsonrpc::response(pending.rpc_id(), pending.cancelled());
+            res = res.and(self.proc.write_line(&line).await);
+            let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
+        }
+        let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
+        if !turn_running {
+            return res.and(self.cancel_now(&session_id).await);
+        }
+        let waits = untied || !calls.is_empty();
+        self.cancelling = Some(Cancelling {
+            session_id,
+            calls,
+            by: Some(Instant::now() + SETTLE_WAIT),
+        });
+        if !waits {
+            return res.and(self.send_cancel().await);
+        }
+        res
+    }
+
+    async fn cancel_now(&mut self, session_id: &str) -> Result<()> {
+        self.proc
             .write_line(&jsonrpc::notification(
                 "session/cancel",
                 json!({"sessionId": session_id}),
             ))
-            .await;
-        for (_, pending) in self.pending.drain() {
-            let line = jsonrpc::response(pending.rpc_id(), pending.cancelled());
-            res = res.and(self.proc.write_line(&line).await);
+            .await
+    }
+
+    /// The `session/cancel` a cancelled turn owes, once.
+    async fn send_cancel(&mut self) -> Result<()> {
+        let Some(c) = self.cancelling.as_mut() else {
+            return Ok(());
+        };
+        if c.by.take().is_none() {
+            return Ok(());
         }
-        res
+        c.calls.clear();
+        let session_id = c.session_id.clone();
+        self.cancel_now(&session_id).await
+    }
+
+    /// When the owed `session/cancel` goes whatever is left.
+    fn cancel_by(&self) -> Option<Instant> {
+        self.cancelling.as_ref().and_then(|c| c.by)
+    }
+
+    /// A tool call was reported: one the owed `session/cancel` waits for
+    /// has ended.
+    async fn call_reported(&mut self, update: &Value) -> Result<()> {
+        let Some(c) = self.cancelling.as_mut() else {
+            return Ok(());
+        };
+        let ended = matches!(
+            update.get("status").and_then(Value::as_str),
+            Some("completed" | "failed")
+        );
+        let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if ended && c.calls.remove(id) && c.calls.is_empty() {
+            return self.send_cancel().await;
+        }
+        Ok(())
+    }
+
+    /// A request that comes while the turn is being cancelled is answered
+    /// at once, as the open ones were, and its call waited for.
+    async fn refuse_late(&mut self, pending: Pending) -> Result<()> {
+        if let Some(c) = self.cancelling.as_mut()
+            && c.by.is_some()
+            && let Some(call) = pending.call()
+        {
+            c.calls.insert(call.clone());
+        }
+        self.proc
+            .write_line(&jsonrpc::response(pending.rpc_id(), pending.cancelled()))
+            .await
     }
 }
 
@@ -1082,6 +1223,7 @@ async fn drive(
         reattach_via: None,
         auth_methods: Vec::new(),
         signed_out: false,
+        cancelling: None,
     };
     if let Err(e) = d
         .request("initialize", initialize_params(), Outstanding::Initialize)
@@ -1144,14 +1286,14 @@ async fn drive(
                             }).await;
                             Ok(())
                         } else {
-                            d.cancel_turn().await
+                            d.cancel_turn(&events).await
                         }
                     }
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some(Pending::Elicitation { rpc_id, form }) => {
+                        Some(Pending::Elicitation { rpc_id, form, .. }) => {
                             d.proc.write_line(&jsonrpc::response(&rpc_id, form.answer(&decision))).await
                         }
-                        Some(Pending::Permission { rpc_id, options }) => {
+                        Some(Pending::Permission { rpc_id, options, .. }) => {
                             let outcome = permission_outcome(&options, &decision);
                             if matches!(decision, PermissionDecision::Allow { .. })
                                 && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
@@ -1229,6 +1371,11 @@ async fn drive(
                 close_by = None;
                 d.proc.end();
             }
+            _ = tokio::time::sleep_until(d.cancel_by().unwrap_or_else(Instant::now)), if d.cancel_by().is_some() => {
+                if let Err(e) = d.send_cancel().await {
+                    let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
+                }
+            }
             raw = d.proc.lines.recv() => {
                 match raw {
                     // A process ending to be started again says nothing more.
@@ -1289,6 +1436,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
     match &msg {
         Some(RpcMessage::Response { id, result, error }) => {
             let kind = id.as_u64().and_then(|i| d.outstanding.remove(&i));
+            if kind == Some(Outstanding::Prompt) {
+                d.cancelling = None;
+            }
             let result = result.clone().unwrap_or(Value::Null);
             if let Some(e) = error
                 && auth::is_auth_required(e)
@@ -1443,6 +1593,12 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         return d.on_mode_report(events).await;
                     }
                 }
+                // A call an owed `session/cancel` waits for may have ended.
+                Some("tool_call" | "tool_call_update") => {
+                    forward(d, line, events).await;
+                    let update = params.get("update").unwrap_or(&Value::Null);
+                    return d.call_reported(update).await;
+                }
                 Some("current_mode_update") => {
                     if let Some(mode) = params
                         .pointer("/update/currentModeId")
@@ -1475,6 +1631,19 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             }
             let options = params.get("options").cloned().unwrap_or(Value::Null);
             let (allowed, evs) = screen_permission(&mut d.parser, d.policy, line, params);
+            if d.cancelling.is_some() {
+                let pending = Pending::Permission {
+                    rpc_id: id.clone(),
+                    call: requested_call(&evs),
+                    options,
+                };
+                for ev in evs {
+                    if !matches!(ev, AgentEvent::PermissionRequest(_)) {
+                        let _ = events.send(ev).await;
+                    }
+                }
+                return d.refuse_late(pending).await;
+            }
             if allowed {
                 let allow = PermissionDecision::Allow {
                     updated_input: None,
@@ -1489,6 +1658,7 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     rid,
                     Pending::Permission {
                         rpc_id: id.clone(),
+                        call: requested_call(&evs),
                         options,
                     },
                 );

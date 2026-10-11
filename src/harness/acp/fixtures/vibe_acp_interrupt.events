@@ -1,0 +1,17 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=3703d545-a355-0851-3ce9-14f2fb25fdc6 model=glm-5-3
+CapabilitiesChanged efforts= plan_mode=false models=2
+CapabilitiesChanged efforts= models=2
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=0 window=800000
+ThinkingDelta "Simple"
+Context used=0 window=800000
+ThinkingDelta " task: write file a.txt with \"hi\" using write_file tool."
+Context used=8357 window=800000
+ToolCallStarted id=effect-0940674e-3725-5b34-b3ae-46ae6aad0912 name=edit input={"content":"hi","filePath":"/WORKSPACE/a.txt"}
+PermissionRequest id=0 ToolUse edit [edit /WORKSPACE/a.txt]
+ToolCallResult id=effect-0940674e-3725-5b34-b3ae-46ae6aad0912 error=true "Tool execution denied by approval callback"
+Context used=8357 window=800000
+Usage in=8318 out=39 cache_read=0 cache_write=0 cost=0.0118 cumulative=false
+TurnCompleted Interrupted

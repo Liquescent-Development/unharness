@@ -1955,8 +1955,10 @@ async fn acp_cancel_request_withdraws_an_open_elicitation() {
     );
 }
 
-/// An interrupt with an elicitation open: `session/cancel`, then the
-/// elicitation answered `cancel`. Synthetic, from the vibe recording.
+/// An interrupt with an elicitation open: the elicitation answered
+/// `cancel`, then `session/cancel` once its call has ended. Synthetic,
+/// from the vibe recording (its call's update is the one vibe sent after
+/// the accepted answer).
 #[tokio::test]
 async fn acp_interrupt_cancels_an_open_elicitation() {
     if !python_available() {
@@ -1966,8 +1968,9 @@ async fn acp_interrupt_cancels_an_open_elicitation() {
     let (_dir, fixture) = vibe_question_with(|line| {
         if line.starts_with(">> ") && line.contains("\"action\"") {
             vec![
-                r#">> {"method": "session/cancel"}"#.into(),
                 r#">> {"id": 0, "result": {"action": "cancel"}}"#.into(),
+                r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"52781132-721c-6b47-6ab0-160b86c84aea","update":{"toolCallId":"effect-70979aa9-c4d8-54a8-a3d8-de5d4837ca50","kind":"other","status":"completed","sessionUpdate":"tool_call_update"}}}"#.into(),
+                r#">> {"method": "session/cancel"}"#.into(),
                 r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#.into(),
             ]
         } else if line.contains("\"stopReason\"") || line.contains("tool_call_update") {
@@ -2007,7 +2010,235 @@ async fn acp_interrupt_cancels_an_open_elicitation() {
         .position(|v| v["method"] == "session/cancel")
         .unwrap();
     let answer = sent.iter().position(|v| v["id"] == 0).unwrap();
-    assert!(cancel < answer);
+    assert!(answer < cancel);
+}
+
+/// vibe-acp 2.26.1, interrupted with a write's permission request open
+/// (#183): the request is answered `cancelled` and the TUI told it is
+/// withdrawn; vibe reports the call failed, and only then does
+/// `session/cancel` go, which ends the turn `cancelled`. (Sent the other
+/// way round, vibe's session store failed and the prompt was never
+/// answered.)
+#[tokio::test]
+async fn acp_interrupt_answers_an_open_request_before_cancelling() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_interrupt.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn(
+            "create the file a.txt containing the word hi, using your file tool",
+        ))
+        .await
+        .unwrap();
+    let mut asked = None;
+    let mut after = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            asked = Some(req.id.clone());
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            continue;
+        }
+        let done = matches!(ev, AgentEvent::TurnCompleted { .. });
+        if asked.is_some() {
+            after.push(ev);
+        }
+        if done {
+            break;
+        }
+    }
+    let asked = asked.expect("vibe asked");
+    let tail: Vec<&AgentEvent> = after
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::PermissionWithdrawn { .. } | AgentEvent::TurnCompleted { .. }
+            )
+        })
+        .collect();
+    assert_eq!(
+        tail,
+        [
+            &AgentEvent::PermissionWithdrawn { id: asked },
+            &AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            }
+        ]
+    );
+    shut_down(&mut handle).await;
+    let sent = fake.sent_lines();
+    assert_eq!(
+        answers_to(&sent, 0),
+        [
+            serde_json::json!({"jsonrpc": "2.0", "id": 0, "result": {"outcome": {"outcome": "cancelled"}}})
+        ]
+    );
+    let answer = sent.iter().position(|v| v["id"] == 0).unwrap();
+    let cancel = sent
+        .iter()
+        .position(|v| v["method"] == "session/cancel")
+        .unwrap();
+    assert!(answer < cancel);
+}
+
+/// The lines of a synthetic ACP turn in which a write is asked about,
+/// up to the answer to the request, then `after`.
+fn asked_then(after: &[&str]) -> Vec<String> {
+    let mut lines: Vec<String> = [
+        r#">> {"method": "initialize"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+        r#">> {"method": "session/new"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+        r#">> {"method": "session/prompt"}"#,
+        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Writing a.txt","kind":"edit","status":"pending"}}}"#,
+        r#"{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1"},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"},{"optionId":"reject_once","name":"Reject","kind":"reject_once"}]}}"#,
+        r#">> {"id": 0, "result": {"outcome": {"outcome": "cancelled"}}}"#,
+    ]
+    .map(String::from)
+    .to_vec();
+    lines.extend(after.iter().map(|l| l.to_string()));
+    lines
+}
+
+/// Interrupt at the first request and run the turn to its end.
+async fn interrupt_at_request(handle: &mut SessionHandle) -> Vec<AgentEvent> {
+    handle.send(SessionCommand::turn("write")).await.unwrap();
+    events_until(handle, |e| matches!(e, AgentEvent::PermissionRequest(_))).await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    events_until(handle, |e| matches!(e, AgentEvent::TurnCompleted { .. })).await
+}
+
+/// The `session/cancel` of an interrupt waits until the call of the
+/// request it answered `cancelled` is reported ended.
+#[tokio::test]
+async fn acp_interrupt_waits_for_the_answered_call_before_cancelling() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let lines = asked_then(&[
+        "# gate",
+        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"failed"}}}"#,
+        r#">> {"method": "session/cancel"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#,
+    ]);
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (mut cfg, gate) = gated_config(&fake, &lines);
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("write")).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+    })
+    .await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionWithdrawn { .. })
+    })
+    .await;
+    // Answered, and nothing more while the call has not ended.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let sent = fake.sent_lines();
+    assert_eq!(answers_to(&sent, 0).len(), 1);
+    assert!(!sent.iter().any(|v| v["method"] == "session/cancel"));
+    std::fs::write(&gate, "").unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+    assert!(sent_methods(&fake).contains(&"session/cancel".to_string()));
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A call never reported ended does not hold the `session/cancel` past
+/// `SETTLE_WAIT`.
+#[tokio::test]
+async fn acp_interrupt_cancels_after_a_while_without_the_call() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let lines = asked_then(&[
+        r#">> {"method": "session/cancel"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#,
+    ]);
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (mut cfg, _gate) = gated_config(&fake, &lines);
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    let started = tokio::time::Instant::now();
+    let events = interrupt_at_request(&mut handle).await;
+    assert!(interrupted(&events), "{events:?}");
+    assert!(started.elapsed() >= unharness::harness::acp::transport::SETTLE_WAIT);
+    let sent = fake.sent_lines();
+    let answer = sent.iter().position(|v| v["id"] == 0).unwrap();
+    let cancel = sent
+        .iter()
+        .position(|v| v["method"] == "session/cancel")
+        .unwrap();
+    assert!(answer < cancel);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A request that crosses the interrupt is answered `cancelled` at once,
+/// never shown, and its call waited for too.
+#[tokio::test]
+async fn acp_request_during_an_interrupt_is_answered_cancelled() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let lines = asked_then(&[
+        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c2","title":"touch x","kind":"execute","status":"pending"}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c2"},"options":[{"optionId":"allow_once","name":"Allow once","kind":"allow_once"}]}}"#,
+        r#">> {"id": 1, "result": {"outcome": {"outcome": "cancelled"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"failed"}}}"#,
+        "# gate",
+        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call_update","toolCallId":"c2","status":"failed"}}}"#,
+        r#">> {"method": "session/cancel"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}"#,
+    ]);
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (mut cfg, gate) = gated_config(&fake, &lines);
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("write")).await.unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_))
+    })
+    .await;
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    // The second call's request is answered; its call still holds the cancel.
+    let sent = fake.sent_lines_eventually(5).await;
+    assert_eq!(
+        answers_to(&sent, 1),
+        [
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": {"outcome": {"outcome": "cancelled"}}})
+        ]
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!sent_methods(&fake).contains(&"session/cancel".to_string()));
+    std::fs::write(&gate, "").unwrap();
+    let events = events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(interrupted(&events), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_))),
+        "{events:?}"
+    );
+    assert!(sent_methods(&fake).contains(&"session/cancel".to_string()));
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
 /// A URL elicitation, never declared, is refused with an error and the
