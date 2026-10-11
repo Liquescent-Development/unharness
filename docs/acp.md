@@ -181,8 +181,10 @@ after that is a fresh session too.
 Whether an agent forks is known once a session of it has started: an
 agent not run since unharness started, like one that does not advertise
 it, starts fresh in the copy with the transcript as context. If the fork
-itself fails, unharness starts a new session and says that it does not
-know the conversation.
+itself fails, or a session to resume is not there any more (Mistral Vibe
+answers "Session not found"), unharness starts a new session, says so,
+and your next prompt tells it the conversation so far, as it tells a
+harness you switch to; the conversation then keeps the new session.
 
 ## Sign-in
 
