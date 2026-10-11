@@ -1,0 +1,18 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=209715
+SessionStarted id=0e5d44b1-be49-efdb-b9a5-5b643d694d44 model=mistral-medium-3.5
+CapabilitiesChanged efforts= plan_mode=false models=1
+CapabilitiesChanged efforts= models=1
+Context used=0 window=209715
+CapabilitiesChanged commands=15 slash_commands=true
+ThinkingDelta "The user wants"
+Context used=0 window=209715
+ThinkingDelta " me to reply with a single word: \"pong\"."
+ThinkingDelta " This is a straightforward request. I should simply outpu..."
+ThinkingDelta " explanation, or formatting."
+TextDelta "pong"
+Context used=0 window=209715
+Context used=8098 window=209715
+Context used=8098 window=209715
+Usage in=8056 out=42 cache_read=0 cache_write=0 cost=0.0124 cumulative=false
+TurnCompleted Done

@@ -423,6 +423,31 @@ recorded ones. For anything else:
   answer followed the cancel; answered `cancelled` with no
   `session/cancel`, its turn ended. Unverified: codex-acp, a string request
   id, elicitation (#157, to be withdrawn through the same map).
+  Ending a session (#161): a shutdown between turns sends `session/close`
+  where the agent lists `sessionCapabilities.close` (claude-agent-acp
+  0.85.1, codex-acp 2.1.1 and vibe-acp 2.26.1 all do) and closes stdin once
+  it is answered or after `transport::CLOSE_WAIT` (1 s), whichever comes
+  first; `END_GRACE` starts then. With stdin closed right behind it,
+  vibe-acp exited without answering; given the time it answered `{}`
+  (`fixtures/vibe_acp_close.jsonl`). Mid-turn nothing is sent and the
+  agent is killed, as before. Checked in the TUI (tmux, Landlock, scratch
+  `VIBE_HOME`, `modes = { ask = "ask", bypass = "auto-approve" }`, the
+  wire teed to files): after one turn `/clear` sent `session/close`, vibe
+  answered `{}`, stdin closed after it, and the next session started;
+  `/quit` did the same for that (unprompted) session and left no
+  `vibe-acp`. A switch, resume, fork, sandbox or provider change ends the
+  session through the same `Shutdown`, so it is not run separately.
+  `session_info_update` (`title`, `updatedAt`) is recognised and not used:
+  vibe-acp 2.26.1 sends it as each turn starts with its first prompt as
+  the title, codex-acp 2.1.1 the prompt and then a title it wrote (and the
+  update with no title, its thread status in `_meta`), claude-agent-acp
+  0.85.1 one it wrote. A conversation is saved only once a prompt went,
+  and is titled with that prompt, so it always has a title before an
+  agent's comes; an agent's would also name only its part of a
+  conversation that moves between harnesses, and Claude Code's and
+  Codex's own titles are not taken either. Unverified: an agent that
+  answers `session/close` with an error (ignored) or serves more than
+  one session per process.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

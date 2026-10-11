@@ -371,11 +371,19 @@ impl AcpParser {
                     }));
                 }
             }
+            // The session's title (`title`, `updatedAt`), sent once a turn
+            // starts or the agent names it: vibe-acp 2.26.1 sends the first
+            // prompt, codex-acp 2.1.1 the prompt and then one it wrote,
+            // claude-agent-acp 0.85.1 one it wrote. Not used: by the time it
+            // comes the conversation has its title, its first prompt, and an
+            // agent's would name only its part of a conversation that can
+            // move between harnesses. codex-acp also sends it with no title,
+            // its thread's status in `_meta`.
+            "session_info_update" => {}
             // The session's mode, and the mode option of a
             // `config_option_update`, are the transport's: it holds the
             // agent to the mode its policy maps to (`modes.rs`).
-            // user_message_chunk (our own prompt echoed), session_info_update,
-            // and anything newer.
+            // user_message_chunk (our own prompt echoed), and anything newer.
             _ => {}
         }
         out
@@ -462,6 +470,13 @@ impl AcpParser {
 /// `agentCapabilities` allows `session/resume` (reattach without replay).
 pub fn can_resume(caps: &Value) -> bool {
     caps.pointer("/sessionCapabilities/resume").is_some()
+}
+
+/// `agentCapabilities` allows `session/close`, which ends a session and
+/// frees what the agent holds for it.
+pub fn can_close(caps: &Value) -> bool {
+    caps.pointer("/sessionCapabilities/close")
+        .is_some_and(|v| !v.is_null())
 }
 
 /// `agentCapabilities` allows `session/load` (reattach, history replayed).
@@ -937,6 +952,33 @@ mod tests {
     #[test]
     fn fixture_vibe_acp_mode_load() {
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp_mode_load");
+    }
+
+    /// vibe-acp 2.26.1 says it closes sessions, titles the session after
+    /// its first prompt, and answers `session/close` with `{}`; neither
+    /// the title nor the answer is an event.
+    #[test]
+    fn fixture_vibe_acp_close() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut parser(), &dir, "vibe_acp_close");
+        let text = std::fs::read_to_string(dir.join("vibe_acp_close.jsonl")).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect();
+        let caps = lines
+            .iter()
+            .find_map(|v| v.pointer("/result/agentCapabilities"))
+            .unwrap();
+        assert!(can_close(caps));
+        for v in &lines {
+            let kind = v.pointer("/params/update/sessionUpdate");
+            if kind == Some(&json!("session_info_update")) || v.get("result") == Some(&json!({})) {
+                assert!(parser().feed(&v.to_string()).is_empty(), "{v}");
+            }
+        }
+        assert!(!can_close(&json!({"sessionCapabilities": {"close": null}})));
+        assert!(!can_close(&json!({"sessionCapabilities": {}})));
     }
 
     #[test]
