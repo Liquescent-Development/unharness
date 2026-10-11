@@ -45,6 +45,10 @@ pub enum Guarded {
         path: PathBuf,
         rewritten: fn(&Path) -> bool,
     },
+    /// A file that holds a secret (an API key): compared by the SHA-256 of
+    /// its content, which is never kept, so a change is reported without a
+    /// copy from before the session.
+    Secret(PathBuf),
 }
 
 pub type Projection = Arc<dyn Fn(&[u8]) -> Option<String> + Send + Sync>;
@@ -64,6 +68,7 @@ impl Guarded {
     fn path(&self) -> &Path {
         match self {
             Guarded::File(p)
+            | Guarded::Secret(p)
             | Guarded::Tree(p)
             | Guarded::TreeWithBookkeeping { path: p, .. }
             | Guarded::Projected { path: p, .. } => p,
@@ -75,6 +80,7 @@ impl std::fmt::Debug for Guarded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
             Guarded::File(_) => "File",
+            Guarded::Secret(_) => "Secret",
             Guarded::Tree(_) => "Tree",
             Guarded::TreeWithBookkeeping { .. } => "TreeWithBookkeeping",
             Guarded::Projected { .. } => "Projected",
@@ -195,7 +201,9 @@ impl Watch {
             .map(|g| {
                 let path = expand(g.path(), home);
                 let original = match g {
-                    Guarded::Tree(_) | Guarded::TreeWithBookkeeping { .. } => None,
+                    Guarded::Tree(_) | Guarded::TreeWithBookkeeping { .. } | Guarded::Secret(_) => {
+                        None
+                    }
                     _ => read_small(&path),
                 };
                 Entry {
@@ -288,6 +296,10 @@ fn fingerprint(guarded: &Guarded, path: &Path) -> Fingerprint {
         },
         Guarded::File(_) => match read_small(path) {
             Some(bytes) => Fingerprint::Content(bytes),
+            None => Fingerprint::Large(meta.len(), changed_at(&meta)),
+        },
+        Guarded::Secret(_) => match read_small(path) {
+            Some(bytes) => Fingerprint::Content(Sha256::digest(&bytes).to_vec()),
             None => Fingerprint::Large(meta.len(), changed_at(&meta)),
         },
     }
@@ -452,6 +464,42 @@ mod tests {
         assert!(changes[0].describe("Codex").contains("config.toml"));
 
         // Reported once.
+        assert!(watch.changes(&keep).is_empty());
+    }
+
+    /// A secret's change is reported like any other, and nothing of it is
+    /// kept: no copy from before the session, not even of the old key.
+    #[test]
+    fn a_secret_is_compared_by_digest_and_never_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let keep = tmp.path().join("keep");
+        std::fs::create_dir_all(home.join(".vendor")).unwrap();
+        std::fs::write(home.join(".vendor/.env"), "KEY=old-secret\n").unwrap();
+        let guarded = [
+            Guarded::Secret("~/.vendor/.env".into()),
+            Guarded::Secret("~/.vendor/missing.env".into()),
+        ];
+        let mut watch = Watch::begin(&guarded, Some(&home));
+        assert!(watch.entries.iter().all(|e| e.original.is_none()));
+        assert!(watch.changes(&keep).is_empty());
+
+        // Written again with the same bytes: not a change.
+        std::fs::write(home.join(".vendor/.env"), "KEY=old-secret\n").unwrap();
+        assert!(watch.changes(&keep).is_empty());
+
+        std::fs::write(home.join(".vendor/.env"), "KEY=new-secret\n").unwrap();
+        std::fs::write(home.join(".vendor/missing.env"), "X=1\n").unwrap();
+        let changes = watch.changes(&keep);
+        assert_eq!(changes.len(), 2);
+        assert!(changes.iter().all(|c| c.saved.is_none()));
+        assert!(!keep.exists());
+        for entry in &watch.entries {
+            let Fingerprint::Content(digest) = &entry.fingerprint else {
+                panic!("{:?}", entry.fingerprint);
+            };
+            assert_eq!(digest.len(), 32);
+        }
         assert!(watch.changes(&keep).is_empty());
     }
 
