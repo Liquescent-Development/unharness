@@ -10,11 +10,13 @@
 pub mod elicitation;
 pub mod modes;
 pub mod parse;
+pub mod spawn;
 pub mod transport;
 
 use std::path::{Path, PathBuf};
 
 pub use modes::ModeMap;
+pub use spawn::{KnownModels, SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 
 use anyhow::{Result, bail};
 
@@ -83,6 +85,11 @@ pub struct AcpHarness {
     effort_option: Option<String>,
     /// Which of the agent's own session modes backs each policy.
     modes: ModeMap,
+    /// Builds the agent's environment for its model and effort, which are
+    /// then never set over the protocol.
+    spawn_env: Option<SpawnEnv>,
+    /// What the agent's sessions said about its models, this run.
+    known: SharedModels,
 }
 
 impl AcpHarness {
@@ -109,6 +116,8 @@ impl AcpHarness {
             asks: false,
             effort_option: None,
             modes: ModeMap::default(),
+            spawn_env: None,
+            known: SharedModels::default(),
         })
     }
 
@@ -136,6 +145,22 @@ impl AcpHarness {
     /// policy below `bypass` (`modes::mode_step`).
     pub fn with_modes(self, modes: ModeMap) -> Self {
         AcpHarness { modes, ..self }
+    }
+
+    /// Choose the agent's model and effort when its process starts, with
+    /// the environment `build` returns, and never with
+    /// `session/set_config_option`: for an agent that writes a model or
+    /// effort set over the protocol into its own configuration (Mistral
+    /// Vibe, whose sessions also keep the ones they last ran). A change of
+    /// either starts a new process, and a new session once the old one was
+    /// prompted (`Capabilities::model_per_process`). The effort option is
+    /// still the one declared with [`declaring_effort_option`]
+    /// (`Self::declaring_effort_option`), read for its levels only.
+    pub fn choosing_at_spawn(self, build: SpawnEnv) -> Self {
+        AcpHarness {
+            spawn_env: Some(build),
+            ..self
+        }
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -199,6 +224,7 @@ impl Harness for AcpHarness {
             provider_per_process: false,
             // Form elicitation is declared at `initialize`; whether the
             // agent asks is reported once it sends one.
+            model_per_process: self.spawn_env.is_some(),
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -270,6 +296,8 @@ impl Harness for AcpHarness {
             transport::AgentSpec {
                 effort_option: self.effort_option.clone(),
                 modes: self.modes.clone(),
+                spawn_env: self.spawn_env.clone(),
+                known: self.known.clone(),
             },
             cfg,
         )

@@ -365,6 +365,7 @@ impl Harness for ClaudeHarness {
             // `CLAUDE_CODE_USE_*` in its environment.
             multi_provider: true,
             provider_per_process: true,
+            model_per_process: false,
             ask_user_question: true,
             interrupt: true,
             usage_reporting: true,

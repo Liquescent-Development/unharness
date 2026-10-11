@@ -113,6 +113,7 @@ impl Harness for AgyHarness {
             live_model_list: true,
             multi_provider: false,
             provider_per_process: false,
+            model_per_process: false,
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,

@@ -31,9 +31,11 @@ use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{
     AcpParser, SessionOptions, can_close, can_load, can_resume, error_text, mcp_http,
 };
+use super::spawn::{SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
+use crate::core::session::ProcessSlot;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, PermissionDecision,
     PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
@@ -231,7 +233,7 @@ impl Pending {
 pub const CLOSE_WAIT: Duration = Duration::from_secs(1);
 
 /// What a harness knows about its agent that the protocol does not say.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct AgentSpec {
     /// The config option id that is the agent's reasoning effort
     /// (`AcpHarness::declaring_effort_option`).
@@ -239,17 +241,18 @@ pub struct AgentSpec {
     /// Which of the agent's session modes backs each policy
     /// (`AcpHarness::with_modes`).
     pub modes: ModeMap,
+    /// The agent's model and effort are chosen by its environment when it
+    /// starts, never by a session option (`AcpHarness::choosing_at_spawn`).
+    pub spawn_env: Option<SpawnEnv>,
+    /// What its sessions said about its models, for the builder.
+    pub known: SharedModels,
 }
 
-pub fn start(
-    harness: HarnessId,
-    args: Vec<String>,
-    spec: AgentSpec,
-    cfg: SessionConfig,
-) -> Result<SessionHandle> {
+/// The agent's command line, in `cfg.cwd`, with `extra` in its environment.
+fn agent_command(args: &[String], cfg: &SessionConfig, extra: &[(String, String)]) -> Command {
     let mut command = Command::new(&cfg.binary);
     command
-        .args(&args)
+        .args(args)
         .args(&cfg.extra_args)
         .current_dir(&cfg.cwd);
     // An agent started from inside another agent's session may behave differently.
@@ -258,20 +261,69 @@ pub fn start(
             command.env_remove(k);
         }
     }
-    for (k, v) in &cfg.env {
+    for (k, v) in extra.iter().chain(&cfg.env) {
         command.env(k, v);
     }
-    let proc = LineProcess::spawn(command, &cfg.sandbox)?;
+    command
+}
+
+/// What the agent's environment says for the chosen model and effort.
+fn spawn_plan(spec: &AgentSpec, cfg: &SessionConfig) -> Option<SpawnPlan> {
+    let build = spec.spawn_env.as_ref()?;
+    let known = spec.known.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Some(build(&SpawnChoice {
+        model: cfg.model.as_ref().map(|m| m.model.as_str()),
+        effort: cfg.effort.as_deref(),
+        known: &known,
+        env: &cfg.env,
+    }))
+}
+
+pub fn start(
+    harness: HarnessId,
+    args: Vec<String>,
+    spec: AgentSpec,
+    cfg: SessionConfig,
+) -> Result<SessionHandle> {
+    let plan = spawn_plan(&spec, &cfg);
+    let extra = plan.as_ref().map(|p| p.env.as_slice()).unwrap_or_default();
+    let proc = LineProcess::spawn(agent_command(&args, &cfg, extra), &cfg.sandbox)?;
     let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
         harness,
         process_model: ProcessModel::LongLived,
     });
-    handle.process_slot().set(&proc);
-    let parser = AcpParser::new(harness).declaring_effort(spec.effort_option);
+    let slot = handle.process_slot();
+    slot.set(&proc);
+    let parser = AcpParser::new(harness).declaring_effort(spec.effort_option.clone());
     tokio::spawn(drive(
-        harness, proc, parser, spec.modes, cfg, events_tx, cmd_rx,
+        harness,
+        proc,
+        parser,
+        Spawning {
+            args,
+            spec,
+            plan,
+            slot,
+            restart: None,
+        },
+        cfg,
+        events_tx,
+        cmd_rx,
     ));
     Ok(handle)
+}
+
+/// How the driver starts the agent's process again, for an agent whose
+/// model and effort are chosen at spawn ([`AgentSpec::spawn_env`]).
+struct Spawning {
+    args: Vec<String>,
+    spec: AgentSpec,
+    /// What the running process was started with; `None` for an agent
+    /// that does not choose at spawn.
+    plan: Option<SpawnPlan>,
+    slot: ProcessSlot,
+    /// The process is ending to be started again with this plan.
+    restart: Option<SpawnPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -311,6 +363,10 @@ enum ModeState {
 struct Driver {
     harness: HarnessId,
     proc: LineProcess,
+    spawning: Spawning,
+    /// The process was started again once already (only one restart is
+    /// made to bring in what a session said).
+    restarted: bool,
     parser: AcpParser,
     cfg: SessionConfig,
     next_id: u64,
@@ -483,7 +539,8 @@ impl Driver {
 
     /// The mode is what the policy needs: send what waited for it.
     async fn mode_ready(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
-        if std::mem::take(&mut self.setup_pending) {
+        // Chosen at spawn: nothing is sent for them.
+        if std::mem::take(&mut self.setup_pending) && self.spawning.plan.is_none() {
             if let Some(model) = self.cfg.model.clone()
                 && self.options.current_model.as_deref() != Some(&model.model)
             {
@@ -686,6 +743,91 @@ impl Driver {
         }
     }
 
+    /// For an agent that chooses its model and effort at spawn, a session
+    /// answer: keep what it says about the models, and decide whether the
+    /// process has to start again (its environment lacked what this
+    /// session told). `Some` is the plan to start it again with.
+    fn learn_from_session(&mut self) -> Option<SpawnPlan> {
+        let plan = self.spawning.plan.as_ref()?;
+        self.spawning
+            .spec
+            .known
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .learn(
+                &self.options,
+                plan.overrides.as_deref(),
+                // A plan that replaces a model's entry pins that model too.
+                self.cfg.model.is_some() || plan.overrides.is_some(),
+            );
+        if plan.unmet.is_none() || self.restarted {
+            return None;
+        }
+        spawn_plan(&self.spawning.spec, &self.cfg).filter(|next| next.unmet.is_none())
+    }
+
+    /// End the process to start it again with `plan`, before anything
+    /// went to its session. The session answer that led here is not
+    /// passed on: the next process answers again.
+    fn restart_with(&mut self, plan: SpawnPlan) {
+        self.restarted = true;
+        self.spawning.restart = Some(plan);
+        self.session_id = None;
+        self.mode = ModeState::Setting;
+        self.outstanding.clear();
+        self.parser.set_replaying(false);
+        self.proc.end();
+    }
+
+    /// The process that was ending for a restart has exited: start the
+    /// next one and begin its handshake.
+    async fn respawn(&mut self, plan: SpawnPlan) -> Result<()> {
+        let command = agent_command(&self.spawning.args, &self.cfg, &plan.env);
+        self.proc = LineProcess::spawn(command, &self.cfg.sandbox)?;
+        self.spawning.slot.set(&self.proc);
+        self.spawning.plan = Some(plan);
+        self.last_stderr = None;
+        // A new connection: its requests are numbered from the start.
+        self.next_id = 0;
+        self.request("initialize", initialize_params(), Outstanding::Initialize)
+            .await
+    }
+
+    /// What the session runs, against what was chosen for an agent that
+    /// chooses at spawn: an agent may fall back to another model, or
+    /// reset a level the model does not offer, without an error.
+    async fn check_choice(&self, events: &mpsc::Sender<AgentEvent>) {
+        let Some(plan) = &self.spawning.plan else {
+            return;
+        };
+        let name = self.harness.as_str();
+        if let Some(model) = &self.cfg.model
+            && let Some(current) = &self.options.current_model
+            && *current != model.model
+        {
+            let _ = events
+                .send(AgentEvent::Notice(format!(
+                    "{name} runs model '{current}', not '{}' as chosen (it may not offer that model)",
+                    model.model
+                )))
+                .await;
+        }
+        if let Some(effort) = &self.cfg.effort
+            && let Some(current) = &self.options.current_effort
+            && current != effort
+        {
+            let why = match &plan.unmet {
+                Some(why) => why.clone(),
+                None => format!("the model offers {}", self.options.efforts.join(", ")),
+            };
+            let _ = events
+                .send(AgentEvent::Notice(format!(
+                    "{name} runs effort '{current}', not '{effort}' as chosen ({why})"
+                )))
+                .await;
+        }
+    }
+
     fn closing(&self) -> bool {
         self.outstanding.values().any(|o| *o == Outstanding::Close)
     }
@@ -712,18 +854,29 @@ impl Driver {
     }
 }
 
+fn initialize_params() -> Value {
+    json!({
+        "protocolVersion": 1,
+        "clientCapabilities": client_capabilities(),
+        "clientInfo": {"name": "unharness", "title": "unharness", "version": env!("CARGO_PKG_VERSION")},
+    })
+}
+
 async fn drive(
     harness: HarnessId,
     proc: LineProcess,
     parser: AcpParser,
-    mode_map: ModeMap,
+    spawning: Spawning,
     cfg: SessionConfig,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
+    let mode_map = spawning.spec.modes.clone();
     let mut d = Driver {
         harness,
         proc,
+        spawning,
+        restarted: false,
         parser,
         policy: cfg.policy,
         cfg,
@@ -744,12 +897,10 @@ async fn drive(
         setup_pending: false,
         can_close: false,
     };
-    let init = json!({
-        "protocolVersion": 1,
-        "clientCapabilities": client_capabilities(),
-        "clientInfo": {"name": "unharness", "title": "unharness", "version": env!("CARGO_PKG_VERSION")},
-    });
-    if let Err(e) = d.request("initialize", init, Outstanding::Initialize).await {
+    if let Err(e) = d
+        .request("initialize", initialize_params(), Outstanding::Initialize)
+        .await
+    {
         let _ = events
             .send(AgentEvent::Error(format!("{harness}: {e}")))
             .await;
@@ -832,6 +983,22 @@ async fn drive(
                             Ok(())
                         }
                     },
+                    // Chosen at spawn: the TUI starts the session again
+                    // (`Capabilities::model_per_process`).
+                    SessionCommand::SetModel(m) if d.spawning.plan.is_some() => {
+                        d.cfg.model = Some(m);
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "{harness}'s model is chosen when it starts: it applies from its next start"
+                        ))).await;
+                        Ok(())
+                    }
+                    SessionCommand::SetEffort(e) if d.spawning.plan.is_some() => {
+                        d.cfg.effort = e;
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "{harness}'s effort is chosen when it starts: it applies from its next start"
+                        ))).await;
+                        Ok(())
+                    }
                     SessionCommand::SetModel(m) => {
                         d.cfg.model = Some(m.clone());
                         match d.set_option(d.options.model_option.clone(), &m.model).await {
@@ -878,6 +1045,19 @@ async fn drive(
             }
             raw = d.proc.lines.recv() => {
                 match raw {
+                    // A process ending to be started again says nothing more.
+                    Some(RawLine::Stdout(_) | RawLine::Stderr(_)) if d.spawning.restart.is_some() => {}
+                    Some(RawLine::Exited(_)) if d.spawning.restart.is_some() && !shutting_down => {
+                        let plan = d.spawning.restart.take().unwrap_or_default();
+                        if let Err(e) = d.respawn(plan).await {
+                            let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
+                            let _ = events.send(AgentEvent::TurnCompleted {
+                                stop_reason: StopReason::Error(format!("could not start {harness} again: {e}")),
+                            }).await;
+                            let _ = events.send(AgentEvent::ProcessExited { code: None }).await;
+                            return;
+                        }
+                    }
                     Some(RawLine::Stdout(line)) => {
                         if let Err(e) = on_line(&mut d, &line, &events).await {
                             let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
@@ -955,14 +1135,18 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     }
                 }
                 (Some(Outstanding::Session { reattach }), None) => {
-                    d.parser.set_replaying(false);
-                    if reattach {
-                        d.parser.mark_reattached();
-                    }
                     d.options = d
                         .parser
                         .session_options(result.get("configOptions"))
                         .unwrap_or_default();
+                    if let Some(plan) = d.learn_from_session() {
+                        d.restart_with(plan);
+                        return Ok(());
+                    }
+                    d.parser.set_replaying(false);
+                    if reattach {
+                        d.parser.mark_reattached();
+                    }
                     d.agent_modes = AgentModes::from_session(&result, &d.options, reattach);
                     d.session_id = result
                         .get("sessionId")
@@ -986,6 +1170,7 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                             .await;
                     }
                     forward(d, line, events).await;
+                    d.check_choice(events).await;
                     return d.session_ready(events).await;
                 }
                 (Some(Outstanding::Session { reattach: true }), Some(e)) => {
