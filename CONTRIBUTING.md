@@ -62,6 +62,10 @@ scripts/record-claude.py out.jsonl "prompt"
 scripts/record-acp.py out.jsonl "prompt" -- gemini --acp
 ```
 
+`scripts/record-acp.py --help` lists what else it can drive: client
+capabilities, `session/load`, modes and config options, fork, close, a
+timed cancel, permission and elicitation answers, and extension requests.
+
 Commit the recording as `fixtures/<case>.jsonl` next to its generated
 `.events` file. Fixtures are redacted (`/WORKSPACE`, `/HOME`, no emails or
 account ids). Grep a new one for your user and org names before

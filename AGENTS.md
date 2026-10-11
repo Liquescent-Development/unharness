@@ -316,6 +316,20 @@ recorded ones. For anything else:
   recorded. unharness declares no `fs`/`terminal` client capabilities, and
   uses only stable v1 methods; `session/load` (history replay) is implemented
   from the spec but only `session/resume` has been exercised.
+  `scripts/record-acp.py` (#169) also sends client capabilities,
+  `session/load`, a mode (`set_mode` or the mode option), any config
+  option, `session/fork`, `session/close`, a timed `session/cancel` and
+  extension requests, and answers permission requests in order and
+  `elicitation/create`; `--help` lists the flags. Without them it sends
+  what it sent before: the seven committed ACP fixtures replayed through
+  it with `fake-harness.py` gave the same `>>` lines, and claude-agent-acp
+  0.85.1 and codex-acp 2.1.1 re-recorded `claude_agent_acp` and
+  `codex_acp` with the same requests. Each flag was run once against
+  vibe-acp 2.26.1 (a scratch `VIBE_HOME`; nothing committed): an
+  extension method has its leading `_` on the wire (`_rewind/preview`;
+  vibe's router strips it), and vibe echoes each user message, live and
+  when `session/load` replays it, with the `messageId` that `_rewind/*`
+  takes and `--ext` can name (`$USER_MESSAGE`).
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
