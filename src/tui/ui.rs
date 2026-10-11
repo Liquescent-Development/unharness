@@ -3515,6 +3515,18 @@ mod tests {
             .unwrap();
         assert_eq!(right(&mut app, second).as_deref(), Some("make"));
         assert_eq!(right(&mut app, row("Run this")).as_deref(), Some(reply));
+
+        // An empty code block: the response.
+        let empty = "Nothing here:\n\n```\n```";
+        app.submit_prompt("again".into());
+        app.take_actions();
+        app.on_event(crate::core::AgentEvent::TextDelta(empty.into()));
+        app.on_event(crate::core::AgentEvent::TurnCompleted {
+            stop_reason: crate::core::StopReason::Done,
+        });
+        let (rows, _) = screen(&mut app, 60, 30);
+        let frame = rows.iter().rposition(|r| r.contains("─ code")).unwrap();
+        assert_eq!(right(&mut app, frame).as_deref(), Some(empty));
     }
 
     #[test]

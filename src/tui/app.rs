@@ -5559,7 +5559,8 @@ impl App {
             .iter()
             .find(|c| c.block == i && c.rows.contains(&point.line));
         let text = match (code, block) {
-            // On a code block in a response, that code.
+            // On a code block in a response, that code; on an empty one,
+            // the response.
             (
                 Some(code),
                 Some(
@@ -5570,8 +5571,9 @@ impl App {
                 .into_iter()
                 .nth(code.nth)
                 .filter(|c| !c.trim().is_empty()),
-            _ => block.and_then(super::transcript::block_text),
-        };
+            _ => None,
+        }
+        .or_else(|| block.and_then(super::transcript::block_text));
         match text {
             Some(text) => {
                 self.selection = None;

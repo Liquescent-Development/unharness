@@ -305,7 +305,9 @@ bottom edge scrolls.
   Only what is copied is highlighted. A list keeps its `-` and numbers
   and a table its cells, a tab between them; an edit keeps its `-` and
   `+`, a written file does not. A drag over nothing but drawing (a label)
-  copies that as drawn.
+  copies that as drawn. A table whose cells wrap is copied a row of the
+  screen at a time, and one too narrow for its columns with its `|`; a
+  right click on it copies the markdown.
 - A right click on a block copies all of it as it was written, also what
   the transcript does not show: a tool call's whole command and output
   (collapsed or not), the content of a file it wrote, an edit as `-` and

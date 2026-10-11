@@ -979,7 +979,7 @@ fn wrap_styled(spans: &[Span<'static>], width: usize) -> Vec<(Vec<Span<'static>>
         }
         if used > 0 {
             lines.push((std::mem::take(&mut line), join));
-            join = Join::Space;
+            join = Join::Spaces(gap.len());
             used = 0;
         }
         for &(g, style, w) in word {
@@ -1191,6 +1191,8 @@ mod tests {
             "quoted text that wraps around"
         );
         assert_eq!(copied("## A heading", 40), "## A heading");
+        // The spaces where it wrapped, as many as there were.
+        assert_eq!(copied("aaa  bbb", 4), "aaa  bbb");
     }
 
     #[test]

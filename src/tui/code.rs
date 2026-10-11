@@ -110,8 +110,8 @@ pub fn wrap_words(text: &str, max_width: usize) -> Vec<String> {
 }
 
 /// [`wrap_words`], with how each line goes on from the one before: after
-/// the space a break drops, or inside a word broken by character. The first
-/// is a [`Join::Line`].
+/// the spaces a break drops, or inside a word broken by character. The
+/// first is a [`Join::Line`].
 pub fn wrap_words_joined(text: &str, max_width: usize) -> Vec<(String, Join)> {
     let max_width = max_width.max(1);
     let mut lines = Vec::new();
@@ -123,7 +123,9 @@ pub fn wrap_words_joined(text: &str, max_width: usize) -> Vec<(String, Join)> {
         if word_len > max_width {
             if !current.is_empty() {
                 lines.push((std::mem::take(&mut current), join));
-                join = Join::Space;
+                join = Join::Spaces(1);
+            } else if let Join::Spaces(n) = &mut join {
+                *n += 1;
             }
             let mut chunk_len = 0;
             for c in word.chars() {
@@ -140,6 +142,11 @@ pub fn wrap_words_joined(text: &str, max_width: usize) -> Vec<(String, Join)> {
             continue;
         }
         if current_len == 0 {
+            // After a break, before any text on the line: the space in
+            // front of this word was dropped with the break.
+            if let Join::Spaces(n) = &mut join {
+                *n += 1;
+            }
             current.push_str(word);
             current_len = word_len;
         } else if current_len + 1 + word_len <= max_width {
@@ -148,7 +155,7 @@ pub fn wrap_words_joined(text: &str, max_width: usize) -> Vec<(String, Join)> {
             current_len += 1 + word_len;
         } else {
             lines.push((std::mem::replace(&mut current, word.to_string()), join));
-            join = Join::Space;
+            join = Join::Spaces(1);
             current_len = word_len;
         }
     }
@@ -583,14 +590,14 @@ mod tests {
             wrap_words_joined("one two three", 8),
             vec![
                 ("one two".to_string(), Join::Line),
-                ("three".to_string(), Join::Space)
+                ("three".to_string(), Join::Spaces(1))
             ]
         );
         assert_eq!(
             wrap_words_joined("go abcdefghij x", 4),
             vec![
                 ("go".to_string(), Join::Line),
-                ("abcd".to_string(), Join::Space),
+                ("abcd".to_string(), Join::Spaces(1)),
                 ("efgh".to_string(), Join::Nothing),
                 ("ij x".to_string(), Join::Nothing),
             ]
@@ -599,6 +606,16 @@ mod tests {
             wrap_words("go abcdefghij x", 4),
             vec!["go", "abcd", "efgh", "ij x"]
         );
+        // Every space a break drops is counted: a copy gives them back.
+        for text in ["echo 'a    b' c", "a  b", "ab    cd ef"] {
+            for width in 1..text.len() {
+                let mut rows = Rows::new();
+                for (seg, join) in wrap_words_joined(text, width) {
+                    rows.text(vec![Part::Text(Span::raw(seg))], join);
+                }
+                assert_eq!(rows.copied(), text, "{width}");
+            }
+        }
     }
 
     #[test]

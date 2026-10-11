@@ -115,8 +115,8 @@ impl Selection {
 pub enum Join {
     /// A line of its own.
     Line,
-    /// The same line, wrapped at a space the wrapping dropped.
-    Space,
+    /// The same line, wrapped at spaces the wrapping dropped: this many.
+    Spaces(usize),
     /// The same line, wrapped inside a word.
     Nothing,
 }
@@ -222,6 +222,8 @@ pub fn word_cols(line: &str, copy: Option<&RowCopy>, col: usize) -> (usize, usiz
     let Some(at) = cells.iter().position(|(s, w, _)| col >= *s && col < s + w) else {
         return (col, col);
     };
+    // On drawing (a tool's name, a header) the word is the drawing's.
+    let copy = copy.filter(|r| r.covers(cells[at].0));
     let word = |i: &usize| {
         let (start, _, c) = cells[*i];
         is_word_char(c) && copy.is_none_or(|r| r.covers(start))
@@ -277,52 +279,78 @@ pub fn text(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> Str
 /// Whether a copy of the cells between two points takes them as drawn,
 /// having no text in them.
 pub fn copies_drawing(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> bool {
-    copied_text(lines, rows, start, end).trim().is_empty()
+    !selected_rows(lines, rows, start, end).any(|(_, taken)| {
+        taken
+            .iter()
+            .any(|t| !t.trim_matches(|c: char| c.is_whitespace()).is_empty())
+    })
+}
+
+/// The rows between two points that are not only drawing, each with how it
+/// goes on from the row above and what a copy takes from its cells there.
+/// A row past the end of `rows` is all text, its padding left out.
+fn selected_rows<'a>(
+    lines: &'a [String],
+    rows: &'a [RowCopy],
+    start: Point,
+    end: Point,
+) -> impl Iterator<Item = (Join, Vec<std::borrow::Cow<'a, str>>)> + 'a {
+    lines
+        .iter()
+        .enumerate()
+        .take(end.line + 1)
+        .skip(start.line)
+        .filter_map(move |(i, line)| {
+            let from = if i == start.line { start.col } else { 0 };
+            let to = if i == end.line { end.col } else { usize::MAX };
+            let (join, pieces) = match rows.get(i) {
+                Some(RowCopy::Drawing) => return None,
+                Some(RowCopy::Text { join, pieces }) => (*join, pieces),
+                None => {
+                    let row = slice(line, from, to);
+                    let row = row.trim_end_matches(' ').to_string();
+                    return Some((Join::Line, vec![row.into()]));
+                }
+            };
+            let taken = pieces
+                .iter()
+                .filter_map(|piece| {
+                    let (a, b) = (
+                        piece.cells.start.max(from),
+                        piece.cells.end.saturating_sub(1).min(to),
+                    );
+                    if piece.cells.is_empty() || a > b {
+                        return None;
+                    }
+                    Some(match piece.copied_as {
+                        Some(text) => text.into(),
+                        None => slice(line, a, b).into(),
+                    })
+                })
+                .collect();
+            Some((join, taken))
+        })
 }
 
 fn copied_text(lines: &[String], rows: &[RowCopy], start: Point, end: Point) -> String {
-    let whole = [Piece {
-        cells: 0..usize::MAX,
-        copied_as: None,
-    }];
     let mut out = String::new();
-    let mut started = false;
-    for (i, line) in lines.iter().enumerate().take(end.line + 1).skip(start.line) {
-        let (join, pieces) = match rows.get(i) {
-            Some(RowCopy::Drawing) => continue,
-            Some(RowCopy::Text { join, pieces }) => (*join, pieces.as_slice()),
-            None => (Join::Line, &whole[..]),
-        };
-        if std::mem::replace(&mut started, true) {
+    // A join goes between two lines: not before the first text taken, which
+    // may be on a row after the first (a drag from past a row's end).
+    let mut taken = false;
+    for (join, pieces) in selected_rows(lines, rows, start, end) {
+        if taken {
             match join {
-                Join::Line => {
-                    out.truncate(out.trim_end_matches(' ').len());
-                    out.push('\n');
-                }
-                Join::Space => {
-                    out.truncate(out.trim_end_matches(' ').len());
-                    out.push(' ');
-                }
+                Join::Line => out.push('\n'),
+                Join::Spaces(n) => out.extend(std::iter::repeat_n(' ', n)),
                 Join::Nothing => {}
             }
         }
-        let from = if i == start.line { start.col } else { 0 };
-        let to = if i == end.line { end.col } else { usize::MAX };
         for piece in pieces {
-            let (a, b) = (
-                piece.cells.start.max(from),
-                piece.cells.end.saturating_sub(1).min(to),
-            );
-            if piece.cells.is_empty() || a > b {
-                continue;
-            }
-            match piece.copied_as {
-                Some(text) => out.push_str(text),
-                None => out.push_str(&slice(line, a, b)),
-            }
+            out.push_str(&piece);
         }
+        taken = !out.is_empty();
     }
-    out.trim_start_matches('\n').trim_end().to_string()
+    out.trim_end().to_string()
 }
 
 /// The cells between two points as drawn, one line per row, without the
@@ -448,7 +476,7 @@ mod tests {
                 pieces: vec![piece(6..9)],
             },
             RowCopy::Text {
-                join: Join::Space,
+                join: Join::Spaces(1),
                 pieces: vec![piece(4..7)],
             },
             RowCopy::Text {
@@ -499,6 +527,11 @@ mod tests {
             copied(sel((5, 2), (5, 2), Granularity::Word)).as_deref(),
             Some("+")
         );
+        // From past a row's text into the row it wraps onto: no space first.
+        assert_eq!(
+            copied(sel((2, 9), (3, 5), Granularity::Char)).as_deref(),
+            Some("jk")
+        );
     }
 
     #[test]
@@ -515,6 +548,11 @@ mod tests {
         assert_eq!(
             copied(sel((1, 2), (1, 2), Granularity::Word)).as_deref(),
             Some("│")
+        );
+        // A word in drawing (a header, a tool's name) is that word.
+        assert_eq!(
+            copied(sel((0, 4), (0, 4), Granularity::Word)).as_deref(),
+            Some("head")
         );
         assert_eq!(
             copied(sel((2, 7), (2, 7), Granularity::Line)).as_deref(),

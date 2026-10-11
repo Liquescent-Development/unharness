@@ -73,18 +73,21 @@ fn build(parts: Vec<Part>, join: Join) -> (Line<'static>, RowCopy) {
 }
 
 /// Cuts a row wider than `width` as [`clamp_lines`] does, and what a copy
-/// takes from it with it: not the `…` that ends it.
+/// takes from it with it: not the `…` that ends it, which is a cell short
+/// of the edge when the cut fell inside a wide character.
 pub fn clamp_row(line: &mut Line<'static>, copy: &mut RowCopy, width: usize) {
-    let drawn: usize = line
-        .spans
-        .iter()
-        .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
-        .sum();
-    if width == 0 || drawn <= width {
-        return;
-    }
-    *copy = std::mem::replace(copy, RowCopy::Drawing).clipped(width - 1);
+    let drawn = |line: &Line<'_>| -> usize {
+        line.spans
+            .iter()
+            .map(|s| super::selection::width(&s.content))
+            .sum()
+    };
+    let before = drawn(line);
     clamp_lines(std::slice::from_mut(line), width);
+    let after = drawn(line);
+    if after < before {
+        *copy = std::mem::replace(copy, RowCopy::Drawing).clipped(after.saturating_sub(1));
+    }
 }
 
 /// Rendered rows, each with what a copy takes from it.
@@ -305,15 +308,32 @@ mod tests {
         let mut rows = Rows::new();
         rows.text(
             vec![Part::Draw(Span::raw("ab")), Part::Text(Span::raw("cdefgh"))],
-            Join::Space,
+            Join::Spaces(1),
         );
         rows.clamp(5);
         assert_eq!(drawn(&rows, 0), "abcd…");
         assert_eq!(
             rows.copies()[0],
             RowCopy::Text {
-                join: Join::Space,
+                join: Join::Spaces(1),
                 pieces: vec![piece(2..4)],
+            }
+        );
+    }
+
+    #[test]
+    fn a_row_cut_inside_a_wide_char_does_not_copy_its_ellipsis() {
+        let mut rows = Rows::new();
+        rows.text(vec![Part::Text(Span::raw("ab日本"))], Join::Line);
+        // Four cells: `日` would take the third and fourth, past the room
+        // left for the `…`, which is then the third.
+        rows.clamp(4);
+        assert_eq!(drawn(&rows, 0), "ab…");
+        assert_eq!(
+            rows.copies()[0],
+            RowCopy::Text {
+                join: Join::Line,
+                pieces: vec![piece(0..2)],
             }
         );
     }
