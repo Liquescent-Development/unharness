@@ -729,6 +729,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(p) = &u.refused_policies {
         v["refused_policies"] = json!(p);
     }
+    if let Some(q) = u.ask_user_question {
+        v["ask_user_question"] = json!(q);
+    }
     if let Some(p) = &u.provider {
         v["provider"] = json!(p.0);
     }

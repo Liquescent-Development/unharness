@@ -99,6 +99,33 @@ Checked with Mistral Vibe 2.26.1: `ask = "ask"` held (a write was asked
 about and denied, and not made). `plan` is hidden by vibe's runtime and
 cannot be mapped.
 
+## Questions
+
+unharness tells every agent it can show forms (form elicitation), and an
+agent's form is shown as a question in the TUI: one page per field, a
+choice with its options (one, or several for a list), a text, number or
+Yes/No field as a typed answer. Agents ask with it only when the client
+says it can: Mistral Vibe offers its `ask_user_question` tool, and
+claude-agent-acp its AskUserQuestion, only then. Whether an agent asks is
+known once it has: the session then reports it (`ask_user_question` in
+`--print`'s `capabilities_changed`).
+
+A choice takes an answer of your own where the agent says it does: vibe
+when its call does not hide the "Other" answer, claude-agent-acp always
+(its form has an "Other" field beside each question, which the answer
+goes to). Every field must be answered before the form is sent. Esc
+declines the form, and so does `--print`, which has nobody to ask; the
+agent is told and the turn goes on. A form still open when you interrupt
+the turn is cancelled. Questions are asked under every policy, `bypass`
+too.
+
+An agent may also ask to open a web page (URL elicitation); unharness does
+not offer that, and refuses one with a notice.
+
+Checked with Mistral Vibe 2.26.1 (a question answered in the TUI, one
+declined by `--print`, a multiple choice recorded) and claude-agent-acp
+0.85.1 (recorded).
+
 ## Limits
 
 - Models and effort levels come from the running session, so the pickers

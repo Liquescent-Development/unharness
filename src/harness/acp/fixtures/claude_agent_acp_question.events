@@ -1,0 +1,33 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
+SessionStarted id=95a76c85-7952-47a9-a914-150447438730 model=opus
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
+CapabilitiesChanged efforts= models=12
+Context used=22681 window=200000
+CapabilitiesChanged ask_user_question=true
+ToolCallStarted id=toolu_01K4FQJKsiiimksrVP4DFZas name=AskUserQuestion input={"questions":[{"header":"Colour","multiSelect":false,"opt...
+PermissionRequest id=0 Question n=1 [Colour: Red|Blue]
+Context used=22881 window=200000
+ToolCallResult id=toolu_01K4FQJKsiiimksrVP4DFZas error=false "Your questions have been answered: \"What's your favourite..."
+Context used=26433 window=200000
+TextDelta "Your"
+TextDelta " favourite"
+TextDelta " colour"
+TextDelta " is Blue."
+Context used=26510 window=200000
+Context used=26510 window=200000
+Usage in=18 out=283 cache_read=22668 cache_write=26422 cost=0.0575 cumulative=false
+TurnCompleted Done
+Context used=26587 window=200000
+ToolCallStarted id=toolu_01CtrniasxtsZBKbmSx7hJnV name=AskUserQuestion input={"description":"Asking for your input"}
+PermissionRequest id=1 Question n=1 [Colours multi: Red|Green|Blue]
+ToolCallResult id=toolu_01CtrniasxtsZBKbmSx7hJnV error=false "The user answered: \"Which of these colours do you like?\"=..."
+Context used=26763 window=200000
+Context used=26861 window=200000
+TextDelta "You"
+TextDelta " like"
+TextDelta " Red, Blue, and"
+TextDelta " Teal."
+Context used=26982 window=200000
+Context used=26982 window=200000
+Usage in=18 out=306 cache_read=52993 cache_write=428 cost=0.0077 cumulative=false
+TurnCompleted Done

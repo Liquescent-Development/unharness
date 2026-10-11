@@ -2,10 +2,13 @@
 //! `session/resume` / `session/load`) → one `session/prompt` per turn →
 //! `session/close`, where the agent takes it, answered before stdin closes.
 //!
-//! unharness declares no client capabilities, so the agent uses its own file
-//! and terminal tools and reports them as tool calls. The only agent → client
-//! request served is `session/request_permission`; the rest are refused. The
-//! agent may withdraw one that waits for the user (`$/cancel_request`).
+//! unharness declares no `fs` or `terminal` client capabilities, so the
+//! agent uses its own file and terminal tools and reports them as tool
+//! calls. It declares form elicitation, so that the agent can ask the user
+//! questions. The agent → client requests served are
+//! `session/request_permission` and `elicitation/create` in form mode
+//! (`elicitation.rs`); the rest are refused. The agent may withdraw one that
+//! waits for the user (`$/cancel_request`).
 //!
 //! An agent with session modes is held to the one its policy maps to
 //! (`modes.rs`): after every session answer (new, load, resume) and every
@@ -23,6 +26,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::elicitation::{self, Form, Refusal};
 use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{
     AcpParser, SessionOptions, can_close, can_load, can_resume, error_text, mcp_http,
@@ -187,6 +191,39 @@ fn request_key(id: &Value) -> String {
     }
 }
 
+/// The client capabilities of `initialize`: form elicitation, and no
+/// `fs` or `terminal`. Without it vibe-acp 2.26.1 does not offer its
+/// `ask_user_question` tool, claude-agent-acp turns off AskUserQuestion,
+/// and codex-acp answers its own questions empty (#157).
+pub fn client_capabilities() -> Value {
+    json!({"elicitation": {"form": {}}})
+}
+
+/// An agent → client request that waits for the user.
+#[derive(Debug)]
+enum Pending {
+    /// `session/request_permission`, with the options it offered.
+    Permission { rpc_id: Value, options: Value },
+    /// `elicitation/create` in form mode.
+    Elicitation { rpc_id: Value, form: Form },
+}
+
+impl Pending {
+    fn rpc_id(&self) -> &Value {
+        match self {
+            Pending::Permission { rpc_id, .. } | Pending::Elicitation { rpc_id, .. } => rpc_id,
+        }
+    }
+
+    /// The answer once the turn it belongs to is cancelled.
+    fn cancelled(&self) -> Value {
+        match self {
+            Pending::Permission { .. } => json!({"outcome": {"outcome": "cancelled"}}),
+            Pending::Elicitation { .. } => elicitation::cancelled(),
+        }
+    }
+}
+
 /// How long a shutdown waits for the answer to `session/close` before it
 /// closes stdin. The agent's [`END_GRACE`](crate::core::process::END_GRACE)
 /// starts then: the whole stays within what the TUI waits for an agent to
@@ -284,8 +321,8 @@ struct Driver {
     mcp_servers: Value,
     options: SessionOptions,
     policy: PermissionPolicy,
-    /// Permission requests awaiting the user: our id → (rpc id, offered options).
-    pending: HashMap<String, (Value, Value)>,
+    /// Permission requests and elicitations awaiting the user, by our id.
+    pending: HashMap<String, Pending>,
     /// Requests the agent withdrew while they waited for the user: an
     /// answer the user gave meanwhile is dropped.
     withdrawn: HashSet<String>,
@@ -560,21 +597,21 @@ impl Driver {
     /// id that waits for nothing (unknown, already answered, or answered by
     /// the policy) is ignored: its answer has gone.
     ///
-    /// An elicitation (`elicitation/create`, #157) that waits for the user is
-    /// withdrawn the same way: kept under its id with the permission
-    /// requests, it needs nothing more here.
+    /// An elicitation that waits for the user is withdrawn the same way:
+    /// it is kept under its id with the permission requests.
     async fn withdraw(&mut self, params: &Value, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
         let Some(id) = params.get("requestId").map(request_key) else {
             return Ok(());
         };
-        let Some((rpc_id, _)) = self.pending.remove(&id) else {
+        let Some(pending) = self.pending.remove(&id) else {
             return Ok(());
         };
+        let rpc_id = pending.rpc_id();
         self.withdrawn.insert(id.clone());
         let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
         self.proc
             .write_line(&jsonrpc::error_response(
-                &rpc_id,
+                rpc_id,
                 REQUEST_CANCELLED,
                 "Request cancelled",
             ))
@@ -602,12 +639,60 @@ impl Driver {
                 .is_ok()
     }
 
+    /// `elicitation/create`: a form waits for the user, whatever the
+    /// policy (a question is never answered for them). A URL elicitation,
+    /// never declared, is refused with an error; a form with a field no
+    /// question stands for is declined. Either is told to the user.
+    async fn on_elicitation(
+        &mut self,
+        line: &str,
+        id: &Value,
+        params: &Value,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<()> {
+        let name = self.harness.as_str();
+        match Form::from_request(line, params) {
+            Ok(form) => {
+                let rid = request_key(id);
+                self.withdrawn.remove(&rid);
+                self.pending.insert(
+                    rid,
+                    Pending::Elicitation {
+                        rpc_id: id.clone(),
+                        form,
+                    },
+                );
+                forward(self, line, events).await;
+                Ok(())
+            }
+            Err(refusal) => {
+                let _ = events
+                    .send(AgentEvent::Notice(format!(
+                        "{name} asked for {}; it was refused",
+                        match &refusal {
+                            Refusal::NotForm(what) => what.clone(),
+                            Refusal::Unsupported(why) => format!("a form, but {why}"),
+                        }
+                    )))
+                    .await;
+                let line = match refusal {
+                    Refusal::NotForm(_) => {
+                        jsonrpc::error_response(id, -32602, "unsupported by unharness")
+                    }
+                    Refusal::Unsupported(_) => jsonrpc::response(id, elicitation::declined()),
+                };
+                self.proc.write_line(&line).await
+            }
+        }
+    }
+
     fn closing(&self) -> bool {
         self.outstanding.values().any(|o| *o == Outstanding::Close)
     }
 
     /// `session/cancel`, and every open permission request answered
-    /// `cancelled`, as the spec requires once a turn is cancelled.
+    /// `cancelled`, as the spec requires once a turn is cancelled; an open
+    /// elicitation is answered `cancel`.
     async fn cancel_turn(&mut self) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
@@ -619,8 +704,8 @@ impl Driver {
                 json!({"sessionId": session_id}),
             ))
             .await;
-        for (_, (rpc_id, _)) in self.pending.drain() {
-            let line = jsonrpc::response(&rpc_id, json!({"outcome": {"outcome": "cancelled"}}));
+        for (_, pending) in self.pending.drain() {
+            let line = jsonrpc::response(pending.rpc_id(), pending.cancelled());
             res = res.and(self.proc.write_line(&line).await);
         }
         res
@@ -661,7 +746,7 @@ async fn drive(
     };
     let init = json!({
         "protocolVersion": 1,
-        "clientCapabilities": {},
+        "clientCapabilities": client_capabilities(),
         "clientInfo": {"name": "unharness", "title": "unharness", "version": env!("CARGO_PKG_VERSION")},
     });
     if let Err(e) = d.request("initialize", init, Outstanding::Initialize).await {
@@ -726,7 +811,10 @@ async fn drive(
                         }
                     }
                     SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some((rpc_id, options)) => {
+                        Some(Pending::Elicitation { rpc_id, form }) => {
+                            d.proc.write_line(&jsonrpc::response(&rpc_id, form.answer(&decision))).await
+                        }
+                        Some(Pending::Permission { rpc_id, options }) => {
                             let outcome = permission_outcome(&options, &decision);
                             if matches!(decision, PermissionDecision::Allow { .. })
                                 && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
@@ -993,6 +1081,9 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
         Some(RpcMessage::Notification { method, params }) if method == "$/cancel_request" => {
             return d.withdraw(params, events).await;
         }
+        Some(RpcMessage::Request { id, method, params }) if method == "elicitation/create" => {
+            return d.on_elicitation(line, id, params, events).await;
+        }
         Some(RpcMessage::Request { id, method, params }) => {
             if method != "session/request_permission" {
                 return d
@@ -1016,7 +1107,13 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
             } else {
                 let rid = request_key(id);
                 d.withdrawn.remove(&rid);
-                d.pending.insert(rid, (id.clone(), options));
+                d.pending.insert(
+                    rid,
+                    Pending::Permission {
+                        rpc_id: id.clone(),
+                        options,
+                    },
+                );
             }
             for ev in evs {
                 let _ = events.send(ev).await;
