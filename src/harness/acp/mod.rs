@@ -94,6 +94,8 @@ pub struct AcpHarness {
     /// The command that signs the agent in, told to the user when a
     /// session fails for want of sign-in (`auth.rs`). Never run.
     sign_in: Option<String>,
+    /// A relative path in an edit's `diff` is in the session's directory.
+    relative_edits: bool,
 }
 
 impl AcpHarness {
@@ -123,6 +125,7 @@ impl AcpHarness {
             spawn_env: None,
             known: SharedModels::default(),
             sign_in: None,
+            relative_edits: false,
         })
     }
 
@@ -186,6 +189,18 @@ impl AcpHarness {
     /// The command that signs the agent in, if one is known.
     pub fn sign_in(&self) -> Option<&str> {
         self.sign_in.as_deref()
+    }
+
+    /// Take a relative path in an edit's `diff` content as one in the
+    /// session's directory, for allow rules
+    /// (`AcpParser::resolving_relative_edits`). Only for an agent known to
+    /// write it there and to name it in `locations` (Mistral Vibe 2.26.1);
+    /// for any other a relative path stays unknown.
+    pub fn resolving_relative_edits(self) -> Self {
+        AcpHarness {
+            relative_edits: true,
+            ..self
+        }
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -330,6 +345,7 @@ impl Harness for AcpHarness {
                 spawn_env: self.spawn_env.clone(),
                 known: self.known.clone(),
                 sign_in: self.sign_in.clone(),
+                relative_edits: self.relative_edits,
             },
             cfg,
         )
