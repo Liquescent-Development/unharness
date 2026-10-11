@@ -1614,7 +1614,8 @@ async fn acp_accept_edits_reads_the_kind_of_an_id_only_request() {
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_ask.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
     cfg.model = None;
-    let mut handle = acp_harness().start_session(cfg).unwrap();
+    // vibe started in `ask`, the mode accept-edits maps to: nothing is sent.
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
     let asked = |events: &[AgentEvent]| {
         events
             .iter()
@@ -1709,8 +1710,9 @@ async fn acp_sends_no_effort_to_an_option_it_was_not_told_is_one() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
-    // Left in the mode it starts in: no map, and not `ask`.
-    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
+    // Left in the mode it starts in: no map, and bypass, the one policy
+    // that leaves an agent's mode alone.
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
     cfg.model = None;
     cfg.effort = Some("high".into());
     let mut handle = acp_harness().start_session(cfg).unwrap();
@@ -1865,29 +1867,33 @@ async fn acp_sets_the_mode_again_after_a_load() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
-/// An agent with modes of its own and no map has no `ask`: the prompt is
-/// failed, not sent, and the policy taken out of what the session offers.
+/// An agent with modes of its own and no map has no policy below bypass:
+/// the prompt is failed, not sent, and the policy taken out of what the
+/// session offers. (A vibe session loaded in auto-approve would otherwise
+/// run commands unasked under accept-edits.)
 #[tokio::test]
-async fn acp_refuses_ask_for_an_agent_with_modes_and_no_map() {
+async fn acp_refuses_every_policy_below_bypass_for_an_agent_with_modes_and_no_map() {
     if !python_available() {
         return;
     }
-    let fake = Fake::new();
-    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
-    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
-    cfg.model = None;
-    let mut handle = acp_harness().start_session(cfg).unwrap();
-    handle.send(SessionCommand::turn("pong?")).await.unwrap();
-    let events = run_turn(&mut handle, |_| None).await;
-    let why = turn_error(&events).expect("the turn fails");
-    assert!(
-        why.contains("policy 'ask' is not available for fake-acp")
-            && why.contains("[harnesses.fake-acp] has no `modes` map"),
-        "{why}"
-    );
-    assert!(refused(&events, PermissionPolicy::Ask), "{events:?}");
-    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
-    handle.send(SessionCommand::Shutdown).await.unwrap();
+    for policy in [PermissionPolicy::Ask, PermissionPolicy::AcceptEdits] {
+        let fake = Fake::new();
+        let fixture = repo().join("src/harness/acp/fixtures/vibe_acp.jsonl");
+        let mut cfg = fake.config(&fixture, policy, true);
+        cfg.model = None;
+        let mut handle = acp_harness().start_session(cfg).unwrap();
+        handle.send(SessionCommand::turn("pong?")).await.unwrap();
+        let events = run_turn(&mut handle, |_| None).await;
+        let why = turn_error(&events).expect("the turn fails");
+        assert!(
+            why.contains(&format!("policy '{policy}' is not available for fake-acp"))
+                && why.contains("[harnesses.fake-acp] has no `modes` map"),
+            "{why}"
+        );
+        assert!(refused(&events, policy), "{events:?}");
+        assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+        handle.send(SessionCommand::Shutdown).await.unwrap();
+    }
 }
 
 /// A mapped mode the agent does not offer is never sent (vibe-acp answers

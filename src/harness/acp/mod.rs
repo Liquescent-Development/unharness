@@ -131,8 +131,8 @@ impl AcpHarness {
 
     /// Hold the agent to these of its session modes, one per policy (see
     /// [`ModeMap`]): from `[harnesses.<name>] modes`, or declared by a
-    /// harness that knows its agent. An agent with modes and no map for
-    /// `ask` does not get `ask` (`modes::mode_step`).
+    /// harness that knows its agent. An agent with modes and no map gets no
+    /// policy below `bypass` (`modes::mode_step`).
     pub fn with_modes(self, modes: ModeMap) -> Self {
         AcpHarness { modes, ..self }
     }
@@ -180,7 +180,7 @@ impl Harness for AcpHarness {
             // asks cannot be made to, so `ask` is only for one known to
             // (codex-acp 2.1.1 asked for nothing in three recordings). One
             // with session modes of its own also needs a mode map, or its
-            // session refuses `ask` (`modes::mode_step`).
+            // session refuses every policy below bypass (`modes::mode_step`).
             permission_policies: self
                 .asks
                 .then_some(PolicySupport::full(PermissionPolicy::Ask))

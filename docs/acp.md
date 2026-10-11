@@ -87,10 +87,13 @@ fails without sending it. If the agent goes into another mode by itself, the
 mapped one is set again, and a turn that is running is stopped when the new
 mode could run what the policy asks about.
 
-An agent that has session modes and no `modes` entry for `ask` does not get
-`ask`, even with `asks_permission = true`: unharness cannot tell whether the
-mode it is in asks. Without a map, the other policies leave the agent in
-whatever mode it is in, as before.
+An agent that has session modes and no `modes` map gets no policy below
+`bypass`: not `ask` (even with `asks_permission = true`), not
+`accept-edits`. unharness cannot tell what the mode the agent is in lets
+through, and a session can be in any of them: a vibe session loaded again
+in `auto-approve` would run commands unasked under `accept-edits`. Only
+`bypass` leaves the agent in whatever mode it is in. With a map, every
+policy needs an entry at or below it.
 
 Checked with Mistral Vibe 2.26.1: `ask = "ask"` held (a write was asked
 about and denied, and not made). `plan` is hidden by vibe's runtime and

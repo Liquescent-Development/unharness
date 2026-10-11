@@ -187,11 +187,12 @@ pub enum ModeStep {
 
 /// What to do so that the agent of `harness` runs under `policy`.
 ///
-/// `ask` is never left to the agent's own mode: an agent with modes and no
-/// map for `ask` (or anything below it) has `ask` refused, as a policy a
-/// harness cannot hold is, and the message names the missing map. Other
-/// policies without a map leave the mode alone, as before there were maps;
-/// with a map, every policy needs an entry at or below it.
+/// Only `bypass` is left to the agent's own mode. An agent with modes and
+/// no map has every policy below it refused, as a policy a harness cannot
+/// hold is, and the message names the missing map: whatever mode the agent
+/// is in may run what the policy asks about (a vibe session loaded in
+/// `auto-approve` would run commands unasked under `accept-edits`). With a
+/// map, every policy needs an entry at or below it.
 pub fn mode_step(
     harness: &str,
     policy: PermissionPolicy,
@@ -204,13 +205,13 @@ pub fn mode_step(
         ))
     };
     let Some((_, mode)) = map.for_policy(policy) else {
-        if !agent.any() || (map.is_empty() && policy > PermissionPolicy::Ask) {
+        if !agent.any() || (map.is_empty() && policy >= PermissionPolicy::Bypass) {
             return ModeStep::Leave;
         }
         return unavailable(if map.is_empty() {
             format!(
                 "it has session modes of its own ({}), some of which run tools without asking, \
-                 and [harnesses.{harness}] has no `modes` map to say which one asks \
+                 and [harnesses.{harness}] has no `modes` map to say which one holds to {policy} \
                  (e.g. modes = {{ ask = \"…\" }}; see docs/acp.md)",
                 agent.offered().join(", ")
             )
@@ -382,11 +383,18 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // The other policies leave the mode as it is, as before maps.
-        assert_eq!(
-            mode_step("vibe", AcceptEdits, &none, &agent),
-            ModeStep::Leave
-        );
+        // So is every policy below bypass: the mode the agent is in may
+        // run what it asks about. Only bypass leaves the mode alone.
+        for policy in [Plan, AcceptEdits, Auto] {
+            match mode_step("vibe", policy, &none, &agent) {
+                ModeStep::Refuse(why) => {
+                    let head = format!("policy '{policy}' is not available for vibe");
+                    let map = format!("no `modes` map to say which one holds to {policy}");
+                    assert!(why.starts_with(&head) && why.contains(&map), "{why}");
+                }
+                other => panic!("{policy}: {other:?}"),
+            }
+        }
         assert_eq!(mode_step("vibe", Bypass, &none, &agent), ModeStep::Leave);
         // An agent with no modes asks or does not by itself.
         let modeless = AgentModes {

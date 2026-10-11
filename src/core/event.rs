@@ -277,7 +277,7 @@ pub struct CapsUpdate {
     pub slash_commands: Option<bool>,
     /// Policies the live session cannot hold although the harness declares
     /// them (an ACP agent whose mode for the policy did not take, or that
-    /// has modes and no map for `ask`): taken out of what is offered, as a
+    /// has modes and no map, below `bypass`): taken out of what is offered, as a
     /// policy the harness never had is. Each list replaces the last.
     pub refused_policies: Option<Vec<PermissionPolicy>>,
 }
