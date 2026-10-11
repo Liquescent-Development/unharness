@@ -10,6 +10,7 @@ command      = ["npx", "-y", "@agentclientprotocol/claude-agent-acp"]
 display_name = "Claude (ACP)"
 sandbox_writable = ["~/.claude", "~/.npm"]   # the agent's own state, for the sandbox
 asks_permission  = true                      # this agent asks before it acts: offer `ask`
+modes            = { ask = "default" }       # its session mode that asks (see Modes)
 ```
 
 The table name is the harness id: `unharness -H claude-acp`, or
@@ -48,6 +49,55 @@ call without asking. So `ask` is offered only for an agent whose table has
 `asks_permission = true`. Set it for an agent you have seen ask before it
 writes, runs a command or reaches out (claude-agent-acp 0.85.1 does). The
 presets do not have it until you add a table for them.
+
+## Modes
+
+Many agents have session modes of their own, and some of them approve
+calls without sending a request: Mistral Vibe's `vibe-acp` starts every
+session in `accept-edits`, which writes files without asking, and a session
+loaded again comes back in the mode it was left in. unharness cannot see
+what such a mode lets through, so `modes` says which of the agent's modes
+backs each policy:
+
+```toml
+[harnesses.vibe]
+protocol        = "acp"
+command         = ["vibe-acp"]
+asks_permission = true
+modes           = { ask = "ask", bypass = "auto-approve" }
+```
+
+The keys are policies, the values the agent's mode ids (the agent lists
+them when a session starts, and the message that refuses `ask` for want of
+a map names them). A policy without an entry takes the entry of the
+nearest less permissive policy that has one, never a more permissive one's:
+above, `accept-edits` keeps vibe in its `ask` mode and unharness answers the
+edits itself. Keeping the agent in the mode that asks and letting unharness
+decide is the safe form; map a policy to the agent's own `accept-edits`
+only if you know it approves nothing but edits.
+
+unharness sets the mapped mode when a session starts, after it is resumed
+or loaded, and whenever the policy changes, and reads it back before the
+first prompt goes: through the session's `mode` option where the agent
+offers one (its answer says which mode is in effect), else with
+`session/set_mode`. If the agent does not offer the mode, refuses it, or
+answers with another one, the policy is not available for that session:
+the TUI asks for another one (Ctrl+P) and keeps the prompt, and `--print`
+fails without sending it. If the agent goes into another mode by itself, the
+mapped one is set again, and a turn that is running is stopped when the new
+mode could run what the policy asks about.
+
+An agent that has session modes and no `modes` map gets no policy below
+`bypass`: not `ask` (even with `asks_permission = true`), not
+`accept-edits`. unharness cannot tell what the mode the agent is in lets
+through, and a session can be in any of them: a vibe session loaded again
+in `auto-approve` would run commands unasked under `accept-edits`. Only
+`bypass` leaves the agent in whatever mode it is in. With a map, every
+policy needs an entry at or below it.
+
+Checked with Mistral Vibe 2.26.1: `ask = "ask"` held (a write was asked
+about and denied, and not made). `plan` is hidden by vibe's runtime and
+cannot be mapped.
 
 ## Limits
 

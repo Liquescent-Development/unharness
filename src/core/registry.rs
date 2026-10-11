@@ -20,7 +20,7 @@ impl Registry {
 
     /// Build the registry, honouring per-harness transport settings.
     pub fn from_config(config: &crate::config::Config) -> Self {
-        use crate::harness::acp::AcpHarness;
+        use crate::harness::acp::{AcpHarness, ModeMap as AcpModeMap};
         use crate::harness::agy::AgyHarness;
         use crate::harness::codex::{CodexHarness, CodexTransport};
         let codex_transport = config
@@ -57,8 +57,12 @@ impl Registry {
             if let Ok(h) =
                 AcpHarness::new(name, settings.display_name.as_deref(), &settings.command)
             {
+                // A map that does not parse is an error at startup
+                // (`runner::check_configured_policies`); none is taken here.
+                let modes = AcpModeMap::from_config(&settings.modes).unwrap_or_default();
                 harnesses.push(Box::new(
-                    h.asking_permission(settings.asks_permission.unwrap_or(false)),
+                    h.asking_permission(settings.asks_permission.unwrap_or(false))
+                        .with_modes(modes),
                 ));
             }
         }

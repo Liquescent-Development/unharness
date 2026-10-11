@@ -3014,9 +3014,14 @@ impl App {
                         .insert((self.active, provider), models.clone());
                 }
                 let commands = update.commands.is_some() || update.slash_commands.is_some();
+                let refusal = update.refused_policies.is_some();
+                let before = self.effective_policy();
                 self.live_caps.entry(self.active).or_default().merge(update);
                 if commands {
                     self.commands_arrived();
+                }
+                if refusal {
+                    self.policy_refused(before);
                 }
             }
             AgentEvent::TurnCompleted {
@@ -3678,6 +3683,36 @@ impl App {
             }
             _ => format!("{name} now runs under policy {p}"),
         });
+    }
+
+    /// The session took a policy out of what it offers (an ACP agent whose
+    /// mode for it did not take; the driver said why). One in effect gives
+    /// way as an unsupported policy does: to the nearest less permissive
+    /// one, which the session is told, or, with none, to the user's choice.
+    fn policy_refused(&mut self, before: Option<PermissionPolicy>) {
+        let now = self.effective_policy();
+        if now == before {
+            return;
+        }
+        match now {
+            Some(p) => {
+                if let Some(w) = self.policy_warning() {
+                    self.transcript.push_notice(w);
+                }
+                if self.session_alive {
+                    self.policies_sent.push_back(p);
+                    self.actions
+                        .push_back(Action::Command(SessionCommand::SetPolicy(p)));
+                }
+            }
+            None => {
+                self.transcript.push_notice(format!(
+                    "{} waits for another policy (Ctrl+P)",
+                    self.display_name()
+                ));
+                self.require_policy();
+            }
+        }
     }
 
     /// The policies a plan can be carried out under: those the harness has,
@@ -8024,6 +8059,60 @@ pub(crate) mod tests {
         let report = app.herdr_report();
         assert_eq!(report.state, State::Blocked);
         assert!(report.message.unwrap().contains("permission policy"));
+    }
+
+    /// A session that cannot hold a policy (an ACP agent's mode did not
+    /// take) takes it out of what is offered: the nearest less permissive
+    /// one takes its place and the session is told, or, with none left at
+    /// or below it, the picker opens and prompts wait.
+    #[test]
+    fn a_policy_the_session_refuses_gives_way_as_an_unsupported_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        app.session_alive = true;
+        app.take_actions();
+        let refuse = |app: &mut App, policies: &[PermissionPolicy]| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(policies.to_vec()),
+                ..Default::default()
+            }));
+        };
+
+        // One not in effect changes nothing.
+        refuse(&mut app, &[PermissionPolicy::Bypass]);
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+        assert!(app.take_actions().is_empty());
+
+        refuse(
+            &mut app,
+            &[PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass],
+        );
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert!(matches!(
+            app.take_actions().as_slice(),
+            [Action::Command(SessionCommand::SetPolicy(
+                PermissionPolicy::Ask
+            ))]
+        ));
+        assert!(app.modal.is_none());
+
+        refuse(
+            &mut app,
+            &[
+                PermissionPolicy::Plan,
+                PermissionPolicy::Ask,
+                PermissionPolicy::AcceptEdits,
+                PermissionPolicy::Bypass,
+            ],
+        );
+        assert_eq!(app.effective_policy(), None);
+        assert!(matches!(app.modal, Some(Modal::Policy(_))));
+        assert!(!app.offered_policies().contains(&PermissionPolicy::Ask));
+        app.modal = None;
+        app.submit_prompt("do it".into());
+        assert!(app.take_actions().is_empty());
+        assert!(!app.is_generating);
     }
 
     #[test]

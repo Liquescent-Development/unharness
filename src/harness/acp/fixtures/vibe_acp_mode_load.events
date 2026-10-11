@@ -1,0 +1,21 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+ThinkingDelta "The user wants me to create a file p.txt containing \"hi\" ..."
+TextDelta "I'll create p.txt with the word \"hi\" in the workspace."
+ToolCallStarted id=effect-c915dcf9-45d9-5931-a7ab-1e84ae09c92b name=edit input={"content":"hi","filePath":"/WORKSPACE/p.txt"}
+ToolCallResult id=effect-c915dcf9-45d9-5931-a7ab-1e84ae09c92b error=true "Tool execution denied by approval callback"
+ThinkingDelta "The write was refused by the approval callback. Per the u..."
+TextDelta "The file write was refused — the approval callback denied..."
+ToolCallStarted id=effect-56af2589-c514-50c3-9d53-d2f41b07d13c name=edit input={"content":"hi","filePath":"/WORKSPACE/q.txt"}
+ToolCallResult id=effect-56af2589-c514-50c3-9d53-d2f41b07d13c error=false "--- /WORKSPACE/q.txt\\n+++ /WORKSPACE/q.txt\\n@@\\n+hi\\n\\nCr..."
+TextDelta "Created q.txt at /WORKSPACE/q.txt containing the word \"hi\"."
+Context used=8083 window=800000
+CapabilitiesChanged efforts= plan_mode=false models=2
+CapabilitiesChanged efforts= models=2
+Context used=8083 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+TextDelta "pong"
+Context used=8083 window=800000
+Context used=8094 window=800000
+Context used=8094 window=800000
+Usage in=39948 out=183 cache_read=0 cache_write=0 cost=0.0567 cumulative=false
+TurnCompleted Done

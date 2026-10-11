@@ -14,9 +14,10 @@ Run it from a scratch directory; the agent will act in the cwd.
 What it sends, in this order:
   1. `initialize` (with --client-capabilities, else `{}`);
   2. `session/new`, or `session/resume` (--resume) or `session/load` (--load);
-  3. once the session answers, without waiting for the answers (as the
-     unharness driver does): --mode, --model, then each --config, in the
-     order given;
+  3. once the session answers: --mode, and once that has answered (the
+     unharness driver holds the prompt until the agent's mode is set,
+     #155) --model, then each --config, in the order given, without
+     waiting for their answers (as the driver does);
   4. `session/prompt` for each PROMPT, each once the previous one answered
      (--image and --file go with the first); with --cancel-after, a
      `session/cancel` notification that long after the last one was sent,
@@ -303,16 +304,18 @@ def main() -> int:
             cancel_timer.daemon = True
             cancel_timer.start()
 
+    def set_mode():
+        """The session exists: send the mode. Its answer is waited for."""
+        if args.mode_option:
+            option = next((o for o in config_options if o.get("category") == "mode"), None)
+            request("session/set_config_option",
+                    {"sessionId": session_id, "configId": option["id"] if option else "mode",
+                     "value": args.mode}, "mode")
+        else:
+            request("session/set_mode", {"sessionId": session_id, "modeId": args.mode}, "mode")
+
     def setup():
-        """The session exists: send the mode, model and options, unanswered."""
-        if args.mode:
-            if args.mode_option:
-                option = next((o for o in config_options if o.get("category") == "mode"), None)
-                request("session/set_config_option",
-                        {"sessionId": session_id, "configId": option["id"] if option else "mode",
-                         "value": args.mode}, "setup")
-            else:
-                request("session/set_mode", {"sessionId": session_id, "modeId": args.mode}, "setup")
+        """The mode is set: send the model and options, unanswered."""
         option = next((o for o in config_options if o.get("category") == "model"), None)
         if args.model and option:
             request("session/set_config_option",
@@ -468,6 +471,13 @@ def main() -> int:
                 session_id = result.get("sessionId") or session_id
                 config_options = result.get("configOptions") or []
                 status = "prompt"
+                if args.mode:
+                    set_mode()
+                else:
+                    setup()
+                    advance()
+            elif kind == "mode":
+                config_options = result.get("configOptions") or config_options
                 setup()
                 advance()
             elif kind == "prompt":
