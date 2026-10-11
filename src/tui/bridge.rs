@@ -568,7 +568,10 @@ impl Call<'_> {
             Outcome::Agent(_) => self.line(&self.report(usize::MAX)),
             Outcome::Edited(_) => self.line(""),
             Outcome::Ok if reads(self.name) => self.line(""),
-            Outcome::Ok if runs(self.name) => self.line(&last_lines(self.output, 3, 200)),
+            // A command's output ends with what it came to.
+            Outcome::Ok if super::transcript::is_command(self.name) => {
+                self.line(&last_lines(self.output, 3, 200))
+            }
             Outcome::Ok => self.line(&first_lines(self.output, 3)),
         }
     }
@@ -632,20 +635,6 @@ fn edited_paths(name: &str, input: &Value) -> Vec<String> {
 /// A call whose output is a file's content or a list of names.
 fn reads(name: &str) -> bool {
     matches!(name, "Read" | "read" | "view_file" | "Glob" | "glob")
-}
-
-/// A call that runs a command, whose output ends with what it came to.
-fn runs(name: &str) -> bool {
-    matches!(
-        name,
-        "Bash"
-            | "bash"
-            | "shell"
-            | "command_execution"
-            | "exec_command"
-            | "execute"
-            | "run_command"
-    )
 }
 
 /// The last non-blank lines of `s`, at most `max_chars`, as they were.
