@@ -38,6 +38,10 @@ unharness applies the permission policy to the requests an agent makes:
 | `auto` | falls back to `accept-edits` |
 | `bypass` | answers everything |
 
+What a request is for (an edit, a command, …) is the tool call's kind as
+the agent announced it, also when the request itself names the call only
+by its id (as Mistral Vibe's `vibe-acp` does).
+
 But an agent asks only about what it chooses to ask about, and unharness
 cannot make it ask. codex-acp 2.1.1 ran a command, an edit and a network
 call without asking. So `ask` is offered only for an agent whose table has

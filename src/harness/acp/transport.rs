@@ -132,6 +132,36 @@ pub fn auto_allows(policy: PermissionPolicy, kind: &str) -> bool {
     }
 }
 
+/// Feed a `session/request_permission` line to the parser, and say whether
+/// `policy` answers it without asking, with the events to pass on (the
+/// question left out when it is answered: the tool call is still shown).
+///
+/// The kind is the tool call's as the parser has merged it: vibe-acp 2.26.1
+/// sends only `toolCallId` in the request, the kind, input and locations
+/// having come on the `tool_call` before it. A kind the request carries
+/// replaces the earlier one, as an update's does; a request without an id
+/// has only its own.
+fn screen_permission(
+    parser: &mut AcpParser,
+    policy: PermissionPolicy,
+    line: &str,
+    params: &Value,
+) -> (bool, Vec<AgentEvent>) {
+    let mut evs = parser.feed(line);
+    let call = params.get("toolCall").unwrap_or(&Value::Null);
+    let kind = call
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .and_then(|id| parser.tool_kind(id))
+        .or_else(|| call.get("kind").and_then(Value::as_str))
+        .unwrap_or("");
+    let allowed = auto_allows(policy, kind);
+    if allowed {
+        evs.retain(|ev| !matches!(ev, AgentEvent::PermissionRequest(_)));
+    }
+    (allowed, evs)
+}
+
 pub fn start(harness: HarnessId, args: Vec<String>, cfg: SessionConfig) -> Result<SessionHandle> {
     let mut command = Command::new(&cfg.binary);
     command
@@ -580,30 +610,25 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     .await;
             }
             let options = params.get("options").cloned().unwrap_or(Value::Null);
-            let kind = params
-                .pointer("/toolCall/kind")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if auto_allows(d.policy, kind) {
+            let (allowed, evs) = screen_permission(&mut d.parser, d.policy, line, params);
+            if allowed {
                 let allow = PermissionDecision::Allow {
                     updated_input: None,
                 };
                 d.proc
                     .write_line(&jsonrpc::response(id, permission_outcome(&options, &allow)))
                     .await?;
-                // Still announce the tool call, just not the question.
-                for ev in d.parser.feed(line) {
-                    if !matches!(ev, AgentEvent::PermissionRequest(_)) {
-                        let _ = events.send(ev).await;
-                    }
-                }
-                return Ok(());
+            } else {
+                let rid = match id {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                d.pending.insert(rid, (id.clone(), options));
             }
-            let rid = match id {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            d.pending.insert(rid, (id.clone(), options));
+            for ev in evs {
+                let _ = events.send(ev).await;
+            }
+            return Ok(());
         }
         _ => {}
     }
@@ -672,6 +697,67 @@ mod tests {
         assert!(auto_allows(AcceptEdits, "edit"));
         assert!(!auto_allows(AcceptEdits, "execute"));
         assert!(auto_allows(Bypass, "execute"));
+    }
+
+    /// vibe-acp 2.26.1's shapes (`fixtures/vibe_acp_ask.jsonl`): the
+    /// request names the call by its id alone.
+    #[test]
+    fn the_policy_reads_the_kind_of_the_merged_tool_call() {
+        use PermissionPolicy::*;
+        let tool_call = |id: &str, kind: &str| {
+            json!({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
+                "sessionUpdate": "tool_call", "toolCallId": id, "kind": kind,
+                "status": "in_progress", "title": "t"}}})
+            .to_string()
+        };
+        let request = |call: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 0, "method": "session/request_permission",
+                "params": {"toolCall": call, "options": options()}});
+            (line.to_string(), line["params"].clone())
+        };
+        // Whether `policy` answers a request for `call` after a tool_call
+        // with id `t` of `kind`, and whether the question is passed on.
+        let screen = |policy, kind: &str, call: Value| {
+            let mut parser = AcpParser::new(HarnessId::intern("acp-test"));
+            parser.feed(&tool_call("t", kind));
+            let (line, params) = request(call);
+            let (allowed, evs) = screen_permission(&mut parser, policy, &line, &params);
+            let asked = evs
+                .iter()
+                .any(|e| matches!(e, AgentEvent::PermissionRequest(_)));
+            assert_ne!(allowed, asked, "asked exactly when not answered");
+            allowed
+        };
+        let id_only = || json!({"toolCallId": "t"});
+        assert!(screen(AcceptEdits, "edit", id_only()));
+        assert!(screen(Bypass, "edit", id_only()));
+        assert!(!screen(Ask, "edit", id_only()));
+        assert!(!screen(AcceptEdits, "execute", id_only()));
+        assert!(screen(Bypass, "execute", id_only()));
+        // A kind in the request replaces the earlier one, as an update's does.
+        assert!(!screen(
+            AcceptEdits,
+            "edit",
+            json!({"toolCallId": "t", "kind": "execute"})
+        ));
+        assert!(screen(
+            AcceptEdits,
+            "execute",
+            json!({"toolCallId": "t", "kind": "edit"})
+        ));
+        // A request for a call never announced has only its own fields.
+        assert!(!screen(AcceptEdits, "edit", json!({"toolCallId": "u"})));
+        assert!(screen(
+            AcceptEdits,
+            "execute",
+            json!({"toolCallId": "u", "kind": "edit"})
+        ));
+        // One without an id does not take what an earlier one without an id said.
+        let mut parser = AcpParser::new(HarnessId::intern("acp-test"));
+        let (line, params) = request(json!({"kind": "edit"}));
+        assert!(screen_permission(&mut parser, AcceptEdits, &line, &params).0);
+        let (line, params) = request(json!({}));
+        assert!(!screen_permission(&mut parser, AcceptEdits, &line, &params).0);
     }
 
     #[test]
