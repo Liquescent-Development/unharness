@@ -229,6 +229,7 @@ vibe does not say what they are, so no allow rule answers them. Each shows
 as a `tool` call that ends with your answer, since vibe does not report
 what it did.
 `unharness --print` does not wait for vibe's subagents.
+
 ## Rewind
 
 `/rewind` rewinds vibe's own session: unharness asks vibe (its `_rewind/to`
@@ -303,8 +304,10 @@ session or a `-p` run, but not after `--no-tui`.
 
 ## Not checked yet
 
-- macOS.
-- vibe's plan mode.
+- macOS (no Mac was available).
+- vibe's plan mode, which vibe 2.26.1 does not offer (see Policies).
+- Pasting an image from the clipboard (attaching one with `/attach` was
+  checked).
 - Under `auto`: the classifier being unreachable (vibe then asks), and a
   provider other than Mistral's (vibe sends the classifier's model name
   to it).
