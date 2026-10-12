@@ -59,6 +59,12 @@ impl ModeMap {
         self.0.is_empty()
     }
 
+    /// Whether the map names a mode for `policy` itself, rather than
+    /// leaving it to a less permissive policy's entry.
+    pub fn names(&self, policy: PermissionPolicy) -> bool {
+        self.0.contains_key(&policy)
+    }
+
     /// The mode for `policy`: its own entry, else the nearest less
     /// permissive policy's, with the policy whose entry it is.
     pub fn for_policy(&self, policy: PermissionPolicy) -> Option<(PermissionPolicy, &str)> {
@@ -314,6 +320,66 @@ mod tests {
         assert!(map.within(AcceptEdits, "ask"));
         assert!(!map.within(AcceptEdits, "auto-approve"));
         assert!(!map.within(Ask, "accept-edits"));
+        assert!(map.names(Ask) && map.names(Bypass));
+        assert!(!map.names(AcceptEdits) && !map.names(Auto));
+    }
+
+    /// vibe's `auto` is its smart-approve mode (#174): under auto the
+    /// agent is set to it; under accept-edits it stays in `ask`, never in
+    /// the more permissive smart-approve.
+    #[test]
+    fn auto_has_a_mode_of_its_own() {
+        let map = ModeMap::new([
+            (Ask, "ask"),
+            (Auto, "smart-approve"),
+            (Bypass, "auto-approve"),
+        ]);
+        assert_eq!(map.for_policy(AcceptEdits), Some((Ask, "ask")));
+        assert_eq!(map.for_policy(Auto), Some((Auto, "smart-approve")));
+        assert!(!map.within(AcceptEdits, "smart-approve"));
+        assert!(map.within(Auto, "smart-approve") && map.within(Auto, "ask"));
+        assert!(!map.within(Auto, "auto-approve"));
+        // Started with `VIBE_DEFAULT_AGENT=smart-approve`, the session is in
+        // it already (`fixtures/vibe_acp_auto.jsonl`): nothing is sent.
+        let in_it = AgentModes {
+            known: true,
+            current: Some("smart-approve".into()),
+            listed: vec![
+                "ask".into(),
+                "accept-edits".into(),
+                "smart-approve".into(),
+                "auto-approve".into(),
+            ],
+            option: Some("mode".into()),
+            option_values: vec![
+                "ask".into(),
+                "accept-edits".into(),
+                "smart-approve".into(),
+                "auto-approve".into(),
+            ],
+        };
+        assert_eq!(
+            mode_step("vibe", Auto, &map, &in_it),
+            ModeStep::Keep("smart-approve".into())
+        );
+        // A policy change back to ask sets `ask` through the option.
+        assert_eq!(
+            mode_step("vibe", Ask, &map, &in_it),
+            ModeStep::Set {
+                mode: "ask".into(),
+                via: SetVia::Option("mode".into())
+            }
+        );
+        // A session that does not offer it (vibe outside the experiment's
+        // cohort without `VIBE_SMART_APPROVE_AVAILABLE`, or a user's
+        // `disabled_agents`): auto is refused, and the TUI falls back to
+        // accept-edits.
+        let (result, options) = vibe_new();
+        let without = AgentModes::from_session(&result, &options, false);
+        assert!(matches!(
+            mode_step("vibe", Auto, &map, &without),
+            ModeStep::Refuse(why) if why.contains("does not offer mode 'smart-approve'")
+        ));
     }
 
     #[test]

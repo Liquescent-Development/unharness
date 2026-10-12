@@ -182,6 +182,7 @@ fn cli_plan(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> SpawnPlan
         known: &KnownModels::default(),
         env: &[],
         provider: cfg.provider.as_ref().map(|p| p.as_str()),
+        policy: cfg.policy.unwrap_or(PermissionPolicy::Ask),
     };
     match choice
         .provider
@@ -1061,6 +1062,7 @@ mod tests {
         SpawnChoice {
             model,
             effort,
+            policy: PermissionPolicy::Ask,
             known,
             env: &[],
             provider: None,
