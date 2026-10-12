@@ -343,7 +343,11 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         if let Some(note) = harness.prepare()? {
             eprintln!("{} {}", "[unharness]".yellow().bold(), note);
         }
-        let mut cmd = cfg.sandbox.wrap(harness.build_print_command(&cfg)?)?;
+        let command = harness.build_print_command(&cfg)?;
+        for w in harness.print_warnings(&cfg) {
+            eprintln!("{} {}", "[unharness]".yellow().bold(), w);
+        }
+        let mut cmd = cfg.sandbox.wrap(command)?;
         if args.print {
             let mut watch = Watch::begin(&harness.guarded(workspace), dirs::home_dir().as_deref());
             let status = cmd.status()?;
