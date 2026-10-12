@@ -48,7 +48,8 @@ stderr carries everything else: the sandbox level, warnings, denials,
 and in `text` and `json` the harness's notices and errors.
 
 Exit status: `0` when the answer is complete, `130` when interrupted,
-`1` on an error (the harness failed the turn or exited early).
+`1` on an error (the harness failed the turn or exited early, or the
+session `--resume` named is gone; see below).
 
 `Ctrl+C` interrupts the running turn and ends the run. A second one, or
 one while only subagents are running, ends it at once. SIGTERM, SIGHUP
@@ -165,7 +166,12 @@ The `json` output, and the last `stream-json` line:
   harness's own configuration during the run.
 
 `session_id` can be passed to `--resume` to continue the vendor session
-in another `-p` run.
+in another `-p` run. When the harness no longer has that session the run
+fails (exit 1) rather than be answered by a session that knows nothing
+of it: Claude Code and Codex refuse the resume themselves, and pi and an
+ACP agent start a new session in its place, which the run stops before it
+answers. The reason is on stderr with `--format text` and in the
+result's `error` with `json` and `stream-json`.
 
 ## The harness's own output
 

@@ -313,6 +313,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
             policy: res.effective.to_string(),
             sandbox: setup.sandbox.level().to_string(),
             cwd: cwd.to_path_buf(),
+            resume: print_resume.clone(),
         };
         let mut watch = Watch::begin(&harness.guarded(workspace), dirs::home_dir().as_deref());
         let handle = harness.start_session(SessionConfig {

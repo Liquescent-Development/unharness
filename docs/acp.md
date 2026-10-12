@@ -211,6 +211,7 @@ itself fails, or a session to resume is not there any more (Mistral Vibe
 answers "Session not found"), unharness starts a new session, says so,
 and your next prompt tells it the conversation so far, as it tells a
 harness you switch to; the conversation then keeps the new session.
+A `--print --resume` run fails there instead ([headless](headless.md#result)).
 
 ## Sign-in
 

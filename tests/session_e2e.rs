@@ -3762,6 +3762,7 @@ fn headless_run_with(
         policy: "ask".into(),
         sandbox: "off".into(),
         cwd: fake._tmp.path().to_path_buf(),
+        resume: None,
     });
     run
 }
@@ -3834,6 +3835,93 @@ async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
     let err = String::from_utf8_lossy(&run.err);
     assert!(
         err.contains("not waiting for 1 subagent(s): fake tells a subagent's end only when"),
+        "{err}"
+    );
+}
+
+/// `--print --resume <id>` of a session the agent no longer has: pi 1.1.0
+/// creates an empty one under the id (`fixtures/resume_missing.jsonl`),
+/// vibe-acp 2.26.1 answers `session/load` with "Session not found" and the
+/// driver starts a new one (`vibe_acp_load_missing.jsonl`). Either fails
+/// the run with the reason rather than answer from the new session
+/// (#214).
+#[tokio::test]
+async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
+    if !python_available() {
+        return;
+    }
+    let resuming = |fake: &Fake, format, id: &str| {
+        let rules = unharness::core::Rules::load_in(
+            &fake._tmp.path().join("config"),
+            Some(fake._tmp.path()),
+        )
+        .unwrap();
+        let mut run = unharness::headless::Headless::new(
+            format,
+            rules,
+            fake._tmp.path().to_path_buf(),
+            "fake",
+            Default::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        run.begin(&unharness::headless::RunInfo {
+            harness: "fake".into(),
+            policy: "ask".into(),
+            sandbox: "off".into(),
+            cwd: fake._tmp.path().to_path_buf(),
+            resume: Some(id.into()),
+        });
+        run
+    };
+
+    let pi_missing = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62";
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(pi_missing.into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Json, pi_missing);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "pong?".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(
+        result["error"],
+        format!(
+            "fake: could not resume the session (pi has none under its id, and started an \
+             empty one); stopped, since the session started in its place knows nothing of \
+             {pi_missing}"
+        )
+    );
+
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_load_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(MISSING_SESSION.into());
+    let handle = vibe_acp().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Text, MISSING_SESSION);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "Reply with the single word: pong".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    assert!(run.out.is_empty(), "{}", String::from_utf8_lossy(&run.out));
+    let err = String::from_utf8_lossy(&run.err);
+    assert!(
+        err.contains(&format!(
+            "fake: could not resume the session (Session not found: {MISSING_SESSION}); \
+             stopped, since the session started in its place knows nothing of {MISSING_SESSION}"
+        )),
         "{err}"
     );
 }
