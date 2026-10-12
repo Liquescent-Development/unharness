@@ -123,6 +123,36 @@ when one of these changes while vibe runs:
 Session journals under `logs/` are not watched: vibe rewrites them on every
 turn.
 
+## vibe's own CLI
+
+`unharness -p --native -H vibe` runs `vibe -p` and passes its output
+through, and `unharness -H vibe --no-tui` starts `vibe` in its own
+interface. Both run under the sandbox, in the session's directory, with
+the policy as vibe's agent:
+
+| Policy | `--agent` |
+|---|---|
+| `ask` | `ask`: its interface asks before every write and command; `vibe -p` denies them and goes on |
+| `accept-edits` | `accept-edits`: edits run unasked, commands as under `ask` |
+| `auto` | not offered; falls back to `accept-edits` |
+| `bypass` | `auto-approve` |
+
+The model and effort go to vibe by environment, as for a session. Only a
+session says what vibe's own models are, so an effort is passed on only
+for a model your `config.toml` defines; otherwise unharness says it is
+left out. unharness's MCP servers are not passed on, and neither is
+`--trust`: whether vibe reads the project's own configuration stays
+vibe's and your decision. `--format` takes `text`, `json` and
+`stream-json` (vibe's `streaming`), and the exit status is vibe's (see
+[Headless runs](headless.md#the-harnesss-own-output)). unharness runs the
+`vibe` installed beside `vibe-acp`, else the one on `PATH`.
+
+"Always allow" in vibe's own interface writes the tool into vibe's
+`config.toml` (`[tools.write_file] permission = "always"`), and vibe's
+`ask` then runs that tool unasked (seen with `-p`). unharness tells you when
+`config.toml` changes during a session or a `-p` run, but not after
+`--no-tui`.
+
 ## Not checked yet
 
 - macOS.

@@ -824,6 +824,47 @@ recorded ones. For anything else:
   Unverified: macOS, a folder trusted through a repo root vibe offered
   (`trust_repo`), whether vibe 2.26.1 offers a project subagent profile
   to the model.
+  vibe's own CLI (#165, 2.26.1, `vibe::cli_command`): `--print --native`
+  is `vibe --workdir <cwd> --agent <a> [--output] [--resume <id>]
+  --prompt=<text>` (one word, so a prompt starting with `-` is no flag;
+  empty, vibe reads stdin), `--no-tui` the same without `--output` and
+  with the prompt after `--`. The agent is vibe's built-in profile
+  (`vibe/core/agents/models.py`) `ask`, `accept-edits` (`write_file` and
+  `edit` always) or `auto-approve`, whatever a `modes` table says (that
+  is for `vibe-acp`); `auto` and `plan` have none, so `print_policies`
+  is the session's policies (`ask` still tied to `asks_permission`).
+  `vibe` is the one beside the `vibe-acp` in use, else on `PATH`. The
+  model and level go by environment through `spawn_env`; with no
+  session in the run only a model the user's `config.toml` defines gets
+  a level, and a level left out is said (`Harness::print_warnings`), as
+  are unharness's MCP servers, which vibe's CLI is not given. Never
+  `--trust`. `--format` `stream-json` is vibe's `streaming`. vibe's exit
+  status is passed on unchanged: 0 finished, 1 usage or configuration
+  error, 2 infrastructure failure (argparse's own errors are 2 too), 3
+  stopped early (a limit, a refusal, SIGINT or SIGTERM), 4 aborted by
+  an `--agent-socket` server (`RunOutcome`, `vibe/app_server/
+  run_export.py`); none collides with unharness's own 130. Checked live
+  under Landlock with a scratch `VIBE_HOME`: under `ask` with `--format
+  stream-json` vibe printed an approval `callback` for
+  `file_system.write_file`, the write failed "denied by the approval
+  callback", the file was not there and vibe exited 0; `accept-edits`
+  wrote the file and was denied `touch`; `bypass` with `-m
+  mistral-medium-3.5` ran `printf hi > z.txt` in the workspace, on that
+  model (`runtime-state.json`; `glm-5-3`, the default, without `-m`).
+  The first run in a new home reported the files vibe created there
+  (`trusted_folders.toml` and the three caches). In tmux `--no-tui`
+  started vibe in `ask`, and with `--policy accept-edits -m
+  mistral-medium-3.5` in `accept edits` on that model; under `ask` vibe
+  asked before a write (Allow once, for the session, Always allow,
+  Deny), and `/exit` ended it with 0. Its "Always allow" wrote
+  `[tools.write_file] permission = "always"` into `config.toml` (a
+  guarded file, but `--no-tui` is not watched), after which a `--print
+  --native --policy ask` run wrote a file unasked: a tool vibe's
+  configuration lets run is run under its `ask` too. Not checked over
+  `vibe-acp`. Unverified: a level through `--native` (unit-tested
+  only), `--resume` with a `vibe-acp` session's id, a prompt on stdin
+  (only that `--prompt=` with nothing there exits 1, "No prompt
+  provided"), vibe's trust prompt, macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
