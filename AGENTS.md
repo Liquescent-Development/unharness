@@ -1127,7 +1127,8 @@ recorded ones. For anything else:
   `VIBE_TOOLS__<NAME>__…` in the environment or in `$VIBE_HOME/.env` name
   (#212: vibe-acp loads `.env` into its environment before any
   configuration layer, `load_dotenv_values`, so unharness parses it as
-  python-dotenv 1.2.2 does, `${VAR}` expanded in linear time, and takes those variables
+  python-dotenv 1.2.2 does, `${VAR}` expanded in linear time from the
+  process's environment as unharness sets it, and takes those variables
   alone from it, each that is not empty and whose key the environment
   does not give a value that is not empty; parser checked against
   python-dotenv's own output, not a live vibe; looked at before it is
@@ -1151,7 +1152,13 @@ recorded ones. For anything else:
   over 1 MiB, not UTF-8 or TOML, `tools` not a table, a `VIBE_TOOLS` that
   is not a JSON object; a FIFO `.env`, which vibe reads, too) or a state
   directory that cannot be written refuses both policies with the reason
-  (`SpawnPlan::own_modes`), never a degraded profile. Profiles are found
+  (`SpawnPlan::own_modes`), never a degraded profile. Every vibe process
+  (`vibe-acp` and vibe's CLI) is given `VIBE_HOME`, the home unharness
+  read: vibe resolves its home from the variable on every access, after
+  `load_dotenv_values`, so a `VIBE_HOME` written into `.env` (writable in
+  the sandbox) would otherwise move the next process to a `config.toml`
+  unharness never read; a `.env` that would still set it (the session's
+  environment setting it empty) refuses both policies. Profiles are found
   in `agent_paths` first, then a trusted project's `.vibe/agents/`, then
   `~/.vibe/agents/`, the first of a name kept (`core/agents/
   registry.py`), and `agent_paths` concatenates across layers in order

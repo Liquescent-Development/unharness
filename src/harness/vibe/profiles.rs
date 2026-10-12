@@ -316,7 +316,10 @@ pub fn read_tool_keys(
 /// FIFO (1Password's local env files are one) is refused without being
 /// opened: opening it would have it serve its content, which vibe then
 /// would not get. A file is read as a config file is: one that is not
-/// UTF-8 or is over 1 MiB is an error.
+/// UTF-8 or is over 1 MiB is an error. So is a `VIBE_HOME` the file would
+/// set, which would move vibe to a configuration unharness did not read
+/// (the processes unharness starts are always given one, so this is only
+/// reached when the session's environment sets it empty).
 fn dotenv_tool_vars(
     home: &Path,
     inherited: &[(String, String)],
@@ -343,7 +346,14 @@ fn dotenv_tool_vars(
     };
     let environ: std::collections::HashMap<String, String> =
         inherited.iter().chain(env).cloned().collect();
-    Ok(super::dotenv::loaded(&text, &environ)
+    let loaded = super::dotenv::loaded(&text, &environ);
+    if loaded.iter().any(|(k, _)| k == "VIBE_HOME") {
+        bail!(
+            "{} sets VIBE_HOME, which would move vibe to a configuration unharness has not read",
+            path.display()
+        );
+    }
+    Ok(loaded
         .into_iter()
         .filter(|(k, _)| {
             let k = k.to_ascii_lowercase();
@@ -1014,6 +1024,16 @@ mod tests {
             err.contains("is not UTF-8") && !err.contains("MISTRAL"),
             "{err}"
         );
+        // A VIBE_HOME it would set (none in the environment) would move
+        // vibe to a configuration that was not read: refused, unless the
+        // environment sets one, as every process unharness starts has.
+        std::fs::write(&dotenv, "VIBE_HOME=/elsewhere\n").unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert!(
+            err.contains("sets VIBE_HOME") && !err.contains("/elsewhere"),
+            "{err}"
+        );
+        assert!(read_tool_keys(&home, &cwd, &[var("VIBE_HOME", "/h")], &[]).is_ok());
         std::fs::remove_file(&dotenv).unwrap();
         // A FIFO is refused, saying what to do, and never opened.
         #[cfg(unix)]

@@ -230,7 +230,10 @@ fn cli_command(
     };
     let mut cmd = std::process::Command::new(binary);
     cmd.current_dir(&cfg.cwd);
-    for (key, value) in cli_plan(cfg, home, providers).env {
+    let mut added = cli_plan(cfg, home, providers).env;
+    // vibe's home is set, so that its `.env` cannot move it ([`with_profiles`]).
+    added.push(home_var(home));
+    for (key, value) in &added {
         cmd.env(key, value);
     }
     // Every run gets unharness's profiles, as a session's process does
@@ -238,7 +241,7 @@ fn cli_command(
     // vibe would find elsewhere first ([`profiles::shadowing`]), ends the
     // run before vibe starts: no session describes the mode here to check
     // it by.
-    let prepared = profiles::prepare(profile_root, home, &cfg.cwd, inherited, &[]);
+    let prepared = profiles::prepare(profile_root, home, &cfg.cwd, inherited, &added);
     if let Some(dir) = &prepared.dir {
         cmd.env(
             "VIBE_AGENT_PATHS",
@@ -413,6 +416,11 @@ impl VibeHarness {
             .unwrap_or_else(|| Arc::new(process_env()))
     }
 
+    /// vibe's home for a process that is given no `VIBE_HOME` of its own.
+    fn home(&self) -> PathBuf {
+        vibe_home(&self.inherited_env(), &[])
+    }
+
     /// The environment each vibe process starts with: the providers' or
     /// vibe's own model choice ([`plan_for`]) and unharness's profiles
     /// ([`with_profiles`]).
@@ -425,7 +433,7 @@ impl VibeHarness {
             .choosing_at_spawn(Arc::new(move |choice: &SpawnChoice<'_>| {
                 let inherited = fixed.clone().unwrap_or_else(|| Arc::new(process_env()));
                 with_profiles(
-                    plan_for(&providers, choice),
+                    plan_for(&providers, &inherited, choice),
                     root.as_deref(),
                     &inherited,
                     choice,
@@ -516,22 +524,29 @@ fn last_of<'a>(vars: &'a [(String, String)], key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// `$VIBE_HOME` (from `env`, the session's additions, else unharness's
-/// own environment), else `~/.vibe`: where vibe keeps its configuration,
-/// sessions and logs (`vibe/utils/vibe_home.py`).
-pub fn vibe_home(env: &[(String, String)]) -> PathBuf {
-    let set = env
-        .iter()
-        .rev()
-        .find(|(k, _)| k == "VIBE_HOME")
-        .map(|(_, v)| v.clone())
-        .or_else(|| std::env::var("VIBE_HOME").ok())
+/// `$VIBE_HOME` (from `env`, the session's additions, else `inherited`,
+/// the environment vibe inherits from unharness), else `~/.vibe`: where
+/// vibe keeps its configuration, sessions and logs
+/// (`vibe/utils/vibe_home.py`).
+pub fn vibe_home(inherited: &[(String, String)], env: &[(String, String)]) -> PathBuf {
+    let set = last_of(env, "VIBE_HOME")
+        .or_else(|| last_of(inherited, "VIBE_HOME"))
         .filter(|v| !v.is_empty());
     let home = dirs::home_dir();
     match set {
-        Some(dir) => crate::core::sandbox::expand_home(Path::new(&dir), home.as_deref()),
+        Some(dir) => crate::core::sandbox::expand_home(Path::new(dir), home.as_deref()),
         None => home.unwrap_or_default().join(".vibe"),
     }
+}
+
+/// `VIBE_HOME` naming `home`. Every vibe process is given it: vibe loads
+/// its `.env` into its environment and reads `VIBE_HOME` afresh on every
+/// access to its home, so a `VIBE_HOME` in `.env` would otherwise move
+/// it, after unharness read the configuration of the home it knew, to a
+/// `config.toml` unharness never read; with the variable set, `.env`
+/// leaves it alone (`load_dotenv_values`).
+fn home_var(home: &Path) -> (String, String) {
+    ("VIBE_HOME".to_string(), home.to_string_lossy().into_owned())
 }
 
 /// Where the key for vibe's default provider was found, as far as can be
@@ -878,13 +893,17 @@ fn provider(id: &str, s: &ProviderSettings) -> Result<Provider> {
 /// vibe's environment for a choice: on one of `providers`, that
 /// provider's ([`provider_env`]); on vibe's own configuration, the model
 /// and level alone ([`spawn_env`]).
-fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
+fn plan_for(
+    providers: &[Provider],
+    inherited: &[(String, String)],
+    choice: &SpawnChoice<'_>,
+) -> SpawnPlan {
     match choice
         .provider
         .and_then(|id| providers.iter().find(|p| p.id == id))
     {
         Some(provider) => provider_env(provider, choice),
-        None => spawn_env(&vibe_home(choice.env), choice),
+        None => spawn_env(&vibe_home(inherited, choice.env), choice),
     }
 }
 
@@ -895,15 +914,19 @@ fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
 /// and the modes are refused with the reason. Every process gets them,
 /// whatever its policy: a policy changed later sets the mode with no
 /// restart. `inherited` is the environment the process inherits from
-/// unharness.
+/// unharness. The process is given its home in `VIBE_HOME` ([`home_var`]).
 fn with_profiles(
     mut plan: SpawnPlan,
     root: Option<&Path>,
     inherited: &[(String, String)],
     choice: &SpawnChoice<'_>,
 ) -> SpawnPlan {
-    let home = vibe_home(choice.env);
-    let prepared = profiles::prepare(root, &home, choice.cwd, inherited, choice.env);
+    let home = vibe_home(inherited, choice.env);
+    plan.env.push(home_var(&home));
+    // The process's environment over what it inherits, in the order the
+    // transport sets it: the plan's, then the session's.
+    let added: Vec<(String, String)> = plan.env.iter().chain(choice.env).cloned().collect();
+    let prepared = profiles::prepare(root, &home, choice.cwd, inherited, &added);
     if let Some(dir) = &prepared.dir {
         let before = last_of(choice.env, "VIBE_AGENT_PATHS")
             .or_else(|| last_of(inherited, "VIBE_AGENT_PATHS"));
@@ -1067,7 +1090,7 @@ impl Harness for VibeHarness {
         let version = binary.as_deref().and_then(version_aside);
         let auth = auth_info(
             std::env::var_os(API_KEY_VAR).as_deref(),
-            &vibe_home(&[]),
+            &self.home(),
             self.acp.sign_in().unwrap_or("vibe --setup"),
         );
         Probe {
@@ -1089,7 +1112,7 @@ impl Harness for VibeHarness {
     /// Whether vibe trusts the folder with its project configuration
     /// ([`trust::describe`]).
     fn doctor_notes(&self, cwd: &Path) -> Vec<DoctorNote> {
-        let (text, warning) = trust::describe(&vibe_home(&[]), cwd);
+        let (text, warning) = trust::describe(&self.home(), cwd);
         vec![DoctorNote {
             label: "Trust",
             text,
@@ -1100,7 +1123,7 @@ impl Harness for VibeHarness {
     /// That vibe ignores the folder's project configuration, when it does
     /// ([`trust::notice`]).
     fn session_notice(&self, cwd: &Path) -> Option<String> {
-        trust::notice(&vibe_home(&[]), cwd)
+        trust::notice(&self.home(), cwd)
     }
 
     /// Signed in when the key is in the environment or vibe's `.env`;
@@ -1108,7 +1131,7 @@ impl Harness for VibeHarness {
     /// not quick, or the user's configuration may choose a provider with
     /// another key or none.
     fn quick_auth(&self, _binary: &Path) -> Option<bool> {
-        api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &vibe_home(&[])).map(|_| true)
+        api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &self.home()).map(|_| true)
     }
 
     /// A provider of `[harnesses.vibe.providers]` has the models it lists;
@@ -1163,7 +1186,7 @@ impl Harness for VibeHarness {
     /// its own binary (`builtin-skills/`, rewritten when they differ), its
     /// other caches and its history.
     fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
-        guarded_in(&vibe_home(&[]))
+        guarded_in(&self.home())
     }
 
     fn own_mcp_servers(&self) -> Vec<String> {
@@ -1208,17 +1231,18 @@ impl Harness for VibeHarness {
             cfg.provider.as_ref(),
             cfg.model.as_ref().map(|m| m.model.as_str()),
         )?;
+        let inherited = self.inherited_env();
         cli_command(
             cfg,
-            &vibe_home(&[]),
+            &vibe_home(&inherited, &[]),
             &self.providers,
             self.profile_root.as_deref(),
-            &self.inherited_env(),
+            &inherited,
         )
     }
 
     fn print_warnings(&self, cfg: &PrintConfig) -> Vec<String> {
-        cli_warnings(cfg, &vibe_home(&[]), &self.providers)
+        cli_warnings(cfg, &self.home(), &self.providers)
     }
 }
 
@@ -1531,12 +1555,71 @@ provider = "mine"
         assert_eq!(models[0]["name"], "n\",\"x");
     }
 
+    /// Every vibe process is given its home in `VIBE_HOME`, so that a
+    /// `VIBE_HOME` in its `.env` is left alone (#212), and the tools `.env`
+    /// names are read with the plan's variables there to expand: what the
+    /// process will have.
+    #[test]
+    fn a_vibe_process_is_given_its_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("vh");
+        let cwd = dir.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            home.join(".env"),
+            "VIBE_HOME=/elsewhere\nVIBE_TOOLS='{\"${VIBE_ACTIVE_MODEL}-tool\": {}}'\n",
+        )
+        .unwrap();
+        let mut plan = SpawnPlan::default();
+        plan.env
+            .push(("VIBE_ACTIVE_MODEL".to_string(), "m-1".to_string()));
+        let inherited = [("VIBE_HOME".to_string(), home.to_string_lossy().into_owned())];
+        let known = known();
+        let choice = SpawnChoice {
+            cwd: &cwd,
+            ..choice(None, None, &known)
+        };
+        let plan = with_profiles(plan, Some(&dir.path().join("store")), &inherited, &choice);
+        assert_eq!(
+            plan.env.iter().find(|(k, _)| k == "VIBE_HOME"),
+            Some(&inherited[0])
+        );
+        assert!(
+            plan.own_modes[profiles::ASK].is_ok(),
+            "{:?}",
+            plan.own_modes
+        );
+        let dirs: Vec<String> = serde_json::from_str(
+            &plan
+                .env
+                .iter()
+                .find(|(k, _)| k == "VIBE_AGENT_PATHS")
+                .unwrap()
+                .1,
+        )
+        .unwrap();
+        let ask = std::fs::read_to_string(Path::new(&dirs[0]).join("unharness-ask.toml")).unwrap();
+        let ask: toml::Table = ask.parse().unwrap();
+        assert_eq!(ask["tools"]["m-1-tool"]["permission"].as_str(), Some("ask"));
+    }
+
     #[test]
     fn vibe_home_is_the_variable_else_dot_vibe() {
         let set = [("VIBE_HOME".to_string(), "/tmp/vh".to_string())];
-        assert_eq!(vibe_home(&set), PathBuf::from("/tmp/vh"));
+        assert_eq!(vibe_home(&[], &set), PathBuf::from("/tmp/vh"));
         let tilde = [("VIBE_HOME".to_string(), "~/vh".to_string())];
-        assert_eq!(vibe_home(&tilde), dirs::home_dir().unwrap().join("vh"));
+        assert_eq!(vibe_home(&[], &tilde), dirs::home_dir().unwrap().join("vh"));
+        // The session's over the inherited one; empty is none.
+        let inherited = [("VIBE_HOME".to_string(), "/tmp/inh".to_string())];
+        assert_eq!(vibe_home(&inherited, &set), PathBuf::from("/tmp/vh"));
+        assert_eq!(vibe_home(&inherited, &[]), PathBuf::from("/tmp/inh"));
+        let empty = [("VIBE_HOME".to_string(), String::new())];
+        assert_eq!(
+            vibe_home(&inherited, &empty),
+            dirs::home_dir().unwrap().join(".vibe")
+        );
+        assert_eq!(vibe_home(&[], &[]), dirs::home_dir().unwrap().join(".vibe"));
     }
 
     #[test]
@@ -1803,14 +1886,19 @@ provider = "mine"
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("without the thinking level"));
 
-        // Nothing chosen, nothing set but unharness's profiles.
+        // Nothing chosen, nothing set but unharness's profiles and vibe's
+        // home, which its `.env` then cannot move (#212).
         let (dir, cfg) = cli_setup();
         let cmd = cli(&cfg, dir.path(), &[]).unwrap();
         let set: Vec<String> = cmd
             .get_envs()
             .map(|(k, _)| k.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(set, ["VIBE_AGENT_PATHS"]);
+        assert_eq!(set, ["VIBE_AGENT_PATHS", "VIBE_HOME"]);
+        assert_eq!(
+            cli_env(&cmd, "VIBE_HOME").as_deref(),
+            Some(dir.path().to_string_lossy().as_ref())
+        );
         assert!(cli_warnings(&cfg, dir.path(), &[]).is_empty());
     }
 
@@ -2111,7 +2199,7 @@ provider = "mine"
             used.display()
         );
         assert!(!used.exists(), "{} left behind", used.display());
-        assert_ne!(used, vibe_home(&[]));
+        assert_ne!(used, vibe_home(&process_env(), &[]));
     }
 
     /// vibe also reads a FIFO for `.env` (1Password's local env files);
@@ -2363,7 +2451,7 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
     fn the_builder_picks_the_providers_environment() {
         let known = known();
         let lan = [lan()];
-        let plan = plan_for(&lan, &on("lan", None, None, &known));
+        let plan = plan_for(&lan, &[], &on("lan", None, None, &known));
         assert!(var(&plan, "VIBE_PROVIDERS").is_some());
 
         let home = tempfile::tempdir().unwrap();
@@ -2382,7 +2470,7 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
                 provider,
                 ..choice(Some("local"), Some("high"), &known)
             };
-            let plan = plan_for(&lan, &choice);
+            let plan = plan_for(&lan, &[], &choice);
             assert_eq!(var(&plan, "VIBE_PROVIDERS"), None);
             assert_eq!(plan.provider, None);
             assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("local"));
