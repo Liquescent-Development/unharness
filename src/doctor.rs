@@ -217,7 +217,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
         config_errors
             .iter()
             .filter(|e| e.left_out)
-            .find_map(|e| e.table.as_deref().filter(|t| *t == d))
+            .find_map(|e| e.table.as_deref().filter(|t| t.to_lowercase() == d))
     });
     if let Some(table) = default_left_out {
         println!(

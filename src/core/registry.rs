@@ -262,11 +262,12 @@ impl ConfigError {
 }
 
 /// What is wrong with the config's harness settings, in a stable order:
-/// an ACP agent without a command, an unknown policy (the TUI reads them again when the harness is
-/// switched, where an error could no longer end the run), a mode map that
-/// does not parse (it would leave the agent in a mode of its own
-/// choosing), a provider that is not whole or not Mistral Vibe's (a
-/// session on it would fail, or run somewhere else).
+/// the global policy, then per table its policy, an ACP agent without a
+/// command, its mode map and its providers. A policy must be one (the TUI
+/// reads them again when the harness is switched, where an error could no
+/// longer end the run), a mode map must parse (else the agent is left in
+/// a mode of its own choosing), a provider must be whole and Mistral
+/// Vibe's (a session on it would fail, or run somewhere else).
 pub fn config_errors(config: &crate::config::Config) -> Vec<ConfigError> {
     use crate::core::PermissionPolicy;
     const POLICIES: &str = "plan, ask, accept-edits, auto, bypass";
