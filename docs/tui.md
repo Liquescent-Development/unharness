@@ -418,9 +418,9 @@ agent's session ends and a new one starts that knows nothing of it
 (one started fresh and sent nothing yet carries on), so usage and
 the context meter start from zero; a harness used before the clear
 starts afresh too when you switch to it. Prompts held after a turn that
-did not finish stay queued. `/clear` waits until the turn, the subagents
-at work and a running `!` command are done (not for a Mistral Vibe
-subagent, below).
+did not finish stay queued. `/clear` is refused until the turn, the
+subagents at work and a running `!` command are done (not for a Mistral
+Vibe subagent, below).
 
 ## Hooks
 
@@ -445,11 +445,11 @@ first. A finished one stays listed so you can still read what it did,
 until you remove it with `Delete`. Its transcript is kept, and `Ctrl+S`
 still offers it. While any subagent is running, the status rule stays
 busy ("2 subagents running") instead of "Ready", and `/clear` or a
-change of model, effort or provider that would end the session waits
-for it. A Mistral Vibe subagent is the exception: vibe tells that one
-has ended only when its agent waits for it, so it may stay listed as
-running for good. It keeps neither the status rule busy nor any of
-those waiting, and goes with the session they end
+change of model, effort or provider that would end the session is
+refused while it works. A Mistral Vibe subagent is the exception: vibe
+tells that one has ended only when its agent waits for it, so it may
+stay listed as running for good. It does not keep the status rule
+busy and holds back none of those, and goes with the session they end
 ([Mistral Vibe](vibe.md#subagents)).
 
 The main transcript belongs to the main agent. A subagent appears there

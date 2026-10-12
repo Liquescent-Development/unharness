@@ -168,9 +168,6 @@ pub struct RunningSubagent {
     /// Tool calls it has made.
     pub tools: usize,
     pub started: Instant,
-    /// Its harness reports its end (`SubagentSupport::unreported_ends` is
-    /// not declared), so waiting for it ends.
-    end_reported: bool,
 }
 
 /// A prompt waiting for the running turn to finish.
@@ -1516,7 +1513,17 @@ impl App {
     /// for it) would hold them until the session ends: it stays listed
     /// at work with its note, and goes with the session.
     fn awaited_subagents(&self) -> usize {
-        self.subagents.iter().filter(|a| a.end_reported).count()
+        if self.subagents.is_empty() || self.caps().subagents.unreported_ends {
+            0
+        } else {
+            self.subagents.len()
+        }
+    }
+
+    /// Any subagent is listed at work, whether or not its end will be
+    /// told: its row's spinner and time go on.
+    pub fn has_running_subagents(&self) -> bool {
+        !self.subagents.is_empty()
     }
 
     /// Whether subagents at work keep the session from being ended for
@@ -1570,9 +1577,11 @@ impl App {
 
     /// How long the longest-running subagent has been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
+        if self.awaited_subagents() == 0 {
+            return 0.0;
+        }
         self.subagents
             .iter()
-            .filter(|a| a.end_reported)
             .map(|a| a.started.elapsed().as_secs_f32())
             .fold(0.0, f32::max)
     }
@@ -3017,7 +3026,6 @@ impl App {
                 self.transcript
                     .agent_started(&id, &description, kind.as_deref());
                 self.subagents.retain(|a| a.id != id);
-                let end_reported = !self.caps().subagents.unreported_ends;
                 self.subagents.push(RunningSubagent {
                     id,
                     description,
@@ -3026,7 +3034,6 @@ impl App {
                     described: false,
                     tools: 0,
                     started: Instant::now(),
-                    end_reported,
                 });
             }
             AgentEvent::SubagentProgress { id, activity } => {
@@ -5210,7 +5217,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it where the agent can, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -12071,9 +12078,11 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].status.is_none());
         assert_eq!(rows[0].activity.as_deref(), Some(UNSEEN_END));
-        // The status rule says ready, and herdr idle.
+        // The status rule says ready, and herdr idle; the row's spinner
+        // and time still run.
         assert!(!app.is_busy());
         assert_eq!(app.subagents_label(), None);
+        assert!(app.has_running_subagents());
         // Delete on it names no key that would stop it.
         assert!(app.subagent_list_down());
         app.dismiss_focused_subagent();
@@ -12186,8 +12195,10 @@ pub(crate) mod tests {
         assert!(!app.is_generating);
         assert_eq!(app.active, HarnessId::CODEX);
 
-        // pi cannot stop one: the user is only told to wait.
-        let mut app = test_app(HarnessId::PI);
+        // Antigravity tells the end but cannot stop one: the user is only
+        // told to wait.
+        let mut app = test_app(HarnessId::AGY);
+        assert!(app.caps().subagents.reported && !app.caps().subagents.unreported_ends);
         assert!(!app.caps().subagents.stop);
         app.submit_prompt("delegate".into());
         app.take_actions();

@@ -921,9 +921,10 @@ recorded ones. For anything else:
   child's answer into the parent model's input
   (`_subagents/_notifications.py`) and the client hears nothing, so a
   row the agent did not wait for stays at work until the session ends,
-  saying that its end shows only when the agent waits for it. Such a
-  row (`RunningSubagent::end_reported`, false under `unreported_ends`)
-  does not keep the TUI busy (status rule, herdr) and holds back
+  saying that its end shows only when the agent waits for it. Under
+  `unreported_ends` such a row (`App::awaited_subagents`) does not keep
+  the TUI busy (status rule, herdr; its own spinner and time still run,
+  `has_running_subagents`) and holds back
   neither `/clear`, a model, effort or provider change
   (`App::refused_for_subagents`) nor a handoff summary
   (`handoff_wanted_for`), since it would hold them until the session

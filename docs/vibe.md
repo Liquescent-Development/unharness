@@ -225,8 +225,9 @@ the agent does not wait for stays listed as at work until the session
 ends, even once it has finished. Such a subagent does not keep the
 status rule busy and does not hold back `/clear`, a change of model,
 effort or provider, or a handoff summary: the session they end takes it
-along, and its row then says it was stopped. Its own tool calls are not shown (vibe
-does not send them), and it cannot be stopped from unharness. Under `ask`
+along, and its row then says it was stopped. Its own tool calls are not
+shown (vibe does not send them), and it cannot be stopped from
+unharness. Under `ask`
 a subagent's writes and commands are asked about like the agent's own, but
 vibe does not say what they are, so no allow rule answers them. Each shows
 as a `tool` call that ends with your answer, since vibe does not report
