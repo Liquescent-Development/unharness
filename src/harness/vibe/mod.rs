@@ -215,6 +215,7 @@ fn cli_command(
     home: &Path,
     providers: &[Provider],
     profile_root: Option<&Path>,
+    inherited: &[(String, String)],
 ) -> Result<std::process::Command> {
     let Some(binary) = cli_binary(&cfg.binary) else {
         anyhow::bail!(
@@ -236,12 +237,11 @@ fn cli_command(
     // vibe would find elsewhere first ([`profiles::shadowing`]), ends the
     // run before vibe starts: no session describes the mode here to check
     // it by.
-    let prepared = profiles::prepare(profile_root, home, &cfg.cwd, &[]);
+    let prepared = profiles::prepare(profile_root, home, &cfg.cwd, inherited, &[]);
     if let Some(dir) = &prepared.dir {
-        let inherited = std::env::var("VIBE_AGENT_PATHS").ok();
         cmd.env(
             "VIBE_AGENT_PATHS",
-            profiles::agent_paths_env(dir, inherited.as_deref()),
+            profiles::agent_paths_env(dir, last_of(inherited, "VIBE_AGENT_PATHS")),
         );
     }
     if let Some(Err(why)) = prepared.own.get(agent) {
@@ -325,6 +325,10 @@ pub struct VibeHarness {
     /// Where unharness's profiles are written; `None` is under its state
     /// directory ([`profiles::default_root`]).
     profile_root: Option<PathBuf>,
+    /// The environment vibe is taken to inherit when the profiles are
+    /// prepared; `None` is unharness's own, read at each spawn
+    /// ([`process_env`]).
+    inherited: Option<Arc<Vec<(String, String)>>>,
 }
 
 impl Default for VibeHarness {
@@ -389,16 +393,42 @@ impl VibeHarness {
         .rebuild_spawn()
     }
 
+    /// Take `vars` as the environment vibe inherits from unharness when
+    /// its profiles are prepared, instead of unharness's own (tests, which
+    /// never read the real one).
+    pub fn inheriting_env(self, vars: Vec<(String, String)>) -> Self {
+        VibeHarness {
+            inherited: Some(Arc::new(vars)),
+            ..self
+        }
+        .rebuild_spawn()
+    }
+
+    /// The environment vibe inherits: [`Self::inheriting_env`]'s, else
+    /// unharness's own.
+    fn inherited_env(&self) -> Arc<Vec<(String, String)>> {
+        self.inherited
+            .clone()
+            .unwrap_or_else(|| Arc::new(process_env()))
+    }
+
     /// The environment each vibe process starts with: the providers' or
     /// vibe's own model choice ([`plan_for`]) and unharness's profiles
     /// ([`with_profiles`]).
     fn rebuild_spawn(self) -> Self {
         let providers = self.providers.clone();
         let root = self.profile_root.clone();
+        let fixed = self.inherited.clone();
         let acp = self
             .acp
             .choosing_at_spawn(Arc::new(move |choice: &SpawnChoice<'_>| {
-                with_profiles(plan_for(&providers, choice), root.as_deref(), choice)
+                let inherited = fixed.clone().unwrap_or_else(|| Arc::new(process_env()));
+                with_profiles(
+                    plan_for(&providers, choice),
+                    root.as_deref(),
+                    &inherited,
+                    choice,
+                )
             }));
         VibeHarness { acp, ..self }
     }
@@ -457,9 +487,32 @@ impl VibeHarness {
             acp,
             providers: Arc::default(),
             profile_root: None,
+            inherited: None,
         }
         .rebuild_spawn()
     }
+}
+
+/// unharness's environment, which a vibe process inherits; a name or value
+/// that is not Unicode is taken lossily, so that one variable vibe would not
+/// read anyway never stops the rest from being read.
+fn process_env() -> Vec<(String, String)> {
+    std::env::vars_os()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// The value the last of `vars` named `key` gives it.
+fn last_of<'a>(vars: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    vars.iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
 }
 
 /// `$VIBE_HOME` (from `env`, the session's additions, else unharness's
@@ -849,21 +902,22 @@ fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
 /// in the session. When they cannot be written the variable is left out
 /// and the modes are refused with the reason. Every process gets them,
 /// whatever its policy: a policy changed later sets the mode with no
-/// restart.
-fn with_profiles(mut plan: SpawnPlan, root: Option<&Path>, choice: &SpawnChoice<'_>) -> SpawnPlan {
+/// restart. `inherited` is the environment the process inherits from
+/// unharness.
+fn with_profiles(
+    mut plan: SpawnPlan,
+    root: Option<&Path>,
+    inherited: &[(String, String)],
+    choice: &SpawnChoice<'_>,
+) -> SpawnPlan {
     let home = vibe_home(choice.env);
-    let prepared = profiles::prepare(root, &home, choice.cwd, choice.env);
+    let prepared = profiles::prepare(root, &home, choice.cwd, inherited, choice.env);
     if let Some(dir) = &prepared.dir {
-        let inherited = choice
-            .env
-            .iter()
-            .rev()
-            .find(|(k, _)| k == "VIBE_AGENT_PATHS")
-            .map(|(_, v)| v.clone())
-            .or_else(|| std::env::var("VIBE_AGENT_PATHS").ok());
+        let before = last_of(choice.env, "VIBE_AGENT_PATHS")
+            .or_else(|| last_of(inherited, "VIBE_AGENT_PATHS"));
         plan.env.push((
             "VIBE_AGENT_PATHS".to_string(),
-            profiles::agent_paths_env(dir, inherited.as_deref()),
+            profiles::agent_paths_env(dir, before),
         ));
     }
     plan.own_modes = prepared.own;
@@ -1167,6 +1221,7 @@ impl Harness for VibeHarness {
             &vibe_home(&[]),
             &self.providers,
             self.profile_root.as_deref(),
+            &self.inherited_env(),
         )
     }
 
@@ -1589,7 +1644,7 @@ provider = "mine"
         home: &Path,
         providers: &[Provider],
     ) -> Result<std::process::Command> {
-        cli_command(cfg, home, providers, Some(&home.join("uh-profiles")))
+        cli_command(cfg, home, providers, Some(&home.join("uh-profiles")), &[])
     }
 
     fn cli_args(cmd: &std::process::Command) -> Vec<String> {

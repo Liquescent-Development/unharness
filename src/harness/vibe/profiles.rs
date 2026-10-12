@@ -264,10 +264,16 @@ fn read_config(path: &Path) -> Result<Option<String>> {
 
 /// The tools named by vibe's configuration for a session in `cwd`, with
 /// vibe's home at `home`: its `config.toml`, the project's
-/// ([`project_config`]), and the `VIBE_*` variables of unharness's
-/// environment and the session's additions (`env`). A file that is there
-/// and cannot be read is an error: what it allows could not be overridden.
-pub fn read_tool_keys(home: &Path, cwd: &Path, env: &[(String, String)]) -> Result<ToolKeys> {
+/// ([`project_config`]), and the `VIBE_*` variables of the environment
+/// vibe inherits from unharness (`inherited`; a test passes none) and the
+/// session's additions (`env`). A file that is there and cannot be read
+/// is an error: what it allows could not be overridden.
+pub fn read_tool_keys(
+    home: &Path,
+    cwd: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<ToolKeys> {
     let mut keys = ToolKeys::default();
     let files = std::iter::once(home.join("config.toml")).chain(project_config(home, cwd));
     for path in files {
@@ -278,7 +284,6 @@ pub fn read_tool_keys(home: &Path, cwd: &Path, env: &[(String, String)]) -> Resu
             );
         }
     }
-    let inherited: Vec<(String, String)> = std::env::vars().collect();
     keys.extend(ToolKeys::from_env(
         inherited
             .iter()
@@ -543,18 +548,26 @@ pub struct Prepared {
 }
 
 /// [`read_tool_keys`] and [`install`] under `root` (else
-/// [`default_root`]), for a session in `cwd` with vibe's home at `home`;
+/// [`default_root`]), for a session in `cwd` with vibe's home at `home`,
+/// the environment it inherits `inherited` and the session's additions
+/// `env`;
 /// a profile vibe would take from elsewhere first ([`shadowing`]) is
 /// refused with the file named. Read at spawn: a config or profile
 /// written between this and vibe's session open is not seen here (the
 /// nonce check of the session's answer still is).
-pub fn prepare(root: Option<&Path>, home: &Path, cwd: &Path, env: &[(String, String)]) -> Prepared {
+pub fn prepare(
+    root: Option<&Path>,
+    home: &Path,
+    cwd: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Prepared {
     let made = (|| {
         let root = match root {
             Some(r) => r.to_path_buf(),
             None => default_root()?,
         };
-        let keys = read_tool_keys(home, cwd, env)?;
+        let keys = read_tool_keys(home, cwd, inherited, env)?;
         install(&root, &keys)
     })();
     match made {
@@ -833,36 +846,43 @@ mod tests {
             project_config(&home, &cwd),
             Some(project.join(".vibe/config.toml"))
         );
-        let found = read_tool_keys(&home, &cwd, &[]).unwrap();
+        let found = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(found.names.contains("write_file") && found.names.contains("bash"));
         // A `.vibe` in the directory that holds vibe's home is its home.
         assert_eq!(project_config(&home, root.path()), None);
-        // The session's additions count too.
+        // The session's additions count too, and the environment vibe
+        // inherits, which is only what the caller passes.
         let env = [(
             "VIBE_TOOLS__edit__permission".to_string(),
             "always".to_string(),
         )];
+        let inherited = [(
+            "VIBE_TOOLS__grep__permission".to_string(),
+            "never".to_string(),
+        )];
+        let found = read_tool_keys(&home, &cwd, &inherited, &env).unwrap();
+        assert!(found.names.contains("edit") && found.never.contains("grep"));
         assert!(
-            read_tool_keys(&home, &cwd, &env)
+            !read_tool_keys(&home, &cwd, &[], &env)
                 .unwrap()
                 .names
-                .contains("edit")
+                .contains("grep")
         );
         // Unreadable: not TOML, too large, not a regular file.
         std::fs::write(home.join("config.toml"), "[tools").unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::write(
             home.join("config.toml"),
             vec![b'#'; (CONFIG_LIMIT + 1) as usize],
         )
         .unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::remove_file(home.join("config.toml")).unwrap();
         std::fs::create_dir(home.join("config.toml")).unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::remove_dir(home.join("config.toml")).unwrap();
         // None at all is no key.
-        let keys = read_tool_keys(&home, &cwd, &[]).unwrap();
+        let keys = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(keys.names.contains("bash") && !keys.names.contains("write_file"));
     }
 
@@ -878,14 +898,14 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".vibe/theirs")).unwrap();
         std::fs::write(cwd.join(".vibe/theirs/unharness-ask.toml"), "").unwrap();
         let store = root.path().join("store");
-        let clean = prepare(Some(&store), &home, &cwd, &[]);
+        let clean = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(clean.own[ASK].is_ok() && clean.own[ACCEPT_EDITS].is_ok());
         std::fs::write(
             cwd.join(".vibe/config.toml"),
             "agent_paths = [\".vibe/theirs\"]\n",
         )
         .unwrap();
-        let shadowed = prepare(Some(&store), &home, &cwd, &[]);
+        let shadowed = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(shadowed.dir.is_some());
         let why = shadowed.own[ASK].as_ref().unwrap_err();
         assert!(
@@ -903,7 +923,7 @@ mod tests {
             format!("agent_paths = [{:?}]\n", theirs.to_string_lossy()),
         )
         .unwrap();
-        let both = prepare(Some(&store), &home, &cwd, &[]);
+        let both = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(
             both.own[ACCEPT_EDITS]
                 .as_ref()
@@ -1017,7 +1037,13 @@ mod tests {
         let home = root.path().join(".vibe");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), "[tools").unwrap();
-        let prepared = prepare(Some(&root.path().join("store")), &home, root.path(), &[]);
+        let prepared = prepare(
+            Some(&root.path().join("store")),
+            &home,
+            root.path(),
+            &[],
+            &[],
+        );
         assert_eq!(prepared.dir, None);
         for name in [ASK, ACCEPT_EDITS] {
             let why = prepared.own[name].as_ref().unwrap_err();
