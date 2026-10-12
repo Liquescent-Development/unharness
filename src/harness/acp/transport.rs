@@ -49,11 +49,12 @@ use super::spawn::{SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::mcp;
 use crate::core::process::{LineProcess, RawLine};
+use crate::core::rules::{self, ToolAction};
 use crate::core::session::ProcessSlot;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, PermissionDecision,
-    PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
-    SessionInfo, StopReason,
+    PermissionKind, PermissionPolicy, PermissionRequest, ProcessModel, RemoteControl,
+    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 use crate::harness::which;
 
@@ -153,14 +154,28 @@ pub fn permission_outcome(options: &Value, decision: &PermissionDecision) -> Val
     }
 }
 
-/// Whether `policy` answers a request for a tool of this `kind` without asking.
-/// The policy is applied here, on the client, so it means the same for every
-/// ACP agent regardless of the modes it offers.
-pub fn auto_allows(policy: PermissionPolicy, kind: &str) -> bool {
+/// Whether `policy` answers a request for a tool of this `kind`, doing
+/// `action`, without asking. The policy is applied here, on the client, so
+/// it means the same for every ACP agent regardless of the modes it offers.
+///
+/// `accept-edits` answers an edit only of files inside `workspace` (#204),
+/// as Claude Code's `acceptEdits` covers only its working directory: the
+/// action's paths, compared as allow rules compare them
+/// ([`rules::edits_within`]), never in unharness's own directories. An edit
+/// elsewhere, of a relative or unknown path, or `Opaque`, is asked about.
+pub fn auto_allows(
+    policy: PermissionPolicy,
+    kind: &str,
+    action: Option<&ToolAction>,
+    workspace: &Path,
+) -> bool {
     match policy {
         // Not declared for ACP agents; never sent one.
         PermissionPolicy::Plan | PermissionPolicy::Ask => false,
-        PermissionPolicy::AcceptEdits => kind == "edit",
+        PermissionPolicy::AcceptEdits => {
+            kind == "edit"
+                && action.is_some_and(|a| rules::edits_within(a, workspace, &rules::own_dirs()))
+        }
         // Declared only for an agent whose own mode backs it (vibe's
         // smart-approve, #174): what it sends is what that mode's judgement
         // escalated, an edit included (`fixtures/vibe_acp_auto.jsonl`), and
@@ -178,10 +193,12 @@ pub fn auto_allows(policy: PermissionPolicy, kind: &str) -> bool {
 /// sends only `toolCallId` in the request, the kind, input and locations
 /// having come on the `tool_call` before it. A kind the request carries
 /// replaces the earlier one, as an update's does; a request without an id
-/// has only its own.
+/// has only its own. The action is the one the parser derived for the
+/// question, from the same merged call.
 fn screen_permission(
     parser: &mut AcpParser,
     policy: PermissionPolicy,
+    workspace: &Path,
     line: &str,
     params: &Value,
 ) -> (bool, Vec<AgentEvent>) {
@@ -193,7 +210,14 @@ fn screen_permission(
         .and_then(|id| parser.tool_kind(id))
         .or_else(|| call.get("kind").and_then(Value::as_str))
         .unwrap_or("");
-    let allowed = auto_allows(policy, kind);
+    let action = evs.iter().find_map(|ev| match ev {
+        AgentEvent::PermissionRequest(PermissionRequest {
+            kind: PermissionKind::ToolUse { action, .. },
+            ..
+        }) => Some(action),
+        _ => None,
+    });
+    let allowed = auto_allows(policy, kind, action, workspace);
     if allowed {
         evs.retain(|ev| !matches!(ev, AgentEvent::PermissionRequest(_)));
     }
@@ -1750,7 +1774,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     .await;
             }
             let options = params.get("options").cloned().unwrap_or(Value::Null);
-            let (allowed, evs) = screen_permission(&mut d.parser, d.policy, line, params);
+            let (allowed, evs) =
+                screen_permission(&mut d.parser, d.policy, d.cfg.workspace(), line, params);
             if d.cancelling.is_some() {
                 let pending = Pending::Permission {
                     rpc_id: id.clone(),
@@ -1828,6 +1853,7 @@ async fn forward(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn options() -> Value {
         json!([
@@ -1876,13 +1902,68 @@ mod tests {
     #[test]
     fn policy_is_applied_client_side() {
         use PermissionPolicy::*;
-        assert!(!auto_allows(Ask, "edit"));
-        assert!(auto_allows(AcceptEdits, "edit"));
-        assert!(!auto_allows(AcceptEdits, "execute"));
+        let ws = Path::new("/work");
+        let inside = ToolAction::Edit {
+            paths: vec!["/work/a.txt".into()],
+        };
+        let allows = |policy, kind| auto_allows(policy, kind, Some(&inside), ws);
+        assert!(!allows(Ask, "edit"));
+        assert!(allows(AcceptEdits, "edit"));
+        assert!(!allows(AcceptEdits, "execute"));
         // What an agent's auto mode escalates is the user's to answer.
-        assert!(!auto_allows(Auto, "edit"));
-        assert!(!auto_allows(Auto, "execute"));
-        assert!(auto_allows(Bypass, "execute"));
+        assert!(!allows(Auto, "edit"));
+        assert!(!allows(Auto, "execute"));
+        assert!(allows(Bypass, "execute"));
+        assert!(auto_allows(Bypass, "edit", None, ws));
+    }
+
+    /// accept-edits answers an edit of files in the workspace only (#204):
+    /// one outside, of a path that cannot be told, or of no known path is
+    /// the user's to answer. Bypass answers them all.
+    #[test]
+    fn accept_edits_answers_only_edits_inside_the_workspace() {
+        use PermissionPolicy::*;
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let out = tmp.path().join("outside");
+        std::fs::create_dir_all(ws.join("sub")).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        // A link in the workspace to a directory outside it.
+        std::os::unix::fs::symlink(&out, ws.join("out")).unwrap();
+        let edit = |paths: &[PathBuf]| ToolAction::Edit {
+            paths: paths.to_vec(),
+        };
+        let allows = |action: &ToolAction| auto_allows(AcceptEdits, "edit", Some(action), &ws);
+        assert!(allows(&edit(&[ws.join("a.txt")])));
+        assert!(allows(&edit(&[ws.join("sub/new/b.txt"), ws.join("c.txt")])));
+        assert!(!allows(&edit(&[out.join("x.txt")])));
+        assert!(!allows(&edit(&[ws.join("a.txt"), out.join("x.txt")])));
+        assert!(!allows(&edit(&[ws.join("out/x.txt")])));
+        assert!(!allows(&edit(&[ws.join("../outside/x.txt")])));
+        assert!(!allows(&edit(&[PathBuf::from("a.txt")])));
+        assert!(!allows(&edit(&[])));
+        assert!(!allows(&ToolAction::Opaque));
+        assert!(!auto_allows(AcceptEdits, "edit", None, &ws));
+        assert!(auto_allows(
+            Bypass,
+            "edit",
+            Some(&edit(&[out.join("x.txt")])),
+            &ws
+        ));
+        // A subfolder session's workspace is the root above it, as the
+        // rules' and the sandbox's is: the caller passes that.
+        assert!(auto_allows(
+            AcceptEdits,
+            "edit",
+            Some(&edit(&[ws.join("a.txt")])),
+            &ws
+        ));
+        assert!(!auto_allows(
+            AcceptEdits,
+            "edit",
+            Some(&edit(&[ws.join("a.txt")])),
+            &ws.join("sub")
+        ));
     }
 
     /// vibe-acp 2.26.1's shapes (`fixtures/vibe_acp_ask.jsonl`): the
@@ -1890,10 +1971,13 @@ mod tests {
     #[test]
     fn the_policy_reads_the_kind_of_the_merged_tool_call() {
         use PermissionPolicy::*;
+        let ws = Path::new("/work");
+        // A tool call of `kind` with a diff of /work/a.txt.
         let tool_call = |id: &str, kind: &str| {
             json!({"jsonrpc": "2.0", "method": "session/update", "params": {"update": {
                 "sessionUpdate": "tool_call", "toolCallId": id, "kind": kind,
-                "status": "in_progress", "title": "t"}}})
+                "status": "in_progress", "title": "t",
+                "content": [{"type": "diff", "path": "/work/a.txt", "newText": "hi"}]}}})
             .to_string()
         };
         let request = |call: Value| {
@@ -1907,7 +1991,7 @@ mod tests {
             let mut parser = AcpParser::new(HarnessId::intern("acp-test"));
             parser.feed(&tool_call("t", kind));
             let (line, params) = request(call);
-            let (allowed, evs) = screen_permission(&mut parser, policy, &line, &params);
+            let (allowed, evs) = screen_permission(&mut parser, policy, ws, &line, &params);
             let asked = evs
                 .iter()
                 .any(|e| matches!(e, AgentEvent::PermissionRequest(_)));
@@ -1931,19 +2015,35 @@ mod tests {
             "execute",
             json!({"toolCallId": "t", "kind": "edit"})
         ));
-        // A request for a call never announced has only its own fields.
+        // The path is the merged call's too: one the request moves outside
+        // the workspace is asked about.
+        assert!(!screen(
+            AcceptEdits,
+            "edit",
+            json!({"toolCallId": "t", "content": [
+                {"type": "diff", "path": "/elsewhere/a.txt", "newText": "hi"}]})
+        ));
+        // A request for a call never announced has only its own fields:
+        // a kind with no path is not enough.
         assert!(!screen(AcceptEdits, "edit", json!({"toolCallId": "u"})));
-        assert!(screen(
+        assert!(!screen(
             AcceptEdits,
             "execute",
             json!({"toolCallId": "u", "kind": "edit"})
         ));
+        assert!(screen(
+            AcceptEdits,
+            "execute",
+            json!({"toolCallId": "u", "kind": "edit", "content": [
+                {"type": "diff", "path": "/work/b.txt", "newText": "hi"}]})
+        ));
         // One without an id does not take what an earlier one without an id said.
         let mut parser = AcpParser::new(HarnessId::intern("acp-test"));
+        let (line, params) = request(json!({"kind": "edit", "content": [
+            {"type": "diff", "path": "/work/a.txt", "newText": "hi"}]}));
+        assert!(screen_permission(&mut parser, AcceptEdits, ws, &line, &params).0);
         let (line, params) = request(json!({"kind": "edit"}));
-        assert!(screen_permission(&mut parser, AcceptEdits, &line, &params).0);
-        let (line, params) = request(json!({}));
-        assert!(!screen_permission(&mut parser, AcceptEdits, &line, &params).0);
+        assert!(!screen_permission(&mut parser, AcceptEdits, ws, &line, &params).0);
     }
 
     #[test]

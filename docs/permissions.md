@@ -10,7 +10,7 @@ own allow rules. Set the policy with `--policy`, `UNHARNESS_POLICY`,
 |---|---|---|---|---|---|---|
 | `plan` | `plan` mode: reads and plans, asks before anything else, and waits for you to [approve the plan](#plan) | not available | not available | not available | not available | not available |
 | `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available | `ask` mode, prompts in the TUI |
-| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn | `ask` mode, unharness answers the edits |
+| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn | `ask` mode, unharness answers the edits in the workspace |
 | `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* | `smart-approve` (classifier, [what it lets through](vibe.md#auto)) |
 | `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` | `auto-approve` |
 
@@ -32,6 +32,21 @@ A harness that cannot hold to that does not offer `ask`:
   and, if it has session modes of its own, said which of them asks; such
   an agent with no mode map offers only `bypass`
   ([ACP agents](acp.md#modes)).
+
+### What `accept-edits` covers
+
+On Claude Code, Codex and Antigravity `accept-edits` is the CLI's own
+mode (see the table), which decides by itself what it lets through. For
+an ACP agent (Mistral Vibe included) unharness answers the edits itself,
+and only those whose every file is known and inside the workspace, the same
+one allow rules and the sandbox use: the nearest directory at or above
+the one you started in that has `.git`, `.agents` or `AGENTS.md`, else
+the one you started in. Started in a subdirectory of a project, the whole
+project counts. An edit outside it, through a symbolic link that leads
+out of it, of a relative path (except Mistral Vibe's, which are known to
+be in its session's directory), of a file in unharness's own config or
+state directory, or one the request does not name exactly, comes to you
+([ACP agents](acp.md#permissions)).
 
 ### Plan
 

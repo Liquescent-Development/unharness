@@ -1003,6 +1003,7 @@ fn start_session(
     let cfg = SessionConfig {
         binary,
         cwd: app.cwd.clone(),
+        workspace_root: app.workspace_root.clone(),
         model: app.current_model().cloned(),
         provider: app.chosen_provider().cloned(),
         effort: app.current_effort().map(str::to_string),

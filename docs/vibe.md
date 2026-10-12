@@ -71,7 +71,7 @@ that name, `ask` included.
 | Policy | vibe |
 |---|---|
 | `ask` | its `ask` mode: every write and command is asked about |
-| `accept-edits` | its `ask` mode, and unharness answers the edits |
+| `accept-edits` | its `ask` mode, and unharness answers the edits in the workspace; one outside it is asked about |
 | `auto` | its `smart-approve` mode: a Mistral model decides what runs (see [Auto](#auto)) |
 | `bypass` | its `auto-approve` mode |
 | `plan` | not offered: vibe's runtime hides its plan mode |

@@ -346,6 +346,7 @@ mod tests {
         SessionConfig {
             binary: PathBuf::from("sh"),
             cwd: std::env::temp_dir(),
+            workspace_root: None,
             model: None,
             provider: None,
             effort: None,

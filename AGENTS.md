@@ -346,6 +346,31 @@ recorded ones. For anything else:
   asked about and denied. vibe's edit diff names the file as the model wrote
   it (`a.txt`) beside an absolute location, so its action is `Opaque` and no
   edit rule matches it.
+  Under `accept-edits` (#204) the transport answers an edit request
+  only when its action (the parser's, from the merged call) is an `Edit`
+  whose every path is inside the session's workspace
+  (`SessionConfig::workspace`: the root `find_workspace_root` found at
+  launch, else `cwd`, which is what allow rules and the sandbox take, so
+  a session started in a subdirectory covers the whole root), compared
+  as rules compare paths (`rules::edits_within`: links followed; a
+  relative path, a link to nothing yet or `..` past a missing directory
+  is unknown) and never in unharness's own config or state directory.
+  Anything else is asked about, `Opaque` included; before, every request
+  of kind `edit` was answered wherever it wrote, also where vibe's own
+  `ask` mode had asked because the file was outside. vibe-acp 2.26.1 in
+  its `ask` mode asked about a write in the workspace and one to
+  `/tmp/l204/outside/x.txt` alike, by id alone, both with absolute diff
+  paths and locations, the second with options scoped
+  `outside_directory` (`fixtures/vibe_acp_accept_edits_outside.jsonl`,
+  e2e with the workspace as the recording's root and without it). Checked
+  in the TUI (tmux, Landlock, scratch `VIBE_HOME` and XDG directories,
+  `--harness vibe --policy accept-edits`, no root above the workspace):
+  a write to a workspace file ran with no modal, and a write to
+  `/tmp/l204/outside/y.txt` (writable in the sandbox) came as a modal and
+  was not made. Unverified: claude-agent-acp and codex-acp edits under
+  the policy (a claude-agent-acp `Write` outside the workspace is now
+  asked about, by the code), a link out of the workspace in a live run
+  (unit tests only), macOS.
   Config options (`SessionOptions::from_config_options`): the schema lets
   a select option's values come in groups (`options: [{group, name,
   options: [...]}]`, read in the schema of `@agentclientprotocol/sdk`

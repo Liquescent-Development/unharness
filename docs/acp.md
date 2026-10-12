@@ -67,13 +67,23 @@ unharness applies the permission policy to the requests an agent makes:
 | Policy | What unharness does |
 |---|---|
 | `ask` | shows every request |
-| `accept-edits` | answers file edits itself and shows the rest |
+| `accept-edits` | answers edits of files inside the workspace itself and shows the rest |
 | `auto` | shows every request, where the agent's own mode backs it (Mistral Vibe's `smart-approve`); otherwise not offered and falls back to `accept-edits` |
 | `bypass` | answers everything |
 
 What a request is for (an edit, a command, …) is the tool call's kind as
 the agent announced it, also when the request itself names the call only
 by its id (as Mistral Vibe's `vibe-acp` does).
+
+Under `accept-edits` an edit is answered only when every file it writes
+is known and inside the workspace: the nearest directory at or above the
+one you started in that has `.git`, `.agents` or `AGENTS.md`, else the
+one you started in, the same workspace allow rules and the sandbox use.
+Files are compared as allow rules compare them, after following symbolic
+links. An edit of a file outside it (in `/tmp`, your home directory,
+another project), of a relative path the agent might resolve its own
+way, of a file in unharness's own config or state directory, or one
+whose files the request does not name exactly, is shown to you.
 
 But an agent asks only about what it chooses to ask about, and unharness
 cannot make it ask. codex-acp 2.1.1 ran a command, an edit and a network

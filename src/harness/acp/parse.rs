@@ -1907,6 +1907,21 @@ mod tests {
         assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_auto_outside");
     }
 
+    /// vibe-acp 2.26.1 in its ask mode, the one behind `accept-edits`
+    /// (#204): a write in the workspace and one outside it, each asked
+    /// about by id alone, the edit's path absolute in its diff and
+    /// location. Which of them the policy answers is the transport's
+    /// (`transport::auto_allows`).
+    #[test]
+    fn fixture_vibe_acp_accept_edits_outside() {
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(
+            &mut p,
+            &fixtures_dir(file!()),
+            "vibe_acp_accept_edits_outside",
+        );
+    }
+
     #[test]
     fn effort_is_read_from_thought_level() {
         let options = json!([
