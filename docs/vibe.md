@@ -110,9 +110,11 @@ vibe applies above all of those:
 - Each profile's description carries a code unharness keeps beside them.
   vibe takes a profile of the same name from an `agent_paths` directory
   your `config.toml` or a trusted project's config lists before
-  unharness's; when the session describes the mode otherwise, `ask` and
-  `accept-edits` are refused for that session (the TUI asks you to choose
-  another policy) instead of running in that profile.
+  unharness's. When such a directory holds an `unharness-ask.toml` or
+  `unharness-accept-edits.toml` as vibe starts, or the session describes
+  the mode otherwise, that policy is refused for the session (the TUI asks
+  you to choose another, the refusal names the file) instead of running in
+  that profile.
 
 What vibe's admin configuration, set by your organisation and fetched
 when vibe starts, enforces still wins over any profile: if it allows a

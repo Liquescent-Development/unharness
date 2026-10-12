@@ -233,8 +233,9 @@ fn cli_command(
     }
     // Every run gets unharness's profiles, as a session's process does
     // ([`with_profiles`]); one behind the policy that is not there, or that
-    // vibe would find elsewhere first, ends the run before vibe starts:
-    // no session describes the mode here to check it by.
+    // vibe would find elsewhere first ([`profiles::shadowing`]), ends the
+    // run before vibe starts: no session describes the mode here to check
+    // it by.
     let prepared = profiles::prepare(profile_root, home, &cfg.cwd, &[]);
     if let Some(dir) = &prepared.dir {
         let inherited = std::env::var("VIBE_AGENT_PATHS").ok();
@@ -245,19 +246,6 @@ fn cli_command(
     }
     if let Some(Err(why)) = prepared.own.get(agent) {
         anyhow::bail!("policy '{policy}' is not available for vibe's own CLI: {why}");
-    }
-    if prepared.own.contains_key(agent) {
-        let file = format!("{agent}.toml");
-        let first = profiles::configured_agent_paths(home, &cfg.cwd)
-            .context("reading the agent_paths of vibe's configuration")?
-            .into_iter()
-            .find(|dir| dir.join(&file).exists());
-        if let Some(dir) = first {
-            anyhow::bail!(
-                "policy '{policy}' is not available for vibe's own CLI: vibe would take its agent '{agent}' from {}, an agent_paths directory of its configuration that it reads before unharness's",
-                dir.display()
-            );
-        }
     }
     cmd.arg("--workdir").arg(&cfg.cwd);
     cmd.arg("--agent").arg(agent);
@@ -1821,7 +1809,7 @@ provider = "mine"
         .unwrap();
         let why = cli(&cfg, home, &[]).unwrap_err().to_string();
         assert!(
-            why.contains("would take its agent 'unharness-ask' from"),
+            why.contains("would take its mode 'unharness-ask' from"),
             "{why}"
         );
         // Not the one behind accept-edits, nor auto-approve.

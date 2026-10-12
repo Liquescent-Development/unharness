@@ -5336,6 +5336,50 @@ async fn vibe_refuses_ask_when_unharness_ask_is_not_its_own() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// A profile named `unharness-ask` in an `agent_paths` directory of the
+/// user's vibe config, which vibe reads before unharness's: `ask` is
+/// refused at spawn with the file named, before the session's description
+/// is even looked at (here it would match: the recorded nonce).
+#[tokio::test]
+async fn vibe_refuses_ask_when_its_config_lists_another_unharness_ask() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let home = permissive_vibe_home();
+    let theirs = home.path().join("theirs");
+    std::fs::create_dir(&theirs).unwrap();
+    std::fs::write(theirs.join("unharness-ask.toml"), "").unwrap();
+    let config = std::fs::read_to_string(home.path().join("config.toml")).unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!("agent_paths = [{:?}]\n{config}", theirs.to_string_lossy()),
+    )
+    .unwrap();
+    let mut handle = vibe_own_profile(
+        &fake,
+        home.path(),
+        "vibe_acp_own_profile.jsonl",
+        PermissionPolicy::Ask,
+        Some(RECORDED_NONCE),
+    );
+    handle
+        .send(SessionCommand::turn("write a.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(refused(&events, PermissionPolicy::Ask), "{events:?}");
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(
+        why.contains("would take its mode 'unharness-ask' from"),
+        "{why}"
+    );
+    let file = theirs.join("unharness-ask.toml");
+    assert!(why.contains(&*file.to_string_lossy()), "{why}");
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// The fake ACP agent as vibe-acp, which rewinds with its `_rewind/to`.
 fn vibe_rewinding(fake: &Fake, fixture: &Path) -> SessionHandle {
     let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);

@@ -1149,11 +1149,19 @@ recorded ones. For anything else:
   profile that is not unharness's from its own, not a copy of it: an
   agent in a trusted folder that writes a `.vibe/config.toml` naming an
   `agent_paths` directory with a copied `unharness-ask.toml` gets past it
-  (such a config can already start MCP servers, #171). vibe's CLI cannot
-  be checked that way, so `cli_command` refuses a run whose profile is in
-  an `agent_paths` directory of either config file. Admin config (fetched
-  from the organisation at startup, `layers/admin.py`) still wins over the
-  profile. The mode is set through the mode option as before; vibe's
+  (such a config can already start MCP servers, #171). So at every spawn,
+  a session's and vibe's CLI's alike, `profiles::prepare` also refuses a
+  mode whose file (`unharness-ask.toml`, `unharness-accept-edits.toml`)
+  exists in an `agent_paths` directory of the user's or the project's
+  config (trusted or not; each entry relative to the session's directory,
+  literally and with `~` expanded, since 2.26.1 does not expand it), the
+  file named in the refusal; a `VIBE_AGENT_PATHS` the user set is not
+  looked at, since unharness's directory goes before its entries. What
+  remains: a config or profile written between that read and vibe's
+  session open (the description check still sees a profile that is not a
+  copy), a copied profile in a directory the check cannot see (GrowthBook
+  or admin config), and admin config (fetched from the organisation at
+  startup, `layers/admin.py`), which wins over the profile. The mode is set through the mode option as before; vibe's
   `set_config_option` and `set_mode` both call `agents.switch`
   (`acp/agent.py`), and the session lists the custom modes in both.
   Recorded with the environment the driver sets (bwrap, a scratch
@@ -1164,8 +1172,9 @@ recorded ones. For anything else:
   written; `fixtures/vibe_acp_own_profile_edits.jsonl` under
   `unharness-accept-edits`, the write in the workspace ran unasked, a
   write to `/tmp/l196/outside.txt` and the `touch` were asked about
-  (e2e tests through `VibeHarness` with the recorded nonce, and one with
-  another nonce refused). Checked live with the same home: `unharness
+  (e2e tests through `VibeHarness` with the recorded nonce, one with
+  another nonce refused, and one with an `agent_paths` entry holding an
+  `unharness-ask.toml` refused at spawn). Checked live with the same home: `unharness
   --print --native --policy ask` (Landlock) had vibe ask about
   `file_system.write_file` and deny it, nothing written; the TUI (tmux,
   Landlock) under `ask` showed the write's modal. The e2e tests built

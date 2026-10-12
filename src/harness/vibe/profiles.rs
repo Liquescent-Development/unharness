@@ -288,9 +288,12 @@ pub fn read_tool_keys(home: &Path, cwd: &Path, env: &[(String, String)]) -> Resu
     Ok(keys)
 }
 
-/// The `agent_paths` vibe's config files name for a session in `cwd`, as
-/// vibe takes them: relative to `cwd`, `~` expanded. A profile in one of
-/// them is found before unharness's.
+/// The `agent_paths` vibe's config files name for a session in `cwd`:
+/// relative to `cwd` (vibe-acp runs there), each also with `~` expanded
+/// (vibe 2.26.1 does not expand it, `vibe_schema.py`; both are looked at).
+/// The project's file is taken trusted or not. A profile in one of them is
+/// found before unharness's: `agent_paths` concatenates across vibe's
+/// layers in order, and both TOML layers are below the environment.
 pub fn configured_agent_paths(home: &Path, cwd: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let files = std::iter::once(home.join("config.toml")).chain(project_config(home, cwd));
@@ -305,12 +308,31 @@ pub fn configured_agent_paths(home: &Path, cwd: &Path) -> Result<Vec<PathBuf>> {
             continue;
         };
         for entry in list.iter().filter_map(toml::Value::as_str) {
-            let p =
-                crate::core::sandbox::expand_home(Path::new(entry), dirs::home_dir().as_deref());
-            out.push(cwd.join(p));
+            let literal = cwd.join(entry);
+            let expanded = cwd.join(crate::core::sandbox::expand_home(
+                Path::new(entry),
+                dirs::home_dir().as_deref(),
+            ));
+            if expanded != literal {
+                out.push(expanded);
+            }
+            out.push(literal);
         }
     }
     Ok(out)
+}
+
+/// The file vibe would take as `profile` before unharness's own: one of that
+/// name in an `agent_paths` directory of the user's or the project's
+/// config ([`configured_agent_paths`]). A `VIBE_AGENT_PATHS` the user set
+/// is not looked at: unharness puts its own directory before those.
+pub fn shadowing(home: &Path, cwd: &Path, profile: Profile) -> Result<Option<PathBuf>> {
+    let file = format!("{}.toml", profile.name());
+    Ok(configured_agent_paths(home, cwd)
+        .context("reading the agent_paths of vibe's configuration")?
+        .into_iter()
+        .map(|dir| dir.join(&file))
+        .find(|path| path.exists()))
 }
 
 /// A profile's text: the header, then the TOML vibe reads.
@@ -521,7 +543,11 @@ pub struct Prepared {
 }
 
 /// [`read_tool_keys`] and [`install`] under `root` (else
-/// [`default_root`]), for a session in `cwd` with vibe's home at `home`.
+/// [`default_root`]), for a session in `cwd` with vibe's home at `home`;
+/// a profile vibe would take from elsewhere first ([`shadowing`]) is
+/// refused with the file named. Read at spawn: a config or profile
+/// written between this and vibe's session open is not seen here (the
+/// nonce check of the session's answer still is).
 pub fn prepare(root: Option<&Path>, home: &Path, cwd: &Path, env: &[(String, String)]) -> Prepared {
     let made = (|| {
         let root = match root {
@@ -532,10 +558,25 @@ pub fn prepare(root: Option<&Path>, home: &Path, cwd: &Path, env: &[(String, Str
         install(&root, &keys)
     })();
     match made {
-        Ok((dir, own)) => Prepared {
-            dir: Some(dir),
-            own,
-        },
+        Ok((dir, mut own)) => {
+            for profile in Profile::ALL {
+                let why = match shadowing(home, cwd, profile) {
+                    Ok(None) => continue,
+                    Ok(Some(file)) => format!(
+                        "vibe would take its mode '{}' from {}, in an agent_paths directory of \
+                         its configuration, which it reads before unharness's own",
+                        profile.name(),
+                        file.display()
+                    ),
+                    Err(e) => format!("unharness could not check vibe's agent_paths: {e:#}"),
+                };
+                own.insert(profile.name().to_string(), Err(why));
+            }
+            Prepared {
+                dir: Some(dir),
+                own,
+            }
+        }
         Err(e) => {
             let why = format!("unharness could not put its vibe profile in place: {e:#}");
             Prepared {
@@ -825,6 +866,53 @@ mod tests {
         assert!(keys.names.contains("bash") && !keys.names.contains("write_file"));
     }
 
+    /// A profile of unharness's name in an `agent_paths` directory of the
+    /// user's or the project's config refuses that mode at spawn, the file
+    /// named; the other mode stays.
+    #[test]
+    fn a_profile_vibe_would_find_first_refuses_its_mode() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".vibe");
+        let cwd = root.path().join("ws");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(cwd.join(".vibe/theirs")).unwrap();
+        std::fs::write(cwd.join(".vibe/theirs/unharness-ask.toml"), "").unwrap();
+        let store = root.path().join("store");
+        let clean = prepare(Some(&store), &home, &cwd, &[]);
+        assert!(clean.own[ASK].is_ok() && clean.own[ACCEPT_EDITS].is_ok());
+        std::fs::write(
+            cwd.join(".vibe/config.toml"),
+            "agent_paths = [\".vibe/theirs\"]\n",
+        )
+        .unwrap();
+        let shadowed = prepare(Some(&store), &home, &cwd, &[]);
+        assert!(shadowed.dir.is_some());
+        let why = shadowed.own[ASK].as_ref().unwrap_err();
+        assert!(
+            why.contains("would take its mode 'unharness-ask' from"),
+            "{why}"
+        );
+        assert!(why.contains(".vibe/theirs/unharness-ask.toml"), "{why}");
+        assert!(shadowed.own[ACCEPT_EDITS].is_ok());
+        // From the user's config too, by an absolute path.
+        let theirs = root.path().join("mine");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("unharness-accept-edits.toml"), "").unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!("agent_paths = [{:?}]\n", theirs.to_string_lossy()),
+        )
+        .unwrap();
+        let both = prepare(Some(&store), &home, &cwd, &[]);
+        assert!(
+            both.own[ACCEPT_EDITS]
+                .as_ref()
+                .unwrap_err()
+                .contains("mine/unharness-accept-edits.toml")
+        );
+        assert!(both.own[ASK].is_err());
+    }
+
     #[test]
     fn agent_paths_are_read_relative_to_the_session() {
         let root = tempfile::tempdir().unwrap();
@@ -833,10 +921,20 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(cwd.join(".vibe")).unwrap();
         std::fs::write(home.join("config.toml"), "agent_paths = [\"/abs/a\"]\n").unwrap();
-        std::fs::write(cwd.join(".vibe/config.toml"), "agent_paths = [\"rel\"]\n").unwrap();
+        std::fs::write(
+            cwd.join(".vibe/config.toml"),
+            "agent_paths = [\"rel\", \"~/t\"]\n",
+        )
+        .unwrap();
+        let home_dir = dirs::home_dir().unwrap();
         assert_eq!(
             configured_agent_paths(&home, &cwd).unwrap(),
-            [PathBuf::from("/abs/a"), cwd.join("rel")]
+            [
+                PathBuf::from("/abs/a"),
+                cwd.join("rel"),
+                home_dir.join("t"),
+                cwd.join("~/t"),
+            ]
         );
     }
 
