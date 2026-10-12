@@ -98,6 +98,8 @@ pub struct AcpHarness {
     relative_edits: bool,
     /// Reads what the agent says in fields of its own (`_meta`).
     meta_reader: Option<parse::MetaReaderFactory>,
+    /// The extension method that rewinds a session (`rewinding_with`).
+    rewind: Option<&'static str>,
 }
 
 impl AcpHarness {
@@ -129,6 +131,7 @@ impl AcpHarness {
             sign_in: None,
             relative_edits: false,
             meta_reader: None,
+            rewind: None,
         })
     }
 
@@ -217,6 +220,20 @@ impl AcpHarness {
         }
     }
 
+    /// Rewind the session with this extension method, which takes
+    /// `sessionId`, `messageId` (the id the agent's `user_message_chunk`
+    /// gave the turn's message, reported as its `TurnAnchor`) and
+    /// `restoreFiles: false`, drops that message and everything after it
+    /// in place, and answers an unknown id with an error (Mistral Vibe's
+    /// `_rewind/to`, 2.26.1). Not the spec: only for an agent known to
+    /// have it. Files are restored by unharness from its checkpoints.
+    pub fn rewinding_with(self, method: &'static str) -> Self {
+        AcpHarness {
+            rewind: Some(method),
+            ..self
+        }
+    }
+
     /// The presets whose binary is installed and whose name is not taken.
     pub fn installed_presets(taken: &[HarnessId]) -> Vec<AcpHarness> {
         PRESETS
@@ -290,7 +307,13 @@ impl Harness for AcpHarness {
             compaction: false,
             context_usage: true,
             rate_limits: false,
-            rewind: RewindSupport::default(),
+            // Not in the spec; an agent known to have one declares it.
+            rewind: RewindSupport {
+                conversation: self.rewind.is_some(),
+                // A forked session's inherited messages have ids of its
+                // own (vibe 2.26.1 numbers them by position).
+                anchors_survive_fork: false,
+            },
             fork: false,
             // `mcpServers` of the session request. Every agent must take
             // stdio servers; http ones and a plan mode are reported by the
@@ -361,6 +384,7 @@ impl Harness for AcpHarness {
                 sign_in: self.sign_in.clone(),
                 relative_edits: self.relative_edits,
                 meta_reader: self.meta_reader,
+                rewind: self.rewind,
             },
             cfg,
         )
@@ -395,6 +419,13 @@ mod tests {
 
         let caps = h.capabilities();
         assert!(caps.interactive_permissions && caps.plan_updates && !caps.steer);
+        // Rewind is not in the spec: only an agent known to have it does.
+        assert!(!caps.rewind.conversation);
+        let rewinds = AcpHarness::new("x", None, &["x".into()])
+            .unwrap()
+            .rewinding_with("_rewind/to");
+        assert!(rewinds.capabilities().rewind.conversation);
+        assert!(!rewinds.capabilities().rewind.anchors_survive_fork);
         assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
         assert!(h.build_print_command(&PrintConfig::default()).is_err());
 

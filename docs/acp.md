@@ -182,7 +182,9 @@ comes back in the mode the original was in.
 whole session, so the two agree. There is no fork at an earlier point:
 to go on from an earlier prompt, `/rewind` first, which starts the agent
 afresh with the transcript up to there (ACP has no rewind), and a fork
-after that is a fresh session too.
+after that is a fresh session too. Mistral Vibe is the exception: its own
+rewind is used ([Mistral Vibe](vibe.md#rewind)), so its session is still
+the conversation's after `/rewind` and `/fork` then forks it.
 
 Whether an agent forks is known once a session of it has started: an
 agent not run since unharness started, like one that does not advertise

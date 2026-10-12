@@ -206,6 +206,10 @@ pub struct AcpParser {
     edits_relative_to: Option<PathBuf>,
     /// The harness's reader of its agent's own fields (`reading_meta`).
     meta: Option<Box<dyn MetaReader>>,
+    /// The `messageId` of a `user_message_chunk` is a turn anchor
+    /// (`anchoring_turns`); the last one reported, so that the other
+    /// chunks of one message say nothing.
+    anchors: Option<Option<String>>,
 }
 
 impl AcpParser {
@@ -222,6 +226,7 @@ impl AcpParser {
             asked: false,
             edits_relative_to: None,
             meta: None,
+            anchors: None,
         }
     }
 
@@ -230,6 +235,19 @@ impl AcpParser {
     pub fn reading_meta(self, reader: Option<Box<dyn MetaReader>>) -> Self {
         AcpParser {
             meta: reader,
+            ..self
+        }
+    }
+
+    /// Report the `messageId` of the user's message, as the agent echoes
+    /// it in `user_message_chunk`, as the turn's anchor
+    /// (`AgentEvent::TurnAnchor`). Only for an agent that rewinds to that
+    /// id (Mistral Vibe's `_rewind/to`, which its harness declares); the
+    /// spec gives the id no meaning. A history replayed by `session/load`
+    /// is not reported.
+    pub fn anchoring_turns(self, anchors: bool) -> Self {
+        AcpParser {
+            anchors: anchors.then_some(None),
             ..self
         }
     }
@@ -453,7 +471,20 @@ impl AcpParser {
             // The session's mode, and the mode option of a
             // `config_option_update`, are the transport's: it holds the
             // agent to the mode its policy maps to (`modes.rs`).
-            // user_message_chunk (our own prompt echoed), and anything newer.
+            // Our own prompt echoed: its id is what a rewind names, for an
+            // agent that rewinds (`anchoring_turns`). One message may come
+            // in several chunks, each with its id.
+            "user_message_chunk" => {
+                let id = s(update, "messageId");
+                if let Some(last) = &mut self.anchors
+                    && !id.is_empty()
+                    && last.as_deref() != Some(id)
+                {
+                    *last = Some(id.to_string());
+                    out.push(AgentEvent::TurnAnchor { id: id.to_string() });
+                }
+            }
+            // Anything newer.
             _ => {}
         }
         out
@@ -1402,6 +1433,84 @@ mod tests {
         for case in ["vibe_acp_load_missing", "vibe_acp_fork_missing"] {
             assert_fixture(&mut parser(), &dir, case);
         }
+    }
+
+    /// The anchors a fixture reports, for an agent that rewinds.
+    fn anchors(case: &str, p: &mut AcpParser) -> Vec<String> {
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl"))).unwrap();
+        crate::core::testing::replay(p, &text)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::TurnAnchor { id } => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// vibe-acp 2.26.1 echoes each prompt as a `user_message_chunk` whose
+    /// `messageId` is what its `_rewind/to` takes. Two turns, a rewind to
+    /// the second message (its answer is the driver's, and says nothing
+    /// here), then a turn whose answer knows only the first one's code
+    /// word: three anchors, one a turn.
+    #[test]
+    fn fixture_vibe_acp_rewind() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut parser().anchoring_turns(true), &dir, "vibe_acp_rewind");
+        assert_eq!(
+            anchors("vibe_acp_rewind", &mut parser().anchoring_turns(true)),
+            [
+                "0b774d1b-00a0-4a1f-b468-92bad5480550",
+                "f0539b32-76a6-4bb8-976b-af5b729addcd",
+                "29e7094a-5c47-4bec-8f20-7ae5dccb1d56",
+            ]
+        );
+        // The spec gives the id no meaning: another agent reports none.
+        assert!(anchors("vibe_acp_rewind", &mut parser()).is_empty());
+    }
+
+    /// A rewind to an id vibe never gave is refused with -32602 (an error
+    /// here; the driver takes the answer and reports `RewindFailed`), one
+    /// to the session's first message empties it.
+    #[test]
+    fn fixture_vibe_acp_rewind_first() {
+        let dir = fixtures_dir(file!());
+        assert_fixture(
+            &mut parser().anchoring_turns(true),
+            &dir,
+            "vibe_acp_rewind_first",
+        );
+    }
+
+    /// The chunks of one message say its id once; a history replayed by
+    /// `session/load` says nothing.
+    #[test]
+    fn a_message_is_one_anchor_and_a_replay_none() {
+        let chunk = |id: &str, text: &str| {
+            json!({"jsonrpc": "2.0", "method": "session/update", "params": {
+                "sessionId": "s", "update": {"sessionUpdate": "user_message_chunk",
+                "messageId": id, "content": {"type": "text", "text": text}}}})
+            .to_string()
+        };
+        let mut p = parser().anchoring_turns(true);
+        let mut out = Vec::new();
+        for line in [
+            chunk("m1", "look at"),
+            chunk("m1", "this"),
+            chunk("m2", "and"),
+        ] {
+            out.extend(p.feed(&line));
+        }
+        assert_eq!(
+            out,
+            [
+                AgentEvent::TurnAnchor { id: "m1".into() },
+                AgentEvent::TurnAnchor { id: "m2".into() },
+            ]
+        );
+        assert!(p.feed(&chunk("", "no id")).is_empty());
+        p.set_replaying(true);
+        assert!(p.feed(&chunk("m3", "old")).is_empty());
     }
 
     /// The questions of every request in a fixture, with the tool call

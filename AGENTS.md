@@ -910,6 +910,41 @@ recorded ones. For anything else:
   show as a second end), `.stop` and `.interrupt` by the model (the row
   stays at work), nested subagents, a child at `session/close` or
   process exit, a custom subagent from a trusted project, macOS.
+  Rewind (#167, `vibe::REWIND_METHOD`, `AcpHarness::rewinding_with`):
+  vibe-acp 2.26.1 has the extension requests `_rewind/to` and
+  `_rewind/preview` (`_rewind_extension`, `vibe/acp/agent.py`; the `_`
+  is stripped by its router), not advertised at `initialize`, so the
+  vibe module declares `RewindSupport::conversation`. Each takes
+  `sessionId` and `messageId`, the id vibe gave the user's message and
+  echoed as `user_message_chunk.messageId` (live and in a `session/load`
+  replay, the same id both ways), which the parser reports as the turn's
+  `TurnAnchor` only for an agent that rewinds; the driver lets one
+  through per turn sent and reports an empty one for a turn that was
+  not sent or whose message was not echoed. `_rewind/to` drops that
+  message and everything after it in place: the same session id,
+  nothing on stdout but its answer (`messageContent`, the dropped
+  prompt, and the restored paths), and the cut is saved (a new process's
+  `session/load` replayed only the kept turns). With `restoreFiles` (by
+  default true) vibe would put back the files its own snapshots saw; it
+  is sent `false` and unharness's checkpoints restore files, so the two
+  never both write. It refuses an id it did not give with -32602
+  "Rewindable history entry not found" (`RewindFailed`) and, read in the
+  source, one while a turn runs (`_require_settled`); it takes the session's first message
+  (the history emptied; unharness starts a fresh session there anyway).
+  A turn sent meanwhile waits for the answer. A fork's inherited messages
+  get ids of their own (`imported-<n>`, `mistralai_vibe_local_harness/
+  vibe/_fork.py`), so `anchors_survive_fork` is false (read, not run).
+  Fixtures `vibe_acp_rewind` (two turns writing a file each with a code
+  word, a rewind to the second, then only the first word known; the
+  second file stayed on disk) and `vibe_acp_rewind_first` (an unknown id,
+  then the first message), recorded with `--ext`. Checked in the TUI
+  (tmux, Landlock, a scratch `VIBE_HOME`, a git workspace): two turns
+  each writing a file, `/rewind` to the second with `f`: "session
+  rewound", `beta.txt` gone, and vibe then named only the first code word
+  in the same session; after `/quit` and `--resume` (reattached with
+  `session/load`) a rewind to the third prompt left the first as the last
+  one vibe could quote. Unverified: a rewind while a vibe subagent runs,
+  and one after `/fork`.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
@@ -970,7 +1005,8 @@ recorded ones. For anything else:
   only in place once it answers) and `--fork <id>` (entry ids survive);
   ACP `session/fork` where the agent advertises it (vibe-acp 2.26.1,
   codex-acp 2.1.1, claude-agent-acp 0.85.1; see the ACP note), of the
-  whole session only, with no rewind, so no anchors to carry.
+  whole session only, with no rewind in the spec, so no anchors to carry
+  (vibe's own `_rewind/to` is in the vibe note).
   Claude's `rewind_files` answers "File rewinding is not enabled" in this
   mode, which is why file restore is unharness's own.
 - File attachments (PDF and text): Claude Code 2.1.289 takes `document`

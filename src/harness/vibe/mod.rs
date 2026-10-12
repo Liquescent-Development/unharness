@@ -49,6 +49,13 @@ pub const EFFORT_OPTION: &str = "thinking";
 /// and with it the session, so nothing else is put in `VIBE_MODELS`.
 pub const THINKING_LEVELS: [&str; 5] = ["off", "low", "medium", "high", "max"];
 
+/// vibe-acp's extension that rewinds a session in place to before a user
+/// message (`_rewind_extension`, `vibe/acp/agent.py` of 2.26.1; not
+/// advertised at `initialize`). Its `restoreFiles` is sent `false`:
+/// unharness restores files from its own checkpoints
+/// (`fixtures/vibe_acp_rewind*.jsonl`).
+pub const REWIND_METHOD: &str = "_rewind/to";
+
 /// The provider of a model that the user's `config.toml` does not define:
 /// vibe's built-in models and the ones its experiments add are all
 /// `mistral` (`DEFAULT_MODELS`, `vibe/core/config/vibe_schema.py`).
@@ -309,6 +316,7 @@ impl VibeHarness {
         .signing_in_with(Some("vibe --setup"))
         .resolving_relative_edits()
         .reading_meta_with(subagents::reader)
+        .rewinding_with(REWIND_METHOD)
         .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
             spawn_env(&vibe_home(choice.env), choice)
         }));
@@ -1004,6 +1012,14 @@ provider = "mine"
         assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
         assert!(caps.supports_policy(PermissionPolicy::Plan).is_none());
         assert!(!caps.plan_mode);
+        // Through its `_rewind/to`; a fork's messages have ids of its own.
+        assert_eq!(
+            caps.rewind,
+            crate::core::RewindSupport {
+                conversation: true,
+                anchors_survive_fork: false,
+            }
+        );
         // Stdio servers in `session/new`; vibe-acp 2.26.1 names no
         // `mcpCapabilities`, so no http ones (a session would say).
         assert_eq!(
