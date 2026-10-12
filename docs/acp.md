@@ -21,8 +21,9 @@ The table name is the harness id: `unharness -H claude-acp`, or
 Mistral Vibe's `vibe-acp` is built in: `unharness -H vibe` with nothing in
 the config, `ask` mapped to vibe's `ask` mode and `bypass` to
 `auto-approve` (see Modes below). A `[harnesses.vibe]` table sets its
-`command`, `display_name`, `asks_permission` and `modes` in place of the
-built-in ones; the rest stays.
+`command`, `display_name`, `asks_permission`, `modes` and `sign_in` in
+place of the built-in ones; the rest stays. When vibe is not signed in,
+unharness says to run `vibe --setup` ([Sign-in](#sign-in)).
 
 Its model and reasoning level (`/model`, `/effort`, `default_model`,
 `default_effort`) are never set over ACP, because vibe 2.26.1 writes a
@@ -183,6 +184,45 @@ it, starts fresh in the copy with the transcript as context. If the fork
 itself fails, unharness starts a new session and says that it does not
 know the conversation.
 
+## Sign-in
+
+unharness does not sign agents in. An agent that wants you signed in
+answers with the protocol's auth-required error, at the start of a session
+(Mistral Vibe 2.26.1 without an API key answers so before the first
+prompt) or at a prompt. unharness then shows the sign-in methods the agent
+offered and, where it knows it, the command to run in a terminal: for
+Mistral Vibe `vibe --setup`, built in, and for another agent what its
+table's `sign_in` names:
+
+```toml
+[harnesses.my-agent]
+protocol = "acp"
+command  = ["my-agent", "--acp"]
+sign_in  = "my-agent login"   # shown when it is not signed in; never run
+```
+
+```text
+vibe is not signed in (Missing API key for mistral provider). It offers:
+"Sign in through Mistral AI Studio" (Sign into Mistral Vibe through your
+Mistral AI Studio account). unharness does not sign agents in: run
+`vibe --setup` in a terminal, then try again
+```
+
+Without `sign_in` it says to sign in with the agent's own command line.
+The agent is then ended, and nothing is tried again by itself: once you
+have signed in, your next prompt starts it afresh, and it picks up the new
+sign-in. A session that was to be resumed or forked is not replaced by a
+new one meanwhile. With `--print` the run fails with this message and
+exit status 1. `unharness doctor` shows the command beside the agent.
+
+Neither the protocol's `authenticate` request nor an agent's terminal
+sign-in is used. A terminal sign-in is a command the agent names, which
+unharness would have to run outside the sandbox and in your terminal,
+and the agent's own login is left to you for every other harness too;
+so unharness does not declare that it can run one, and an agent that
+offers one (Mistral Vibe offers `vibe-acp --setup` when asked) is shown
+by its name only.
+
 ## Limits
 
 - Models and effort levels come from the running session, so the pickers
@@ -195,4 +235,4 @@ know the conversation.
   above.)
 - ACP agents run [headless](headless.md) with `-p` like any harness, but
   have no `--native` or `--no-tui` mode.
-- Sign in with the agent's own CLI.
+- Sign in with the agent's own CLI ([Sign-in](#sign-in)).

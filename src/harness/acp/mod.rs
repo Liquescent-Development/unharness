@@ -7,6 +7,7 @@
 //! can do is mostly learned at the handshake, so the static capabilities are
 //! the protocol's baseline and the session reports the rest.
 
+pub mod auth;
 pub mod elicitation;
 pub mod modes;
 pub mod parse;
@@ -90,6 +91,9 @@ pub struct AcpHarness {
     spawn_env: Option<SpawnEnv>,
     /// What the agent's sessions said about its models, this run.
     known: SharedModels,
+    /// The command that signs the agent in, told to the user when a
+    /// session fails for want of sign-in (`auth.rs`). Never run.
+    sign_in: Option<String>,
 }
 
 impl AcpHarness {
@@ -118,6 +122,7 @@ impl AcpHarness {
             modes: ModeMap::default(),
             spawn_env: None,
             known: SharedModels::default(),
+            sign_in: None,
         })
     }
 
@@ -161,6 +166,26 @@ impl AcpHarness {
             spawn_env: Some(build),
             ..self
         }
+    }
+
+    /// The command that signs the agent in (`vibe --setup`), from
+    /// `[harnesses.<name>] sign_in` or declared by a harness that knows
+    /// its agent. It is only told to the user, with the sign-in methods
+    /// the agent offers, when a session fails for want of sign-in; the
+    /// generic text without one points at the agent's own command line.
+    pub fn signing_in_with(self, command: Option<&str>) -> Self {
+        AcpHarness {
+            sign_in: command
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+                .map(str::to_string),
+            ..self
+        }
+    }
+
+    /// The command that signs the agent in, if one is known.
+    pub fn sign_in(&self) -> Option<&str> {
+        self.sign_in.as_deref()
     }
 
     /// The presets whose binary is installed and whose name is not taken.
@@ -257,14 +282,20 @@ impl Harness for AcpHarness {
     fn probe(&self, binary_override: Option<&Path>) -> Probe {
         let binary = resolve_binary(self.descriptor, binary_override);
         let version = binary.as_deref().and_then(probe_version);
+        let how = match &self.sign_in {
+            Some(command) => format!(" (to sign in, run `{command}`)"),
+            None => String::new(),
+        };
         Probe {
             // Whether the agent is signed in is only known once a session starts.
             auth: AuthInfo {
                 authenticated: false,
                 details: Some(if self.preset {
-                    "ACP preset (launch command not yet verified by a recording); sign-in is checked at session start".into()
+                    format!(
+                        "ACP preset (launch command not yet verified by a recording); sign-in is checked at session start{how}"
+                    )
                 } else {
-                    "ACP agent from config; sign-in is checked at session start".into()
+                    format!("ACP agent from config; sign-in is checked at session start{how}")
                 }),
             },
             binary,
@@ -298,6 +329,7 @@ impl Harness for AcpHarness {
                 modes: self.modes.clone(),
                 spawn_env: self.spawn_env.clone(),
                 known: self.known.clone(),
+                sign_in: self.sign_in.clone(),
             },
             cfg,
         )
@@ -358,6 +390,19 @@ mod tests {
             Some((PermissionPolicy::Ask, "ask"))
         );
         assert!(h.asks && h.effort_option.is_some());
+
+        // Nor a sign-in command: doctor names one that is declared.
+        let auth = |h: &AcpHarness| h.probe(None).auth.details.unwrap();
+        assert!(!auth(&h).contains("to sign in"));
+        assert!(h.sign_in.is_none());
+        let h = h.signing_in_with(Some(" vibe --setup "));
+        assert_eq!(h.sign_in.as_deref(), Some("vibe --setup"));
+        assert!(
+            auth(&h).ends_with("(to sign in, run `vibe --setup`)"),
+            "{}",
+            auth(&h)
+        );
+        assert!(h.signing_in_with(Some("  ")).sign_in.is_none());
     }
 
     #[test]

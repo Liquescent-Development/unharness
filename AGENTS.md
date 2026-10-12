@@ -543,6 +543,42 @@ recorded ones. For anything else:
   names), an agent that forks with neither resume nor load, the fork of a
   session that is open in the same process (the TUI always forks in a new
   one), and whether vibe's `session/load` of the source writes to it.
+  Sign-in (#162, `auth.rs`): unharness never sends `authenticate` and runs
+  no sign-in; an answer with the spec's auth-required error (-32000) to
+  `session/new`, `load`, `resume`, `fork` (also the reattach before a
+  second fork) or `session/prompt` fails the turn with the `authMethods`
+  the agent offered at `initialize` (names, descriptions, an `env_var`
+  method's variables) and the command to run where it is known
+  (`[harnesses.<name>] sign_in`, `AcpHarness::signing_in_with`: the
+  built-in vibe declares `vibe --setup`, which its table's `sign_in`
+  replaces; else the agent's own command line), with no retry and no new session in place
+  of a resume or fork, and the driver ends the process, so that the next
+  prompt starts one that reads the sign-in afresh. A terminal sign-in is
+  a command the agent names, run outside the sandbox in the user's
+  terminal, so none is run or declared (neither the spec's `auth.terminal`
+  nor vibe's `_meta["terminal-auth"]`), and one an agent offers anyway is
+  shown by name. vibe-acp 2.26.1 with no key (scratch `VIBE_HOME`
+  without `.env`, `MISTRAL_API_KEY` unset) offered only `browser-auth` and
+  answered `session/new` with -32000 "Missing API key for mistral
+  provider." (`fixtures/vibe_acp_not_signed_in.jsonl`); with
+  `_meta["terminal-auth"]: true` it also offered `vibe-setup`, whose
+  command is its own Python running the `vibe-acp` script with
+  `--setup` (`fixtures/vibe_acp_terminal_auth.jsonl`), not the agent
+  binary with `args` as the spec has it. A key it does not take passes
+  `session/new` and fails the prompt with -31002 ("Invalid API key (from
+  env var MISTRAL_API_KEY)…", not committed), which is not taken for
+  sign-in. Its `session/load` goes through the same check (read in its
+  source; a load or fork failing so is only in e2e tests). Checked live
+  (Landlock, `sign_in = "vibe --setup"`): `--print` printed the methods and
+  the command and exited 1; the TUI showed it once at launch, started
+  nothing by itself, and after `.env` was put back the next prompt
+  started vibe again and was answered; `doctor` shows the command.
+  vibe-acp's `_auth/status` answers without a session (`authenticated`,
+  `authState`: `vibe_home_env_file` with the key in `$VIBE_HOME/.env`,
+  `signed_out` without), in 0.1 s, but only after 1.6 to 1.9 s of start
+  and `initialize`, too slow for `quick_auth`. Unverified: an agent that
+  fails `prompt` with -32000, `env_var` and spec terminal methods from a
+  real agent, `authenticate` with vibe's `browser-auth`.
 - Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
   `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
   name, `asks_permission` and modes), with `ask` → `ask` and `bypass` →

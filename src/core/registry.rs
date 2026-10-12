@@ -71,7 +71,8 @@ impl Registry {
                 let modes = AcpModeMap::from_config(&settings.modes).unwrap_or_default();
                 harnesses.push(Box::new(
                     h.asking_permission(settings.asks_permission.unwrap_or(false))
-                        .with_modes(modes),
+                        .with_modes(modes)
+                        .signing_in_with(settings.sign_in.as_deref()),
                 ));
             }
         }

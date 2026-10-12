@@ -1,0 +1,2 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Error "Missing API key for mistral provider."

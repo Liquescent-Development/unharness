@@ -125,6 +125,10 @@ pub struct HarnessSettings {
     /// without one (`harness::acp::modes`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub modes: BTreeMap<String, String>,
+    /// ACP only: the command that signs the agent in (`vibe --setup`),
+    /// told to the user when a session fails for want of sign-in.
+    /// unharness never runs it.
+    pub sign_in: Option<String>,
     /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
     /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
     /// existing `~/.claude.json` is copied there once. Default: on.
@@ -412,6 +416,7 @@ impl Config {
             } else {
                 global.modes
             },
+            sign_in: local.sign_in.or(global.sign_in),
             relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
         }

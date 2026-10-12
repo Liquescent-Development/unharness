@@ -751,3 +751,53 @@ fn a_hangup_while_the_prompt_is_in_the_editor_still_ends_the_session_in_order() 
         "the editor runs on"
     );
 }
+
+/// `--print` with an ACP agent that is not signed in (vibe-acp 2.26.1's
+/// recording, played by the fake as the built-in vibe's command): the run
+/// fails with exit 1, and stderr names the methods the agent offers and
+/// what to run (vibe's own `vibe --setup`).
+#[test]
+fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
+    if !python_available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for dir in ["home", "config/unharness", "state", "data", "cache", "ws"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(
+        root.join("config/unharness/config.toml"),
+        format!(
+            "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\n",
+            repo().join("scripts/fake-harness.py").display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+        .args(["-H", "vibe", "--sandbox", "off", "--policy", "bypass"])
+        .args(["--print", "say hi"])
+        .current_dir(root.join("ws"))
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env(
+            "UNHARNESS_FAKE_FIXTURE",
+            repo().join("src/harness/acp/fixtures/vibe_acp_not_signed_in.jsonl"),
+        )
+        .env("UNHARNESS_FAKE_HANG", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("vibe is not signed in (Missing API key for mistral provider)")
+            && stderr.contains("\"Sign in through Mistral AI Studio\"")
+            && stderr.contains("run `vibe --setup` in a terminal"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty());
+}

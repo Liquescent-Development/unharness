@@ -17,6 +17,12 @@
 //! policy change the mode is set and read back before a prompt goes, and a
 //! policy whose mode does not take is refused for the session
 //! (`CapsUpdate::refused_policies`), its prompt failed rather than sent.
+//!
+//! An agent that wants the user signed in (the spec's auth-required error
+//! at a session request or a prompt) gets no `authenticate` and no retry:
+//! the turn fails with what the agent offers and what to run (`auth.rs`),
+//! and the process is ended, so that the next prompt starts one that reads
+//! the sign-in afresh.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -28,6 +34,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::auth::{self, AuthMethod};
 use super::elicitation::{self, Form, Refusal};
 use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{
@@ -198,7 +205,9 @@ fn request_key(id: &Value) -> String {
 /// The client capabilities of `initialize`: form elicitation, and no
 /// `fs` or `terminal`. Without it vibe-acp 2.26.1 does not offer its
 /// `ask_user_question` tool, claude-agent-acp turns off AskUserQuestion,
-/// and codex-acp answers its own questions empty (#157).
+/// and codex-acp answers its own questions empty (#157). No terminal
+/// sign-in either (`auth.terminal`, vibe-acp's `_meta["terminal-auth"]`):
+/// unharness runs no command an agent names to sign in (`auth.rs`).
 pub fn client_capabilities() -> Value {
     json!({"elicitation": {"form": {}}})
 }
@@ -248,6 +257,9 @@ pub struct AgentSpec {
     pub spawn_env: Option<SpawnEnv>,
     /// What its sessions said about its models, for the builder.
     pub known: SharedModels,
+    /// The command that signs the agent in, told to the user when it is
+    /// not (`AcpHarness::signing_in_with`). Never run by unharness.
+    pub sign_in: Option<String>,
 }
 
 /// The agent's command line, in `cfg.cwd`, with `extra` in its environment.
@@ -410,6 +422,10 @@ struct Driver {
     /// How the agent reattaches a stored session: `session/resume`, else
     /// `session/load`, or neither.
     reattach_via: Option<&'static str>,
+    /// The sign-in methods the agent offered at `initialize`.
+    auth_methods: Vec<AuthMethod>,
+    /// The agent wants the user signed in: the process is to end.
+    signed_out: bool,
 }
 
 impl Driver {
@@ -900,6 +916,31 @@ impl Driver {
         self.on_session_answer(line, result, false, events).await
     }
 
+    /// The agent answered a session request (new, load, resume, fork, or
+    /// the reattach before a fork) or a prompt with the spec's
+    /// auth-required error. Nothing is retried and no new session is
+    /// started in its place (one for a resume or a fork would not know the
+    /// conversation, and would fail the same way): the turn fails with
+    /// what the agent offers and what to run, and the process is ended
+    /// (`signed_out`), so that the next prompt starts one that reads the
+    /// sign-in afresh.
+    async fn not_signed_in(&mut self, error: &Value, events: &mpsc::Sender<AgentEvent>) {
+        self.parser.set_replaying(false);
+        self.queued_turn = None;
+        let why = auth::not_signed_in(
+            self.harness.as_str(),
+            error,
+            &self.auth_methods,
+            self.spawning.spec.sign_in.as_deref(),
+        );
+        let _ = events
+            .send(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(why),
+            })
+            .await;
+        self.signed_out = true;
+    }
+
     /// The source could not be forked: a new session, which knows nothing
     /// of the conversation, rather than the source itself.
     async fn fork_failed(&mut self, why: &str, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
@@ -1029,6 +1070,8 @@ async fn drive(
         setup_pending: false,
         can_close: false,
         reattach_via: None,
+        auth_methods: Vec::new(),
+        signed_out: false,
     };
     if let Err(e) = d
         .request("initialize", initialize_params(), Outstanding::Initialize)
@@ -1195,6 +1238,14 @@ async fn drive(
                         if let Err(e) = on_line(&mut d, &line, &events).await {
                             let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
                         }
+                        // Not signed in: nothing more goes to this process,
+                        // and what it says on the way out is not news.
+                        if d.signed_out && !shutting_down {
+                            shutting_down = true;
+                            close_by = None;
+                            d.proc.end();
+                            continue;
+                        }
                         if close_by.is_some() && !d.closing() {
                             close_by = None;
                             d.proc.end();
@@ -1229,8 +1280,24 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
         Some(RpcMessage::Response { id, result, error }) => {
             let kind = id.as_u64().and_then(|i| d.outstanding.remove(&i));
             let result = result.clone().unwrap_or(Value::Null);
+            if let Some(e) = error
+                && auth::is_auth_required(e)
+                && matches!(
+                    kind,
+                    Some(
+                        Outstanding::Session { .. }
+                            | Outstanding::Fork { .. }
+                            | Outstanding::ForkSource
+                            | Outstanding::Prompt
+                    )
+                )
+            {
+                d.not_signed_in(e, events).await;
+                return Ok(());
+            }
             match (kind, error) {
                 (Some(Outstanding::Initialize), None) => {
+                    d.auth_methods = auth::auth_methods(&result);
                     let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
                     d.can_close = can_close(caps);
                     d.reattach_via = if can_resume(caps) {

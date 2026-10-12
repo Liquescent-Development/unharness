@@ -1,0 +1,52 @@
+# vibe-acp 2.26.1 (mistral-vibe, scratch VIBE_HOME with config.toml and no .env, MISTRAL_API_KEY unset) via scripts/record-acp.py --client-capabilities '{"elicitation":{"form":{}}}' "say hi": initialize offers browser-auth only, and session/new is answered with the spec's auth-required error (-32000, "Missing API key for mistral provider."); the prompt is never sent.
+>> {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"elicitation": {"form": {}}}, "clientInfo": {"name": "unharness", "title": "unharness", "version": "0.2.0"}}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true,"promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},"sessionCapabilities":{"list":{},"fork":{},"close":{}}},"authMethods":[{"id":"browser-auth","name":"Sign in through Mistral AI Studio","description":"Sign into Mistral Vibe through your Mistral AI Studio account."}],"agentInfo":{"name":"@mistralai/mistral-vibe","title":"Mistral Vibe","version":"2.26.1"}}}
+>> {"jsonrpc": "2.0", "id": 2, "method": "session/new", "params": {"cwd": "/WORKSPACE", "mcpServers": []}}
+{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Missing API key for mistral provider.","data":null}}
+!! ERROR:root:Background task failed
+!! Traceback (most recent call last):
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/acp/agent.py", line 615, in _create_session
+!!     app_server = await self._start_session(
+!!                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/app_server/local.py", line 60, in start
+!!     return await host.open_session()
+!!            ^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/app_server/host.py", line 104, in open_session
+!!     return await self._open_session(self._resume_session_id, self._continue_session)
+!!            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/app_server/host.py", line 128, in _open_session
+!!     session = await AppServerSession.open(
+!!               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/app_server/session.py", line 250, in open
+!!     await client.request(
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/app_server/client.py", line 142, in request
+!!     raise response.error
+!! vibe.app_server.protocol.AppServerResponseError: Missing MISTRAL_API_KEY environment variable for mistral provider
+!! 
+!! The above exception was the direct cause of the following exception:
+!! 
+!! Traceback (most recent call last):
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/task/supervisor.py", line 51, in _on_done
+!!     task.result()
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/task/dispatcher.py", line 81, in runner
+!!     result = await self._request_runner(message)
+!!              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/connection.py", line 234, in _run_request
+!!     result = await self._handler(method, message.get("params"), False)
+!!              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/router.py", line 184, in __call__
+!!     return await route.handle(params)
+!!            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/router.py", line 73, in handle
+!!     result = await self.func(params)
+!!              ^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/acp/router.py", line 107, in wrapper
+!!     return await func(**params)  # type: ignore[arg-type]
+!!            ^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/acp/agent.py", line 554, in new_session
+!!     session = await self._create_session(
+!!               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+!!   File "/HOME/.local/share/uv/tools/mistral-vibe/lib/python3.12/site-packages/vibe/acp/agent.py", line 635, in _create_session
+!!     raise UnauthenticatedError.for_provider(provider) from exc
+!! vibe.acp.exceptions.UnauthenticatedError: Missing API key for mistral provider.
+# exit=0 status=error
