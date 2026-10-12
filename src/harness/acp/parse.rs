@@ -1883,6 +1883,18 @@ mod tests {
         assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_spawn_env");
     }
 
+    /// vibe-acp 2.26.1 on a provider handed over by environment (#173):
+    /// `VIBE_PROVIDERS` with an OpenAI-compatible server (no key),
+    /// `VIBE_MODELS` with its model and `VIBE_ACTIVE_MODEL` naming it, as
+    /// `vibe::provider_env` sets them. The session lists vibe's own models
+    /// beside it and runs it; the parser reports them all (the transport
+    /// keeps the provider's, `SpawnPlan::restrict`).
+    #[test]
+    fn fixture_vibe_acp_provider() {
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_provider");
+    }
+
     #[test]
     fn effort_is_read_from_thought_level() {
         let options = json!([

@@ -356,6 +356,7 @@ fn spawn_plan(spec: &AgentSpec, cfg: &SessionConfig) -> Option<SpawnPlan> {
         effort: cfg.effort.as_deref(),
         known: &known,
         env: &cfg.env,
+        provider: cfg.provider.as_ref().map(|p| p.as_str()),
     }))
 }
 
@@ -939,6 +940,21 @@ impl Driver {
                 )))
                 .await;
         }
+        // On a provider of the harness's, with none of its models chosen
+        // (an agent profile or admin configuration can name another).
+        if self.cfg.model.is_none()
+            && let Some(p) = &plan.provider
+            && let Some(current) = &self.options.current_model
+            && !p.models.contains(current)
+        {
+            let _ = events
+                .send(AgentEvent::Notice(format!(
+                    "{name} runs model '{current}', which is not one of provider {}'s ({})",
+                    p.provider,
+                    p.models.join(", ")
+                )))
+                .await;
+        }
         if let Some(effort) = &self.cfg.effort
             && let Some(current) = &self.options.current_effort
             && current != effort
@@ -1099,11 +1115,11 @@ impl Driver {
                     model: self.options.current_model.clone(),
                 })
                 .await;
-            let _ = events
-                .send(AgentEvent::CapabilitiesChanged(
-                    self.options.caps_update(self.harness),
-                ))
-                .await;
+            let mut update = self.options.caps_update(self.harness);
+            if let Some(plan) = &self.spawning.plan {
+                plan.restrict(&mut update);
+            }
+            let _ = events.send(AgentEvent::CapabilitiesChanged(update)).await;
         }
         forward(self, line, events).await;
         self.check_choice(events).await;
@@ -1786,11 +1802,15 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
 }
 
 async fn forward(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) {
-    for ev in d.parser.feed(line) {
+    for mut ev in d.parser.feed(line) {
         // One anchor per turn sent: a message the agent echoes outside
         // one is not a turn of ours.
         if matches!(ev, AgentEvent::TurnAnchor { .. }) && !std::mem::take(&mut d.anchor_owed) {
             continue;
+        }
+        // On a provider in the agent's environment, only its models.
+        if let (AgentEvent::CapabilitiesChanged(update), Some(plan)) = (&mut ev, &d.spawning.plan) {
+            plan.restrict(update);
         }
         let _ = events.send(ev).await;
     }

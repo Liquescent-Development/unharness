@@ -1,0 +1,20 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=200000
+SessionStarted id=68f59901-1270-0a0b-e748-23ca6d0591c1 model=qwen3.8-q5kxl-x2
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=3
+CapabilitiesChanged efforts=off,low,medium,high,max models=3
+CapabilitiesChanged commands=14 slash_commands=true
+Context used=0 window=200000
+ThinkingDelta "The"
+Context used=0 window=200000
+ThinkingDelta " user is asking me"
+ThinkingDelta " to reply with a"
+ThinkingDelta " single word: pong. This"
+ThinkingDelta " is a simple request. I"
+ThinkingDelta " should just reply with \"pong\".\\n"
+TextDelta "pong"
+Context used=0 window=200000
+Context used=8157 window=200000
+Context used=8157 window=200000
+Usage in=8124 out=33 cache_read=0 cache_write=0 cost=- cumulative=false
+TurnCompleted Done

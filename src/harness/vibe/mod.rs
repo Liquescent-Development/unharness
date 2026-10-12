@@ -12,23 +12,28 @@
 //! entry in `VIBE_MODELS`, which vibe reads as a configuration layer above
 //! both TOML files and below an agent profile and admin config, and never
 //! writes (`vibe/core/config/layers/environment.py`).
+//!
+//! A provider defined in unharness's config (`[harnesses.vibe.providers]`)
+//! goes the same way when it is chosen: `VIBE_PROVIDERS`, its models in
+//! `VIBE_MODELS` and the one to run in `VIBE_ACTIVE_MODEL`.
 
 pub mod subagents;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use serde_json::json;
 
 pub mod trust;
 
-use super::acp::{AcpHarness, KnownModels, ModeMap, SpawnChoice, SpawnPlan};
+use super::acp::{AcpHarness, KnownModels, ModeMap, ProviderModels, SpawnChoice, SpawnPlan};
 use super::{
     AuthInfo, DoctorNote, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
     probe_version_of, resolve_binary,
 };
-use crate::config::HarnessSettings;
+use crate::config::{HarnessSettings, ProviderSettings};
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
@@ -166,18 +171,25 @@ fn is_executable(path: &Path) -> bool {
 }
 
 /// The model and level of a run of vibe's own CLI, by environment as for a
-/// session, with `home` vibe's. No session has said what its models are,
-/// so a level is only given for a model the user's `config.toml` defines.
-fn cli_plan(cfg: &PrintConfig, home: &Path) -> SpawnPlan {
-    spawn_env(
-        home,
-        &SpawnChoice {
-            model: cfg.model.as_ref().map(|m| m.model.as_str()),
-            effort: cfg.effort.as_deref(),
-            known: &KnownModels::default(),
-            env: &[],
-        },
-    )
+/// session, with `home` vibe's: on a provider of `providers` chosen with
+/// `--provider`, that provider's ([`provider_env`]). No session has said
+/// what vibe's own models are, so a level is only given for one of those
+/// or for a model the user's `config.toml` defines.
+fn cli_plan(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> SpawnPlan {
+    let choice = SpawnChoice {
+        model: cfg.model.as_ref().map(|m| m.model.as_str()),
+        effort: cfg.effort.as_deref(),
+        known: &KnownModels::default(),
+        env: &[],
+        provider: cfg.provider.as_ref().map(|p| p.as_str()),
+    };
+    match choice
+        .provider
+        .and_then(|id| providers.iter().find(|p| p.id == id))
+    {
+        Some(provider) => provider_env(provider, &choice),
+        None => spawn_env(home, &choice),
+    }
 }
 
 /// `vibe -p` (`--print --native`) or `vibe` in its own interface
@@ -187,7 +199,11 @@ fn cli_plan(cfg: &PrintConfig, home: &Path) -> SpawnPlan {
 /// in vibe. vibe's exit status is passed on (0 finished, 1 usage or
 /// configuration error, 2 infrastructure failure, 3 stopped: a limit, a
 /// refusal, SIGINT or SIGTERM; `HeadlessRun`, `vibe/cli/headless_run.py`).
-fn cli_command(cfg: &PrintConfig, home: &Path) -> Result<std::process::Command> {
+fn cli_command(
+    cfg: &PrintConfig,
+    home: &Path,
+    providers: &[Provider],
+) -> Result<std::process::Command> {
     let Some(binary) = cli_binary(&cfg.binary) else {
         anyhow::bail!(
             "vibe's own CLI (`{CLI}`) is neither beside {} nor on PATH",
@@ -200,7 +216,7 @@ fn cli_command(cfg: &PrintConfig, home: &Path) -> Result<std::process::Command> 
     };
     let mut cmd = std::process::Command::new(binary);
     cmd.current_dir(&cfg.cwd);
-    for (key, value) in cli_plan(cfg, home).env {
+    for (key, value) in cli_plan(cfg, home, providers).env {
         cmd.env(key, value);
     }
     cmd.arg("--workdir").arg(&cfg.cwd);
@@ -230,9 +246,9 @@ fn cli_command(cfg: &PrintConfig, home: &Path) -> Result<std::process::Command> 
 
 /// What [`cli_command`] leaves out: a level it cannot give (see
 /// [`cli_plan`]) and the MCP servers, which reach vibe only over ACP.
-fn cli_warnings(cfg: &PrintConfig, home: &Path) -> Vec<String> {
+fn cli_warnings(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> Vec<String> {
     let mut warnings = Vec::new();
-    if let Some(why) = cli_plan(cfg, home).unmet {
+    if let Some(why) = cli_plan(cfg, home, providers).unmet {
         warnings.push(format!(
             "vibe runs without the thinking level asked for: {why} (only a vibe-acp session tells a model's name; one defined in vibe's config.toml needs none)"
         ));
@@ -259,6 +275,8 @@ fn mode_map() -> ModeMap {
 
 pub struct VibeHarness {
     acp: AcpHarness,
+    /// The providers `[harnesses.vibe.providers]` defines.
+    providers: Arc<Vec<Provider>>,
 }
 
 impl Default for VibeHarness {
@@ -293,12 +311,61 @@ impl VibeHarness {
             modes,
         );
         // `sign_in` in the table replaces vibe's own command.
-        Ok(match settings.sign_in.as_deref() {
+        let vibe = match settings.sign_in.as_deref() {
             Some(command) => VibeHarness {
                 acp: vibe.acp.signing_in_with(Some(command)),
+                ..vibe
             },
             None => vibe,
-        })
+        };
+        Ok(vibe.with_providers(providers(&settings.providers)?))
+    }
+
+    /// Offer `providers` beside vibe's own configuration: one chosen for a
+    /// session is handed to vibe in its environment ([`provider_env`]).
+    fn with_providers(self, providers: Vec<Provider>) -> Self {
+        let providers = Arc::new(providers);
+        let defined = providers.clone();
+        let acp = self
+            .acp
+            .choosing_at_spawn(Arc::new(move |choice: &SpawnChoice<'_>| {
+                plan_for(&defined, choice)
+            }));
+        VibeHarness { acp, providers }
+    }
+
+    /// The provider a session is to run on, if it is one of
+    /// [`Self::providers`]; an error for one vibe does not have, or a
+    /// model that provider does not list.
+    fn session_provider(
+        &self,
+        provider: Option<&ProviderId>,
+        model: Option<&str>,
+    ) -> Result<Option<&Provider>> {
+        let Some(id) = provider.map(ProviderId::as_str) else {
+            return Ok(None);
+        };
+        if id == OWN_PROVIDER {
+            return Ok(None);
+        }
+        let Some(p) = self.providers.iter().find(|p| p.id == id) else {
+            let known: Vec<&str> = std::iter::once(OWN_PROVIDER)
+                .chain(self.providers.iter().map(|p| p.id.as_str()))
+                .collect();
+            bail!(
+                "{DISPLAY_NAME} has no provider '{id}' ({}; others are defined in [harnesses.vibe.providers])",
+                known.join(", ")
+            );
+        };
+        if let Some(m) = model
+            && !p.models.iter().any(|x| x == m)
+        {
+            bail!(
+                "provider {id} has no model '{m}' ({}; [harnesses.vibe.providers.{id}] models)",
+                p.models.join(", ")
+            );
+        }
+        Ok(Some(p))
     }
 
     fn build(command: &[String], display: Option<&str>, asks: bool, modes: ModeMap) -> Self {
@@ -320,7 +387,10 @@ impl VibeHarness {
         .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
             spawn_env(&vibe_home(choice.env), choice)
         }));
-        VibeHarness { acp }
+        VibeHarness {
+            acp,
+            providers: Arc::default(),
+        }
     }
 }
 
@@ -550,6 +620,191 @@ fn version_aside(binary: &Path) -> Option<String> {
     version
 }
 
+/// The id of vibe's own configuration among its providers: the models its
+/// sessions list (Mistral's, its experiments', those of the user's
+/// `config.toml`), under the provider of any ACP agent's.
+pub const OWN_PROVIDER: &str = super::acp::parse::PROVIDER;
+
+/// What vibe is told a provider of unharness's is called: vibe merges its
+/// providers by name across its configuration layers (`WithUnionMerge` in
+/// `vibe/core/config/vibe_schema.py`), so one of the user's own with the
+/// same name would be replaced for the process, and its models with it.
+const PROVIDER_PREFIX: &str = "unharness-";
+
+/// The API styles of vibe 2.26.1's generic backend (`_ADAPTERS`,
+/// `mistralai_vibe_local_harness/vibe/adapters/generic/_execute.py`) but
+/// `vertex-anthropic`, which needs a project and region unharness does not
+/// pass. The first is vibe's default.
+pub const API_STYLES: [&str; 4] = ["openai", "reasoning", "openai-responses", "anthropic"];
+
+/// vibe's backends (`Backend`, `vibe/core/types.py`); its default for a
+/// provider is `generic`.
+pub const BACKENDS: [&str; 2] = ["generic", "mistral"];
+
+/// A provider of `[harnesses.vibe.providers.<id>]`, checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Provider {
+    pub id: String,
+    pub api_base: String,
+    pub api_style: String,
+    pub backend: String,
+    /// The variable that holds the key; never its value.
+    pub api_key_env_var: Option<String>,
+    /// Never empty; the first is run when none is chosen.
+    pub models: Vec<String>,
+}
+
+/// The providers of a `[harnesses.vibe]` table, checked; an error names
+/// the first table that is wrong. unharness's config is the user's, outside
+/// the workspace: nothing a session writes can add one.
+pub fn providers(table: &BTreeMap<String, ProviderSettings>) -> Result<Vec<Provider>> {
+    table
+        .iter()
+        .map(|(id, settings)| {
+            provider(id, settings).with_context(|| format!("[harnesses.vibe.providers.{id}]"))
+        })
+        .collect()
+}
+
+fn provider(id: &str, s: &ProviderSettings) -> Result<Provider> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if id.is_empty() || !id.chars().all(plain) {
+        bail!("a provider's name has only letters, digits, '-', '_' and '.'");
+    }
+    if id == OWN_PROVIDER {
+        bail!("'{OWN_PROVIDER}' is vibe's own configuration; choose another name");
+    }
+    let api_base = s.api_base.trim();
+    let scheme = ["http://", "https://"]
+        .iter()
+        .find_map(|p| api_base.strip_prefix(p));
+    if scheme.is_none_or(str::is_empty)
+        || api_base
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("api_base must be an http:// or https:// URL");
+    }
+    let api_style = s.api_style.as_deref().unwrap_or(API_STYLES[0]);
+    if api_style == "vertex-anthropic" {
+        bail!(
+            "api_style 'vertex-anthropic' needs a project and region, which unharness does not pass"
+        );
+    }
+    if !API_STYLES.contains(&api_style) {
+        bail!(
+            "api_style '{api_style}' is not one of {}",
+            API_STYLES.join(", ")
+        );
+    }
+    let backend = s.backend.as_deref().unwrap_or(BACKENDS[0]);
+    if !BACKENDS.contains(&backend) {
+        bail!("backend '{backend}' is not one of {}", BACKENDS.join(", "));
+    }
+    // Only ever a name: what is there is not repeated, in case it is a key.
+    let api_key_env_var = s.api_key_env_var.as_deref().filter(|v| !v.is_empty());
+    if let Some(var) = api_key_env_var {
+        let mut chars = var.chars();
+        let first = chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+        if !first || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            bail!(
+                "api_key_env_var is not an environment variable's name: it names the variable that holds the key, never the key"
+            );
+        }
+    }
+    if s.models.is_empty() {
+        bail!("models lists none; name the models the server has");
+    }
+    for (i, m) in s.models.iter().enumerate() {
+        if m.trim().is_empty() || m.trim() != m || m.chars().any(char::is_control) {
+            bail!("models: '{}' is not a model name", m.escape_debug());
+        }
+        if s.models[..i].contains(m) {
+            bail!("models: '{m}' is listed twice");
+        }
+    }
+    Ok(Provider {
+        id: id.to_string(),
+        api_base: api_base.to_string(),
+        api_style: api_style.to_string(),
+        backend: backend.to_string(),
+        api_key_env_var: api_key_env_var.map(str::to_string),
+        models: s.models.clone(),
+    })
+}
+
+/// vibe's environment for a choice: on one of `providers`, that
+/// provider's ([`provider_env`]); on vibe's own configuration, the model
+/// and level alone ([`spawn_env`]).
+fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
+    match choice
+        .provider
+        .and_then(|id| providers.iter().find(|p| p.id == id))
+    {
+        Some(provider) => provider_env(provider, choice),
+        None => spawn_env(&vibe_home(choice.env), choice),
+    }
+}
+
+/// vibe's environment for a session on `provider`: the provider in
+/// `VIBE_PROVIDERS`, each of its models as a whole entry in `VIBE_MODELS`
+/// (its alias the model's name), and the chosen one, else the first, in
+/// `VIBE_ACTIVE_MODEL`. A level goes in the entry of the model that runs,
+/// so that one `VIBE_MODELS` says both; the rest get vibe's default (`off`).
+/// Built as JSON, never pasted together: vibe 2.26.1 fails its whole
+/// environment layer on a value that does not parse. No key is passed, only
+/// the name of the variable vibe reads it from.
+pub fn provider_env(provider: &Provider, choice: &SpawnChoice<'_>) -> SpawnPlan {
+    let mut plan = SpawnPlan::default();
+    let name = format!("{PROVIDER_PREFIX}{}", provider.id);
+    let active = choice.model.unwrap_or(&provider.models[0]).to_string();
+    let level = match choice.effort {
+        Some(level) if THINKING_LEVELS.contains(&level) => Some(level),
+        Some(level) => {
+            plan.unmet = Some(format!(
+                "vibe has no thinking level '{level}'; it has {}",
+                THINKING_LEVELS.join(", ")
+            ));
+            None
+        }
+        None => None,
+    };
+    let providers = json!([{
+        "name": name,
+        "api_base": provider.api_base,
+        "api_style": provider.api_style,
+        "backend": provider.backend,
+        "api_key_env_var": provider.api_key_env_var.as_deref().unwrap_or_default(),
+    }]);
+    let models: Vec<serde_json::Value> = provider
+        .models
+        .iter()
+        .map(|m| {
+            let mut entry = json!({"alias": m, "name": m, "provider": name});
+            if let Some(level) = level.filter(|_| *m == active) {
+                entry["thinking"] = json!(level);
+            }
+            entry
+        })
+        .collect();
+    plan.env
+        .push(("VIBE_PROVIDERS".to_string(), providers.to_string()));
+    plan.env.push((
+        "VIBE_MODELS".to_string(),
+        serde_json::Value::Array(models).to_string(),
+    ));
+    plan.env
+        .push(("VIBE_ACTIVE_MODEL".to_string(), active.clone()));
+    plan.overrides = Some(active);
+    plan.provider = Some(ProviderModels {
+        provider: provider.id.clone(),
+        models: provider.models.clone(),
+    });
+    plan
+}
+
 /// [`VibeHarness::guarded`] for a vibe home at `home`.
 fn guarded_in(home: &Path) -> Vec<Guarded> {
     let mut guarded: Vec<Guarded> = GUARDED_FILES
@@ -591,12 +846,15 @@ impl Harness for VibeHarness {
         self.acp.descriptor()
     }
 
+    /// Those of any ACP agent chosen at spawn, and with providers in
+    /// `[harnesses.vibe.providers]` more than one, chosen when vibe starts.
+    ///
     /// The ACP agent's, with its subagents (`subagents.rs`): a start and,
     /// when the agent waits for one, its end and report. Nothing stops one
     /// from outside (no client method; `session/cancel` leaves it running),
     /// and nothing reports one between turns.
     fn capabilities(&self) -> Capabilities {
-        Capabilities {
+        let mut caps = Capabilities {
             subagents: SubagentSupport {
                 reported: true,
                 described: false,
@@ -605,7 +863,31 @@ impl Harness for VibeHarness {
                 unreported_ends: true,
             },
             ..self.acp.capabilities()
+        };
+        if !self.providers.is_empty() {
+            caps.multi_provider = true;
+            caps.provider_per_process = true;
         }
+        caps
+    }
+
+    /// vibe's own configuration, then the providers of
+    /// `[harnesses.vibe.providers]`.
+    fn list_providers(
+        &self,
+        _binary: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<(ProviderId, String)>> {
+        Ok(std::iter::once((
+            ProviderId::from(OWN_PROVIDER),
+            "vibe's own configuration".to_string(),
+        ))
+        .chain(
+            self.providers
+                .iter()
+                .map(|p| (ProviderId::new(p.id.clone()), p.api_base.clone())),
+        )
+        .collect())
     }
 
     /// The binary and its version (see [`version_aside`]); signed in when
@@ -660,13 +942,27 @@ impl Harness for VibeHarness {
         api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &vibe_home(&[])).map(|_| true)
     }
 
+    /// A provider of `[harnesses.vibe.providers]` has the models it lists;
+    /// vibe's own are what a session lists.
     fn list_models(
         &self,
         binary: &Path,
         provider: &ProviderId,
         sandbox: &Sandbox,
     ) -> Result<Vec<ModelInfo>> {
-        self.acp.list_models(binary, provider, sandbox)
+        match self.providers.iter().find(|p| p.id == provider.as_str()) {
+            Some(p) => Ok(p
+                .models
+                .iter()
+                .map(|m| ModelInfo {
+                    model_ref: crate::core::ModelRef::new(HarnessId::VIBE, provider.clone(), m),
+                    display_name: m.clone(),
+                    description: Some(format!("on {}", p.api_base)),
+                    effort_levels: None,
+                })
+                .collect()),
+            None => self.acp.list_models(binary, provider, sandbox),
+        }
     }
 
     fn list_commands(
@@ -725,18 +1021,29 @@ impl Harness for VibeHarness {
         self.acp.file_reference(path)
     }
 
+    /// A provider chosen must be vibe's own or one of
+    /// `[harnesses.vibe.providers]`, and a model chosen with one of those
+    /// among its models.
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
+        self.session_provider(
+            cfg.provider.as_ref(),
+            cfg.model.as_ref().map(|m| m.model.as_str()),
+        )?;
         self.acp.start_session(cfg)
     }
 
     /// `vibe -p` (`--print --native`) or `vibe` in its own interface
     /// (`--no-tui`): see [`cli_command`].
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<std::process::Command> {
-        cli_command(cfg, &vibe_home(&[]))
+        self.session_provider(
+            cfg.provider.as_ref(),
+            cfg.model.as_ref().map(|m| m.model.as_str()),
+        )?;
+        cli_command(cfg, &vibe_home(&[]), &self.providers)
     }
 
     fn print_warnings(&self, cfg: &PrintConfig) -> Vec<String> {
-        cli_warnings(cfg, &vibe_home(&[]))
+        cli_warnings(cfg, &vibe_home(&[]), &self.providers)
     }
 }
 
@@ -756,6 +1063,7 @@ mod tests {
             effort,
             known,
             env: &[],
+            provider: None,
         }
     }
 
@@ -1107,7 +1415,7 @@ provider = "mine"
                 policy: Some(policy),
                 ..cfg.clone()
             };
-            let cmd = cli_command(&cfg, home).unwrap();
+            let cmd = cli_command(&cfg, home, &[]).unwrap();
             assert_eq!(cmd.get_program(), dir.path().join("vibe"));
             assert_eq!(cmd.get_current_dir(), Some(Path::new("/ws")));
             assert_eq!(
@@ -1121,10 +1429,10 @@ provider = "mine"
                 policy: Some(policy),
                 ..cfg.clone()
             };
-            assert!(cli_command(&cfg, home).is_err(), "{policy}");
+            assert!(cli_command(&cfg, home, &[]).is_err(), "{policy}");
         }
         // Never `--trust`.
-        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
         assert!(!a.iter().any(|a| a == "--trust"));
     }
 
@@ -1142,10 +1450,10 @@ provider = "mine"
             ("stream-json", "streaming"),
             ("streaming", "streaming"),
         ] {
-            let a = cli_args(&cli_command(&with(format), home).unwrap());
+            let a = cli_args(&cli_command(&with(format), home, &[]).unwrap());
             assert!(a.windows(2).any(|w| w == ["--output", output]), "{a:?}");
         }
-        assert!(cli_command(&with("yaml"), home).is_err());
+        assert!(cli_command(&with("yaml"), home, &[]).is_err());
 
         let cfg = PrintConfig {
             resume: Some("s-1".into()),
@@ -1153,7 +1461,7 @@ provider = "mine"
             prompt: Some("-n is a flag".into()),
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
         assert!(a.windows(2).any(|w| w == ["--resume", "s-1"]));
         assert!(a.windows(2).any(|w| w == ["--max-turns", "3"]));
         assert_eq!(a.last().unwrap(), "--prompt=-n is a flag");
@@ -1162,7 +1470,7 @@ provider = "mine"
             prompt: None,
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
         assert_eq!(a.last().unwrap(), "--prompt=");
     }
 
@@ -1177,7 +1485,7 @@ provider = "mine"
             policy: Some(PermissionPolicy::AcceptEdits),
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, dir.path()).unwrap());
+        let a = cli_args(&cli_command(&cfg, dir.path(), &[]).unwrap());
         assert_eq!(
             a,
             [
@@ -1193,7 +1501,7 @@ provider = "mine"
             prompt: None,
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, dir.path()).unwrap());
+        let a = cli_args(&cli_command(&cfg, dir.path(), &[]).unwrap());
         assert_eq!(a, ["--workdir", "/ws", "--agent", "accept-edits"]);
     }
 
@@ -1215,7 +1523,7 @@ provider = "mine"
             effort: Some("high".into()),
             ..cfg
         };
-        let cmd = cli_command(&cfg, home).unwrap();
+        let cmd = cli_command(&cfg, home, &[]).unwrap();
         assert_eq!(cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(), Some("dev"));
         let models: serde_json::Value =
             serde_json::from_str(&cli_env(&cmd, "VIBE_MODELS").unwrap()).unwrap();
@@ -1224,7 +1532,7 @@ provider = "mine"
             json!([{"alias": "dev", "name": "devstral-2", "provider": "mistral",
                     "thinking": "high"}])
         );
-        assert!(cli_warnings(&cfg, home).is_empty());
+        assert!(cli_warnings(&cfg, home, &[]).is_empty());
         // Nothing of it on the command line.
         assert!(!cli_args(&cmd).iter().any(|a| a.contains("dev")));
 
@@ -1234,21 +1542,59 @@ provider = "mine"
             model: model("glm-5-3"),
             ..cfg
         };
-        let cmd = cli_command(&cfg, home).unwrap();
+        let cmd = cli_command(&cfg, home, &[]).unwrap();
         assert_eq!(
             cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(),
             Some("glm-5-3")
         );
         assert_eq!(cli_env(&cmd, "VIBE_MODELS"), None);
-        let warnings = cli_warnings(&cfg, home);
+        let warnings = cli_warnings(&cfg, home, &[]);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("without the thinking level"));
 
         // Nothing chosen, nothing set.
         let (dir, cfg) = cli_setup();
-        let cmd = cli_command(&cfg, dir.path()).unwrap();
+        let cmd = cli_command(&cfg, dir.path(), &[]).unwrap();
         assert_eq!(cmd.get_envs().count(), 0);
-        assert!(cli_warnings(&cfg, dir.path()).is_empty());
+        assert!(cli_warnings(&cfg, dir.path(), &[]).is_empty());
+    }
+
+    /// `--print --native --provider`: vibe's CLI gets the provider in its
+    /// environment as a session does, and an unknown one is refused.
+    #[test]
+    fn the_cli_runs_on_a_configured_provider() {
+        let (dir, cfg) = cli_setup();
+        let settings = HarnessSettings {
+            providers: [(
+                "lan".to_string(),
+                ProviderSettings {
+                    api_base: "http://127.0.0.1:8080/v1".into(),
+                    models: vec!["qwen3-coder".into()],
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let vibe = VibeHarness::from_settings(&settings).unwrap();
+        let cfg = PrintConfig {
+            provider: Some(ProviderId::from("lan")),
+            ..cfg
+        };
+        let cmd = cli_command(&cfg, dir.path(), &vibe.providers).unwrap();
+        assert_eq!(
+            cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(),
+            Some("qwen3-coder")
+        );
+        let providers: serde_json::Value =
+            serde_json::from_str(&cli_env(&cmd, "VIBE_PROVIDERS").unwrap()).unwrap();
+        assert_eq!(providers[0]["name"], "unharness-lan");
+        assert!(cli_env(&cmd, "VIBE_MODELS").is_some());
+        let unknown = PrintConfig {
+            provider: Some(ProviderId::from("nowhere")),
+            ..cfg
+        };
+        assert!(vibe.build_print_command(&unknown).is_err());
     }
 
     #[test]
@@ -1265,7 +1611,7 @@ provider = "mine"
             }],
             ..cfg
         };
-        let warnings = cli_warnings(&cfg, dir.path());
+        let warnings = cli_warnings(&cfg, dir.path(), &[]);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].ends_with("not passed on: tiny"), "{warnings:?}");
     }
@@ -1541,5 +1887,326 @@ provider = "mine"
         let changes = watch.changes(&keep);
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].path, cache);
+    }
+
+    /// `[harnesses.vibe.providers.lan]` as the docs show it, read from TOML.
+    const LAN: &str = r#"
+[harnesses.vibe.providers.lan]
+api_base = "https://LOCAL-LLM/v1"
+models = ["qwen3.8-q5kxl-x2", "gemma-4"]
+"#;
+
+    fn lan() -> Provider {
+        let cfg: crate::config::Config = toml::from_str(LAN).unwrap();
+        providers(&cfg.harnesses["vibe"].providers)
+            .unwrap()
+            .remove(0)
+    }
+
+    fn json_var(plan: &SpawnPlan, key: &str) -> serde_json::Value {
+        let raw = var(plan, key).unwrap_or_else(|| panic!("no {key}"));
+        serde_json::from_str(raw).unwrap_or_else(|e| panic!("{key} is not JSON ({e}): {raw}"))
+    }
+
+    fn on<'a>(
+        provider: &'a str,
+        model: Option<&'a str>,
+        effort: Option<&'a str>,
+        known: &'a KnownModels,
+    ) -> SpawnChoice<'a> {
+        SpawnChoice {
+            provider: Some(provider),
+            ..choice(model, effort, known)
+        }
+    }
+
+    /// The provider, its models as whole entries and the one to run, all
+    /// in valid JSON (vibe 2.26.1 fails its environment layer on one that
+    /// is not), with no key: only the variable's name, empty for none.
+    #[test]
+    fn a_provider_is_handed_over_by_environment() {
+        let known = KnownModels::default();
+        let lan = lan();
+        assert_eq!(lan.api_style, "openai");
+        assert_eq!(lan.backend, "generic");
+        let plan = provider_env(&lan, &on("lan", None, None, &known));
+        assert_eq!(
+            json_var(&plan, "VIBE_PROVIDERS"),
+            json!([{"name": "unharness-lan", "api_base": "https://LOCAL-LLM/v1",
+                    "api_style": "openai", "backend": "generic", "api_key_env_var": ""}])
+        );
+        assert_eq!(
+            json_var(&plan, "VIBE_MODELS"),
+            json!([
+                {"alias": "qwen3.8-q5kxl-x2", "name": "qwen3.8-q5kxl-x2", "provider": "unharness-lan"},
+                {"alias": "gemma-4", "name": "gemma-4", "provider": "unharness-lan"},
+            ])
+        );
+        // None chosen: the first.
+        assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("qwen3.8-q5kxl-x2"));
+        assert_eq!(plan.env.len(), 3, "one VIBE_MODELS, nothing else");
+        assert_eq!(plan.overrides.as_deref(), Some("qwen3.8-q5kxl-x2"));
+        assert_eq!(plan.unmet, None);
+        assert_eq!(
+            plan.provider,
+            Some(ProviderModels {
+                provider: "lan".into(),
+                models: vec!["qwen3.8-q5kxl-x2".into(), "gemma-4".into()],
+            })
+        );
+
+        // A key's variable is named, and a style and backend passed on.
+        let keyed = Provider {
+            api_key_env_var: Some("LAN_API_KEY".into()),
+            api_style: "anthropic".into(),
+            ..lan.clone()
+        };
+        let plan = provider_env(&keyed, &on("lan", None, None, &known));
+        let providers = json_var(&plan, "VIBE_PROVIDERS");
+        assert_eq!(providers[0]["api_key_env_var"], "LAN_API_KEY");
+        assert_eq!(providers[0]["api_style"], "anthropic");
+    }
+
+    /// A model and a level chosen on a provider make one `VIBE_MODELS`:
+    /// the level in the entry of the model that runs, the others whole
+    /// and without one (vibe's default, `off`).
+    #[test]
+    fn a_level_goes_in_the_running_models_entry() {
+        let known = known();
+        let lan = lan();
+        let plan = provider_env(&lan, &on("lan", Some("gemma-4"), Some("high"), &known));
+        assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("gemma-4"));
+        assert_eq!(
+            plan.env.iter().filter(|(k, _)| k == "VIBE_MODELS").count(),
+            1
+        );
+        assert_eq!(
+            json_var(&plan, "VIBE_MODELS"),
+            json!([
+                {"alias": "qwen3.8-q5kxl-x2", "name": "qwen3.8-q5kxl-x2", "provider": "unharness-lan"},
+                {"alias": "gemma-4", "name": "gemma-4", "provider": "unharness-lan", "thinking": "high"},
+            ])
+        );
+        assert_eq!(plan.overrides.as_deref(), Some("gemma-4"));
+
+        // A level alone: on the first model.
+        let plan = provider_env(&lan, &on("lan", None, Some("low"), &known));
+        assert_eq!(json_var(&plan, "VIBE_MODELS")[0]["thinking"], "low");
+
+        // A level vibe does not have is not sent, and said.
+        let plan = provider_env(&lan, &on("lan", None, Some("extreme"), &known));
+        let models = json_var(&plan, "VIBE_MODELS");
+        assert!(
+            models
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m.get("thinking").is_none())
+        );
+        assert!(plan.unmet.unwrap().contains("'extreme'"));
+    }
+
+    /// The spawn builder: a configured provider's environment for one of
+    /// its ids; vibe's own configuration (no provider, `agent`, or one
+    /// not defined) gets the model and level alone, a model of the user's
+    /// `config.toml` with its provider as before (#164).
+    #[test]
+    fn the_builder_picks_the_providers_environment() {
+        let known = known();
+        let lan = [lan()];
+        let plan = plan_for(&lan, &on("lan", None, None, &known));
+        assert!(var(&plan, "VIBE_PROVIDERS").is_some());
+
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[[models]]\nalias = \"local\"\nname = \"qwen3-coder\"\nprovider = \"llamacpp\"\n",
+        )
+        .unwrap();
+        let env = [(
+            "VIBE_HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        )];
+        for provider in [None, Some(OWN_PROVIDER)] {
+            let choice = SpawnChoice {
+                env: &env,
+                provider,
+                ..choice(Some("local"), Some("high"), &known)
+            };
+            let plan = plan_for(&lan, &choice);
+            assert_eq!(var(&plan, "VIBE_PROVIDERS"), None);
+            assert_eq!(plan.provider, None);
+            assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("local"));
+            assert_eq!(
+                json_var(&plan, "VIBE_MODELS"),
+                json!([{"alias": "local", "name": "qwen3-coder", "provider": "llamacpp",
+                        "thinking": "high"}])
+            );
+        }
+    }
+
+    /// A session names a provider vibe has, and a model of it.
+    #[test]
+    fn a_session_on_an_unknown_provider_or_model_is_refused() {
+        let cfg: crate::config::Config = toml::from_str(LAN).unwrap();
+        let vibe = VibeHarness::from_settings(&cfg.harnesses["vibe"]).unwrap();
+        let lan = ProviderId::from("lan");
+        let own = ProviderId::from(OWN_PROVIDER);
+        assert!(
+            vibe.session_provider(None, Some("glm-5-3"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            vibe.session_provider(Some(&own), Some("glm-5-3"))
+                .unwrap()
+                .is_none()
+        );
+        let p = vibe.session_provider(Some(&lan), Some("gemma-4")).unwrap();
+        assert_eq!(p.map(|p| p.id.as_str()), Some("lan"));
+        assert!(vibe.session_provider(Some(&lan), None).unwrap().is_some());
+        // A model of vibe's own (or of its config.toml) is not the provider's.
+        let e = vibe
+            .session_provider(Some(&lan), Some("glm-5-3"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no model 'glm-5-3'") && e.contains("gemma-4"),
+            "{e}"
+        );
+        let e = vibe
+            .session_provider(Some(&ProviderId::from("cloud")), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("no provider 'cloud'") && e.contains("agent, lan"),
+            "{e}"
+        );
+    }
+
+    /// Listed beside vibe's own, with their models before any session;
+    /// more than one provider only with some defined.
+    #[test]
+    fn providers_are_listed_with_their_models() {
+        let none = VibeHarness::new();
+        assert!(!none.capabilities().multi_provider);
+        let sandbox = Sandbox::default();
+        let bin = Path::new("vibe-acp");
+        assert_eq!(none.list_providers(bin, &sandbox).unwrap().len(), 1);
+
+        let cfg: crate::config::Config = toml::from_str(LAN).unwrap();
+        let vibe = VibeHarness::from_settings(&cfg.harnesses["vibe"]).unwrap();
+        let caps = vibe.capabilities();
+        assert!(caps.multi_provider && caps.provider_per_process && caps.model_per_process);
+        let listed: Vec<String> = vibe
+            .list_providers(bin, &sandbox)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect();
+        assert_eq!(listed, ["agent", "lan"]);
+        let models = vibe
+            .list_models(bin, &ProviderId::from("lan"), &sandbox)
+            .unwrap();
+        let names: Vec<&str> = models.iter().map(|m| m.model_ref.model.as_str()).collect();
+        assert_eq!(names, ["qwen3.8-q5kxl-x2", "gemma-4"]);
+        assert_eq!(models[0].model_ref.provider, ProviderId::from("lan"));
+        // vibe's own come from a session.
+        assert!(
+            vibe.list_models(bin, &ProviderId::from(OWN_PROVIDER), &sandbox)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// A provider table that is wrong is an error naming it, and never
+    /// repeats what `api_key_env_var` holds (it may be a key).
+    #[test]
+    fn provider_tables_that_are_wrong() {
+        let parse = |toml_text: &str| -> Result<Vec<Provider>> {
+            let cfg: crate::config::Config = toml::from_str(toml_text)?;
+            providers(&cfg.harnesses["vibe"].providers)
+        };
+        let table = |body: &str| format!("[harnesses.vibe.providers.lan]\n{body}\n");
+        let err = |body: &str| format!("{:#}", parse(&table(body)).unwrap_err());
+
+        assert!(
+            parse(&table(
+                "api_base = \"http://127.0.0.1:8080/v1\"\nmodels = [\"m\"]"
+            ))
+            .is_ok()
+        );
+        let full = parse(&table(
+            "api_base = \"https://h/v1\"\napi_style = \"reasoning\"\nbackend = \"mistral\"\n\
+             api_key_env_var = \"LAN_KEY\"\nmodels = [\"m\"]",
+        ))
+        .unwrap();
+        assert_eq!(full[0].api_key_env_var.as_deref(), Some("LAN_KEY"));
+        assert_eq!(full[0].backend, "mistral");
+
+        // Unknown keys and a missing api_base do not parse.
+        assert!(
+            parse(&table(
+                "api_base = \"http://h\"\nmodels = [\"m\"]\napi_key = \"x\""
+            ))
+            .is_err()
+        );
+        assert!(parse(&table("models = [\"m\"]")).is_err());
+
+        let e = err("api_base = \"http://h\"");
+        assert!(
+            e.starts_with("[harnesses.vibe.providers.lan]: models lists none"),
+            "{e}"
+        );
+        for base in ["\"h/v1\"", "\"ftp://h\"", "\"http://\"", "\"http://h /v1\""] {
+            let e = err(&format!("api_base = {base}\nmodels = [\"m\"]"));
+            assert!(e.contains("api_base must be"), "{base}: {e}");
+        }
+        let e = err("api_base = \"http://h\"\napi_style = \"grpc\"\nmodels = [\"m\"]");
+        assert!(e.contains("api_style 'grpc'"), "{e}");
+        let e = err("api_base = \"http://h\"\napi_style = \"vertex-anthropic\"\nmodels = [\"m\"]");
+        assert!(e.contains("project and region"), "{e}");
+        let e = err("api_base = \"http://h\"\nbackend = \"local\"\nmodels = [\"m\"]");
+        assert!(e.contains("backend 'local'"), "{e}");
+        let e = err("api_base = \"http://h\"\nmodels = [\"m\", \"m\"]");
+        assert!(e.contains("listed twice"), "{e}");
+        let e = err("api_base = \"http://h\"\nmodels = [\" m\"]");
+        assert!(e.contains("not a model name"), "{e}");
+
+        let secret = "sk-not-a-name-0123";
+        let e = err(&format!(
+            "api_base = \"http://h\"\napi_key_env_var = \"{secret}\"\nmodels = [\"m\"]"
+        ));
+        assert!(e.contains("api_key_env_var is not"), "{e}");
+        assert!(!e.contains(secret), "the value is never repeated: {e}");
+
+        for name in ["agent", "a b", "lan/x"] {
+            let cfg = crate::config::Config {
+                harnesses: [(
+                    "vibe".to_string(),
+                    HarnessSettings {
+                        providers: [(
+                            name.to_string(),
+                            ProviderSettings {
+                                api_base: "http://h".into(),
+                                models: vec!["m".into()],
+                                ..Default::default()
+                            },
+                        )]
+                        .into(),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
+                ..Default::default()
+            };
+            assert!(
+                providers(&cfg.harnesses["vibe"].providers).is_err(),
+                "{name}"
+            );
+        }
+        // From the table, the harness is not built either.
+        let cfg: crate::config::Config = toml::from_str(&table("api_base = \"http://h\"")).unwrap();
+        assert!(VibeHarness::from_settings(&cfg.harnesses["vibe"]).is_err());
     }
 }
