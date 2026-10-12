@@ -17,6 +17,7 @@
 //! goes the same way when it is chosen: `VIBE_PROVIDERS`, its models in
 //! `VIBE_MODELS` and the one to run in `VIBE_ACTIVE_MODEL`.
 
+pub mod profiles;
 pub mod subagents;
 
 use std::collections::BTreeMap;
@@ -121,16 +122,19 @@ const GUARDED_CACHES: [&str; 3] = [
 /// `vibe-acp` by the `mistral-vibe` package.
 const CLI: &str = "vibe";
 
-/// The agent (`--agent`) that backs each policy in vibe's own CLI: its
-/// built-in profiles (`vibe/core/agents/models.py`, 2.26.1). `ask` asks
-/// before every write and command, and in print mode (`-p`) denies them
-/// ("Tool execution denied by approval callback"); `accept-edits` runs
-/// `write_file` and `edit` unasked; `auto-approve` runs everything. `auto`
-/// (its `smart-approve`, #174) and `plan` (#166) are not offered.
+/// The agent (`--agent`) that backs each policy in vibe's own CLI:
+/// unharness's own profiles for `ask` and `accept-edits` (#196,
+/// [`profiles`]), found through `VIBE_AGENT_PATHS` as for a session, and
+/// vibe's built-in `auto-approve` (`vibe/core/agents/models.py`, 2.26.1).
+/// Under `ask` vibe asks before every write and command, and in print mode
+/// (`-p`) denies them ("Tool execution denied by approval callback");
+/// `accept-edits` runs `write_file` and `edit` unasked; `auto-approve`
+/// runs everything. `auto` (its `smart-approve`, #174) and `plan` (#166)
+/// are not offered.
 fn cli_agent(policy: PermissionPolicy) -> Option<&'static str> {
     match policy {
-        PermissionPolicy::Ask => Some("ask"),
-        PermissionPolicy::AcceptEdits => Some("accept-edits"),
+        PermissionPolicy::Ask => Some(profiles::ASK),
+        PermissionPolicy::AcceptEdits => Some(profiles::ACCEPT_EDITS),
         PermissionPolicy::Bypass => Some("auto-approve"),
         PermissionPolicy::Auto | PermissionPolicy::Plan => None,
     }
@@ -183,6 +187,7 @@ fn cli_plan(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> SpawnPlan
         env: &[],
         provider: cfg.provider.as_ref().map(|p| p.as_str()),
         policy: cfg.policy.unwrap_or(PermissionPolicy::Ask),
+        cwd: &cfg.cwd,
     };
     let mut plan = match choice
         .provider
@@ -209,6 +214,7 @@ fn cli_command(
     cfg: &PrintConfig,
     home: &Path,
     providers: &[Provider],
+    profile_root: Option<&Path>,
 ) -> Result<std::process::Command> {
     let Some(binary) = cli_binary(&cfg.binary) else {
         anyhow::bail!(
@@ -224,6 +230,34 @@ fn cli_command(
     cmd.current_dir(&cfg.cwd);
     for (key, value) in cli_plan(cfg, home, providers).env {
         cmd.env(key, value);
+    }
+    // Every run gets unharness's profiles, as a session's process does
+    // ([`with_profiles`]); one behind the policy that is not there, or that
+    // vibe would find elsewhere first, ends the run before vibe starts:
+    // no session describes the mode here to check it by.
+    let prepared = profiles::prepare(profile_root, home, &cfg.cwd, &[]);
+    if let Some(dir) = &prepared.dir {
+        let inherited = std::env::var("VIBE_AGENT_PATHS").ok();
+        cmd.env(
+            "VIBE_AGENT_PATHS",
+            profiles::agent_paths_env(dir, inherited.as_deref()),
+        );
+    }
+    if let Some(Err(why)) = prepared.own.get(agent) {
+        anyhow::bail!("policy '{policy}' is not available for vibe's own CLI: {why}");
+    }
+    if prepared.own.contains_key(agent) {
+        let file = format!("{agent}.toml");
+        let first = profiles::configured_agent_paths(home, &cfg.cwd)
+            .context("reading the agent_paths of vibe's configuration")?
+            .into_iter()
+            .find(|dir| dir.join(&file).exists());
+        if let Some(dir) = first {
+            anyhow::bail!(
+                "policy '{policy}' is not available for vibe's own CLI: vibe would take its agent '{agent}' from {}, an agent_paths directory of its configuration that it reads before unharness's",
+                dir.display()
+            );
+        }
     }
     cmd.arg("--workdir").arg(&cfg.cwd);
     cmd.arg("--agent").arg(agent);
@@ -274,13 +308,23 @@ fn cli_warnings(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> Vec<S
 /// (`fixtures/vibe_acp_auto*.jsonl`).
 pub const SMART_APPROVE: &str = "smart-approve";
 
-/// `ask` is vibe's mode that asks before every write and command; under
-/// `accept-edits` the agent stays in it and unharness answers the edits.
+/// `ask` and `accept-edits` are unharness's own profiles (#196,
+/// [`profiles`]): vibe's built-in `ask` runs what its configuration allows
+/// unasked, and its `accept-edits` commands too. Under `accept-edits` an
+/// edit vibe still asks about is answered as before: unharness allows one
+/// in the workspace (a sensitive file) and asks the user about one outside
+/// it (#204; vibe asks for a path outside the workspace also under
+/// `always`, `fixtures/vibe_acp_own_profile_edits.jsonl`).
 /// `auto` is smart-approve, `bypass` is `auto-approve`.
-/// (`fixtures/vibe_acp_mode*.jsonl`, `fixtures/vibe_acp_auto*.jsonl`.)
+/// (`fixtures/vibe_acp_own_profile*.jsonl`, `fixtures/vibe_acp_mode*.jsonl`,
+/// `fixtures/vibe_acp_auto*.jsonl`.)
 fn mode_map() -> ModeMap {
     ModeMap::new([
-        (crate::core::PermissionPolicy::Ask, "ask"),
+        (crate::core::PermissionPolicy::Ask, profiles::ASK),
+        (
+            crate::core::PermissionPolicy::AcceptEdits,
+            profiles::ACCEPT_EDITS,
+        ),
         (crate::core::PermissionPolicy::Auto, SMART_APPROVE),
         (crate::core::PermissionPolicy::Bypass, "auto-approve"),
     ])
@@ -290,6 +334,9 @@ pub struct VibeHarness {
     acp: AcpHarness,
     /// The providers `[harnesses.vibe.providers]` defines.
     providers: Arc<Vec<Provider>>,
+    /// Where unharness's profiles are written; `None` is under its state
+    /// directory ([`profiles::default_root`]).
+    profile_root: Option<PathBuf>,
 }
 
 impl Default for VibeHarness {
@@ -337,14 +384,35 @@ impl VibeHarness {
     /// Offer `providers` beside vibe's own configuration: one chosen for a
     /// session is handed to vibe in its environment ([`provider_env`]).
     fn with_providers(self, providers: Vec<Provider>) -> Self {
-        let providers = Arc::new(providers);
-        let defined = providers.clone();
+        VibeHarness {
+            providers: Arc::new(providers),
+            ..self
+        }
+        .rebuild_spawn()
+    }
+
+    /// Write unharness's profiles under `dir` instead of its state
+    /// directory (tests, which never write the real one).
+    pub fn writing_profiles_in(self, dir: &Path) -> Self {
+        VibeHarness {
+            profile_root: Some(dir.to_path_buf()),
+            ..self
+        }
+        .rebuild_spawn()
+    }
+
+    /// The environment each vibe process starts with: the providers' or
+    /// vibe's own model choice ([`plan_for`]) and unharness's profiles
+    /// ([`with_profiles`]).
+    fn rebuild_spawn(self) -> Self {
+        let providers = self.providers.clone();
+        let root = self.profile_root.clone();
         let acp = self
             .acp
             .choosing_at_spawn(Arc::new(move |choice: &SpawnChoice<'_>| {
-                plan_for(&defined, choice)
+                with_profiles(plan_for(&providers, choice), root.as_deref(), choice)
             }));
-        VibeHarness { acp, providers }
+        VibeHarness { acp, ..self }
     }
 
     /// The provider a session is to run on, if it is one of
@@ -396,14 +464,13 @@ impl VibeHarness {
         .signing_in_with(Some("vibe --setup"))
         .resolving_relative_edits()
         .reading_meta_with(subagents::reader)
-        .rewinding_with(REWIND_METHOD)
-        .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
-            spawn_env(&vibe_home(choice.env), choice)
-        }));
+        .rewinding_with(REWIND_METHOD);
         VibeHarness {
             acp,
             providers: Arc::default(),
+            profile_root: None,
         }
+        .rebuild_spawn()
     }
 }
 
@@ -788,6 +855,33 @@ fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
     }
 }
 
+/// `plan` with unharness's profiles put in place for a session in
+/// `choice.cwd` ([`profiles::prepare`], under `root`): their directory
+/// first in `VIBE_AGENT_PATHS`, and the description each mode has to show
+/// in the session. When they cannot be written the variable is left out
+/// and the modes are refused with the reason. Every process gets them,
+/// whatever its policy: a policy changed later sets the mode with no
+/// restart.
+fn with_profiles(mut plan: SpawnPlan, root: Option<&Path>, choice: &SpawnChoice<'_>) -> SpawnPlan {
+    let home = vibe_home(choice.env);
+    let prepared = profiles::prepare(root, &home, choice.cwd, choice.env);
+    if let Some(dir) = &prepared.dir {
+        let inherited = choice
+            .env
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "VIBE_AGENT_PATHS")
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var("VIBE_AGENT_PATHS").ok());
+        plan.env.push((
+            "VIBE_AGENT_PATHS".to_string(),
+            profiles::agent_paths_env(dir, inherited.as_deref()),
+        ));
+    }
+    plan.own_modes = prepared.own;
+    plan
+}
+
 /// vibe's environment for a session on `provider`: the provider in
 /// `VIBE_PROVIDERS`, each of its models as a whole entry in `VIBE_MODELS`
 /// (its alias the model's name), and the chosen one, else the first, in
@@ -1080,7 +1174,12 @@ impl Harness for VibeHarness {
             cfg.provider.as_ref(),
             cfg.model.as_ref().map(|m| m.model.as_str()),
         )?;
-        cli_command(cfg, &vibe_home(&[]), &self.providers)
+        cli_command(
+            cfg,
+            &vibe_home(&[]),
+            &self.providers,
+            self.profile_root.as_deref(),
+        )
     }
 
     fn print_warnings(&self, cfg: &PrintConfig) -> Vec<String> {
@@ -1106,6 +1205,7 @@ mod tests {
             known,
             env: &[],
             provider: None,
+            cwd: Path::new("/ws"),
         }
     }
 
@@ -1494,6 +1594,16 @@ provider = "mine"
         (dir, cfg)
     }
 
+    /// [`cli_command`] with unharness's profiles written beside vibe's
+    /// home in the test's directory.
+    fn cli(
+        cfg: &PrintConfig,
+        home: &Path,
+        providers: &[Provider],
+    ) -> Result<std::process::Command> {
+        cli_command(cfg, home, providers, Some(&home.join("uh-profiles")))
+    }
+
     fn cli_args(cmd: &std::process::Command) -> Vec<String> {
         cmd.get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -1513,15 +1623,15 @@ provider = "mine"
         let (dir, cfg) = cli_setup();
         let home = dir.path();
         for (policy, agent) in [
-            (PermissionPolicy::Ask, "ask"),
-            (PermissionPolicy::AcceptEdits, "accept-edits"),
+            (PermissionPolicy::Ask, "unharness-ask"),
+            (PermissionPolicy::AcceptEdits, "unharness-accept-edits"),
             (PermissionPolicy::Bypass, "auto-approve"),
         ] {
             let cfg = PrintConfig {
                 policy: Some(policy),
                 ..cfg.clone()
             };
-            let cmd = cli_command(&cfg, home, &[]).unwrap();
+            let cmd = cli(&cfg, home, &[]).unwrap();
             assert_eq!(cmd.get_program(), dir.path().join("vibe"));
             assert_eq!(cmd.get_current_dir(), Some(Path::new("/ws")));
             assert_eq!(
@@ -1535,10 +1645,10 @@ provider = "mine"
                 policy: Some(policy),
                 ..cfg.clone()
             };
-            assert!(cli_command(&cfg, home, &[]).is_err(), "{policy}");
+            assert!(cli(&cfg, home, &[]).is_err(), "{policy}");
         }
         // Never `--trust`.
-        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
+        let a = cli_args(&cli(&cfg, home, &[]).unwrap());
         assert!(!a.iter().any(|a| a == "--trust"));
     }
 
@@ -1556,10 +1666,10 @@ provider = "mine"
             ("stream-json", "streaming"),
             ("streaming", "streaming"),
         ] {
-            let a = cli_args(&cli_command(&with(format), home, &[]).unwrap());
+            let a = cli_args(&cli(&with(format), home, &[]).unwrap());
             assert!(a.windows(2).any(|w| w == ["--output", output]), "{a:?}");
         }
-        assert!(cli_command(&with("yaml"), home, &[]).is_err());
+        assert!(cli(&with("yaml"), home, &[]).is_err());
 
         let cfg = PrintConfig {
             resume: Some("s-1".into()),
@@ -1567,7 +1677,7 @@ provider = "mine"
             prompt: Some("-n is a flag".into()),
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
+        let a = cli_args(&cli(&cfg, home, &[]).unwrap());
         assert!(a.windows(2).any(|w| w == ["--resume", "s-1"]));
         assert!(a.windows(2).any(|w| w == ["--max-turns", "3"]));
         assert_eq!(a.last().unwrap(), "--prompt=-n is a flag");
@@ -1576,7 +1686,7 @@ provider = "mine"
             prompt: None,
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, home, &[]).unwrap());
+        let a = cli_args(&cli(&cfg, home, &[]).unwrap());
         assert_eq!(a.last().unwrap(), "--prompt=");
     }
 
@@ -1591,14 +1701,14 @@ provider = "mine"
             policy: Some(PermissionPolicy::AcceptEdits),
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, dir.path(), &[]).unwrap());
+        let a = cli_args(&cli(&cfg, dir.path(), &[]).unwrap());
         assert_eq!(
             a,
             [
                 "--workdir",
                 "/ws",
                 "--agent",
-                "accept-edits",
+                "unharness-accept-edits",
                 "--",
                 "fix it"
             ]
@@ -1607,8 +1717,8 @@ provider = "mine"
             prompt: None,
             ..cfg
         };
-        let a = cli_args(&cli_command(&cfg, dir.path(), &[]).unwrap());
-        assert_eq!(a, ["--workdir", "/ws", "--agent", "accept-edits"]);
+        let a = cli_args(&cli(&cfg, dir.path(), &[]).unwrap());
+        assert_eq!(a, ["--workdir", "/ws", "--agent", "unharness-accept-edits"]);
     }
 
     /// The model and level go in the environment as for a session; a level
@@ -1629,7 +1739,7 @@ provider = "mine"
             effort: Some("high".into()),
             ..cfg
         };
-        let cmd = cli_command(&cfg, home, &[]).unwrap();
+        let cmd = cli(&cfg, home, &[]).unwrap();
         assert_eq!(cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(), Some("dev"));
         let models: serde_json::Value =
             serde_json::from_str(&cli_env(&cmd, "VIBE_MODELS").unwrap()).unwrap();
@@ -1648,7 +1758,7 @@ provider = "mine"
             model: model("glm-5-3"),
             ..cfg
         };
-        let cmd = cli_command(&cfg, home, &[]).unwrap();
+        let cmd = cli(&cfg, home, &[]).unwrap();
         assert_eq!(
             cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(),
             Some("glm-5-3")
@@ -1658,11 +1768,84 @@ provider = "mine"
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("without the thinking level"));
 
-        // Nothing chosen, nothing set.
+        // Nothing chosen, nothing set but unharness's profiles.
         let (dir, cfg) = cli_setup();
-        let cmd = cli_command(&cfg, dir.path(), &[]).unwrap();
-        assert_eq!(cmd.get_envs().count(), 0);
+        let cmd = cli(&cfg, dir.path(), &[]).unwrap();
+        let set: Vec<String> = cmd
+            .get_envs()
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(set, ["VIBE_AGENT_PATHS"]);
         assert!(cli_warnings(&cfg, dir.path(), &[]).is_empty());
+    }
+
+    /// `--print --native` and `--no-tui` run vibe with unharness's profile
+    /// behind `ask` and `accept-edits`, found through `VIBE_AGENT_PATHS`
+    /// (#196). No session describes the mode there, so a profile of that
+    /// name in an `agent_paths` directory of vibe's configuration, which
+    /// vibe reads first, or a configuration that cannot be read, ends the
+    /// run before vibe starts.
+    #[test]
+    fn the_cli_runs_unharness_profiles() {
+        let (dir, cfg) = cli_setup();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "bypass_tool_permissions = true\n[tools.write_file]\npermission = \"always\"\n",
+        )
+        .unwrap();
+        let cmd = cli(&cfg, home, &[]).unwrap();
+        let paths: Vec<PathBuf> =
+            serde_json::from_str(&cli_env(&cmd, "VIBE_AGENT_PATHS").unwrap()).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert!(paths[0].starts_with(home.join("uh-profiles")));
+        let ask: toml::Table = std::fs::read_to_string(paths[0].join("unharness-ask.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(ask["bypass_tool_permissions"].as_bool(), Some(false));
+        assert_eq!(
+            ask["tools"]["write_file"]["permission"].as_str(),
+            Some("ask")
+        );
+        assert!(paths[0].join("unharness-accept-edits.toml").is_file());
+
+        // vibe would find another `unharness-ask` first.
+        let theirs = home.join("theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        std::fs::write(theirs.join("unharness-ask.toml"), "").unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            format!("agent_paths = [{:?}]\n", theirs.to_string_lossy()),
+        )
+        .unwrap();
+        let why = cli(&cfg, home, &[]).unwrap_err().to_string();
+        assert!(
+            why.contains("would take its agent 'unharness-ask' from"),
+            "{why}"
+        );
+        // Not the one behind accept-edits, nor auto-approve.
+        for policy in [PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass] {
+            let cfg = PrintConfig {
+                policy: Some(policy),
+                ..cfg.clone()
+            };
+            assert!(cli(&cfg, home, &[]).is_ok(), "{policy}");
+        }
+
+        // A configuration that cannot be read: what it allows could not be
+        // overridden.
+        std::fs::write(home.join("config.toml"), "[tools").unwrap();
+        let why = cli(&cfg, home, &[]).unwrap_err().to_string();
+        assert!(
+            why.contains("could not put its vibe profile in place"),
+            "{why}"
+        );
+        let bypass = PrintConfig {
+            policy: Some(PermissionPolicy::Bypass),
+            ..cfg
+        };
+        assert!(cli(&bypass, home, &[]).is_ok());
     }
 
     /// `--print --native --provider`: vibe's CLI gets the provider in its
@@ -1687,7 +1870,7 @@ provider = "mine"
             provider: Some(ProviderId::from("lan")),
             ..cfg
         };
-        let cmd = cli_command(&cfg, dir.path(), &vibe.providers).unwrap();
+        let cmd = cli(&cfg, dir.path(), &vibe.providers).unwrap();
         assert_eq!(
             cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(),
             Some("qwen3-coder")

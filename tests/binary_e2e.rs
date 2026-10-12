@@ -881,7 +881,7 @@ fn native_print_and_no_tui_run_vibes_own_cli() {
     assert_eq!(
         print,
         format!(
-            "--workdir\n{ws}\n--agent\nask\n--output\nstreaming\n--prompt=write x\nmodel=mistral-medium-3.5\ncwd={ws}\n"
+            "--workdir\n{ws}\n--agent\nunharness-ask\n--output\nstreaming\n--prompt=write x\nmodel=mistral-medium-3.5\ncwd={ws}\n"
         )
     );
     let tui = run(&["--policy", "bypass", "--no-tui", "hi"]);

@@ -8,7 +8,7 @@
 //! the request ids. The transport driver owns everything that needs those
 //! ids: the handshake, failed requests, and answering the agent's requests.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -42,6 +42,8 @@ pub struct SessionOptions {
     pub mode_option: Option<String>,
     pub mode_values: Vec<String>,
     pub current_mode: Option<String>,
+    /// Each mode value's `description`, where it has one.
+    pub mode_descriptions: BTreeMap<String, String>,
 }
 
 impl SessionOptions {
@@ -106,6 +108,7 @@ impl SessionOptions {
                         .and_then(Value::as_str)
                         .map(str::to_string);
                     out.mode_values = values();
+                    out.mode_descriptions = descriptions(&choices);
                     out.mode_option = Some(id);
                 }
                 _ => {}
@@ -765,6 +768,17 @@ fn select_choices(opt: &Value) -> Option<Vec<&Value>> {
             .filter(|c| !s(c, "value").is_empty())
             .collect(),
     )
+}
+
+/// Each choice's `description`, by its value, for those that have one.
+fn descriptions(choices: &[&Value]) -> BTreeMap<String, String> {
+    choices
+        .iter()
+        .filter_map(|c| {
+            let d = c.get("description").and_then(Value::as_str)?;
+            Some((s(c, "value").to_string(), d.to_string()))
+        })
+        .collect()
 }
 
 pub fn error_text(error: &Value) -> String {
@@ -1905,6 +1919,19 @@ mod tests {
         assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_auto");
         let mut p = parser().declaring_effort(Some("thinking".into()));
         assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_auto_outside");
+    }
+
+    /// vibe-acp 2.26.1 in unharness's own profiles (#196), with a config
+    /// under which vibe's built-in `ask` ran everything unasked: in
+    /// `unharness-ask` a command and a write are asked about, in
+    /// `unharness-accept-edits` a write in the workspace runs unasked and a
+    /// write outside it and a command are asked about.
+    #[test]
+    fn fixture_vibe_acp_own_profile() {
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_own_profile");
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_own_profile_edits");
     }
 
     /// vibe-acp 2.26.1 in its ask mode, the one behind `accept-edits`

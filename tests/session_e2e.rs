@@ -43,6 +43,11 @@ impl Fake {
         Fake { _tmp: tmp, log }
     }
 
+    /// Where a vibe harness writes its profiles in a test.
+    fn profiles(&self) -> PathBuf {
+        self._tmp.path().join("uh-profiles")
+    }
+
     fn config(&self, fixture: &Path, policy: PermissionPolicy, hang: bool) -> SessionConfig {
         let mut env = vec![
             (
@@ -3809,7 +3814,7 @@ async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent_background.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let vibe = vibe_harness();
+    let vibe = vibe_harness_recorded_in_ask(&fake.profiles());
     let handle = vibe.start_session(cfg).unwrap();
     let mut run = headless_run_with(
         &fake,
@@ -4269,13 +4274,35 @@ async fn claude_remote_control_turns_on_withdraws_remote_answers_and_turns_off()
     );
 }
 
-/// The built-in vibe harness, its command the fake.
-fn vibe_harness() -> unharness::harness::vibe::VibeHarness {
+/// The built-in vibe harness, its command the fake, writing its profiles
+/// (#196) in `profiles`, never in the real state directory.
+fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
         command: vec![fake_harness().to_string_lossy().into_owned()],
         ..Default::default()
     })
     .unwrap()
+    .writing_profiles_in(profiles)
+}
+
+/// The vibe harness for a recording made before #196, with vibe's own
+/// `ask` behind `ask` (the map of that time, as a `modes` table): those
+/// sessions list no `unharness-ask`.
+fn vibe_harness_recorded_in_ask(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
+    unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
+        command: vec![fake_harness().to_string_lossy().into_owned()],
+        modes: [
+            ("ask", "ask"),
+            ("auto", "smart-approve"),
+            ("bypass", "auto-approve"),
+        ]
+        .into_iter()
+        .map(|(p, m)| (p.to_string(), m.to_string()))
+        .collect(),
+        ..Default::default()
+    })
+    .unwrap()
+    .writing_profiles_in(profiles)
 }
 
 /// A vibe session for `model` at `effort`, its VIBE_HOME an empty `home`.
@@ -4322,7 +4349,7 @@ async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
         return;
     }
     let home = tempfile::tempdir().unwrap();
-    let vibe = vibe_harness();
+    let vibe = vibe_harness_recorded_in_ask(&home.path().join("uh-profiles"));
     let entry = r#"[{"alias":"mistral-medium-3.5","name":"mistral-vibe-cli-latest","provider":"mistral","thinking":"off"}]"#;
     let model_only = r#"env {"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":null}"#;
     let with_entry = format!(
@@ -4426,7 +4453,9 @@ async fn vibe_reports_a_subagent_and_asks_for_its_write() {
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    let mut handle = vibe_harness_recorded_in_ask(&fake.profiles())
+        .start_session(cfg)
+        .unwrap();
     handle
         .send(SessionCommand::turn("use the scribe subagent"))
         .await
@@ -4507,7 +4536,9 @@ async fn vibe_a_denied_call_only_its_request_named_ends_denied() {
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    let mut handle = vibe_harness_recorded_in_ask(&fake.profiles())
+        .start_session(cfg)
+        .unwrap();
     handle
         .send(SessionCommand::turn("use the scribe subagent"))
         .await
@@ -4593,7 +4624,7 @@ async fn vibe_auto_is_smart_approve_and_its_escalations_are_asked() {
         ),
         ("VIBE_HOME".to_string(), home.path().display().to_string()),
     ]);
-    let vibe = vibe_harness();
+    let vibe = vibe_harness(&fake.profiles());
     assert!(
         vibe.capabilities()
             .supports_policy(PermissionPolicy::Auto)
@@ -4703,7 +4734,9 @@ async fn vibe_says_when_the_session_runs_another_model_or_level() {
     .unwrap();
     let fake = Fake::new();
     let cfg = vibe_config(&fake, home.path(), "gone", "high");
-    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    let mut handle = vibe_harness_recorded_in_ask(&fake.profiles())
+        .start_session(cfg)
+        .unwrap();
     handle.send(SessionCommand::turn("hi")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     let notices: Vec<&str> = events
@@ -4738,14 +4771,17 @@ async fn vibe_runs_on_a_configured_provider_by_environment() {
     }
     let settings: unharness::config::Config = toml::from_str(&format!(
         "[harnesses.vibe]\ncommand = [{:?}]\n\
+         modes = {{ ask = \"ask\", auto = \"smart-approve\", bypass = \"auto-approve\" }}\n\
          [harnesses.vibe.providers.lan]\napi_base = \"https://LOCAL-LLM/v1\"\n\
          models = [\"qwen3.8-q5kxl-x2\"]\n",
         fake_harness().to_string_lossy()
     ))
     .unwrap();
-    let vibe =
-        unharness::harness::vibe::VibeHarness::from_settings(&settings.harnesses["vibe"]).unwrap();
+    // Recorded before #196, in vibe's own `ask`: the map of that time.
     let fake = Fake::new();
+    let vibe = unharness::harness::vibe::VibeHarness::from_settings(&settings.harnesses["vibe"])
+        .unwrap()
+        .writing_profiles_in(&fake.profiles());
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_provider.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
@@ -5005,7 +5041,9 @@ async fn vibe_asks_before_a_write_and_a_command() {
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_allow_deny.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
-    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    let mut handle = vibe_harness_recorded_in_ask(&fake.profiles())
+        .start_session(cfg)
+        .unwrap();
     handle
         .send(SessionCommand::turn("write a.txt, then touch b.txt"))
         .await
@@ -5067,6 +5105,234 @@ async fn vibe_asks_before_a_write_and_a_command() {
         .filter_map(|v| v["result"]["outcome"]["optionId"].as_str())
         .collect();
     assert_eq!(answers, ["allow_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// The nonce of the profiles `fixtures/vibe_acp_own_profile*.jsonl` were
+/// recorded with: put in a test's profile directory, the sessions there
+/// describe unharness's modes as its own.
+const RECORDED_NONCE: &str = "47afaea60b0f49e4b85044ff3d752d7f";
+
+/// A vibe home whose configuration lets everything run unasked in vibe's
+/// own `ask` (#196): bypass on, `write_file` and `bash` always, and an
+/// `agents/ask.toml` that replaces the built-in `ask`.
+fn permissive_vibe_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "bypass_tool_permissions = true\n[tools.write_file]\npermission = \"always\"\n\
+         [tools.bash]\npermission = \"always\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(home.path().join("agents")).unwrap();
+    std::fs::write(
+        home.path().join("agents/ask.toml"),
+        "[tools.write_file]\npermission = \"always\"\n",
+    )
+    .unwrap();
+    home
+}
+
+/// A vibe session on the built-in harness under `policy`, its home
+/// `home`, its profiles in the fake's directory with `nonce` (none: a new
+/// one), the agent's `VIBE_AGENT_PATHS` logged.
+fn vibe_own_profile(
+    fake: &Fake,
+    home: &Path,
+    fixture: &str,
+    policy: PermissionPolicy,
+    nonce: Option<&str>,
+) -> SessionHandle {
+    if let Some(nonce) = nonce {
+        std::fs::create_dir_all(fake.profiles()).unwrap();
+        std::fs::write(fake.profiles().join("nonce"), format!("{nonce}\n")).unwrap();
+    }
+    let fixture = repo().join("src/harness/acp/fixtures").join(fixture);
+    let mut cfg = fake.config(&fixture, policy, true);
+    cfg.model = None;
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "VIBE_AGENT_PATHS".to_string(),
+        ),
+        ("VIBE_HOME".to_string(), home.to_string_lossy().into_owned()),
+    ]);
+    vibe_harness(&fake.profiles()).start_session(cfg).unwrap()
+}
+
+/// The directory the agent was given in `VIBE_AGENT_PATHS`.
+fn agent_paths(fake: &Fake) -> Vec<PathBuf> {
+    let logged = fake
+        .sent_lines()
+        .into_iter()
+        .find_map(|v| v.get("env").cloned())
+        .expect("the environment was logged");
+    serde_json::from_str(logged["VIBE_AGENT_PATHS"].as_str().unwrap()).unwrap()
+}
+
+fn tool_actions(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::PermissionRequest(req) => match &req.kind {
+                PermissionKind::ToolUse { action, .. } => Some(format!("{action:?}")),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// `ask` on vibe is unharness's own profile (#196): written under the
+/// state directory (here the test's), named in `VIBE_AGENT_PATHS`, set as
+/// the session's mode once the session describes it with the nonce. With
+/// a configuration under which vibe's own `ask` ran everything unasked,
+/// the command and the write are asked about, and denied
+/// (`fixtures/vibe_acp_own_profile.jsonl`, vibe-acp 2.26.1).
+#[tokio::test]
+async fn vibe_ask_is_unharness_own_profile() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let home = permissive_vibe_home();
+    let mut handle = vibe_own_profile(
+        &fake,
+        home.path(),
+        "vibe_acp_own_profile.jsonl",
+        PermissionPolicy::Ask,
+        Some(RECORDED_NONCE),
+    );
+    handle
+        .send(SessionCommand::turn("touch b.txt, write a.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| match e {
+        AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Deny {
+            reason: "no".into(),
+        }),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        tool_actions(&events),
+        [
+            r#"Shell { command: "touch /WORKSPACE/b.txt", cwd: None }"#,
+            r#"Edit { paths: ["/WORKSPACE/a.txt"] }"#,
+        ]
+    );
+    assert!(turn_error(&events).is_none(), "{events:?}");
+    // The profiles, in the directory the agent was given.
+    let dirs = agent_paths(&fake);
+    assert_eq!(dirs.len(), 1);
+    assert!(dirs[0].starts_with(fake.profiles()), "{dirs:?}");
+    let ask: toml::Table = std::fs::read_to_string(dirs[0].join("unharness-ask.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(ask["bypass_tool_permissions"].as_bool(), Some(false));
+    assert_eq!(
+        ask["tools"]["write_file"]["permission"].as_str(),
+        Some("ask")
+    );
+    assert_eq!(ask["tools"]["bash"]["permission"].as_str(), Some("ask"));
+    let sent = fake.sent_lines();
+    let mode = sent
+        .iter()
+        .find(|v| v["method"] == "session/set_config_option")
+        .unwrap();
+    assert_eq!(mode["params"]["configId"], "mode");
+    assert_eq!(mode["params"]["value"], "unharness-ask");
+    let answers: Vec<&str> = sent
+        .iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str())
+        .collect();
+    assert_eq!(answers, ["reject_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// `accept-edits` is unharness's `unharness-accept-edits`: vibe runs the
+/// write in the workspace with no request, and asks about the write
+/// outside it and the command, which go to the user
+/// (`fixtures/vibe_acp_own_profile_edits.jsonl`, vibe-acp 2.26.1).
+#[tokio::test]
+async fn vibe_accept_edits_is_unharness_own_profile() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let home = permissive_vibe_home();
+    let mut handle = vibe_own_profile(
+        &fake,
+        home.path(),
+        "vibe_acp_own_profile_edits.jsonl",
+        PermissionPolicy::AcceptEdits,
+        Some(RECORDED_NONCE),
+    );
+    handle
+        .send(SessionCommand::turn("three things"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| match e {
+        AgentEvent::PermissionRequest(_) => Some(PermissionDecision::Deny {
+            reason: "no".into(),
+        }),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        tool_actions(&events),
+        [
+            r#"Edit { paths: ["/tmp/l196/outside.txt"] }"#,
+            r#"Shell { command: "touch /WORKSPACE/b.txt", cwd: None }"#,
+        ]
+    );
+    let sent = fake.sent_lines();
+    let mode = sent
+        .iter()
+        .find(|v| v["method"] == "session/set_config_option")
+        .unwrap();
+    assert_eq!(mode["params"]["value"], "unharness-accept-edits");
+    let answers: Vec<&str> = sent
+        .iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str())
+        .collect();
+    assert_eq!(answers, ["reject_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// A session whose `unharness-ask` is described with another nonce got
+/// a profile of that name from somewhere vibe looks first (an
+/// `agent_paths` directory of its config): `ask` is refused for it, no
+/// prompt goes, and nothing is set. (The recording's nonce is not the
+/// test's.)
+#[tokio::test]
+async fn vibe_refuses_ask_when_unharness_ask_is_not_its_own() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let home = permissive_vibe_home();
+    let mut handle = vibe_own_profile(
+        &fake,
+        home.path(),
+        "vibe_acp_own_profile.jsonl",
+        PermissionPolicy::Ask,
+        Some("00000000000000000000000000000000"),
+    );
+    handle
+        .send(SessionCommand::turn("write a.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(refused(&events, PermissionPolicy::Ask), "{events:?}");
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(
+        why.contains("its mode 'unharness-ask' is not the one unharness put in place"),
+        "{why}"
+    );
+    assert!(why.contains(RECORDED_NONCE), "{why}");
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 

@@ -94,7 +94,18 @@ pub struct AgentModes {
     /// The select config option of category `mode`, and its values.
     pub option: Option<String>,
     pub option_values: Vec<String>,
+    /// What the session says each mode is: the `description` of its entry
+    /// in `availableModes`, and of its value in the mode option.
+    pub listed_descriptions: BTreeMap<String, String>,
+    pub option_descriptions: BTreeMap<String, String>,
 }
+
+/// The modes a harness put in place itself for the agent's process, by
+/// id: the description it gave each, which the session has to show for
+/// it (vibe's profiles in unharness's state directory, whose descriptions
+/// carry a nonce, so that a mode of that name defined elsewhere and found
+/// first shows another), or why it could not put the mode there.
+pub type OwnModes = BTreeMap<String, Result<String, String>>;
 
 impl AgentModes {
     /// From a session answer (`session/new`, `load`, `resume`, `fork`) and
@@ -117,6 +128,19 @@ impl AgentModes {
                         .collect()
                 })
                 .unwrap_or_default(),
+            listed_descriptions: modes
+                .and_then(|m| m.get("availableModes"))
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|m| {
+                            let id = m.get("id").and_then(Value::as_str)?;
+                            let d = m.get("description").and_then(Value::as_str)?;
+                            Some((id.to_string(), d.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             ..Default::default()
         };
         out.take_options(options);
@@ -129,6 +153,7 @@ impl AgentModes {
             self.known = true;
             self.option = Some(id.clone());
             self.option_values = options.mode_values.clone();
+            self.option_descriptions = options.mode_descriptions.clone();
             if let Some(current) = &options.current_mode {
                 self.current = Some(current.clone());
             }
@@ -149,6 +174,14 @@ impl AgentModes {
             }
         }
         out
+    }
+
+    /// Every description the session gives `mode`.
+    fn descriptions_of(&self, mode: &str) -> Vec<&str> {
+        [&self.listed_descriptions, &self.option_descriptions]
+            .iter()
+            .filter_map(|d| d.get(mode).map(String::as_str))
+            .collect()
     }
 
     /// How `mode` is set: through the mode option when the session offers
@@ -199,11 +232,16 @@ pub enum ModeStep {
 /// is in may run what the policy asks about (a vibe session loaded in
 /// `auto-approve` would run commands unasked under `accept-edits`). With a
 /// map, every policy needs an entry at or below it.
+///
+/// A mode of `own` is held only when the session describes it as the
+/// harness did ([`OwnModes`]); otherwise the policy is refused, never
+/// held in some other mode.
 pub fn mode_step(
     harness: &str,
     policy: PermissionPolicy,
     map: &ModeMap,
     agent: &AgentModes,
+    own: &OwnModes,
 ) -> ModeStep {
     let unavailable = |why: String| {
         ModeStep::Refuse(format!(
@@ -237,12 +275,28 @@ pub fn mode_step(
             "it lists no session modes, and its modes map names '{mode}' for {policy}"
         ));
     }
+    if let Some(Err(why)) = own.get(mode) {
+        return unavailable(why.clone());
+    }
     let Some(via) = agent.channel(mode) else {
         return unavailable(format!(
             "it does not offer mode '{mode}' (it offers {}), which its modes map names for {policy}",
             agent.offered().join(", ")
         ));
     };
+    if let Some(Ok(expected)) = own.get(mode) {
+        let seen = agent.descriptions_of(mode);
+        if seen.is_empty() || seen.iter().any(|d| d != expected) {
+            let shown = match seen.iter().find(|d| *d != expected) {
+                Some(d) => format!("described as '{d}'"),
+                None => "not described".to_string(),
+            };
+            return unavailable(format!(
+                "its mode '{mode}' is not the one unharness put in place ({shown}, not \
+                 '{expected}'): a definition of that name was found before unharness's own"
+            ));
+        }
+    }
     if agent.current.as_deref() == Some(mode) {
         return ModeStep::Keep(mode.to_string());
     }
@@ -357,14 +411,15 @@ mod tests {
                 "smart-approve".into(),
                 "auto-approve".into(),
             ],
+            ..Default::default()
         };
         assert_eq!(
-            mode_step("vibe", Auto, &map, &in_it),
+            mode_step("vibe", Auto, &map, &in_it, &OwnModes::new()),
             ModeStep::Keep("smart-approve".into())
         );
         // A policy change back to ask sets `ask` through the option.
         assert_eq!(
-            mode_step("vibe", Ask, &map, &in_it),
+            mode_step("vibe", Ask, &map, &in_it, &OwnModes::new()),
             ModeStep::Set {
                 mode: "ask".into(),
                 via: SetVia::Option("mode".into())
@@ -377,7 +432,7 @@ mod tests {
         let (result, options) = vibe_new();
         let without = AgentModes::from_session(&result, &options, false);
         assert!(matches!(
-            mode_step("vibe", Auto, &map, &without),
+            mode_step("vibe", Auto, &map, &without, &OwnModes::new()),
             ModeStep::Refuse(why) if why.contains("does not offer mode 'smart-approve'")
         ));
     }
@@ -404,7 +459,7 @@ mod tests {
         assert_eq!(agent.current.as_deref(), Some("accept-edits"));
         assert_eq!(agent.offered(), ["ask", "accept-edits", "auto-approve"]);
         assert_eq!(
-            mode_step("vibe", Ask, &vibe_map(), &agent),
+            mode_step("vibe", Ask, &vibe_map(), &agent, &OwnModes::new()),
             ModeStep::Set {
                 mode: "ask".into(),
                 via: SetVia::Option("mode".into())
@@ -417,7 +472,7 @@ mod tests {
             ..agent.clone()
         };
         assert_eq!(
-            mode_step("vibe", Ask, &vibe_map(), &bare),
+            mode_step("vibe", Ask, &vibe_map(), &bare, &OwnModes::new()),
             ModeStep::Set {
                 mode: "ask".into(),
                 via: SetVia::SetMode
@@ -429,7 +484,7 @@ mod tests {
             ..agent.clone()
         };
         assert_eq!(
-            mode_step("vibe", AcceptEdits, &vibe_map(), &asking),
+            mode_step("vibe", AcceptEdits, &vibe_map(), &asking, &OwnModes::new()),
             ModeStep::Keep("ask".into())
         );
     }
@@ -439,7 +494,7 @@ mod tests {
         let (result, options) = vibe_new();
         let agent = AgentModes::from_session(&result, &options, false);
         let none = ModeMap::default();
-        match mode_step("vibe", Ask, &none, &agent) {
+        match mode_step("vibe", Ask, &none, &agent, &OwnModes::new()) {
             ModeStep::Refuse(why) => {
                 assert!(
                     why.starts_with("policy 'ask' is not available for vibe"),
@@ -452,7 +507,7 @@ mod tests {
         // So is every policy below bypass: the mode the agent is in may
         // run what it asks about. Only bypass leaves the mode alone.
         for policy in [Plan, AcceptEdits, Auto] {
-            match mode_step("vibe", policy, &none, &agent) {
+            match mode_step("vibe", policy, &none, &agent, &OwnModes::new()) {
                 ModeStep::Refuse(why) => {
                     let head = format!("policy '{policy}' is not available for vibe");
                     let map = format!("no `modes` map to say which one holds to {policy}");
@@ -461,17 +516,23 @@ mod tests {
                 other => panic!("{policy}: {other:?}"),
             }
         }
-        assert_eq!(mode_step("vibe", Bypass, &none, &agent), ModeStep::Leave);
+        assert_eq!(
+            mode_step("vibe", Bypass, &none, &agent, &OwnModes::new()),
+            ModeStep::Leave
+        );
         // An agent with no modes asks or does not by itself.
         let modeless = AgentModes {
             known: true,
             ..Default::default()
         };
-        assert_eq!(mode_step("x", Ask, &none, &modeless), ModeStep::Leave);
+        assert_eq!(
+            mode_step("x", Ask, &none, &modeless, &OwnModes::new()),
+            ModeStep::Leave
+        );
         // With a map, a policy with nothing at or below it is refused.
         let only_bypass = ModeMap::new([(Bypass, "auto-approve")]);
         assert!(matches!(
-            mode_step("vibe", AcceptEdits, &only_bypass, &agent),
+            mode_step("vibe", AcceptEdits, &only_bypass, &agent, &OwnModes::new()),
             ModeStep::Refuse(why) if why.contains("names no mode for accept-edits")
         ));
     }
@@ -483,14 +544,14 @@ mod tests {
         // `plan` is hidden by vibe's runtime; set_mode would answer `{}`.
         let plan = ModeMap::new([(Ask, "plan")]);
         assert!(matches!(
-            mode_step("vibe", Ask, &plan, &agent),
+            mode_step("vibe", Ask, &plan, &agent, &OwnModes::new()),
             ModeStep::Refuse(why) if why.contains("does not offer mode 'plan' (it offers ask, accept-edits, auto-approve)")
         ));
         // A reattach that answered `{}` (vibe's `session/resume`).
         let resumed = AgentModes::from_session(&json!({}), &SessionOptions::default(), true);
         assert!(!resumed.known);
         assert!(matches!(
-            mode_step("vibe", Ask, &vibe_map(), &resumed),
+            mode_step("vibe", Ask, &vibe_map(), &resumed, &OwnModes::new()),
             ModeStep::Refuse(why) if why.contains("did not say which modes")
         ));
         // A new session that lists none.
@@ -500,12 +561,103 @@ mod tests {
             false,
         );
         assert!(matches!(
-            mode_step("x", Ask, &vibe_map(), &none),
+            mode_step("x", Ask, &vibe_map(), &none, &OwnModes::new()),
             ModeStep::Refuse(why) if why.contains("lists no session modes")
         ));
         // A loaded one that does say (`fixtures/vibe_acp_mode_load.jsonl`).
         let loaded = AgentModes::from_session(&result, &options, true);
         assert!(loaded.known);
+    }
+
+    /// vibe's `ask` is unharness's own profile (#196), described with a
+    /// nonce. One of that name defined elsewhere and found first (an
+    /// `agent_paths` directory of vibe's config listed before unharness's)
+    /// describes itself otherwise, and the policy is refused, not held in it.
+    #[test]
+    fn a_mode_the_harness_put_in_place_must_be_its_own() {
+        let map = ModeMap::new([
+            (Ask, "unharness-ask"),
+            (AcceptEdits, "unharness-accept-edits"),
+            (Bypass, "auto-approve"),
+        ]);
+        let ours = "Asks before every write and command (unharness 0123abcd)";
+        let own: OwnModes = [
+            ("unharness-ask".to_string(), Ok(ours.to_string())),
+            (
+                "unharness-accept-edits".to_string(),
+                Err("vibe's config.toml could not be read".to_string()),
+            ),
+        ]
+        .into();
+        let session = |description: &str| {
+            let result = json!({"sessionId": "s",
+                "modes": {"currentModeId": "accept-edits", "availableModes": [
+                    {"id": "ask", "description": "Requires approval for tool executions"},
+                    {"id": "accept-edits"},
+                    {"id": "unharness-ask", "description": description},
+                    {"id": "unharness-accept-edits", "description": "x"}]},
+                "configOptions": [{"id": "mode", "category": "mode", "type": "select",
+                    "currentValue": "accept-edits", "options": [
+                        {"value": "ask"}, {"value": "accept-edits"},
+                        {"value": "unharness-ask", "description": description},
+                        {"value": "unharness-accept-edits"}]}]});
+            let options =
+                SessionOptions::from_config_options(result.get("configOptions"), None).unwrap();
+            AgentModes::from_session(&result, &options, false)
+        };
+        assert_eq!(
+            mode_step("vibe", Ask, &map, &session(ours), &own),
+            ModeStep::Set {
+                mode: "unharness-ask".into(),
+                via: SetVia::Option("mode".into())
+            }
+        );
+        let other = session("Every write asked");
+        match mode_step("vibe", Ask, &map, &other, &own) {
+            ModeStep::Refuse(why) => {
+                assert!(
+                    why.starts_with("policy 'ask' is not available for vibe"),
+                    "{why}"
+                );
+                assert!(why.contains("described as 'Every write asked'"), "{why}");
+                assert!(why.contains("found before unharness's own"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Described rightly in the list and otherwise as an option value.
+        let mut mixed = session(ours);
+        mixed
+            .option_descriptions
+            .insert("unharness-ask".into(), "Every write asked".into());
+        assert!(matches!(
+            mode_step("vibe", Ask, &map, &mixed, &own),
+            ModeStep::Refuse(why) if why.contains("described as 'Every write asked'")
+        ));
+        // Not described at all.
+        let mut bare = session(ours);
+        bare.listed_descriptions.clear();
+        bare.option_descriptions.clear();
+        assert!(matches!(
+            mode_step("vibe", Ask, &map, &bare, &own),
+            ModeStep::Refuse(why) if why.contains("not described")
+        ));
+        // Already in the mode: still checked.
+        let mut current = session("Every write asked");
+        current.current = Some("unharness-ask".into());
+        assert!(matches!(
+            mode_step("vibe", Ask, &map, &current, &own),
+            ModeStep::Refuse(_)
+        ));
+        // A mode the harness could not put in place says why.
+        assert!(matches!(
+            mode_step("vibe", AcceptEdits, &map, &session(ours), &own),
+            ModeStep::Refuse(why) if why.ends_with("vibe's config.toml could not be read")
+        ));
+        // Modes it did not put in place are not checked.
+        assert!(matches!(
+            mode_step("vibe", Bypass, &map, &session(ours), &own),
+            ModeStep::Refuse(why) if why.contains("does not offer mode 'auto-approve'")
+        ));
     }
 
     #[test]

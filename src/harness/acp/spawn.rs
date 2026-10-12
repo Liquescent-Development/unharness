@@ -19,8 +19,10 @@
 //! started again once its session has said it (`transport.rs`).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use super::modes::OwnModes;
 use super::parse::SessionOptions;
 use crate::core::{CapsUpdate, PermissionPolicy, ProviderId};
 
@@ -73,6 +75,9 @@ pub struct SpawnChoice<'a> {
     pub env: &'a [(String, String)],
     /// The provider the user chose (`SessionConfig::provider`).
     pub provider: Option<&'a str>,
+    /// The session's directory (`SessionConfig::cwd`), whose configuration
+    /// the agent may read.
+    pub cwd: &'a Path,
 }
 
 /// What the builder made of a [`SpawnChoice`].
@@ -90,6 +95,9 @@ pub struct SpawnPlan {
     /// environment: the agent lists its own models beside that provider's,
     /// and only these are reported, as that provider's.
     pub provider: Option<ProviderModels>,
+    /// Modes the builder put in place for the process (vibe's own
+    /// profiles), each held only when the session describes it so.
+    pub own_modes: OwnModes,
 }
 
 /// A provider handed to the agent in its environment, and its models.
@@ -120,7 +128,9 @@ impl SpawnPlan {
 }
 
 /// Builds the agent's environment for a model and effort. Pure but for
-/// reading the agent's own configuration (never writing it).
+/// reading the agent's own configuration (never writing it) and writing
+/// what the harness keeps in unharness's own state directory (vibe's
+/// profiles).
 pub type SpawnEnv = Arc<dyn Fn(&SpawnChoice<'_>) -> SpawnPlan + Send + Sync>;
 
 #[cfg(test)]

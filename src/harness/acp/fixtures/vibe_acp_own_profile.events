@@ -1,0 +1,38 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=fe600856-3f9c-463a-93d5-8c07344c6942 model=glm-5-3
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=2
+CapabilitiesChanged efforts=off,low,medium,high,max models=2
+Context used=0 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+ThinkingDelta "The"
+Context used=0 window=800000
+ThinkingDelta " user wants me to run `touch b.txt` via shell and write \""
+ThinkingDelta "hi\" into a.txt using the write tool. Both are in the work..."
+ThinkingDelta ". These are independent, so do both in parallel"
+ThinkingDelta "."
+TextDelta "I"
+Context used=0 window=800000
+TextDelta "'ll run both operations"
+TextDelta " now — the shell command `touch b.txt` and writing \"hi\" i..."
+Context used=7948 window=800000
+ToolCallStarted id=effect-046cc966-ad94-5eac-8afe-f1adef297670 name=execute input={"command":"touch /WORKSPACE/b.txt"}
+ToolCallStarted id=effect-852b84d9-4d2c-5036-a7d2-d3c14b8eb4f1 name=edit input={"content":"hi","filePath":"/WORKSPACE/a.txt"}
+PermissionRequest id=0 ToolUse execute [shell "touch /WORKSPACE/b.txt"]
+PermissionRequest id=1 ToolUse edit [edit /WORKSPACE/a.txt]
+ToolCallResult id=effect-046cc966-ad94-5eac-8afe-f1adef297670 error=true "Tool execution denied by approval callback"
+ToolCallResult id=effect-852b84d9-4d2c-5036-a7d2-d3c14b8eb4f1 error=true "Tool execution denied by approval callback"
+ThinkingDelta "Both"
+Context used=7948 window=800000
+ThinkingDelta " were denied by the approval callback. Report results"
+ThinkingDelta "."
+TextDelta "Both operations were attempted, and both were refused by the"
+Context used=7948 window=800000
+TextDelta " runtime's approval callback — not by me:\\n\\n| Operation ..."
+TextDelta "` | bash | Denied by approval callback |\\n| Write \"hi\" to..."
+TextDelta "_file | Denied by approval callback |\\n\\nNeither `b.txt` ..."
+TextDelta " actions when prompted again (or adjust the permission se..."
+Context used=8134 window=800000
+Context used=8134 window=800000
+Usage in=15846 out=236 cache_read=0 cache_write=0 cost=0.0232 cumulative=false
+TurnCompleted Done
