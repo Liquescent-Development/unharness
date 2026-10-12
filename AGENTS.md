@@ -780,7 +780,7 @@ recorded ones. For anything else:
   them. The project `.vibe/config.toml` and `.agents/skills/` ignored was
   seen live in #171's discovery, the project `AGENTS.md` ignored in
   #171's live check (below). The policies line now names what a harness
-  does not offer (`(not plan auto)` for vibe): without colour (a pipe)
+  does not offer (`(not plan)` for vibe since #174): without colour (a pipe)
   the dimmed ones had read as offered. Checked live (`unharness doctor`, scratch `XDG_*` and
   `VIBE_HOME`): a home with no key, one with a copy of `.env`, a path
   that does not exist (still missing afterwards, and no scratch home left
@@ -1033,7 +1033,9 @@ recorded ones. For anything else:
   experiments': it was then listed in new and loaded sessions and set and
   read back through the mode option, the default unchanged), and under
   `auto` `VIBE_DEFAULT_AGENT=smart-approve` (`spawn_env`, from
-  `SpawnChoice::policy`): a new session answers `currentModeId:
+  `SpawnChoice::policy`; also on a provider of unharness's,
+  `smart_approve_env`, and neither for vibe's own CLI, which has no
+  `auto`): a new session answers `currentModeId:
   "smart-approve"`, so nothing is sent, and vibe looks for its classifier
   model as the session opens, which it does only for a session opened in
   the mode (`vibe/app_server/_runtime.py`). Like vibe's `--smart-approve`
