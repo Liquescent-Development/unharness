@@ -17,6 +17,7 @@
 //! goes the same way when it is chosen: `VIBE_PROVIDERS`, its models in
 //! `VIBE_MODELS` and the one to run in `VIBE_ACTIVE_MODEL`.
 
+mod dotenv;
 pub mod profiles;
 pub mod subagents;
 
@@ -552,36 +553,22 @@ fn api_key_at(env_value: Option<&std::ffi::OsStr>, home: &Path) -> Option<KeyAt>
     }
     let file = crate::sync::open_regular(&home.join(".env"), true).ok()?;
     let bytes = crate::sync::read_at_most(&file, ENV_FILE_LIMIT).ok()?;
-    dotenv_has_value(&String::from_utf8_lossy(&bytes), API_KEY_VAR).then_some(KeyAt::EnvFile)
+    let environ = process_env().into_iter().collect();
+    dotenv_has_value(&String::from_utf8_lossy(&bytes), API_KEY_VAR, &environ)
+        .then_some(KeyAt::EnvFile)
 }
 
-/// Whether the last assignment of `key` in a dotenv file gives it a
-/// value, read as python-dotenv does for vibe: `[export ]KEY = value`,
-/// a value in single or double quotes, an unquoted one up to ` #`; empty
-/// is no value (vibe's `_has_value`).
-fn dotenv_has_value(text: &str, key: &str) -> bool {
-    let mut found = false;
-    for line in text.lines() {
-        let line = line.trim_start();
-        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
-        let Some((name, value)) = line.split_once('=') else {
-            continue;
-        };
-        if name.trim_end() != key {
-            continue;
-        }
-        let value = value.trim_start();
-        found = match value.chars().next() {
-            Some(q @ ('"' | '\'')) => value[1..].split(q).next().is_some_and(|v| !v.is_empty()),
-            _ => !value
-                .split(" #")
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .is_empty(),
-        };
-    }
-    found
+/// Whether a dotenv file gives `key` a value, read as python-dotenv does
+/// for vibe ([`dotenv::values`]: the last assignment, quotes, comments,
+/// `${…}` from `environ`); empty is no value (vibe's `_has_value`).
+fn dotenv_has_value(
+    text: &str,
+    key: &str,
+    environ: &std::collections::HashMap<String, String>,
+) -> bool {
+    dotenv::values(text, environ)
+        .into_iter()
+        .any(|(k, v)| k == key && v.is_some_and(|v| !v.is_empty()))
 }
 
 /// Whether vibe is signed in as far as a file read can tell, for a key
@@ -2134,7 +2121,10 @@ provider = "mine"
 
     #[test]
     fn dotenv_lines_as_python_dotenv_reads_them() {
-        let has = |text: &str| dotenv_has_value(text, "MISTRAL_API_KEY");
+        let environ = [("OTHER_KEY".to_string(), "sk".to_string())]
+            .into_iter()
+            .collect();
+        let has = |text: &str| dotenv_has_value(text, "MISTRAL_API_KEY", &environ);
         assert!(has("MISTRAL_API_KEY=abc"));
         assert!(has("export MISTRAL_API_KEY=abc"));
         assert!(has("  MISTRAL_API_KEY = abc  "));
@@ -2154,6 +2144,15 @@ provider = "mine"
         // The last assignment wins, as in python-dotenv.
         assert!(!has("MISTRAL_API_KEY=abc\nMISTRAL_API_KEY="));
         assert!(has("MISTRAL_API_KEY=\nMISTRAL_API_KEY=abc"));
+        // A variable is expanded, from the environment or the file.
+        assert!(has("MISTRAL_API_KEY=${OTHER_KEY}"));
+        assert!(has("K=abc\nMISTRAL_API_KEY=\"${K}\""));
+        assert!(!has("MISTRAL_API_KEY=${UNSET}"));
+        assert!(has("MISTRAL_API_KEY=${UNSET:-abc}"));
+        // A value in quotes may span lines; a line that does not parse
+        // gives nothing.
+        assert!(has("MISTRAL_API_KEY='a\nb'"));
+        assert!(!has("MISTRAL_API_KEY='abc' junk"));
     }
 
     #[test]

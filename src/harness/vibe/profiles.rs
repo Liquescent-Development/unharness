@@ -264,10 +264,11 @@ fn read_config(path: &Path) -> Result<Option<String>> {
 
 /// The tools named by vibe's configuration for a session in `cwd`, with
 /// vibe's home at `home`: its `config.toml`, the project's
-/// ([`project_config`]), and the `VIBE_*` variables of the environment
-/// vibe inherits from unharness (`inherited`; a test passes none) and the
-/// session's additions (`env`). A file that is there and cannot be read
-/// is an error: what it allows could not be overridden.
+/// ([`project_config`]), the `VIBE_*` variables of the environment vibe
+/// inherits from unharness (`inherited`; a test passes none) and the
+/// session's additions (`env`), and those `<home>/.env` adds to them
+/// ([`dotenv_tool_vars`]). A file that is there and cannot be read is an
+/// error: what it allows could not be overridden.
 pub fn read_tool_keys(
     home: &Path,
     cwd: &Path,
@@ -290,7 +291,44 @@ pub fn read_tool_keys(
             .chain(env)
             .map(|(k, v)| (k.as_str(), v.as_str())),
     )?);
+    let from_dotenv = dotenv_tool_vars(home, inherited, env)?;
+    let path = home.join(".env");
+    // Only the outermost message: what serde_json says of a value that
+    // does not parse is not shown for a file that holds the API key.
+    let dotenv_keys = ToolKeys::from_env(from_dotenv.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    keys.extend(dotenv_keys);
     Ok(keys)
+}
+
+/// The `VIBE_TOOLS` and `VIBE_TOOLS__…` variables vibe takes from
+/// `<home>/.env`: vibe-acp loads the file into its environment before any
+/// configuration layer is read (`load_dotenv_values` in
+/// `vibe/core/config/vibe_schema.py`, from `acp/entrypoint.py`), parsed as
+/// python-dotenv does ([`super::dotenv`]), each value that is not empty
+/// for a key the process's environment (`inherited` with the session's
+/// `env` over it) does not give a value that is not empty. The file holds
+/// the API key: only those variables are taken from it, and no other
+/// value is kept or shown. Read as a config file is: one that is there and
+/// is not a regular UTF-8 file of at most 1 MiB is an error (vibe also
+/// reads a FIFO, which could block here).
+fn dotenv_tool_vars(
+    home: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let Some(text) = read_config(&home.join(".env"))? else {
+        return Ok(Vec::new());
+    };
+    let environ: std::collections::HashMap<String, String> =
+        inherited.iter().chain(env).cloned().collect();
+    Ok(super::dotenv::loaded(&text, &environ)
+        .into_iter()
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            k == "vibe_tools" || k.starts_with("vibe_tools__")
+        })
+        .collect())
 }
 
 /// The `agent_paths` vibe's config files name for a session in `cwd`:
@@ -884,6 +922,88 @@ mod tests {
         // None at all is no key.
         let keys = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(keys.names.contains("bash") && !keys.names.contains("write_file"));
+    }
+
+    /// `<home>/.env` names tools as vibe loads it into its environment
+    /// (#212): its `VIBE_TOOLS*` variables count unless the environment
+    /// gives the key a value already, nothing else in it is taken, and one
+    /// that cannot be read is an error that shows none of its values.
+    #[test]
+    fn tool_keys_come_from_vibes_dotenv() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".vibe");
+        let cwd = root.path().join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let dotenv = home.join(".env");
+        let var = |k: &str, v: &str| (k.to_string(), v.to_string());
+        std::fs::write(
+            &dotenv,
+            "MISTRAL_API_KEY=sk-secret-value\n\
+             export VIBE_TOOLS__WEB_FETCH__PERMISSION=always\n\
+             VIBE_TOOLS='{\"grep\": {\"permission\": \"never\"}}'\n\
+             vibe_tools__Search__allowlist=\"${UNSET:-x}\"\n\
+             VIBE_TOOLS__EMPTY__PERMISSION=\n\
+             VIBE_TOOLS__TAKEN__PERMISSION=always\n\
+             VIBE_ACTIVE_MODEL=x\n",
+        )
+        .unwrap();
+        let found = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
+        assert_eq!(
+            found,
+            keys(&["grep", "search", "taken", "web_fetch"], &["grep"])
+        );
+        let text = profile_text(Profile::Ask, "n", &found);
+        let profile: toml::Table = text.parse().unwrap();
+        assert_eq!(
+            profile["tools"]["web_fetch"]["permission"].as_str(),
+            Some("ask")
+        );
+        // A key the environment gives a value is the environment's, the
+        // inherited one or the session's; an empty one is not a value.
+        let found = read_tool_keys(
+            &home,
+            &cwd,
+            &[
+                var("VIBE_TOOLS", r#"{"edit": {}}"#),
+                var("VIBE_TOOLS__TAKEN__PERMISSION", ""),
+            ],
+            &[var("VIBE_TOOLS__WEB_FETCH__PERMISSION", "ask")],
+        )
+        .unwrap();
+        assert_eq!(found, keys(&["edit", "search", "taken", "web_fetch"], &[]));
+        // A VIBE_TOOLS in it that vibe could not read: an error naming the
+        // file, without the key or what JSON says of the value.
+        std::fs::write(
+            &dotenv,
+            "MISTRAL_API_KEY=sk-secret-value\nVIBE_TOOLS={sk-secret-value\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert_eq!(
+            err,
+            format!("reading {}: VIBE_TOOLS is not JSON", dotenv.display())
+        );
+        // Set in the environment, the file's is not read.
+        assert!(read_tool_keys(&home, &cwd, &[], &[var("VIBE_TOOLS", "{}")]).is_ok());
+        // Not a regular file, or not UTF-8: an error.
+        std::fs::write(&dotenv, b"MISTRAL_API_KEY=\xff\n").unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert!(
+            err.contains("is not UTF-8") && !err.contains("MISTRAL"),
+            "{err}"
+        );
+        std::fs::remove_file(&dotenv).unwrap();
+        #[cfg(unix)]
+        {
+            crate::sync::testing::mkfifo(&dotenv);
+            assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
+            std::fs::remove_file(&dotenv).unwrap();
+        }
+        assert_eq!(
+            read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+            ToolKeys::default()
+        );
     }
 
     /// A profile of unharness's name in an `agent_paths` directory of the

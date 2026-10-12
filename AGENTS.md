@@ -734,8 +734,9 @@ recorded ones. For anything else:
   tool comes as kind `other`, named `mcp_<server>.<tool>`, and is asked about,
   `fixtures/vibe_acp_mcp.jsonl`). Sign-in (`quick_auth`, `probe`) is
   `MISTRAL_API_KEY` set in the environment or given a value in
-  `$VIBE_HOME/.env` (parsed as python-dotenv does, presence only, a regular
-  file of at most 64 KiB); otherwise not known, since vibe also takes it
+  `$VIBE_HOME/.env` (parsed as python-dotenv does, `${VAR}` from the
+  environment, presence only, a regular file of at most 64 KiB);
+  otherwise not known, since vibe also takes it
   from the OS keyring (`vibe/setup/auth/auth_state.py`) and a configured
   provider may use another key. `min_version` is 2.26.1, the release
   checked; `vibe-acp --version` prints `vibe-acp 2.26.1`, and creates the
@@ -1123,7 +1124,13 @@ recorded ones. For anything else:
   `git_bash` and every key the user's `config.toml`, the project's (found
   as vibe finds it, from the session's directory up to the one holding
   vibe's home, trusted or not: it can only ask more) and `VIBE_TOOLS` /
-  `VIBE_TOOLS__<NAME>__…` in the environment name, `never` kept where any
+  `VIBE_TOOLS__<NAME>__…` in the environment or in `$VIBE_HOME/.env` name
+  (#212: vibe-acp loads `.env` into its environment before any
+  configuration layer, `load_dotenv_values`, so unharness parses it as
+  python-dotenv 1.2.2 does, `${VAR}` expanded, and takes those variables
+  alone from it, each that is not empty and whose key the environment
+  does not give a value that is not empty; parser checked against
+  python-dotenv's own output, not a live vibe), `never` kept where any
   of them says it; bash gets vibe 2.26.1's default allowlist
   (`_get_default_allowlist`, `builtins/bash.py`) without `git status`
   (which rewrites `.git/index`), written into the file with that comment.
@@ -1138,9 +1145,10 @@ recorded ones. For anything else:
   `always`: vibe runs them in its workdir and still asks for a path
   outside it or a sensitive one, which the transport answers as for any
   ACP agent (an edit inside the workspace allowed, #204; else the user).
-  A config file that is there and cannot be read (not regular, over
-  1 MiB, not UTF-8 or TOML, `tools` not a table) or a state directory
-  that cannot be written refuses both policies with the reason
+  A config file or `.env` that is there and cannot be read (not regular,
+  over 1 MiB, not UTF-8 or TOML, `tools` not a table, a `VIBE_TOOLS` that
+  is not a JSON object; a FIFO `.env`, which vibe reads, too) or a state
+  directory that cannot be written refuses both policies with the reason
   (`SpawnPlan::own_modes`), never a degraded profile. Profiles are found
   in `agent_paths` first, then a trusted project's `.vibe/agents/`, then
   `~/.vibe/agents/`, the first of a name kept (`core/agents/
