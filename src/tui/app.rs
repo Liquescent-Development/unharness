@@ -1092,11 +1092,19 @@ impl App {
 
     /// Declared capabilities of the active harness plus what its session reported.
     pub fn caps(&self) -> Capabilities {
-        let mut caps = self.harness().capabilities();
-        if let Some(update) = self.live_caps.get(&self.active) {
+        self.caps_of(self.active)
+            .unwrap_or_else(|| self.harness().capabilities())
+    }
+
+    /// Declared capabilities of `harness` plus what a session of it
+    /// reported in this run (an ACP agent says at `initialize` whether it
+    /// can fork); `None` for one not in the registry.
+    fn caps_of(&self, harness: HarnessId) -> Option<Capabilities> {
+        let mut caps = self.registry.get(harness)?.capabilities();
+        if let Some(update) = self.live_caps.get(&harness) {
             caps.apply(update);
         }
-        caps
+        Some(caps)
     }
 
     pub fn harness_binary(&self) -> Option<PathBuf> {
@@ -2200,8 +2208,10 @@ impl App {
         let mut fresh = Vec::new();
         let harnesses: Vec<HarnessId> = self.session_ids.keys().copied().collect();
         for h in harnesses {
-            let caps = self.registry.get(h).map(|x| x.capabilities());
-            match caps {
+            // What its last session in this run reported counts: an ACP
+            // agent declares no fork until it says it can. One not run here
+            // since launch starts fresh.
+            match self.caps_of(h) {
                 Some(c) if c.fork && c.resume_by_id => {
                     self.fork_pending.insert(h);
                     if !c.rewind.anchors_survive_fork {
@@ -6670,6 +6680,61 @@ pub(crate) mod tests {
         });
         assert!(!app.fork_pending());
         assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-2");
+    }
+
+    /// An ACP agent declares no fork until its session says it can
+    /// (`sessionCapabilities.fork` at `initialize`): then its session is
+    /// branched like Claude's; one that did not say so starts fresh with
+    /// the transcript.
+    #[test]
+    fn fork_branches_an_acp_session_once_the_agent_says_it_can() {
+        let acp = HarnessId::intern("acp-fork-test");
+        let forked = |reported: Option<bool>| {
+            let registry = Arc::new(
+                Registry::empty().with(Box::new(
+                    crate::harness::acp::AcpHarness::new(
+                        acp.as_str(),
+                        None,
+                        &["acp-fork-test".to_string()],
+                    )
+                    .unwrap(),
+                )),
+            );
+            let tmp = tempfile::tempdir().unwrap();
+            let mut app = test_app_with(
+                tmp.path().to_path_buf(),
+                acp,
+                None,
+                false,
+                Config::default(),
+                registry,
+            );
+            if app.effective_policy().is_none() {
+                app.policy_choice.insert(acp, PermissionPolicy::Bypass);
+                app.modal = None;
+            }
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                resume_by_id: Some(true),
+                fork: reported,
+                ..Default::default()
+            }));
+            app.submit_prompt("one".into());
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: "acp-1".into(),
+                model: None,
+            });
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+            app.take_actions();
+            app.session_alive = false;
+            app.fork_conversation();
+            (app.session_ids.get(&acp).cloned(), app.fork_pending())
+        };
+        assert_eq!(forked(Some(true)), (Some("acp-1".to_string()), true));
+        for reported in [None, Some(false)] {
+            assert_eq!(forked(reported), (None, false), "{reported:?}");
+        }
     }
 
     #[test]

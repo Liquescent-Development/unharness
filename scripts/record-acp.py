@@ -13,7 +13,12 @@ Run it from a scratch directory; the agent will act in the cwd.
 
 What it sends, in this order:
   1. `initialize` (with --client-capabilities, else `{}`);
-  2. `session/new`, or `session/resume` (--resume) or `session/load` (--load);
+  2. `session/new`, or `session/resume` (--resume) or `session/load` (--load),
+     or `session/fork` of a stored session (--fork-from), as the unharness
+     driver forks: should the fork answer with an error, the session is
+     reattached (`session/resume` where the agent lists it, else
+     `session/load`) and forked again, and where the agent lists
+     `session/resume` the fork is resumed before anything is sent to it;
   3. once the session answers: --mode, and once that has answered (the
      unharness driver holds the prompt until the agent's mode is set,
      #155) --model, then each --config, in the order given, without
@@ -100,6 +105,9 @@ def parser() -> argparse.ArgumentParser:
     reattach.add_argument("--load", metavar="ID",
                           help="reattach to this session with session/load (the agent replays its "
                                "history) instead of creating one")
+    reattach.add_argument("--fork-from", metavar="ID",
+                          help="start with session/fork of this stored session, as the unharness "
+                               "driver does (see above)")
     ap.add_argument("--mode", metavar="ID", help="set this session mode with session/set_mode")
     ap.add_argument("--mode-option", action="store_true",
                     help="send --mode as session/set_config_option of the session's option of "
@@ -272,6 +280,16 @@ def main() -> int:
     ext_after = args.ext_after if args.ext_after is not None else len(prompts)
     prompts_done = 0
     forked = closed = False
+    agent_caps = {}
+    fork_retried = False
+
+    def reattach_method():
+        """How the agent reattaches a stored session, as the driver chooses."""
+        if "resume" in (agent_caps.get("sessionCapabilities") or {}):
+            return "session/resume"
+        if agent_caps.get("loadSession"):
+            return "session/load"
+        return None
     first = True
     cancel_timer = None
     permissions = 0
@@ -483,7 +501,13 @@ def main() -> int:
             result = obj.get("result") or {}
             if "error" in obj:
                 sys.stderr.write(f"[error] {kind}: {json.dumps(obj['error'])[:300]}\n")
-                if kind == "ext":
+                if kind == "fork-start" and not fork_retried and reattach_method():
+                    # As the driver does: the agent may fork only a session
+                    # it has open (vibe-acp 2.26.1).
+                    fork_retried = True
+                    request(reattach_method(), {"sessionId": args.fork_from, "cwd": cwd,
+                                                "mcpServers": mcp_servers}, "fork-source")
+                elif kind == "ext":
                     advance()
                 elif kind == "close":
                     closed = True
@@ -495,14 +519,28 @@ def main() -> int:
                 if not looks_like_vibe and "vibe" in name.lower():
                     looks_like_vibe = True
                     vibe_warnings()
-                if args.resume or args.load:
+                agent_caps = result.get("agentCapabilities") or {}
+                if args.fork_from:
+                    request("session/fork", {"sessionId": args.fork_from, "cwd": cwd,
+                                             "mcpServers": mcp_servers}, "fork-start")
+                elif args.resume or args.load:
                     session_id = args.resume or args.load
                     request("session/resume" if args.resume else "session/load",
                             {"sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers}, "session")
                 else:
                     request("session/new", {"cwd": cwd, "mcpServers": mcp_servers}, "session")
                 status = "session"
-            elif kind == "session":
+            elif kind == "fork-source":
+                request("session/fork", {"sessionId": args.fork_from, "cwd": cwd,
+                                         "mcpServers": mcp_servers}, "fork-start")
+            elif kind == "fork-start" and reattach_method() == "session/resume":
+                # As the driver does: an agent may leave the fork closed
+                # (codex-acp 2.1.1 unsubscribes its thread), so one that
+                # resumes sessions is asked to resume it.
+                session_id = result.get("sessionId")
+                request("session/resume", {"sessionId": session_id, "cwd": cwd,
+                                           "mcpServers": mcp_servers}, "session")
+            elif kind in ("session", "fork-start"):
                 session_id = result.get("sessionId") or session_id
                 config_options = result.get("configOptions") or []
                 status = "prompt"

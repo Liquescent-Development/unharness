@@ -1,0 +1,16 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=true
+SessionStarted id=629ce47c-3036-487c-8d06-49cae067354b model=-
+CapabilitiesChanged 
+SessionStarted id=629ce47c-3036-487c-8d06-49cae067354b model=opus
+CapabilitiesChanged efforts=default,low,medium,high,xhigh,max plan_mode=true models=12
+CapabilitiesChanged commands=71 slash_commands=true
+CapabilitiesChanged efforts= models=12
+CapabilitiesChanged commands=67 slash_commands=true
+Context used=23849 window=200000
+TextDelta "p"
+TextDelta "ineapple"
+Context used=23903 window=200000
+Context used=23903 window=200000
+Context used=23903 window=200000
+Usage in=10 out=60 cache_read=23493 cache_write=340 cost=0.0033 cumulative=false
+TurnCompleted Done

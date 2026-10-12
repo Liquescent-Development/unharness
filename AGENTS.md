@@ -320,8 +320,9 @@ recorded ones. For anything else:
   `session/resume` with claude-agent-acp.
   `scripts/record-acp.py` (#169) also sends client capabilities,
   `session/load`, a mode (`set_mode` or the mode option), any config
-  option, `session/fork`, `session/close`, a timed `session/cancel` and
-  extension requests, and answers permission requests in order and
+  option, `session/fork` (after the prompts, or of a stored session in a
+  new process as the driver forks, `--fork-from`), `session/close`, a
+  timed `session/cancel` and extension requests, and answers permission requests in order and
   `elicitation/create`; `--help` lists the flags. Without them it sends
   what it sent before: the seven committed ACP fixtures replayed through
   it with `fake-harness.py` gave the same `>>` lines, and claude-agent-acp
@@ -397,8 +398,7 @@ recorded ones. For anything else:
   `--print` exited 1 naming it, and the TUI opened the picker with `ask`
   not offered. Unverified: an agent that sends `current_mode_update` (the
   e2e test's line is the spec's), `session/set_mode` with a read-back,
-  `session/fork` (not driven yet; its answer must go through
-  `Driver::session_ready` as the others do), an agent that resumes with
+  an agent that resumes with
   `{}` but has modes and no map (taken to have none, so nothing is
   refused), and claude-agent-acp
   under a map (its recordings start in `default`, so nothing was sent).
@@ -499,6 +499,50 @@ recorded ones. For anything else:
   confirmation) from a real agent, optional fields (the modal still wants
   every question answered), and an elicitation scoped to a request
   (`requestId`) rather than a session.
+  Forks (#160, `Driver::fork`): `sessionCapabilities.fork` at
+  `initialize` reports `CapsUpdate::fork`, and the TUI's `/fork` branches
+  an ACP agent's session only when its last session in this run said so
+  (`App::caps_of`); one not run since launch, or that does not advertise
+  it, starts fresh with the transcript. vibe-acp 2.26.1, codex-acp 2.1.1
+  and claude-agent-acp 0.85.1 all advertise it, and need different things
+  around it, so the driver, given `fork` and the stored id, sends
+  `session/fork` of it; on an error it reattaches the source
+  (`session/resume`, else `session/load` with the replay dropped) and
+  forks once more; where the agent resumes sessions it resumes the fork;
+  then the answer goes through `session_ready` like any other. Recorded
+  from a new process as the driver does it (`record-acp.py --fork-from`):
+  vibe answered "Session not found" (-32602) for a session it had not
+  open, and after `session/load` forked it with `modes`, `configOptions`
+  and the source's mode (`auto-approve` in
+  `fixtures/vibe_acp_fork.jsonl`, which the driver sets back to `ask`);
+  codex-acp forked the stored thread and answered with modes and options
+  but unsubscribes the new thread (read in its source), and the fork's
+  prompt was never answered (120 s, not committed) until it was resumed
+  (`fixtures/codex_acp_fork.jsonl`); claude-agent-acp forked the stored
+  files and answered with the id alone, and its `prompt` looks only at
+  open sessions (read in its source), so it was resumed too
+  (`fixtures/claude_agent_acp_fork.jsonl`). Each fork answered from the
+  source's turn, and a vibe fork's cost started at zero. The source is
+  sent nothing but the reattach, and is left open in the agent (vibe)
+  until the process ends; only the fork is closed. An agent that cannot
+  fork, or whose fork fails twice, gets a new session with a notice that
+  it does not know the conversation (the TUI still takes it as the
+  branch, so nothing is bridged; the same holds for a resume that fails).
+  The fork is of the whole session, which is what `/fork` copies, so
+  there is no fork at an earlier point: `/rewind` on an ACP agent starts
+  it fresh with the transcript up to there, and the agents' own fork
+  points (vibe's `messageId` parameter, JetBrains AIR's `_meta` in
+  claude-agent-acp and codex-acp) are not used. Checked in the TUI (tmux,
+  Landlock, scratch `VIBE_HOME`, `modes = { ask = "ask", bypass =
+  "auto-approve" }`, the wire teed to files): after one turn `/fork` sent
+  `session/fork`, `session/load` and `session/fork` (vibe's answer in
+  `ask`, so nothing was set), the fork answered from the first turn, a
+  write and then a shell command were asked about and denied and no file
+  was made, `/quit` closed the fork and left no `vibe-acp`. Unverified:
+  codex-acp 2.2.2 and claude-agent-acp 0.89.1 (the versions the issue
+  names), an agent that forks with neither resume nor load, the fork of a
+  session that is open in the same process (the TUI always forks in a new
+  one), and whether vibe's `session/load` of the source writes to it.
 - Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
   `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
   name, `asks_permission` and modes), with `ask` → `ask` and `bypass` →
@@ -611,7 +655,10 @@ recorded ones. For anything else:
   and uuids from the session a fork came from with "stale target", reported
   as `RewindFailed`), `--resume X --fork-session`; Codex `thread/revert`
   and `thread/fork` (turn ids survive a fork); pi `fork` (a new session,
-  only in place once it answers) and `--fork <id>` (entry ids survive).
+  only in place once it answers) and `--fork <id>` (entry ids survive);
+  ACP `session/fork` where the agent advertises it (vibe-acp 2.26.1,
+  codex-acp 2.1.1, claude-agent-acp 0.85.1; see the ACP note), of the
+  whole session only, with no rewind, so no anchors to carry.
   Claude's `rewind_files` answers "File rewinding is not enabled" in this
   mode, which is why file restore is unharness's own.
 - File attachments (PDF and text): Claude Code 2.1.289 takes `document`

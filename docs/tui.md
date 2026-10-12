@@ -404,7 +404,9 @@ files, not ignored ones):
 `/fork` continues in a copy of the conversation and leaves the original
 unchanged. Harnesses that can branch a session do so, and the copy knows
 exactly what the original knew. The others start fresh with the
-transcript as context.
+transcript as context. An [ACP agent](acp.md#forks) branches only once its
+session has said it can, so one not run since unharness started starts
+fresh.
 
 ## Clear
 

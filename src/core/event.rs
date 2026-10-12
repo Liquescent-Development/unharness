@@ -262,6 +262,9 @@ pub struct CapsUpdate {
     pub effort_levels: Option<Vec<String>>,
     pub image_input: Option<bool>,
     pub resume_by_id: Option<bool>,
+    /// A session can be branched into a new one (`Capabilities::fork`): an
+    /// ACP agent says so at `initialize`.
+    pub fork: Option<bool>,
     /// The agent takes MCP servers reached over HTTP (`McpSupport::http`).
     pub mcp_http: Option<bool>,
     pub plan_mode: Option<bool>,
@@ -340,6 +343,9 @@ impl CapsUpdate {
         }
         if newer.resume_by_id.is_some() {
             self.resume_by_id = newer.resume_by_id;
+        }
+        if newer.fork.is_some() {
+            self.fork = newer.fork;
         }
         if newer.mcp_http.is_some() {
             self.mcp_http = newer.mcp_http;
