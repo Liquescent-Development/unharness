@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
     name = "unharness",
     author = "Richard Kiene",
     version,
-    about = "Vendor-neutral TUI and CLI runner for AI coding agents (agy, claude, codex, pi)",
+    about = "Vendor-neutral TUI and CLI runner for AI coding agents (agy, claude, codex, pi, vibe)",
     long_about = None
 )]
 pub struct Cli {
@@ -22,7 +22,7 @@ pub struct CommonRunArgs {
     #[arg(trailing_var_arg = true)]
     pub prompt: Vec<String>,
 
-    /// Select AI harness (agy, claude, codex, pi)
+    /// Select AI harness (agy, claude, codex, pi, vibe)
     #[arg(short = 'H', long, env = "UNHARNESS_HARNESS")]
     pub harness: Option<String>,
 
@@ -117,7 +117,7 @@ pub enum Commands {
         clear: bool,
     },
 
-    /// Switch default harness in config (agy, claude, codex, pi)
+    /// Switch default harness in config (agy, claude, codex, pi, vibe)
     Switch {
         /// Target harness name
         harness: String,

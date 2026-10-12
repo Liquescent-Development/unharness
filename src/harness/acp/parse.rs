@@ -9,7 +9,7 @@
 //! ids: the handshake, failed requests, and answering the agent's requests.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -180,6 +180,9 @@ pub struct AcpParser {
     question_calls: Vec<String>,
     /// A form elicitation has come (`CapsUpdate::ask_user_question`).
     asked: bool,
+    /// The session's directory, for an agent known to write a relative
+    /// path in an edit's `diff` there (`resolving_relative_edits`).
+    edits_relative_to: Option<PathBuf>,
 }
 
 impl AcpParser {
@@ -194,6 +197,20 @@ impl AcpParser {
             effort_option: None,
             question_calls: Vec::new(),
             asked: false,
+            edits_relative_to: None,
+        }
+    }
+
+    /// Take a relative path in an edit's `diff` content as relative to
+    /// `cwd`, the session's directory, which must be absolute. Only for an
+    /// agent seen to write such a path there (Mistral Vibe, its harness
+    /// says why); a path with anything but plain names in it (`.`, `..`,
+    /// a leading `~`) stays unknown, and the call's `locations` must still
+    /// name the same files.
+    pub fn resolving_relative_edits(self, cwd: Option<PathBuf>) -> Self {
+        AcpParser {
+            edits_relative_to: cwd.filter(|c| c.is_absolute()),
+            ..self
         }
     }
 
@@ -483,7 +500,7 @@ impl AcpParser {
             kind: PermissionKind::ToolUse {
                 tool: tool.name.clone(),
                 input: tool_input(tool),
-                action: tool_action(tool),
+                action: tool_action(tool, self.edits_relative_to.as_deref()),
                 description: (!tool.title.is_empty()).then(|| tool.title.clone()),
             },
             tool_call_id: (!id.is_empty()).then_some(id),
@@ -680,8 +697,10 @@ fn started_event(id: &str, tool: &ToolState) -> AgentEvent {
 /// exactly what will happen counts: a command (codex-acp sends it as
 /// `rawInput.command`, an MCP call as `server` and `tool`), or the files of
 /// an edit's `diff` content. `locations` only describe a call ("where to
-/// look"), so a read, a move or a delete is not known well enough.
-fn tool_action(tool: &ToolState) -> ToolAction {
+/// look"), so a read, a move or a delete is not known well enough. A
+/// relative path in a diff is unknown, unless `relative_to` is where the
+/// agent is known to write it.
+fn tool_action(tool: &ToolState, relative_to: Option<&Path>) -> ToolAction {
     if tool.claude {
         return claude_tool_action(&tool.name, &tool.input);
     }
@@ -705,7 +724,9 @@ fn tool_action(tool: &ToolState) -> ToolAction {
             let diffs: Option<Vec<PathBuf>> = content
                 .iter()
                 .map(|c| {
-                    (c.get("type").and_then(Value::as_str) == Some("diff")).then(|| path(c))?
+                    (c.get("type").and_then(Value::as_str) == Some("diff"))
+                        .then(|| path(c))?
+                        .and_then(|p| absolute_edit_path(p, relative_to))
                 })
                 .collect();
             match diffs {
@@ -727,6 +748,21 @@ fn tool_action(tool: &ToolState) -> ToolAction {
         _ if tool.named => ToolAction::Other,
         _ => ToolAction::Opaque,
     }
+}
+
+/// `path` when it is absolute; a relative one joined to `relative_to`
+/// when it has only plain names in it (no `.`, `..` or leading `~`, which
+/// the agent might read otherwise); else unknown.
+fn absolute_edit_path(path: PathBuf, relative_to: Option<&Path>) -> Option<PathBuf> {
+    if path.is_absolute() {
+        return Some(path);
+    }
+    let base = relative_to?;
+    let plain = path.components().all(|c| match c {
+        std::path::Component::Normal(name) => !name.to_string_lossy().starts_with('~'),
+        _ => false,
+    });
+    (plain && path.components().next().is_some()).then(|| base.join(path))
 }
 
 /// The agent's raw input when it sent one, else what the protocol describes.
@@ -999,6 +1035,164 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// What vibe-acp 2.26.1 asked about in `fixture`, replayed by a parser
+    /// that takes its relative edit paths as in `cwd`.
+    fn vibe_actions(fixture: &str, cwd: Option<&str>) -> Vec<ToolAction> {
+        let text = std::fs::read_to_string(fixtures_dir(file!()).join(fixture)).unwrap();
+        let mut p = parser().resolving_relative_edits(cwd.map(PathBuf::from));
+        let mut asked = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with(['>', '!', '#'])) {
+            for ev in p.feed(line) {
+                if let AgentEvent::PermissionRequest(PermissionRequest {
+                    kind: PermissionKind::ToolUse { action, .. },
+                    ..
+                }) = ev
+                {
+                    asked.push(action);
+                }
+            }
+        }
+        asked
+    }
+
+    /// vibe-acp 2.26.1 writes a relative path where the session is: with
+    /// the process started elsewhere, the write landed in the session's
+    /// directory while `locations` named the process's (a recording kept
+    /// out of the repository). unharness starts it in the session's
+    /// directory, so there the two agree, and the vibe harness has a
+    /// relative diff path taken as in it.
+    #[test]
+    fn a_relative_vibe_edit_is_in_the_sessions_directory() {
+        assert_eq!(
+            vibe_actions("vibe_acp_ask.jsonl", Some("/WORKSPACE"))[0],
+            ToolAction::Edit {
+                paths: vec!["/WORKSPACE/a.txt".into()]
+            }
+        );
+        // Not where `locations` points elsewhere: a session started in
+        // another directory, or one behind a link (vibe resolves links).
+        assert_eq!(
+            vibe_actions("vibe_acp_ask.jsonl", Some("/elsewhere"))[0],
+            ToolAction::Opaque
+        );
+        // A relative base is no base.
+        assert_eq!(
+            vibe_actions("vibe_acp_ask.jsonl", Some("WORKSPACE"))[0],
+            ToolAction::Opaque
+        );
+        assert_eq!(
+            vibe_actions("vibe_acp_ask.jsonl", None)[0],
+            ToolAction::Opaque
+        );
+    }
+
+    #[test]
+    fn only_plain_relative_edit_paths_are_resolved() {
+        let base = Some(Path::new("/w"));
+        let at = |p: &str| absolute_edit_path(PathBuf::from(p), base);
+        assert_eq!(at("a.txt"), Some("/w/a.txt".into()));
+        assert_eq!(at("src/lib.rs"), Some("/w/src/lib.rs".into()));
+        assert_eq!(at("/etc/hosts"), Some("/etc/hosts".into()));
+        for unknown in ["../x", "src/../../x", "./a", "~/x", "~user/x", ""] {
+            assert_eq!(at(unknown), None, "{unknown}");
+        }
+        // Without a base a relative path is unknown, whoever sent it.
+        assert_eq!(absolute_edit_path("a.txt".into(), None), None);
+        assert_eq!(absolute_edit_path("/w/a".into(), None), Some("/w/a".into()));
+    }
+
+    /// A parser as the vibe harness has it: `thinking` its effort, and a
+    /// relative edit path in the session's directory.
+    fn vibe_parser() -> AcpParser {
+        parser()
+            .declaring_effort(Some("thinking".into()))
+            .resolving_relative_edits(Some("/WORKSPACE".into()))
+    }
+
+    /// The tool calls a fixture asks about, as the vibe harness reads them.
+    fn vibe_asked(case: &str) -> Vec<(String, ToolAction)> {
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut vibe_parser(), &dir, case);
+        let text = std::fs::read_to_string(dir.join(format!("{case}.jsonl"))).unwrap();
+        let mut p = vibe_parser();
+        let mut asked = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with(['>', '!', '#'])) {
+            for ev in p.feed(line) {
+                if let AgentEvent::PermissionRequest(PermissionRequest {
+                    kind: PermissionKind::ToolUse { tool, action, .. },
+                    ..
+                }) = ev
+                {
+                    asked.push((tool, action));
+                }
+            }
+        }
+        asked
+    }
+
+    /// vibe-acp 2.26.1 in its `ask` mode (set through the mode option, as
+    /// the driver does): a write allowed, then a command denied, which
+    /// vibe reports as a failed call ("Tool execution denied by approval
+    /// callback"). The write's relative path is the session's.
+    #[test]
+    fn fixture_vibe_acp_allow_deny() {
+        assert_eq!(
+            vibe_asked("vibe_acp_allow_deny"),
+            [
+                (
+                    "edit".to_string(),
+                    ToolAction::Edit {
+                        paths: vec!["/WORKSPACE/a.txt".into()]
+                    }
+                ),
+                (
+                    "execute".to_string(),
+                    ToolAction::Shell {
+                        command: "touch /WORKSPACE/b.txt".into(),
+                        cwd: None
+                    }
+                ),
+            ]
+        );
+    }
+
+    /// A stdio MCP server's tool (`mcp_<server>.<tool>` in vibe's own
+    /// `_meta.tool_name`, which unharness does not read) comes as kind
+    /// `other` with only its arguments: asked about, and no rule can know
+    /// it. vibe first searches for it (`search_tool_functions`, asked
+    /// about by nobody).
+    #[test]
+    fn fixture_vibe_acp_mcp() {
+        assert_eq!(
+            vibe_asked("vibe_acp_mcp"),
+            [("other".to_string(), ToolAction::Opaque)]
+        );
+    }
+
+    /// `session/cancel` while a command runs: the command stops and the
+    /// prompt answers `cancelled`.
+    #[test]
+    fn fixture_vibe_acp_cancel() {
+        assert_eq!(
+            vibe_asked("vibe_acp_cancel"),
+            [(
+                "execute".to_string(),
+                ToolAction::Shell {
+                    command: "sleep 45".into(),
+                    cwd: None
+                }
+            )]
+        );
+    }
+
+    /// `session/load` of the allow-and-deny session in a new process: the
+    /// history is replayed (dropped by the driver, not here) and the next
+    /// turn knows it.
+    #[test]
+    fn fixture_vibe_acp_load() {
+        assert!(vibe_asked("vibe_acp_load").is_empty());
     }
 
     /// vibe-acp 2.26.1 starts in accept-edits; the mode option, set to

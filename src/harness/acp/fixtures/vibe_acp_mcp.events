@@ -1,0 +1,27 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=8d56ddb8-d737-884a-f08e-39fdb504ed72 model=glm-5-3
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=2
+CapabilitiesChanged efforts=off,low,medium,high,max models=2
+Context used=0 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+ThinkingDelta "Need"
+Context used=0 window=800000
+ThinkingDelta " to find the shout tool in m"
+ThinkingDelta "cp_tiny connector. Search for it."
+ToolCallStarted id=effect-tool-discovery-chatcmpl-tool-84d2d3e8cde77ada name=other input={"mode":"best_match"}
+ToolCallResult id=effect-tool-discovery-chatcmpl-tool-84d2d3e8cde77ada error=false "Searched for relevant tools"
+Context used=7883 window=800000
+ToolCallStarted id=effect-tool-discovery-chatcmpl-tool-a26e1343d055e373 name=other input={"mode":"details"}
+ToolCallResult id=effect-tool-discovery-chatcmpl-tool-a26e1343d055e373 error=false "Searched for relevant tools"
+Context used=8024 window=800000
+Context used=8024 window=800000
+ToolCallStarted id=effect-544961a4-0b36-509a-9cc2-a6932edbc47d name=other input={"text":"hi"}
+PermissionRequest id=0 ToolUse other [opaque]
+ToolCallResult id=effect-544961a4-0b36-509a-9cc2-a6932edbc47d error=false "HI\\nmcp_tiny.shout"
+TextDelta "HI"
+Context used=8024 window=800000
+Context used=8257 window=800000
+Context used=8257 window=800000
+Usage in=24084 out=80 cache_read=0 cache_write=0 cost=0.0341 cumulative=false
+TurnCompleted Done

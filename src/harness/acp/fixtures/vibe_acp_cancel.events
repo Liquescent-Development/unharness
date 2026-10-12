@@ -1,0 +1,18 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=5c0144da-2a05-cbc7-f8e7-acf5b6d5ee6c model=glm-5-3
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=2
+CapabilitiesChanged efforts=off,low,medium,high,max models=2
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=0 window=800000
+ThinkingDelta "The"
+Context used=0 window=800000
+ThinkingDelta " user wants me to run `sleep 45` in the shell and do noth..."
+ThinkingDelta " Simple task. I should use the bash tool with a timeout. The"
+ThinkingDelta " default timeout is 300 seconds, but sleep 45 will take 4..."
+Context used=7895 window=800000
+ToolCallStarted id=effect-5ccbf0dd-bd3e-5cfd-a141-fc15be3ba6ef name=execute input={"command":"sleep 45"}
+PermissionRequest id=0 ToolUse execute [shell "sleep 45"]
+ToolCallResult id=effect-5ccbf0dd-bd3e-5cfd-a141-fc15be3ba6ef error=true "client interrupt"
+Usage in=7820 out=75 cache_read=0 cache_write=0 cost=0.0113 cumulative=false
+TurnCompleted Interrupted

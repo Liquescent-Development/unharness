@@ -302,6 +302,9 @@ pub struct AgentSpec {
     /// The command that signs the agent in, told to the user when it is
     /// not (`AcpHarness::signing_in_with`). Never run by unharness.
     pub sign_in: Option<String>,
+    /// A relative path in an edit's `diff` is in the session's directory
+    /// (`AcpHarness::resolving_relative_edits`).
+    pub relative_edits: bool,
 }
 
 /// The agent's command line, in `cfg.cwd`, with `extra` in its environment.
@@ -350,7 +353,9 @@ pub fn start(
     });
     let slot = handle.process_slot();
     slot.set(&proc);
-    let parser = AcpParser::new(harness).declaring_effort(spec.effort_option.clone());
+    let parser = AcpParser::new(harness)
+        .declaring_effort(spec.effort_option.clone())
+        .resolving_relative_edits(spec.relative_edits.then(|| cfg.cwd.clone()));
     tokio::spawn(drive(
         harness,
         proc,

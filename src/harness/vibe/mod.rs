@@ -20,7 +20,7 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::acp::{AcpHarness, ModeMap, SpawnChoice, SpawnPlan};
-use super::{Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe};
+use super::{AuthInfo, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe};
 use crate::config::HarnessSettings;
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
@@ -49,6 +49,54 @@ const DEFAULT_PROVIDER: &str = "mistral";
 
 /// The most read of vibe's `config.toml`.
 const CONFIG_LIMIT: u64 = 1 << 20;
+
+/// The release unharness was checked against: the session modes behind
+/// each policy, the `thinking` option, the environment that chooses the
+/// model and level, `session/close` and the files below were all read or
+/// recorded on it, and older releases were not tried.
+pub const MIN_VERSION: MinVersion = MinVersion {
+    version: [2, 26, 1],
+    needs: "the session modes, options and environment unharness was checked against",
+    upgrade: "uv tool upgrade mistral-vibe",
+};
+
+/// Where vibe's default provider takes its key from: the environment, or
+/// a line of `<home>/.env`, which vibe loads into it (`load_dotenv_values`,
+/// `vibe/core/config/vibe_schema.py`), or the OS keyring
+/// (`vibe/setup/auth/auth_state.py`).
+const API_KEY_VAR: &str = "MISTRAL_API_KEY";
+
+/// The most read of vibe's `.env` when looking for the key.
+const ENV_FILE_LIMIT: u64 = 64 * 1024;
+
+/// The files under vibe's home that decide how it runs (read in
+/// `vibe/core/config/harness_files/_harness_manager.py`, `_paths.py` and
+/// `vibe/core/paths/_vibe_home.py` of 2.26.1): its configuration (models,
+/// providers, MCP servers, `vibe mcp add` writes there too), the folders
+/// it trusts with project configuration, hooks, the user's instructions
+/// and the skills it installed from its registry.
+const GUARDED_FILES: [&str; 5] = [
+    "config.toml",
+    "trusted_folders.toml",
+    "hooks.toml",
+    "AGENTS.md",
+    "skills.toml",
+];
+
+/// Its agent profiles (one can set the mode and the model), tools,
+/// skills, plugins and prompts.
+const GUARDED_TREES: [&str; 5] = ["agents", "tools", "skills", "plugins", "prompts"];
+
+/// Caches vibe writes by itself, each entry a timestamp and what a server
+/// answered: the experiments it is in (the default model, the system
+/// prompt, smart-approve), the account (whose `api_base` vibe copies into
+/// `config.toml` when they differ, `vibe/app_server/_account.py`) and the
+/// connectors. Only the answers are compared.
+const GUARDED_CACHES: [&str; 3] = [
+    "experiment_eval_cache.json",
+    "whoami_cache.json",
+    "connector_bootstrap_cache.json",
+];
 
 /// `ask` is vibe's mode that asks before every write and command; under
 /// `accept-edits` the agent stays in it and unharness answers the edits.
@@ -117,6 +165,7 @@ impl VibeHarness {
         .declaring_effort_option(EFFORT_OPTION)
         // Told when vibe is not signed in, never run (`acp/auth.rs`).
         .signing_in_with(Some("vibe --setup"))
+        .resolving_relative_edits()
         .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
             spawn_env(&vibe_home(choice.env), choice)
         }));
@@ -140,6 +189,57 @@ pub fn vibe_home(env: &[(String, String)]) -> PathBuf {
         Some(dir) => crate::core::sandbox::expand_home(Path::new(&dir), home.as_deref()),
         None => home.unwrap_or_default().join(".vibe"),
     }
+}
+
+/// Where the key for vibe's default provider was found, as far as can be
+/// told without a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAt {
+    Environment,
+    EnvFile,
+}
+
+/// Whether `MISTRAL_API_KEY` has a value in `env_value` (unharness's own
+/// environment, which vibe inherits) or in `<home>/.env`. Presence only:
+/// the value is never kept, copied or shown. `.env` is read only when it
+/// is a regular file (vibe also reads a FIFO, which could block), and only
+/// its first 64 KiB.
+fn api_key_at(env_value: Option<&std::ffi::OsStr>, home: &Path) -> Option<KeyAt> {
+    if env_value.is_some_and(|v| !v.is_empty()) {
+        return Some(KeyAt::Environment);
+    }
+    let file = crate::sync::open_regular(&home.join(".env"), true).ok()?;
+    let bytes = crate::sync::read_at_most(&file, ENV_FILE_LIMIT).ok()?;
+    dotenv_has_value(&String::from_utf8_lossy(&bytes), API_KEY_VAR).then_some(KeyAt::EnvFile)
+}
+
+/// Whether the last assignment of `key` in a dotenv file gives it a
+/// value, read as python-dotenv does for vibe: `[export ]KEY = value`,
+/// a value in single or double quotes, an unquoted one up to ` #`; empty
+/// is no value (vibe's `_has_value`).
+fn dotenv_has_value(text: &str, key: &str) -> bool {
+    let mut found = false;
+    for line in text.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim_end() != key {
+            continue;
+        }
+        let value = value.trim_start();
+        found = match value.chars().next() {
+            Some(q @ ('"' | '\'')) => value[1..].split(q).next().is_some_and(|v| !v.is_empty()),
+            _ => !value
+                .split(" #")
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+        };
+    }
+    found
 }
 
 /// A model the user defined in vibe's `config.toml`.
@@ -240,6 +340,42 @@ pub fn spawn_env(home: &Path, choice: &SpawnChoice<'_>) -> SpawnPlan {
     plan
 }
 
+/// [`VibeHarness::guarded`] for a vibe home at `home`.
+fn guarded_in(home: &Path) -> Vec<Guarded> {
+    let mut guarded: Vec<Guarded> = GUARDED_FILES
+        .iter()
+        .map(|f| Guarded::File(home.join(f)))
+        .collect();
+    guarded.push(Guarded::Secret(home.join(".env")));
+    guarded.extend(GUARDED_TREES.iter().map(|t| Guarded::Tree(home.join(t))));
+    guarded.extend(
+        GUARDED_CACHES
+            .iter()
+            .map(|c| Guarded::json(home.join(c), cache_answers)),
+    );
+    guarded
+}
+
+/// A vibe cache without the time each entry was stored
+/// (`stored_at_timestamp`, `stored_at`): vibe rewrites the time whenever
+/// it fetches again, the answer only when the server's changed.
+fn cache_answers(cache: &serde_json::Value) -> serde_json::Value {
+    match cache.as_object() {
+        Some(entries) => entries
+            .iter()
+            .map(|(key, entry)| {
+                let mut entry = entry.clone();
+                if let Some(fields) = entry.as_object_mut() {
+                    fields.remove("stored_at_timestamp");
+                    fields.remove("stored_at");
+                }
+                (key.clone(), entry)
+            })
+            .collect(),
+        None => cache.clone(),
+    }
+}
+
 impl Harness for VibeHarness {
     fn descriptor(&self) -> &'static HarnessDescriptor {
         self.acp.descriptor()
@@ -249,12 +385,52 @@ impl Harness for VibeHarness {
         self.acp.capabilities()
     }
 
+    /// The binary and its version as for any ACP agent; signed in when
+    /// vibe's default provider has its key where a file read can tell.
     fn probe(&self, binary_override: Option<&Path>) -> Probe {
-        self.acp.probe(binary_override)
+        let probe = self.acp.probe(binary_override);
+        let home = vibe_home(&[]);
+        let auth = match api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &home) {
+            Some(KeyAt::Environment) => AuthInfo {
+                authenticated: true,
+                details: Some(format!("{API_KEY_VAR} is set in the environment")),
+            },
+            Some(KeyAt::EnvFile) => AuthInfo {
+                authenticated: true,
+                details: Some(format!(
+                    "{API_KEY_VAR} is in {}",
+                    home.join(".env").display()
+                )),
+            },
+            None => AuthInfo {
+                authenticated: false,
+                details: Some(format!(
+                    "no {API_KEY_VAR} in the environment or {}; a key in the OS keyring or another provider's is checked when a session starts (to sign in, run `{}`)",
+                    home.join(".env").display(),
+                    self.acp.sign_in().unwrap_or("vibe --setup"),
+                )),
+            },
+        };
+        Probe { auth, ..probe }
     }
 
+    fn min_version(&self) -> Option<MinVersion> {
+        Some(MIN_VERSION)
+    }
+
+    /// `vibe-acp --version` prints `vibe-acp 2.26.1` (and creates vibe's
+    /// home, `logs/`, `trusted_folders.toml` and `vibehistory`, when
+    /// missing).
     fn reports_version(&self) -> bool {
-        self.acp.reports_version()
+        true
+    }
+
+    /// Signed in when the key is in the environment or vibe's `.env`;
+    /// otherwise not known: it may be in the OS keyring, whose check is
+    /// not quick, or the user's configuration may choose a provider with
+    /// another key or none.
+    fn quick_auth(&self, _binary: &Path) -> Option<bool> {
+        api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &vibe_home(&[])).map(|_| true)
     }
 
     fn list_models(
@@ -287,8 +463,15 @@ impl Harness for VibeHarness {
         paths
     }
 
-    fn guarded(&self, workspace: &Path) -> Vec<Guarded> {
-        self.acp.guarded(workspace)
+    /// What decides how vibe runs, under its home (see [`GUARDED_FILES`]
+    /// and the rest), with its `.env` (the API key, and any `VIBE_*`
+    /// setting) compared by digest so that the key is never copied. Not
+    /// watched: `logs/` (each session's journal and the model and level it
+    /// is pinned to, rewritten every turn), the skills vibe writes out of
+    /// its own binary (`builtin-skills/`, rewritten when they differ), its
+    /// other caches and its history.
+    fn guarded(&self, _workspace: &Path) -> Vec<Guarded> {
+        guarded_in(&vibe_home(&[]))
     }
 
     fn own_mcp_servers(&self) -> Vec<String> {
@@ -586,7 +769,17 @@ provider = "mine"
             assert!(caps.supports_policy(p).is_some(), "{p}");
         }
         assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
+        assert!(caps.supports_policy(PermissionPolicy::Plan).is_none());
         assert!(!caps.plan_mode);
+        // Stdio servers in `session/new`; vibe-acp 2.26.1 names no
+        // `mcpCapabilities`, so no http ones (a session would say).
+        assert_eq!(
+            caps.mcp,
+            crate::core::McpSupport::via(crate::core::McpChannel::Protocol, false)
+        );
+        assert_eq!(h.min_version(), Some(MIN_VERSION));
+        assert_eq!(MIN_VERSION.to_string(), "2.26.1");
+        assert!(h.reports_version());
 
         // A `[harnesses.vibe]` table sets the command and the rest in place
         // of the built-in's; the choice at spawn stays.
@@ -607,5 +800,143 @@ provider = "mine"
             ..Default::default()
         };
         assert!(VibeHarness::from_settings(&bad).is_err());
+    }
+
+    /// What `vibe-acp --version` and `vibe --version` print (2.26.1).
+    #[test]
+    fn the_version_is_read_from_what_vibe_prints() {
+        use crate::harness::parse_version;
+        assert_eq!(parse_version("vibe-acp 2.26.1\n"), Some([2, 26, 1]));
+        assert_eq!(parse_version("vibe 2.26.1"), Some([2, 26, 1]));
+        assert!(parse_version("vibe-acp 2.26.1").unwrap() >= MIN_VERSION.version);
+        assert!(parse_version("vibe 2.25.9").unwrap() < MIN_VERSION.version);
+    }
+
+    #[test]
+    fn a_key_in_the_environment_or_dotenv_signs_in() {
+        let home = tempfile::tempdir().unwrap();
+        let env = home.path().join(".env");
+        // Nothing anywhere: not known (the keyring may hold it).
+        assert_eq!(api_key_at(None, home.path()), None);
+        assert_eq!(
+            api_key_at(Some(std::ffi::OsStr::new("sk")), home.path()),
+            Some(KeyAt::Environment)
+        );
+        // Set but empty is no key.
+        assert_eq!(
+            api_key_at(Some(std::ffi::OsStr::new("")), home.path()),
+            None
+        );
+        std::fs::write(&env, "OTHER=1\nMISTRAL_API_KEY=abc\n").unwrap();
+        assert_eq!(api_key_at(None, home.path()), Some(KeyAt::EnvFile));
+        std::fs::write(&env, "MISTRAL_API_KEY=\n").unwrap();
+        assert_eq!(api_key_at(None, home.path()), None);
+        // Read only, and never more than the limit.
+        let before = std::fs::read(&env).unwrap();
+        let _ = api_key_at(None, home.path());
+        assert_eq!(std::fs::read(&env).unwrap(), before);
+        let mut big = "MISTRAL_API_KEY=abc\n".to_string();
+        big.push_str(&"#".repeat(ENV_FILE_LIMIT as usize));
+        std::fs::write(&env, big).unwrap();
+        assert_eq!(api_key_at(None, home.path()), None);
+    }
+
+    /// vibe also reads a FIFO for `.env` (1Password's local env files);
+    /// unharness does not wait on one.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_for_dotenv_is_not_waited_on() {
+        let home = tempfile::tempdir().unwrap();
+        crate::sync::testing::mkfifo(&home.path().join(".env"));
+        assert_eq!(api_key_at(None, home.path()), None);
+    }
+
+    #[test]
+    fn dotenv_lines_as_python_dotenv_reads_them() {
+        let has = |text: &str| dotenv_has_value(text, "MISTRAL_API_KEY");
+        assert!(has("MISTRAL_API_KEY=abc"));
+        assert!(has("export MISTRAL_API_KEY=abc"));
+        assert!(has("  MISTRAL_API_KEY = abc  "));
+        assert!(has("MISTRAL_API_KEY=\"abc\""));
+        assert!(has("MISTRAL_API_KEY='abc' # comment"));
+        assert!(has("MISTRAL_API_KEY=abc#not-a-comment"));
+        assert!(!has("MISTRAL_API_KEY="));
+        assert!(!has("MISTRAL_API_KEY=\"\""));
+        assert!(!has("MISTRAL_API_KEY=''"));
+        // python-dotenv 1.x (vibe's) keeps this as the value `# nothing`.
+        assert!(has("MISTRAL_API_KEY= # nothing"));
+        assert!(!has("MISTRAL_API_KEY=   "));
+        assert!(!has("MISTRAL_API_KEY"));
+        assert!(!has("# MISTRAL_API_KEY=abc"));
+        assert!(!has("MISTRAL_API_KEY_2=abc"));
+        assert!(!has("OTHER_MISTRAL_API_KEY=abc"));
+        // The last assignment wins, as in python-dotenv.
+        assert!(!has("MISTRAL_API_KEY=abc\nMISTRAL_API_KEY="));
+        assert!(has("MISTRAL_API_KEY=\nMISTRAL_API_KEY=abc"));
+    }
+
+    #[test]
+    fn guarded_files_are_under_vibes_home() {
+        let home = Path::new("/vh");
+        let guarded = guarded_in(home);
+        let names: Vec<String> = guarded.iter().map(|g| format!("{g:?}")).collect();
+        for want in [
+            "File(/vh/config.toml)",
+            "File(/vh/trusted_folders.toml)",
+            "File(/vh/hooks.toml)",
+            "File(/vh/AGENTS.md)",
+            "File(/vh/skills.toml)",
+            "Secret(/vh/.env)",
+            "Tree(/vh/agents)",
+            "Tree(/vh/tools)",
+            "Tree(/vh/skills)",
+            "Tree(/vh/plugins)",
+            "Tree(/vh/prompts)",
+            "Projected(/vh/experiment_eval_cache.json)",
+            "Projected(/vh/whoami_cache.json)",
+            "Projected(/vh/connector_bootstrap_cache.json)",
+        ] {
+            assert!(names.iter().any(|n| n == want), "{want} in {names:?}");
+        }
+        // Each session's journal and pins: per session, rewritten every turn.
+        assert!(!names.iter().any(|n| n.contains("logs")));
+    }
+
+    /// vibe stores a time with each cache entry and rewrites it whenever it
+    /// fetches again; the answers are what decide how it runs.
+    #[test]
+    fn a_cache_is_compared_by_its_answers() {
+        use crate::core::guard::Watch;
+        let home = tempfile::tempdir().unwrap();
+        let keep = home.path().join("keep");
+        let cache = home.path().join("whoami_cache.json");
+        let write = |stored: u64, base: &str| {
+            std::fs::write(
+                &cache,
+                json!({"k": {"stored_at_timestamp": stored,
+                             "payload": {"plan_type": "x", "api_base": base}}})
+                .to_string(),
+            )
+            .unwrap();
+        };
+        write(1, "https://api.mistral.ai");
+        let connectors = home.path().join("connector_bootstrap_cache.json");
+        std::fs::write(
+            &connectors,
+            json!({"k": {"format": 1, "stored_at": 5, "payload": {"connectors": []}}}).to_string(),
+        )
+        .unwrap();
+        let mut watch = Watch::begin(&guarded_in(home.path()), None);
+        write(2, "https://api.mistral.ai");
+        std::fs::write(
+            &connectors,
+            json!({"k": {"format": 1, "stored_at": 9, "payload": {"connectors": []}}}).to_string(),
+        )
+        .unwrap();
+        assert!(watch.changes(&keep).is_empty());
+        write(3, "https://example.invalid");
+        let changes = watch.changes(&keep);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, cache);
     }
 }

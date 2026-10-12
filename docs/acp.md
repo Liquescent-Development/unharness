@@ -23,7 +23,8 @@ the config, `ask` mapped to vibe's `ask` mode and `bypass` to
 `auto-approve` (see Modes below). A `[harnesses.vibe]` table sets its
 `command`, `display_name`, `asks_permission`, `modes` and `sign_in` in
 place of the built-in ones; the rest stays. When vibe is not signed in,
-unharness says to run `vibe --setup` ([Sign-in](#sign-in)).
+unharness says to run `vibe --setup` ([Sign-in](#sign-in)). Allow rules,
+MCP servers and what vibe may write are in [Mistral Vibe](vibe.md).
 
 Its model and reasoning level (`/model`, `/effort`, `default_model`,
 `default_effort`) are never set over ACP, because vibe 2.26.1 writes a

@@ -693,6 +693,68 @@ recorded ones. For anything else:
   environment). Unverified: a provider other than `mistral`, a model
   pinned by an agent profile or admin config, `default_effort` on a first
   run with no session yet (it waits for one, as above), macOS.
+  The rest of the harness (#163, 2.26.1, `docs/vibe.md`): `ask`,
+  `accept-edits` and `bypass`, no `auto` (#174) and no plan (#166);
+  stdio MCP servers only (no `mcpCapabilities`; a server's tool comes as
+  kind `other`, named `mcp_<server>.<tool>`, and is asked about,
+  `fixtures/vibe_acp_mcp.jsonl`). Sign-in (`quick_auth`, `probe`) is
+  `MISTRAL_API_KEY` set in the environment or given a value in
+  `$VIBE_HOME/.env` (parsed as python-dotenv does, presence only, a regular
+  file of at most 64 KiB); otherwise not known, since vibe also takes it
+  from the OS keyring (`vibe/setup/auth/auth_state.py`) and a configured
+  provider may use another key. `min_version` is 2.26.1, the release
+  checked; `vibe-acp --version` prints `vibe-acp 2.26.1`, and creates the
+  home (`logs/`, `trusted_folders.toml`, `vibehistory`) when it is missing.
+  `sandbox_paths` is the home alone, found by tracing: an strace of a
+  write-and-`ls` turn wrote outside the workspace only under it
+  (`logs/vibe.log`; `logs/session/` with each session's journal, chunks,
+  generations, locks and `.registry`; the three caches by a rename; and,
+  in a new home, `trusted_folders.toml` and `vibehistory`), and the same
+  turn through `unharness --print` under Landlock traced with `-e
+  status=failed` was denied nothing (vibe looks for `~/.agents/skills`
+  and walks up for `AGENTS.md`, reads only). `guarded` is read in vibe's
+  source (`harness_files/_harness_manager.py`, `_paths.py`,
+  `paths/_vibe_home.py`): `config.toml` (models, providers, MCP servers:
+  `vibe mcp add` writes there), `trusted_folders.toml`, `hooks.toml`,
+  `AGENTS.md`, `skills.toml`, the trees `agents`, `tools`, `skills`,
+  `plugins`, `prompts`, `.env` as a `Guarded::Secret` (compared by digest,
+  no copy kept, since it holds the key), and `experiment_eval_cache.json`,
+  `whoami_cache.json` and `connector_bootstrap_cache.json` compared
+  without their `stored_at_timestamp`/`stored_at`: vibe rewrites the
+  experiment and connector caches in every session (seen), and their
+  answers choose the default model and system prompt and give the
+  `api_base` vibe copies into `config.toml` (`app_server/_account.py`).
+  Not watched: `logs/` (journals and the session pins, every turn),
+  `builtin-skills/` (rewritten from the binary when it differs), the other
+  caches, `vibehistory`, `worktrees/`, `plans/`. Three `--print` sessions
+  in a scratch home said nothing, and one under `bypass` whose command
+  appended to `trusted_folders.toml` was reported. A relative path in an
+  edit's `diff` (the model's `filePath`) is taken as in the session's
+  directory (`AcpHarness::resolving_relative_edits`, vibe only): with
+  `vibe-acp` started in another directory than the `cwd` of `session/new`
+  the write landed in the session's, while `locations` named the
+  process's (`Path(...).resolve()` in `acp/session_updates.py`, a
+  recording not committed); unharness starts it in the session's, the
+  location still has to name the same file (so a link on the way leaves
+  it unknown), and only plain names are joined (`..`, `.` and a leading
+  `~` stay unknown). Over ACP the session cannot move: `relocate` is
+  reached only from the app server's `session/relocate`. Without the
+  flag a relative diff path is now unknown for every agent, also with no
+  `locations`. `_meta.tool_name` (`file_system.write_file`,
+  `search_tool_functions`, `mcp_tiny.shout`) is not read: as the name it
+  would replace the kind the TUI, the bridge and the rules read, and
+  would make an `other` call `Other` instead of `Opaque`. Fixtures:
+  `vibe_acp_allow_deny` (a write allowed, a command denied, which vibe
+  reports as failed, "Tool execution denied by approval callback"; also
+  through `VibeHarness` in an e2e test), `vibe_acp_mcp`, `vibe_acp_cancel`
+  (`session/cancel` while `sleep` ran: the call failed with "client
+  interrupt", the prompt answered `cancelled`), `vibe_acp_load`; the
+  handshake is `vibe_acp.jsonl`. Checked in the TUI (tmux, Landlock, a
+  scratch `VIBE_HOME`, nothing in the config): a turn, a write under `ask`
+  denied and not made, `/quit` leaving no `vibe-acp`, and a `setsid
+  sleep 300 &` run by vibe's shell under `bypass` adopted by the reaper
+  and gone after `/quit`. Unverified: the keyring and other providers,
+  plugins (none installed; whether vibe updates them itself), macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

@@ -4456,3 +4456,81 @@ async fn acp_other_session_errors_are_not_taken_for_sign_in() {
     );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
+
+/// The built-in vibe harness under `ask` (vibe-acp 2.26.1, nothing in the
+/// config): vibe's `ask` mode is set through its mode option before the
+/// prompt goes, the write and the command are each asked about, known by
+/// their path and command, and the user's answers go as given.
+#[tokio::test]
+async fn vibe_asks_before_a_write_and_a_command() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_allow_deny.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("write a.txt, then touch b.txt"))
+        .await
+        .unwrap();
+    // The write is allowed, the command denied.
+    let events = run_turn(&mut handle, |e| match e {
+        AgentEvent::PermissionRequest(req) => match &req.kind {
+            PermissionKind::ToolUse {
+                action: unharness::core::ToolAction::Edit { .. },
+                ..
+            } => Some(PermissionDecision::Allow {
+                updated_input: None,
+            }),
+            _ => Some(PermissionDecision::Deny {
+                reason: "no".into(),
+            }),
+        },
+        _ => None,
+    })
+    .await;
+    let actions: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::PermissionRequest(req) => match &req.kind {
+                PermissionKind::ToolUse { action, .. } => Some(format!("{action:?}")),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        actions,
+        [
+            r#"Edit { paths: ["/WORKSPACE/a.txt"] }"#,
+            r#"Shell { command: "touch /WORKSPACE/b.txt", cwd: None }"#,
+        ]
+    );
+    // vibe reports the denied command as a failed call.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult { is_error: true, output, .. }
+            if output.contains("denied")
+    )));
+    let sent = fake.sent_lines();
+    let methods: Vec<&str> = sent.iter().filter_map(|v| v["method"].as_str()).collect();
+    assert_eq!(
+        methods,
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option",
+            "session/prompt"
+        ]
+    );
+    assert_eq!(sent[2]["params"]["configId"], "mode");
+    assert_eq!(sent[2]["params"]["value"], "ask");
+    let answers: Vec<&str> = sent
+        .iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str())
+        .collect();
+    assert_eq!(answers, ["allow_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}

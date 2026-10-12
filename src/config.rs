@@ -12,7 +12,7 @@ use crate::core::sandbox;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct Config {
-    /// Preferred default harness (agy, claude, codex, pi).
+    /// Preferred default harness (agy, claude, codex, pi, vibe).
     pub default_harness: Option<String>,
 
     /// Default permission policy (plan, ask, accept-edits, auto, bypass).
