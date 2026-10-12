@@ -9641,9 +9641,13 @@ pub(crate) mod tests {
         let codex = json!({"method": "item/commandExecution/requestApproval", "id": "codex",
             "params": {"itemId": "i1", "cwd": cwd,
                 "command": format!("/usr/bin/zsh -lc '{command}'")}});
+        let mut input = json!({"command": command});
+        if let Some(cwd) = cwd {
+            input["cwd"] = json!(cwd);
+        }
         let acp = json!({"jsonrpc": "2.0", "id": "acp", "method": "session/request_permission",
             "params": {"options": [], "toolCall": {"toolCallId": "t2", "name": "exec_command",
-                "kind": "execute", "rawInput": {"command": command, "cwd": cwd}}}});
+                "kind": "execute", "rawInput": input}}});
         let mut events = ClaudeParser::new().feed(&claude.to_string());
         events.extend(CodexAppServerParser::new().feed(&codex.to_string()));
         events.extend(AcpParser::new(HarnessId::intern("acp-test")).feed(&acp.to_string()));

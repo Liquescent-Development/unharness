@@ -1553,9 +1553,12 @@ recorded ones. For anything else:
   (`fixtures/app_server_file_change.jsonl`). Unverified: codex-acp 2.1.1
   asked for no permission in its default mode in three recordings (a shell
   command, an edit, a network command), so the action of a non-Claude ACP
-  request is built from its tool calls' shapes (`rawInput.command` and
-  `cwd`, `diff` content paths) and the spec's `kind`, and a read, move or
-  delete is `Opaque`; Codex's `move_path` on a rename, and a command or
+  request is built from its tool calls' shapes (an `execute` call's
+  `rawInput` of `command` and a string `cwd`, or of `server`, `tool` and
+  `arguments`, and nothing else: an input with another key, such as
+  `args` or `env`, is `Opaque` (#213), since no recording had one; `diff`
+  content paths) and the spec's `kind`, and a read, move or delete is
+  `Opaque`; Codex's `move_path` on a rename, and a command or
   file approval with `reason`, `grantRoot` or any field the recordings
   lack (`Opaque`); the wording of Codex's MCP approval question, which the
   parser checks for the server and tool (one recording); Claude's
