@@ -80,6 +80,11 @@ call without asking. So `ask` is offered only for an agent whose table has
 writes, runs a command or reaches out (claude-agent-acp 0.85.1 does). The
 presets do not have it until you add a table for them.
 
+A turn stopped while a request waits (an interrupt, or a policy the agent
+can no longer be held to) answers it as cancelled and closes its prompt;
+the agent is told to stop once the call the request was for has ended, or
+after 2 s. Mistral Vibe 2.26.1 lost the turn when told to stop first.
+
 ## Modes
 
 Many agents have session modes of their own, and some of them approve

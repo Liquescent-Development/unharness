@@ -415,16 +415,54 @@ recorded ones. For anything else:
   ignored. Checked in the TUI (tmux, haiku, `modes = { ask = "default" }`):
   the modal opened, closed with "stopped waiting for your answer", and the
   file was not written. With `session/cancel` followed at once by the
-  request answered `cancelled` (what the driver sends on an interrupt, and
-  what `--hold --cancel-after` sends), claude-agent-acp sent no
-  `$/cancel_request`. vibe-acp 2.26.1 sent none in the same run in its
-  `ask` mode (its Python `acp` package has no sender for one), and never
-  answered the `session/prompt` (40 s): its session store failed with
-  "callback result has no pending registration" once the `cancelled`
-  answer followed the cancel; answered `cancelled` with no
-  `session/cancel`, its turn ended. Unverified: codex-acp, a string request
-  id. An elicitation is withdrawn through the same map (#157; a synthetic
-  e2e test, no agent was seen to withdraw one).
+  request answered `cancelled` (what the driver sent on an interrupt
+  before #183, and what `--hold --cancel-after` still sends without
+  `--answer-first`), claude-agent-acp sent no `$/cancel_request`, and
+  vibe-acp 2.26.1 in its `ask` mode sent none either (its Python `acp`
+  package has no sender for one); that order lost vibe's turn (see
+  Interrupts). Unverified: codex-acp, a string request id. An elicitation
+  is withdrawn through the same map (#157; a synthetic e2e test, no agent
+  was seen to withdraw one).
+  Interrupts (#183, `Driver::cancel_turn`): every open permission request
+  is answered `cancelled` (an elicitation `cancel`) and the TUI told it is
+  withdrawn, and `session/cancel` goes once the tool call each was for
+  (as the parser tied it) is reported `completed` or `failed`, or after
+  `transport::SETTLE_WAIT` (2 s); a request that comes before the prompt
+  answers is answered the same way at once and never shown. The other
+  order lost vibe-acp 2.26.1's turn (ask mode, the request held,
+  `record-acp.py --hold --cancel-after`): `session/cancel` interrupts it,
+  which resolves the request's callback in its session journal
+  (`_close_open_callbacks` in `mistralai_vibe_local_harness/vibe/
+  _session.py`), the `cancelled` answer resolves it again through
+  `callback/result` (`respond_to_callback`, which looks for a closed
+  callback before an `await` that the interrupt's own `await`s
+  straddle), the journal's next read fails ("Invalid Unified session
+  store: callback result has no pending registration", `_storage.py`),
+  and the prompt was never answered (40 s). Answered `cancelled` just
+  before the cancel, it raced the same way and failed too. Answered
+  first, with the cancel sent once the call was reported failed
+  (milliseconds later), the prompt answered `stopReason: cancelled`, no
+  file was written, and the session, loaded in a new process, answered
+  the next prompt from its history (`fixtures/vibe_acp_interrupt.jsonl`,
+  `record-acp.py --answer-first`). claude-agent-acp 0.85.1 (its call
+  failed with "Tool use aborted") and codex-acp 2.1.1 in `read-only` (its
+  command failed) ended the same way with `cancelled` (recorded, not
+  committed), so no agent declares an order. The spec asks the client to
+  answer pending requests `cancelled` when it cancels a turn (the
+  schema's `RequestPermissionOutcome` `cancelled`), not in which order. In
+  the TUI a permission modal takes every key: Esc there denies
+  (`reject_once`; vibe then tried another tool and asked again, checked
+  live) and Ctrl+C does nothing, so an interrupt with a request open
+  comes only from a policy the agent stops holding, a mode it went into
+  by itself, or a request in flight when Esc is pressed. The last was
+  checked live (tmux, Landlock, scratch `VIBE_HOME`, `-H vibe` under
+  `ask`, the request held 3 s by a wrapper): it came after the
+  `session/cancel` and was answered `cancelled` without a modal, vibe
+  answered the prompt with -32603 "Callback is closed: approval-…" (shown
+  as the turn's error), no file was written, and the next prompt was
+  answered in the same session. Unverified: an elicitation open at an
+  interrupt on a real agent, an agent that never reports the call ended
+  (the cancel then waits 2 s).
   Ending a session (#161): a shutdown between turns sends `session/close`
   where the agent lists `sessionCapabilities.close` (claude-agent-acp
   0.85.1, codex-acp 2.1.1 and vibe-acp 2.26.1 all do) and closes stdin once

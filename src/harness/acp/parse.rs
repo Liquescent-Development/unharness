@@ -1038,6 +1038,15 @@ mod tests {
         assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp_mode_load");
     }
 
+    /// vibe-acp 2.26.1 interrupted with a write's request open (#183): the
+    /// request is answered `cancelled` (by the driver, not among the
+    /// parser's events), the call is reported failed, and the prompt then
+    /// answers `cancelled`.
+    #[test]
+    fn fixture_vibe_acp_interrupt() {
+        assert_fixture(&mut parser(), &fixtures_dir(file!()), "vibe_acp_interrupt");
+    }
+
     /// vibe-acp 2.26.1 says it closes sessions, titles the session after
     /// its first prompt, and answers `session/close` with `{}`; neither
     /// the title nor the answer is an event.

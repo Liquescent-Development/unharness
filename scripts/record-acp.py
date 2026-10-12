@@ -49,8 +49,12 @@ With --hold a permission request is not answered: it stays open until the
 agent withdraws it with `$/cancel_request` (answered with the error -32800,
 "Request cancelled", as the driver does) or, with --cancel-after, until the
 `session/cancel`, right after which every open one is answered `cancelled`
-(as the driver does). A `$/cancel_request` for anything else is recorded
-and not answered.
+(what the driver sent before #183). With --answer-first they are answered
+`cancelled` first, and the `session/cancel` follows once each of their
+tool calls has been reported `completed` or `failed`, or after
+SETTLE_WAIT, or not at all if the prompt has answered by then (what the
+driver sends: vibe-acp 2.26.1 lost the turn the other way). A
+`$/cancel_request` for anything else is recorded and not answered.
 
 Without the flags added for #169 the lines sent are the ones the recorder
 sent before them, so a fixture re-recorded that way keeps its `>>` lines (an
@@ -75,6 +79,10 @@ import subprocess
 import sys
 import threading
 import time
+
+# --answer-first: how long the session/cancel waits for the calls of the
+# requests answered `cancelled` (transport::SETTLE_WAIT in the driver).
+SETTLE_WAIT = 2.0
 
 PLACEHOLDER = re.compile(r"\$(SESSION|USER_MESSAGE(?:_[0-9]+)?|AGENT_MESSAGE(?:_[0-9]+)?)\b")
 
@@ -132,6 +140,10 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--hold", action="store_true",
                     help="leave permission requests open until the agent withdraws them with "
                          "$/cancel_request, or --cancel-after cancels the turn (see above)")
+    ap.add_argument("--answer-first", action="store_true",
+                    help="with --hold and --cancel-after, answer the open permission requests "
+                         "`cancelled` first and send session/cancel once their calls are done "
+                         "(see above)")
     ap.add_argument("--deny", action="store_true",
                     help="reject permission requests instead of allowing them (also after --answers)")
     ap.add_argument("--answers", metavar="LIST",
@@ -175,6 +187,8 @@ def main() -> int:
         ap.error("--mode-option needs --mode")
     if args.hold and (args.answers or args.deny):
         ap.error("--hold answers no permission request, so it takes neither --answers nor --deny")
+    if args.answer_first and not (args.hold and args.cancel_after is not None):
+        ap.error("--answer-first orders what --hold --cancel-after sends, so it needs both")
 
     try:
         client_caps = json.loads(args.client_capabilities)
@@ -300,6 +314,9 @@ def main() -> int:
     cancel_timer = None
     permissions = 0
     held = {}  # --hold: open permission requests, by id as JSON
+    held_calls = {}  # their tool call ids, by request id as JSON
+    settling = set()  # --answer-first: calls the session/cancel waits for
+    cancel_owed = None  # --answer-first: the session the cancel is for
     elicitations = 0
     message_ids = {"USER": [], "AGENT": []}
 
@@ -311,15 +328,43 @@ def main() -> int:
                 proc.stdin.close()
 
     def send_cancel(sid):
+        nonlocal cancel_owed
         sys.stderr.write(f"[cancel] session/cancel after {args.cancel_after}s\n")
-        send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
         # The protocol has a cancelled turn's open permission requests
-        # answered `cancelled`.
+        # answered `cancelled`: after the cancel, or before it with
+        # --answer-first.
+        if not args.answer_first:
+            send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
         with send_lock:
-            open_ids = list(held.values())
+            open_ids = list(held.items())
             held.clear()
-        for hid in open_ids:
+        for key, hid in open_ids:
             send({"jsonrpc": "2.0", "id": hid, "result": {"outcome": {"outcome": "cancelled"}}})
+            call = held_calls.pop(key, None)
+            if args.answer_first and call:
+                with send_lock:
+                    settling.add(call)
+        if args.answer_first:
+            with send_lock:
+                cancel_owed = sid
+                waiting = bool(settling)
+            if waiting:
+                sys.stderr.write(f"[cancel] waiting for {len(settling)} call(s) to end\n")
+                t = threading.Timer(SETTLE_WAIT, owed_cancel)
+                t.daemon = True
+                t.start()
+            else:
+                owed_cancel()
+
+    def owed_cancel():
+        """--answer-first: the session/cancel, once, if the prompt is still open."""
+        nonlocal cancel_owed
+        with send_lock:
+            sid, cancel_owed = cancel_owed, None
+            settling.clear()
+            prompt_open = "prompt" in pending.values()
+        if sid and prompt_open:
+            send({"jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": sid}})
 
     def next_prompt():
         nonlocal first, cancel_timer
@@ -456,12 +501,22 @@ def main() -> int:
             mid = update.get("messageId")
             if kind and isinstance(mid, str) and mid not in message_ids[kind]:
                 message_ids[kind].append(mid)
+            # --answer-first: a call the owed session/cancel waits for is done.
+            call = update.get("toolCallId")
+            if update.get("status") in ("completed", "failed") and call:
+                with send_lock:
+                    ended = call in settling
+                    settling.discard(call)
+                    done = ended and not settling
+                if done:
+                    owed_cancel()
 
         # The agent withdraws a request it sent.
         if method == "$/cancel_request":
             wid = (obj.get("params") or {}).get("requestId")
             with send_lock:
                 was_held = held.pop(json.dumps(wid), None) is not None
+                held_calls.pop(json.dumps(wid), None)
             sys.stderr.write(f"[withdrawn] request {wid} ({'open' if was_held else 'not open'})\n")
             if was_held:
                 send({"jsonrpc": "2.0", "id": wid,
@@ -472,8 +527,11 @@ def main() -> int:
         if method and rid is not None:
             if method == "session/request_permission" and args.hold:
                 sys.stderr.write(f"[hold] permission request {rid} left open\n")
+                call = ((obj.get("params") or {}).get("toolCall") or {}).get("toolCallId")
                 with send_lock:
                     held[json.dumps(rid)] = rid
+                    if call:
+                        held_calls[json.dumps(rid)] = call
             elif method == "session/request_permission":
                 options = (obj.get("params") or {}).get("options") or []
                 permissions += 1
