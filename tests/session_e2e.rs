@@ -588,6 +588,78 @@ fn pi_harness() -> unharness::harness::pi::PiHarness {
     }
 }
 
+/// A turn sent to a resumed pi waits for the first `get_fork_messages`
+/// answer (#214): pi saves a prompt under the id it was given, so one sent
+/// to the empty session pi made for a missing id
+/// (`fixtures/resume_missing.jsonl`) would make that id resume next time.
+/// There the turn fails unsent; where the listing shows the session, it
+/// goes once the listing is in.
+#[tokio::test]
+async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62".into());
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionReplaced { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(e) })
+                if e.contains("this prompt was not sent")
+        ),
+        "{events:?}"
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert!(
+        !fake.sent_lines().iter().any(|v| v["type"] == "prompt"),
+        "{:?}",
+        fake.sent_lines()
+    );
+
+    // The session is there: the turn goes after the listing.
+    let fake = Fake::new();
+    let fixture = fake._tmp.path().join("resumed.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+            ">> {\"type\": \"prompt\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let sent = fake.sent_lines_eventually(4).await;
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages", "prompt"],
+    );
+    assert_eq!(sent[3]["message"], "hi");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn pi_gate_asks_before_a_tool_acts() {
     if !python_available() {
@@ -3843,8 +3915,8 @@ async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
 /// creates an empty one under the id (`fixtures/resume_missing.jsonl`),
 /// vibe-acp 2.26.1 answers `session/load` with "Session not found" and the
 /// driver starts a new one (`vibe_acp_load_missing.jsonl`). Either fails
-/// the run with the reason rather than answer from the new session
-/// (#214).
+/// the run with the reason rather than answer from the new session, and
+/// pi is never sent the prompt (#214).
 #[tokio::test]
 async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
     if !python_available() {
@@ -3899,6 +3971,17 @@ async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
              empty one); stopped, since the session started in its place knows nothing of \
              {pi_missing}"
         )
+    );
+    // The prompt waited for pi's listing and was never sent: pi saves a
+    // prompt under the id it was given, which would make the next resume
+    // of that id pass for one.
+    let sent = fake.sent_lines();
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+        "{sent:?}"
     );
 
     let fake = Fake::new();

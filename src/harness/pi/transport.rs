@@ -171,6 +171,13 @@ async fn drive(
     let mut aborting = false;
     // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
     let mut forking = false;
+    // A resumed session's first listing has not answered: a turn sent
+    // meanwhile is held back too, since pi saves a prompt under the id
+    // it was given (`SessionManager._persist`, 1.1.0) and the listing may
+    // show that the session is gone (`SessionReplaced`). Sent there, the
+    // prompt would make the empty session pi made under the id pass as
+    // the one to resume next time (#214).
+    let mut baseline = resumed;
     let mut held_turn: Option<String> = None;
 
     let _ = proc
@@ -277,7 +284,7 @@ async fn drive(
                     }
                 };
                 turn_open |= is_turn && line.is_some();
-                if forking && is_turn {
+                if (forking || baseline) && is_turn {
                     held_turn = line;
                 } else if let Some(line) = line
                     && let Err(e) = proc.write_line(&line).await
@@ -294,11 +301,14 @@ async fn drive(
                             forking = false;
                             let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
                             let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
-                            if let Some(turn) = held_turn.take() {
+                            if !baseline && let Some(turn) = held_turn.take() {
                                 let _ = proc.write_line(&turn).await;
                             }
                         }
+                        let baseline_answer = baseline && is_response_to(&line, "get_fork_messages");
+                        let mut replaced = false;
                         for mut ev in parser.feed(&line) {
+                            replaced |= matches!(ev, AgentEvent::SessionReplaced { .. });
                             if let AgentEvent::PermissionRequest(req) = &ev {
                                 let kind = match &req.kind {
                                     PermissionKind::ToolUse { .. } => PendingKind::Gate,
@@ -348,6 +358,25 @@ async fn drive(
                                     }
                                 }
                                 return;
+                            }
+                        }
+                        if baseline_answer {
+                            baseline = false;
+                            match held_turn.take() {
+                                // The session to resume is gone: the prompt
+                                // is not sent to the one pi made in its place.
+                                Some(_) if replaced => {
+                                    turn_open = false;
+                                    let _ = events.send(AgentEvent::TurnCompleted {
+                                        stop_reason: StopReason::Error(
+                                            "pi: the session to resume is gone, so this prompt was not sent; send it again to have the new session told the conversation".into(),
+                                        ),
+                                    }).await;
+                                }
+                                Some(turn) if !forking => {
+                                    let _ = proc.write_line(&turn).await;
+                                }
+                                held => held_turn = held,
                             }
                         }
                     }
