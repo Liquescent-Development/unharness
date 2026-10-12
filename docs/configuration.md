@@ -118,7 +118,8 @@ Claude's settings. Two things to know:
   refused while a turn or a subagent is at work. Mistral Vibe's is fixed
   when it starts too, and a session that was prompted keeps the model it
   ran, so there a change starts a new session told the conversation, as a
-  model change does.
+  model change does; a vibe subagent its agent has not waited for does
+  not hold it back.
 
 The model list is Claude's own for that provider, asked of a short-lived
 Claude in the sandbox a session would get (its settings can name

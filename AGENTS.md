@@ -921,8 +921,17 @@ recorded ones. For anything else:
   child's answer into the parent model's input
   (`_subagents/_notifications.py`) and the client hears nothing, so a
   row the agent did not wait for stays at work until the session ends,
-  saying that its end shows only when the agent waits for it. A child's
-  own tool calls are never sent. Its permission requests are, on the
+  saying that its end shows only when the agent waits for it. Such a
+  row (`RunningSubagent::end_reported`, false under `unreported_ends`)
+  does not keep the TUI busy (status rule, herdr) and holds back
+  neither `/clear`, a model, effort or provider change
+  (`App::refused_for_subagents`) nor a handoff summary
+  (`handoff_wanted_for`), since it would hold them until the session
+  ends (#215); each ends the session, and the row with it, as stopped.
+  The refusals name Ctrl+S, and `Delete` on a running row names `s`,
+  only where the harness can stop one. A child that answers while the
+  summary is written may put its answer in that turn (not seen). A
+  child's own tool calls are never sent. Its permission requests are, on the
   parent's session, id-only for a call no update named
   (`vibe/acp/agent.py:879-887`): a bare `tool` asked about as `Opaque`
   under every policy but bypass (`fixtures/vibe_acp_subagent.jsonl`, also
@@ -1914,7 +1923,8 @@ recorded ones. For anything else:
   asks the harness being left for a handoff summary (`App::ask_handoff`,
   `Block::Handoff`), with every permission request denied while it
   writes; not while its subagents are at work (their requests and reports
-  would land in that turn). Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
+  would land in that turn), but for one whose end is never told (vibe's,
+  #215). Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
   app-server, `bridge_max_chars = 600`): Claude wrote the summary within
   the word limit it was given, the switch followed the turn, and Codex
   answered from the first prompt and the summary it was sent. Windows

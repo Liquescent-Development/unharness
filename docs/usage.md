@@ -107,7 +107,8 @@ of everything before it, and what came after it turn by turn. Esc while
 it writes switches without one; a prompt sent meanwhile (Alt+Enter too)
 goes to the next harness. `bridge_summary = "never"` turns it off. Only
 a harness whose session saw the whole conversation and is still running
-or can be resumed is asked, and not while its subagents are at work.
+or can be resumed is asked, and not while its subagents are at work
+(a Mistral Vibe subagent its agent has not waited for does not count).
 
 Policy, model and effort changes apply from the next turn on every harness:
 

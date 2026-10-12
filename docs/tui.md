@@ -419,7 +419,8 @@ agent's session ends and a new one starts that knows nothing of it
 the context meter start from zero; a harness used before the clear
 starts afresh too when you switch to it. Prompts held after a turn that
 did not finish stay queued. `/clear` waits until the turn, the subagents
-at work and a running `!` command are done.
+at work and a running `!` command are done (not for a Mistral Vibe
+subagent, below).
 
 ## Hooks
 
@@ -443,7 +444,13 @@ run and what it is doing: running ones first, then finished ones, latest
 first. A finished one stays listed so you can still read what it did,
 until you remove it with `Delete`. Its transcript is kept, and `Ctrl+S`
 still offers it. While any subagent is running, the status rule stays
-busy ("2 subagents running") instead of "Ready".
+busy ("2 subagents running") instead of "Ready", and `/clear` or a
+change of model, effort or provider that would end the session waits
+for it. A Mistral Vibe subagent is the exception: vibe tells that one
+has ended only when its agent waits for it, so it may stay listed as
+running for good. It keeps neither the status rule busy nor any of
+those waiting, and goes with the session they end
+([Mistral Vibe](vibe.md#subagents)).
 
 The main transcript belongs to the main agent. A subagent appears there
 as one line, the call that spawned it, marked running, done, failed or
@@ -478,7 +485,8 @@ agent list` as `unharness`:
   for your answer, also when it is queued behind another picker, and
   while the policy picker holds the session because the policy you asked
   for is not available;
-- **working** while a turn runs or subagents are still at work;
+- **working** while a turn runs or subagents are still at work (not a
+  Mistral Vibe subagent its agent has not waited for);
 - **idle** otherwise. herdr shows it as **done** when the turn ended in a
   tab you were not looking at.
 
