@@ -88,6 +88,18 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     details.yellow()
                 };
                 println!("      {} Auth: {}", "↳".dimmed(), details);
+                for note in h.doctor_notes(cwd) {
+                    println!(
+                        "      {} {}: {}",
+                        "↳".dimmed(),
+                        note.label,
+                        if note.warning {
+                            note.text.yellow()
+                        } else {
+                            note.text.normal()
+                        }
+                    );
+                }
 
                 let caps = h.capabilities();
                 println!(

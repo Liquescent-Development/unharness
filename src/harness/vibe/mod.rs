@@ -19,8 +19,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::json;
 
+pub mod trust;
+
 use super::acp::{AcpHarness, ModeMap, SpawnChoice, SpawnPlan};
-use super::{AuthInfo, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe};
+use super::{
+    AuthInfo, DoctorNote, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
+    probe_version_of, resolve_binary,
+};
 use crate::config::HarnessSettings;
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
@@ -242,6 +247,39 @@ fn dotenv_has_value(text: &str, key: &str) -> bool {
     found
 }
 
+/// Whether vibe is signed in as far as a file read can tell, for a key
+/// in `env_value` (unharness's environment) or `<home>/.env`; with neither
+/// and no home, vibe has not been set up.
+fn auth_info(env_value: Option<&std::ffi::OsStr>, home: &Path, sign_in: &str) -> AuthInfo {
+    match api_key_at(env_value, home) {
+        Some(KeyAt::Environment) => AuthInfo {
+            authenticated: true,
+            details: Some(format!("{API_KEY_VAR} is set in the environment")),
+        },
+        Some(KeyAt::EnvFile) => AuthInfo {
+            authenticated: true,
+            details: Some(format!(
+                "{API_KEY_VAR} is in {}",
+                home.join(".env").display()
+            )),
+        },
+        None if std::fs::metadata(home).is_err() => AuthInfo {
+            authenticated: false,
+            details: Some(format!(
+                "vibe has not been set up: {} is not there and {API_KEY_VAR} is not set (to set it up, run `{sign_in}`)",
+                home.display(),
+            )),
+        },
+        None => AuthInfo {
+            authenticated: false,
+            details: Some(format!(
+                "no {API_KEY_VAR} in the environment or {}; a key in the OS keyring or another provider's is checked when a session starts (to sign in, run `{sign_in}`)",
+                home.join(".env").display(),
+            )),
+        },
+    }
+}
+
 /// A model the user defined in vibe's `config.toml`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct UserModel {
@@ -340,6 +378,32 @@ pub fn spawn_env(home: &Path, choice: &SpawnChoice<'_>) -> SpawnPlan {
     plan
 }
 
+/// What `binary --version` prints, run with vibe's home a new empty
+/// directory of its own, removed afterwards. vibe-acp 2.26.1 sets up its
+/// home before it reads its arguments, also for `--version`: it creates
+/// the directory when missing (`logs/vibe.log`, `trusted_folders.toml`,
+/// `vibehistory`), tightens its mode, appends to its log, and empties a
+/// `trusted_folders.toml` it cannot read. An strace of `--version` with
+/// `VIBE_HOME` elsewhere showed no write outside that directory. The
+/// probe runs outside the sandbox (doctor, and every TUI start), so it is
+/// kept out of the user's home: on a machine where vibe was never run it
+/// would otherwise create `~/.vibe`.
+fn version_aside(binary: &Path) -> Option<String> {
+    let scratch = std::env::temp_dir().join(format!(
+        "unharness-vibe-version-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut dir = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut dir, 0o700);
+    dir.create(&scratch).ok()?;
+    let mut command = std::process::Command::new(binary);
+    command.env("VIBE_HOME", &scratch);
+    let version = probe_version_of(command);
+    let _ = std::fs::remove_dir_all(&scratch);
+    version
+}
+
 /// [`VibeHarness::guarded`] for a vibe home at `home`.
 fn guarded_in(home: &Path) -> Vec<Guarded> {
     let mut guarded: Vec<Guarded> = GUARDED_FILES
@@ -385,44 +449,42 @@ impl Harness for VibeHarness {
         self.acp.capabilities()
     }
 
-    /// The binary and its version as for any ACP agent; signed in when
-    /// vibe's default provider has its key where a file read can tell.
+    /// The binary and its version (see [`version_aside`]); signed in when
+    /// vibe's default provider has its key where a file read can tell, and
+    /// not set up when vibe's home is not there.
     fn probe(&self, binary_override: Option<&Path>) -> Probe {
-        let probe = self.acp.probe(binary_override);
-        let home = vibe_home(&[]);
-        let auth = match api_key_at(std::env::var_os(API_KEY_VAR).as_deref(), &home) {
-            Some(KeyAt::Environment) => AuthInfo {
-                authenticated: true,
-                details: Some(format!("{API_KEY_VAR} is set in the environment")),
-            },
-            Some(KeyAt::EnvFile) => AuthInfo {
-                authenticated: true,
-                details: Some(format!(
-                    "{API_KEY_VAR} is in {}",
-                    home.join(".env").display()
-                )),
-            },
-            None => AuthInfo {
-                authenticated: false,
-                details: Some(format!(
-                    "no {API_KEY_VAR} in the environment or {}; a key in the OS keyring or another provider's is checked when a session starts (to sign in, run `{}`)",
-                    home.join(".env").display(),
-                    self.acp.sign_in().unwrap_or("vibe --setup"),
-                )),
-            },
-        };
-        Probe { auth, ..probe }
+        let binary = resolve_binary(self.descriptor(), binary_override);
+        let version = binary.as_deref().and_then(version_aside);
+        let auth = auth_info(
+            std::env::var_os(API_KEY_VAR).as_deref(),
+            &vibe_home(&[]),
+            self.acp.sign_in().unwrap_or("vibe --setup"),
+        );
+        Probe {
+            binary,
+            version,
+            auth,
+        }
     }
 
     fn min_version(&self) -> Option<MinVersion> {
         Some(MIN_VERSION)
     }
 
-    /// `vibe-acp --version` prints `vibe-acp 2.26.1` (and creates vibe's
-    /// home, `logs/`, `trusted_folders.toml` and `vibehistory`, when
-    /// missing).
+    /// `vibe-acp --version` prints `vibe-acp 2.26.1`.
     fn reports_version(&self) -> bool {
         true
+    }
+
+    /// Whether vibe trusts the folder with its project configuration
+    /// ([`trust::describe`]).
+    fn doctor_notes(&self, cwd: &Path) -> Vec<DoctorNote> {
+        let (text, warning) = trust::describe(&vibe_home(&[]), cwd);
+        vec![DoctorNote {
+            label: "Trust",
+            text,
+            warning,
+        }]
     }
 
     /// Signed in when the key is in the environment or vibe's `.env`;
@@ -839,6 +901,94 @@ provider = "mine"
         big.push_str(&"#".repeat(ENV_FILE_LIMIT as usize));
         std::fs::write(&env, big).unwrap();
         assert_eq!(api_key_at(None, home.path()), None);
+    }
+
+    /// What doctor says of sign-in (#172), against tempfile homes: a key
+    /// in the environment or `.env` signs in, neither is not known, and
+    /// without the home vibe has not been set up. Nothing is created.
+    #[test]
+    fn sign_in_and_set_up_as_doctor_says_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("vibehome");
+        let missing = dir.path().join("missing");
+        std::fs::create_dir(&home).unwrap();
+        let key = Some(std::ffi::OsStr::new("sk"));
+
+        let auth = auth_info(None, &home, "vibe --setup");
+        assert!(!auth.authenticated);
+        let text = auth.details.unwrap();
+        assert!(
+            text.starts_with("no MISTRAL_API_KEY in the environment or "),
+            "{text}"
+        );
+        assert!(text.ends_with("(to sign in, run `vibe --setup`)"), "{text}");
+
+        std::fs::write(home.join(".env"), "MISTRAL_API_KEY=abc\n").unwrap();
+        let auth = auth_info(None, &home, "vibe --setup");
+        assert!(auth.authenticated);
+        assert_eq!(
+            auth.details.unwrap(),
+            format!("MISTRAL_API_KEY is in {}", home.join(".env").display())
+        );
+        // The value is never shown.
+        let auth = auth_info(key, &home, "vibe --setup");
+        assert_eq!(
+            auth.details.as_deref(),
+            Some("MISTRAL_API_KEY is set in the environment")
+        );
+
+        let auth = auth_info(None, &missing, "my-setup");
+        assert!(!auth.authenticated);
+        assert_eq!(
+            auth.details.unwrap(),
+            format!(
+                "vibe has not been set up: {} is not there and MISTRAL_API_KEY is not set \
+                 (to set it up, run `my-setup`)",
+                missing.display()
+            )
+        );
+        // With the key in the environment vibe runs without being set up.
+        assert!(auth_info(key, &missing, "vibe --setup").authenticated);
+        assert!(!missing.exists());
+    }
+
+    /// The version probe gives vibe a home of its own, removed afterwards,
+    /// so that `--version` (which sets up the home it is given) never
+    /// creates or touches the user's (#172).
+    #[cfg(unix)]
+    #[test]
+    fn the_version_is_probed_with_a_home_of_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let seen = dir.path().join("seen");
+        let stub = dir.path().join("vibe-acp");
+        // What vibe-acp 2.26.1 does with its home on `--version`.
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] || exit 2\necho \"$VIBE_HOME\" > '{}'\n\
+                 mkdir -p \"$VIBE_HOME/logs\" && touch \"$VIBE_HOME/trusted_folders.toml\" \
+                 \"$VIBE_HOME/vibehistory\" \"$VIBE_HOME/logs/vibe.log\"\necho 'vibe-acp 2.26.1'\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(version_aside(&stub).as_deref(), Some("vibe-acp 2.26.1"));
+        let used = std::fs::read_to_string(&seen).unwrap();
+        let used = Path::new(used.trim());
+        assert!(
+            used.starts_with(std::env::temp_dir())
+                && used
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("unharness-vibe-version-"),
+            "{}",
+            used.display()
+        );
+        assert!(!used.exists(), "{} left behind", used.display());
+        assert_ne!(used, vibe_home(&[]));
     }
 
     /// vibe also reads a FIFO for `.env` (1Password's local env files);
