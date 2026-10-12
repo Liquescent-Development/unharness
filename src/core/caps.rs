@@ -243,6 +243,10 @@ pub struct SubagentSupport {
     /// One that ends between turns is reported to the agent in a turn the
     /// harness starts by itself.
     pub report_turn: bool,
+    /// The end of one can go unreported (Mistral Vibe tells it only when
+    /// the agent waits for the subagent), so a print run does not wait
+    /// for it.
+    pub unreported_ends: bool,
 }
 
 /// How a harness can go back to an earlier turn of its own session. (Files

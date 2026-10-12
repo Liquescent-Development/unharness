@@ -21,7 +21,7 @@ use crate::core::rules::rule_may_answer;
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
     PermissionRequest, RemoteControl, Rule, Rules, SessionCommand, SessionHandle, StopReason,
-    SubagentStatus, ToolAction, Usage,
+    SubagentStatus, SubagentSupport, ToolAction, Usage,
 };
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
@@ -68,6 +68,9 @@ pub struct Headless<O: Write, E: Write> {
     name: String,
     /// `SubagentSupport::report_turn` of the harness.
     report_turn: bool,
+    /// `SubagentSupport::unreported_ends`: a subagent still at work when
+    /// the turn ends is not waited for.
+    unreported_ends: bool,
     pub out: O,
     pub err: E,
     harness: String,
@@ -122,7 +125,7 @@ impl<O: Write, E: Write> Headless<O, E> {
         rules: Rules,
         cwd: PathBuf,
         name: &str,
-        report_turn: bool,
+        subagents: SubagentSupport,
         out: O,
         err: E,
     ) -> Self {
@@ -131,7 +134,8 @@ impl<O: Write, E: Write> Headless<O, E> {
             rules,
             cwd,
             name: name.to_string(),
-            report_turn,
+            report_turn: subagents.report_turn,
+            unreported_ends: subagents.unreported_ends,
             out,
             err,
             harness: String::new(),
@@ -176,11 +180,14 @@ impl<O: Write, E: Write> Headless<O, E> {
 
     /// Whether the answer is complete: the turn is over, and so is every
     /// subagent and every turn that reports one. An error or an interrupt
-    /// ends the run at once.
+    /// ends the run at once. A subagent whose end may never be told is not
+    /// waited for (`SubagentSupport::unreported_ends`).
     pub fn is_done(&self) -> bool {
         match &self.stop {
             None => false,
-            Some(StopReason::Done) => self.owed == 0 && self.running.is_empty(),
+            Some(StopReason::Done) => {
+                self.owed == 0 && (self.running.is_empty() || self.unreported_ends)
+            }
             Some(_) => true,
         }
     }
@@ -354,8 +361,18 @@ impl<O: Write, E: Write> Headless<O, E> {
                 } else {
                     stop_reason.clone()
                 });
-                if !self.is_done() && self.format != Format::StreamJson {
-                    let n = self.running.len();
+                let n = self.running.len();
+                if self.unreported_ends
+                    && self.is_done()
+                    && n > 0
+                    && self.format != Format::StreamJson
+                {
+                    // Ended or not: the session goes with the run.
+                    self.note(&format!(
+                        "not waiting for {n} subagent(s): {} tells a subagent's end only when the agent waits for it",
+                        self.name
+                    ));
+                } else if !self.is_done() && self.format != Format::StreamJson {
                     self.note(&if n > 0 {
                         format!("waiting for {n} subagent(s)")
                     } else {
@@ -953,6 +970,16 @@ mod tests {
     type Run = Headless<Vec<u8>, Vec<u8>>;
 
     fn headless(format: Format, report_turn: bool) -> (tempfile::TempDir, Run) {
+        headless_with(
+            format,
+            SubagentSupport {
+                report_turn,
+                ..Default::default()
+            },
+        )
+    }
+
+    fn headless_with(format: Format, subagents: SubagentSupport) -> (tempfile::TempDir, Run) {
         let dir = tempfile::tempdir().unwrap();
         let rules = Rules::load_in(&dir.path().join("config"), Some(dir.path())).unwrap();
         let mut run = Headless::new(
@@ -960,7 +987,7 @@ mod tests {
             rules,
             dir.path().to_path_buf(),
             "claude",
-            report_turn,
+            subagents,
             Vec::new(),
             Vec::new(),
         );

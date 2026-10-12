@@ -271,7 +271,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
             rules,
             cwd.to_path_buf(),
             harness.descriptor().short_name,
-            caps.subagents.report_turn,
+            caps.subagents,
             std::io::stdout(),
             std::io::stderr(),
         );

@@ -128,6 +128,7 @@ impl Harness for AgyHarness {
                 described: false,
                 stop: false,
                 report_turn: false,
+                unreported_ends: false,
             },
             steer: false,
             compaction: false,

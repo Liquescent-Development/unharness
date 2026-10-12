@@ -13,6 +13,8 @@
 //! both TOML files and below an agent profile and admin config, and never
 //! writes (`vibe/core/config/layers/environment.py`).
 
+pub mod subagents;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -31,7 +33,7 @@ use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, HarnessCommand, HarnessId, PermissionPolicy, PolicySupport, ProviderId,
-    SessionConfig, SessionHandle,
+    SessionConfig, SessionHandle, SubagentSupport,
 };
 
 /// The command unharness runs when the config names none.
@@ -306,6 +308,7 @@ impl VibeHarness {
         // Told when vibe is not signed in, never run (`acp/auth.rs`).
         .signing_in_with(Some("vibe --setup"))
         .resolving_relative_edits()
+        .reading_meta_with(subagents::reader)
         .choosing_at_spawn(Arc::new(|choice: &SpawnChoice<'_>| {
             spawn_env(&vibe_home(choice.env), choice)
         }));
@@ -580,8 +583,21 @@ impl Harness for VibeHarness {
         self.acp.descriptor()
     }
 
+    /// The ACP agent's, with its subagents (`subagents.rs`): a start and,
+    /// when the agent waits for one, its end and report. Nothing stops one
+    /// from outside (no client method; `session/cancel` leaves it running),
+    /// and nothing reports one between turns.
     fn capabilities(&self) -> Capabilities {
-        self.acp.capabilities()
+        Capabilities {
+            subagents: SubagentSupport {
+                reported: true,
+                described: false,
+                stop: false,
+                report_turn: false,
+                unreported_ends: true,
+            },
+            ..self.acp.capabilities()
+        }
     }
 
     /// The binary and its version (see [`version_aside`]); signed in when
@@ -994,6 +1010,11 @@ provider = "mine"
             caps.mcp,
             crate::core::McpSupport::via(crate::core::McpChannel::Protocol, false)
         );
+        // Started and, when waited for, ended (`subagents.rs`); never
+        // stopped from here, and nothing waits for an end that may not come.
+        let subagents = caps.subagents;
+        assert!(subagents.reported && subagents.unreported_ends);
+        assert!(!subagents.stop && !subagents.report_turn);
         assert_eq!(h.min_version(), Some(MIN_VERSION));
         assert_eq!(MIN_VERSION.to_string(), "2.26.1");
         assert!(h.reports_version());

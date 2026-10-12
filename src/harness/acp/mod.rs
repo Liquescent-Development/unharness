@@ -96,6 +96,8 @@ pub struct AcpHarness {
     sign_in: Option<String>,
     /// A relative path in an edit's `diff` is in the session's directory.
     relative_edits: bool,
+    /// Reads what the agent says in fields of its own (`_meta`).
+    meta_reader: Option<parse::MetaReaderFactory>,
 }
 
 impl AcpHarness {
@@ -126,6 +128,7 @@ impl AcpHarness {
             known: SharedModels::default(),
             sign_in: None,
             relative_edits: false,
+            meta_reader: None,
         })
     }
 
@@ -199,6 +202,17 @@ impl AcpHarness {
     pub fn resolving_relative_edits(self) -> Self {
         AcpHarness {
             relative_edits: true,
+            ..self
+        }
+    }
+
+    /// Read each tool call's fields of the agent's own with a reader from
+    /// `make`, one per session (`parse::MetaReader`): for a harness that
+    /// knows its agent (Mistral Vibe's subagents). Nothing declares one
+    /// from config.
+    pub fn reading_meta_with(self, make: parse::MetaReaderFactory) -> Self {
+        AcpHarness {
+            meta_reader: Some(make),
             ..self
         }
     }
@@ -346,6 +360,7 @@ impl Harness for AcpHarness {
                 known: self.known.clone(),
                 sign_in: self.sign_in.clone(),
                 relative_edits: self.relative_edits,
+                meta_reader: self.meta_reader,
             },
             cfg,
         )

@@ -138,6 +138,27 @@ impl SessionOptions {
     }
 }
 
+/// What an agent says in a tool call in fields of its own (`_meta`),
+/// which the protocol leaves to it, read by a harness that knows the agent
+/// (Mistral Vibe's subagents, `harness/vibe/subagents.rs`).
+pub trait MetaReader: std::fmt::Debug + Send + Sync {
+    /// A `tool_call` or `tool_call_update`, after it was merged into
+    /// `call`. Its events go after the call's start and before its result.
+    fn tool_update(&mut self, call: ToolView<'_>, update: &Value) -> Vec<AgentEvent>;
+}
+
+/// Makes a [`MetaReader`] for each session.
+pub type MetaReaderFactory = fn() -> Box<dyn MetaReader>;
+
+/// A tool call as merged from every update so far.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolView<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    /// Its `rawInput`, which an update need not repeat.
+    pub input: &'a Value,
+}
+
 /// A tool call as reported so far. `tool_call_update` sends only what changed.
 #[derive(Debug, Default)]
 struct ToolState {
@@ -183,6 +204,8 @@ pub struct AcpParser {
     /// The session's directory, for an agent known to write a relative
     /// path in an edit's `diff` there (`resolving_relative_edits`).
     edits_relative_to: Option<PathBuf>,
+    /// The harness's reader of its agent's own fields (`reading_meta`).
+    meta: Option<Box<dyn MetaReader>>,
 }
 
 impl AcpParser {
@@ -198,6 +221,16 @@ impl AcpParser {
             question_calls: Vec::new(),
             asked: false,
             edits_relative_to: None,
+            meta: None,
+        }
+    }
+
+    /// Have `reader` read each tool call's fields of the agent's own
+    /// (see [`MetaReader`]).
+    pub fn reading_meta(self, reader: Option<Box<dyn MetaReader>>) -> Self {
+        AcpParser {
+            meta: reader,
+            ..self
         }
     }
 
@@ -447,6 +480,14 @@ impl AcpParser {
         if (status == "in_progress" || ended) && !tool.started {
             tool.started = true;
             out.push(started_event(&id, tool));
+        }
+        if let Some(reader) = self.meta.as_mut() {
+            let call = ToolView {
+                id: &id,
+                title: &tool.title,
+                input: &tool.input,
+            };
+            out.extend(reader.tool_update(call, update));
         }
         if let Some(delta) = update
             .pointer("/_meta/terminal_output_delta/data")
@@ -1103,12 +1144,25 @@ mod tests {
         assert_eq!(absolute_edit_path("/w/a".into(), None), Some("/w/a".into()));
     }
 
-    /// A parser as the vibe harness has it: `thinking` its effort, and a
-    /// relative edit path in the session's directory.
+    /// A parser as the vibe harness has it: `thinking` its effort, a
+    /// relative edit path in the session's directory, and its subagents
+    /// read from its own fields.
     fn vibe_parser() -> AcpParser {
         parser()
             .declaring_effort(Some("thinking".into()))
             .resolving_relative_edits(Some("/WORKSPACE".into()))
+            .reading_meta(Some(crate::harness::vibe::subagents::reader()))
+    }
+
+    /// Every event of a vibe fixture, as the vibe harness reads it.
+    fn vibe_events(case: &str) -> Vec<AgentEvent> {
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl"))).unwrap();
+        let mut p = vibe_parser();
+        text.lines()
+            .filter(|l| !l.starts_with(['>', '!', '#']))
+            .flat_map(|l| p.feed(l))
+            .collect()
     }
 
     /// The tool calls a fixture asks about, as the vibe harness reads them.
@@ -1185,6 +1239,75 @@ mod tests {
                 }
             )]
         );
+    }
+
+    /// vibe-acp 2.26.1 under `ask`, a custom subagent (`agents/scribe.toml`,
+    /// `agent_type = "subagent"`) told to write a file, and waited for.
+    /// The spawn starts it once it has a child; the child's write is asked
+    /// about by an id no update named (its calls are never sent), so it is
+    /// a bare `tool` the user is asked about and no rule can know; the
+    /// wait's answer is its report. The model then spawned `scribe` again,
+    /// which vibe completed without a child: only a call.
+    #[test]
+    fn fixture_vibe_acp_subagent() {
+        assert_eq!(
+            vibe_asked("vibe_acp_subagent"),
+            [("tool".to_string(), ToolAction::Opaque)]
+        );
+        let spawn = "effect-f30db937-2271-52a4-9828-ce2c89567293";
+        let events = vibe_events("vibe_acp_subagent");
+        let at = |want: &dyn Fn(&AgentEvent) -> bool| events.iter().position(want).unwrap();
+        let started = at(&|e| {
+            matches!(e, AgentEvent::SubagentStarted { id, description, kind }
+                if id == spawn && description == "scribe" && kind.as_deref() == Some("scribe"))
+        });
+        let asked = at(&|e| {
+            matches!(e, AgentEvent::PermissionRequest(r)
+            if r.tool_call_id.as_deref() == Some("effect-996cefd7-ea1a-59ec-94d3-077046b0e175"))
+        });
+        let ended = at(&|e| {
+            matches!(e, AgentEvent::SubagentEnded { id, status: crate::core::SubagentStatus::Completed, result: Some(r) }
+                if id == spawn && r == "Done. Created `note.txt` with the word \"hello\".")
+        });
+        assert!(started < asked && asked < ended);
+        let count = |want: fn(&AgentEvent) -> bool| events.iter().filter(|e| want(e)).count();
+        assert_eq!(
+            count(|e| matches!(e, AgentEvent::SubagentStarted { .. })),
+            1
+        );
+        assert_eq!(count(|e| matches!(e, AgentEvent::SubagentEnded { .. })), 1);
+        // The task is told in its own transcript.
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Sub { parent, event }
+            if parent == spawn
+                && matches!(event.as_ref(), AgentEvent::Notice(n)
+                    if n == "task: Write the word hello into note.txt in this directory.")))
+        );
+    }
+
+    /// A subagent the agent does not wait for: started, and its end never
+    /// comes over ACP (the turn ended after the spawn).
+    #[test]
+    fn fixture_vibe_acp_subagent_background() {
+        assert!(vibe_asked("vibe_acp_subagent_background").is_empty());
+        let events = vibe_events("vibe_acp_subagent_background");
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::SubagentStarted { description, kind, .. }
+            if description == "pinger" && kind.as_deref() == Some("generic"))
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SubagentEnded { .. }))
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done
+            })
+        ));
     }
 
     /// `session/load` of the allow-and-deny session in a new process: the
