@@ -1,6 +1,7 @@
 //! Code rendering: syntax highlighting (syntect), diff colouring, and
 //! wrapping that never truncates.
 
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use ratatui::{
@@ -33,16 +34,23 @@ const CONT: &str = "  │ ↪ ";
 /// (newlines are kept). Anything that moves the cursor on its own corrupts
 /// ratatui's diff and leaves artifacts on screen.
 pub fn sanitize(text: &str) -> String {
-    clean(text, true)
+    clean(text, true, None)
+}
+
+/// [`sanitize`], with where each tab was in what it returns: the spaces
+/// it became.
+pub fn sanitize_tabs(text: &str) -> (String, Vec<Range<usize>>) {
+    let mut tabs = Vec::new();
+    (clean(text, true, Some(&mut tabs)), tabs)
 }
 
 /// Text for the clipboard: escape sequences, carriage returns and other
 /// control characters out, as [`sanitize`] does, but tabs kept.
 pub fn strip_controls(text: &str) -> String {
-    clean(text, false)
+    clean(text, false, None)
 }
 
-fn clean(text: &str, expand_tabs: bool) -> String {
+fn clean(text: &str, expand_tabs: bool, mut tabs: Option<&mut Vec<Range<usize>>>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut col = 0usize;
@@ -87,6 +95,9 @@ fn clean(text: &str, expand_tabs: bool) -> String {
             }
             '\t' => {
                 let pad = 4 - (col % 4);
+                if let Some(tabs) = &mut tabs {
+                    tabs.push(out.len()..out.len() + pad);
+                }
                 out.extend(std::iter::repeat_n(' ', pad));
                 col += pad;
             }
@@ -625,6 +636,10 @@ mod tests {
         assert_eq!(sanitize("x\ty\n\tz"), "x   y\n    z");
         assert_eq!(sanitize("line\r\nnext\x07"), "line\nnext");
         assert_eq!(strip_controls("a\x1b[31m\tb\r\n\tc\x07"), "a\tb\n\tc");
+        assert_eq!(
+            sanitize_tabs("x\ty\n\x1b[1m\tz"),
+            ("x   y\n    z".to_string(), vec![1..4, 6..10])
+        );
     }
 
     #[test]
