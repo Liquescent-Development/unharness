@@ -15,8 +15,7 @@ use crate::harness::resolve_binary;
 use crate::sync::find_workspace_root;
 
 pub fn list_models(config: &Config, harness: Option<&str>, provider: Option<&str>) -> Result<()> {
-    crate::runner::check_configured_providers(config)?;
-    let registry = Registry::from_config(config);
+    let registry = Registry::from_config(config)?;
     let overrides: HashMap<HarnessId, std::path::PathBuf> = registry
         .ids()
         .into_iter()

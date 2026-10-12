@@ -78,7 +78,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   are read from `<config dir>/unharness/workspaces/`, never from the
   workspace: an in-tree `unharness.toml` is not read by anything. The config and state
   directories are never writable in the sandbox. A config file that does
-  not parse is an error, never a silent fall back to defaults.
+  not parse is an error, never a silent fall back to defaults, and so is
+  a harness table that is wrong (an unknown policy, a mode map or a
+  provider that is not whole, `registry::config_errors`): a run,
+  `switch` and `models` stop on it in `Registry::from_config`, and
+  `doctor` names it, leaves out the harness it could not build and exits
+  1 (#217).
 - **"Allow always" is an unharness rule.** A harness is only ever told
   "allow" or "deny": what it offers to remember (Claude's
   `updatedPermissions`, Codex's `acceptForSession`, an ACP `allow_always`
@@ -993,7 +998,8 @@ recorded ones. For anything else:
   user's `config.toml` are plain model choices (#164). Others come from
   `[harnesses.vibe.providers.<name>]` in unharness's config (`api_base`,
   `models`, optional `api_style`, `backend`, `api_key_env_var`, checked
-  at startup with the table named, `vibe::providers`): one chosen
+  by a run, `switch` and `models` with the table named,
+  `vibe::providers`; `doctor` shows no vibe then): one chosen
   (`--provider`, `/provider`) goes to `vibe-acp` as `VIBE_PROVIDERS` (named
   `unharness-<name>`, since vibe merges providers by name across layers,
   `WithUnionMerge`), each model as a whole entry in `VIBE_MODELS` (alias

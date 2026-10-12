@@ -201,7 +201,8 @@ The providers are read from unharness's own config directory, never from
 the project: an agent cannot add one. A provider table that is wrong (a
 missing `api_base` or `models`, an unknown key or style, an
 `api_key_env_var` that is not a variable's name) stops unharness with the
-table's name.
+table's name; `unharness doctor` names it too and shows no vibe until it
+is fixed.
 
 Checked with vibe 2.26.1 and an OpenAI-compatible server that needs no
 key: the model answered in the TUI under the sandbox, ran a shell command,

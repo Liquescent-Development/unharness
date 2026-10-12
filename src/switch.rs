@@ -8,7 +8,7 @@ use crate::sync::find_workspace_root;
 
 pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<()> {
     let ws_root = find_workspace_root(cwd);
-    let registry = Registry::from_config(&Config::load_effective(ws_root.as_deref())?);
+    let registry = Registry::from_config(&Config::load_effective(ws_root.as_deref())?)?;
     let Some(harness) = registry.parse(target) else {
         bail!(
             "Unknown harness '{}'. Supported: {}",

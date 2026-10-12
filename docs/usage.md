@@ -11,7 +11,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 
 | Command | What it does |
 |---|---|
-| `unharness doctor` | Harnesses, sign-in, capabilities, sandbox, MCP servers, skills CLI and allow rules |
+| `unharness doctor` | Harnesses, sign-in, capabilities, sandbox, MCP servers, skills CLI and allow rules; exits 1 when a harness table in the config is wrong |
 | `unharness models [-H <harness>] [--provider <p>]` | Providers and models per harness |
 | `unharness sessions [--clear]` | Saved conversations in this workspace; `--clear` removes them, the prompt history and the checkpoints |
 | `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file |

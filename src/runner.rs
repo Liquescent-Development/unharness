@@ -78,46 +78,6 @@ pub fn configured_policy(config: &Config, harness: HarnessId) -> Result<Permissi
     }
 }
 
-/// Every policy the config names must be one: the TUI reads them again
-/// when the harness is switched, where an error could no longer end the run.
-fn check_configured_policies(config: &Config) -> Result<()> {
-    let named = config
-        .harnesses
-        .values()
-        .filter_map(|h| h.default_policy.as_deref())
-        .chain(config.default_policy.as_deref());
-    for p in named {
-        if PermissionPolicy::parse(p).is_none() {
-            bail!("unknown policy '{p}' in config (plan, ask, accept-edits, auto, bypass)");
-        }
-    }
-    // A mode map is about policies too: one that does not parse would
-    // leave the agent in a mode of its own choosing.
-    for (name, h) in &config.harnesses {
-        if let Err(e) = crate::harness::acp::ModeMap::from_config(&h.modes) {
-            bail!("[harnesses.{name}]: {e}");
-        }
-    }
-    Ok(())
-}
-
-/// Providers defined in the config must be whole: a session on one that
-/// is not would fail, or run somewhere else. Only Mistral Vibe takes them.
-pub fn check_configured_providers(config: &Config) -> Result<()> {
-    for (name, h) in &config.harnesses {
-        if h.providers.is_empty() {
-            continue;
-        }
-        if name != HarnessId::VIBE.as_str() {
-            bail!(
-                "[harnesses.{name}] providers: only Mistral Vibe takes providers from unharness's config"
-            );
-        }
-        crate::harness::vibe::providers(&h.providers).map_err(|e| anyhow::anyhow!("{e:#}"))?;
-    }
-    Ok(())
-}
-
 /// The policy of a run without the TUI. Nobody is there to choose another
 /// one, so a policy the harness does not have, with nothing less permissive
 /// in its place, ends the run. Nor is anybody there to approve a plan, so
@@ -198,7 +158,8 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         }
     }
 
-    let registry = Arc::new(Registry::from_config(config));
+    // A table that is wrong ends the run here, before anything starts.
+    let registry = Arc::new(Registry::from_config(config)?);
     let overrides = binary_overrides(&registry, config);
     let (harness, binary) = registry.resolve(
         args.harness.as_deref(),
@@ -208,8 +169,6 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
     let id = harness.descriptor().id;
     let settings = config.harness(id.as_str());
 
-    check_configured_policies(config)?;
-    check_configured_providers(config)?;
     let policy = requested_policy(&args, config, id)?;
     // The sandbox keeps unharness's config directory from being written,
     // but only knows of it once it exists; allow rules will be kept there.
@@ -589,46 +548,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(explicit_policy(&y).unwrap(), Some(PermissionPolicy::Bypass));
-
-        assert!(check_configured_policies(&cfg).is_ok());
-        cfg.harnesses.get_mut("agy").unwrap().default_policy = Some("nah".into());
-        assert!(check_configured_policies(&cfg).is_err());
-        cfg.harnesses.get_mut("agy").unwrap().default_policy = None;
-
-        // A mode map names policies too.
-        let vibe = cfg.harnesses.entry("vibe".into()).or_default();
-        vibe.modes = [("ask".to_string(), "ask".to_string())].into();
-        assert!(check_configured_policies(&cfg).is_ok());
-        let vibe = cfg.harnesses.get_mut("vibe").unwrap();
-        vibe.modes.insert("always".into(), "auto-approve".into());
-        let e = check_configured_policies(&cfg).unwrap_err().to_string();
-        assert!(
-            e.contains("[harnesses.vibe]") && e.contains("'always'"),
-            "{e}"
-        );
-    }
-
-    /// Providers are vibe's only, and a wrong one ends the run before
-    /// anything starts (the registry would otherwise build vibe without).
-    #[test]
-    fn configured_providers_are_checked() {
-        let parse = |text: &str| -> Config { toml::from_str(text).unwrap() };
-        let good = "[harnesses.vibe.providers.lan]\napi_base = \"http://127.0.0.1:8080/v1\"\nmodels = [\"m\"]\n";
-        assert!(check_configured_providers(&parse(good)).is_ok());
-        assert!(check_configured_providers(&Config::default()).is_ok());
-        let e = check_configured_providers(&parse(
-            "[harnesses.vibe.providers.lan]\napi_base = \"http://h\"\nmodels = []\n",
-        ))
-        .unwrap_err()
-        .to_string();
-        assert!(
-            e.contains("[harnesses.vibe.providers.lan]") && e.contains("models"),
-            "{e}"
-        );
-        let e = check_configured_providers(&parse(&good.replace("vibe", "codex")))
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("[harnesses.codex]"), "{e}");
     }
 
     #[test]
