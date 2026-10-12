@@ -952,6 +952,45 @@ recorded ones. For anything else:
   `session/load`) a rewind to the third prompt left the first as the last
   one vibe could quote. Unverified: a rewind while a vibe subagent runs,
   and one after `/fork`.
+  Providers (#173, 2.26.1): a provider is `{name, api_base, api_key_env_var,
+  api_style, backend, …}` (`vibe/core/config/models.py`), and a model
+  names its provider, so the provider follows the model. Providers in the
+  user's `config.toml` are plain model choices (#164). Others come from
+  `[harnesses.vibe.providers.<name>]` in unharness's config (`api_base`,
+  `models`, optional `api_style`, `backend`, `api_key_env_var`, checked
+  at startup with the table named, `vibe::providers`): one chosen
+  (`--provider`, `/provider`) goes to `vibe-acp` as `VIBE_PROVIDERS` (named
+  `unharness-<name>`, since vibe merges providers by name across layers,
+  `WithUnionMerge`), each model as a whole entry in `VIBE_MODELS` (alias
+  and name the model's, the level in the entry of the one that runs) and
+  `VIBE_ACTIVE_MODEL`, all built as JSON, since a value that does not
+  parse fails vibe's environment layer. Only the key's variable is named.
+  The session lists vibe's own models beside the provider's, and the
+  transport reports only the provider's, as its (`SpawnPlan::restrict`).
+  `multi_provider` and `provider_per_process` are declared only with a
+  provider defined; a change after a prompt starts a new bridged session,
+  as a model change does. Recorded (`fixtures/vibe_acp_provider.jsonl`,
+  `scripts/record-acp.py`, the environment as the driver sets it, the
+  server redacted to `https://LOCAL-LLM`): an OpenAI-compatible server
+  needing no key, `session/new` listing `mistral-medium-3.5`, `glm-5-3`
+  and the provider's model as current, at thinking `off` with all five
+  levels, and the model answering. Checked in the TUI (tmux, Landlock,
+  scratch XDG and `VIBE_HOME`, `-H vibe --provider lan`): the model
+  answered (`runtime-state.json` `active_model` it), `/provider` back to
+  `agent` started a new session on vibe's default (`glm-5-3`) told the
+  conversation, and `~/.vibe/config.toml` and the scratch one were
+  byte-identical. A tool call through the local model ran (`echo`, which
+  vibe's `ask` mode runs unasked: its bash allowlist,
+  `vibe/core/tools/builtins/bash.py`; recording not committed). With
+  `MISTRAL_API_KEY` in `.env`, a session on the local provider still wrote
+  `whoami_cache.json`, `experiment_eval_cache.json` and
+  `connector_bootstrap_cache.json`, so vibe reached Mistral's servers.
+  Unverified: `api_style` other than `openai`, the `mistral` backend, a
+  key through `api_key_env_var`, what vibe calls without a Mistral key, a
+  local model in the session title or the smart-approve classifier, a
+  resumed session whose provider is no longer chosen (its model is
+  dropped with a notice, and vibe restores the pinned alias, unknown
+  there).
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

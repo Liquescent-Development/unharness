@@ -48,6 +48,10 @@ transport = "auto"               # auto | app-server | exec
 default_provider = "openai-codex"
 default_model    = "gpt-5.5"
 
+[harnesses.vibe.providers.lan]   # a provider for Mistral Vibe (see Providers)
+api_base = "http://127.0.0.1:8080/v1"
+models   = ["qwen3-coder"]
+
 [mcp_servers.files]              # an MCP server the harness launches (see MCP servers)
 command = "npx"
 args    = ["-y", "@modelcontextprotocol/server-filesystem", "."]
@@ -78,6 +82,7 @@ headers = { Authorization = "Bearer …" }
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[harnesses.<name>] modes` | none | ACP only: which of the agent's own session modes backs each policy, e.g. `{ ask = "ask", bypass = "auto-approve" }`; see [Modes](acp.md#modes). An agent with modes and no map gets only `bypass`. A workspace's table replaces the global one whole |
 | `[harnesses.<name>] sign_in` | none (`vibe --setup` for `vibe`) | ACP only: the command that signs the agent in, shown when a session fails for want of sign-in; unharness never runs it. See [Sign-in](acp.md#sign-in) |
+| `[harnesses.vibe.providers.<name>]` | none | A provider for Mistral Vibe: `api_base`, `models`, and optionally `api_style`, `backend`, `api_key_env_var`; see [Providers](vibe.md#providers). A workspace's provider of the same name replaces the global one. A table that is wrong stops unharness, and only `vibe` takes providers |
 | `[mcp_servers.<name>]` | | See [MCP servers](mcp.md) |
 
 ## Providers
@@ -97,6 +102,7 @@ on the chosen one.
 | Claude Code | `anthropic`, `bedrock` (Amazon Bedrock), `vertex` (Google Vertex AI), `foundry` (Microsoft Foundry) | Sets `CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY` and removes the others from Claude's environment |
 | Codex | `openai`, `ollama`, `lmstudio`, `amazon-bedrock`, and each `[model_providers.<id>]` of Codex's own `config.toml` | `-c model_provider="<id>"`, and `modelProvider` when a thread is resumed or forked |
 | pi | whatever `pi --list-models` reports | `--provider` |
+| Mistral Vibe | `agent` (vibe's own configuration) and each `[harnesses.vibe.providers.<name>]` of unharness's config | `VIBE_PROVIDERS`, `VIBE_MODELS` and `VIBE_ACTIVE_MODEL` in vibe's environment; see [Providers](vibe.md#providers) |
 
 Credentials, region and project stay Claude Code's own (`AWS_REGION`,
 `AWS_PROFILE`, `CLOUD_ML_REGION`, `ANTHROPIC_VERTEX_PROJECT_ID`,
@@ -109,7 +115,10 @@ Claude's settings. Two things to know:
   runs on as an error.
 - The provider is fixed when Claude or Codex starts, so changing it in
   the TUI restarts the session (resumed). It is
-  refused while a turn or a subagent is at work.
+  refused while a turn or a subagent is at work. Mistral Vibe's is fixed
+  when it starts too, and a session that was prompted keeps the model it
+  ran, so there a change starts a new session told the conversation, as a
+  model change does.
 
 The model list is Claude's own for that provider, asked of a short-lived
 Claude in the sandbox a session would get (its settings can name
