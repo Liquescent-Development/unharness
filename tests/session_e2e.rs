@@ -3972,6 +3972,8 @@ async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
              {pi_missing}"
         )
     );
+    // pi made an empty session under the id: it is not handed out.
+    assert_eq!(result["session_id"], Value::Null);
     // The prompt waited for pi's listing and was never sent: pi saves a
     // prompt under the id it was given, which would make the next resume
     // of that id pass for one.

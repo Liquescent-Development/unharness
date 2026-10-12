@@ -807,6 +807,9 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
 /// `session/load` with "Session not found": the run fails with exit 1 and
 /// the reason, on stderr for `text` and in the result for `json`, rather
 /// than answer from the new session the driver starts in its place (#214).
+/// The recording was made in vibe's own `ask` mode, which the `modes`
+/// table maps `ask` to, so that without the fix the run would go on to
+/// the prompt and exit 0; what is checked is the exact reason.
 #[test]
 fn print_resume_of_a_session_the_agent_no_longer_has_fails() {
     if !python_available() {
@@ -826,7 +829,7 @@ fn print_resume_of_a_session_the_agent_no_longer_has_fails() {
         std::fs::write(
             root.join("config/unharness/config.toml"),
             format!(
-                "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\n",
+                "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\nmodes = {{ ask = \"ask\" }}\n",
                 repo().join("scripts/fake-harness.py").display()
             ),
         )
@@ -860,6 +863,7 @@ fn print_resume_of_a_session_the_agent_no_longer_has_fails() {
         } else {
             let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
             assert_eq!(result["status"], "error", "{stdout}");
+            assert_eq!(result["session_id"], serde_json::Value::Null);
             assert_eq!(result["error"], why.as_str());
             assert_eq!(result["text"], "");
         }
