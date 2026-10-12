@@ -3418,8 +3418,31 @@ impl App {
     /// again, and refuses it again if it still cannot hold it. The rest of
     /// what it reported is the agent's, kept until the next one says.
     fn forget_refusals(&mut self) {
-        if let Some(update) = self.live_caps.get_mut(&self.active) {
-            update.refused_policies = None;
+        let before = self.effective_policy();
+        let Some(update) = self.live_caps.get_mut(&self.active) else {
+            return;
+        };
+        if update.refused_policies.take().is_none() {
+            return;
+        }
+        // A policy picker open on what the session offered is redone, or,
+        // where it waited for a policy and one is in effect again, closed:
+        // what waited for it is the user's to send.
+        if matches!(&self.modal, Some(Modal::Policy(p)) if p.save.is_none()) {
+            if before.is_none() && self.effective_policy().is_some() {
+                self.modal = None;
+                if let Some(w) = self.policy_warning() {
+                    self.transcript.push_notice(w);
+                }
+                if !self.queued.is_empty() {
+                    self.transcript.push_notice(format!(
+                        "{} queued prompt(s) held; press Enter to send the next",
+                        self.queued.len()
+                    ));
+                }
+            } else {
+                self.open_policy_picker();
+            }
         }
     }
 
@@ -8646,6 +8669,12 @@ pub(crate) mod tests {
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         assert!(!app.session_alive);
         offered_again(&app);
+        // The event loop starts the next one unprompted, under it.
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
 
         // Refused by a session a turn went to, which then exits.
         start(&mut app, "claude-2");
@@ -8667,6 +8696,77 @@ pub(crate) mod tests {
         app.switch_harness(HarnessId::CODEX);
         app.switch_harness(HarnessId::CLAUDE);
         offered_again(&app);
+
+        // Refused, then the driver is gone.
+        start(&mut app, "claude-4");
+        refuse(&mut app);
+        app.driver_gone();
+        offered_again(&app);
+    }
+
+    /// A policy picker opened on what a session refused is not left
+    /// showing it once that session is gone: one that waited for a policy
+    /// closes when the wanted one is in effect again, and the prompts that
+    /// waited are the user's to send; one the user opened is redone.
+    #[test]
+    fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
+        use crate::tui::herdr::State;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App, policies: &[PermissionPolicy]| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(policies.to_vec()),
+                ..Default::default()
+            }));
+        };
+        let disabled = |app: &App, policy: PermissionPolicy| match &app.modal {
+            Some(Modal::Policy(p)) => {
+                let idx = PermissionPolicy::ALL
+                    .iter()
+                    .position(|q| *q == policy)
+                    .unwrap();
+                !p.list.is_enabled(idx)
+            }
+            _ => panic!("no policy picker"),
+        };
+
+        // Nothing left at or below: the picker waits, and so does a prompt.
+        start(&mut app, "claude-1");
+        refuse(&mut app, &PermissionPolicy::ALL);
+        assert_eq!(app.effective_policy(), None);
+        assert!(disabled(&app, PermissionPolicy::Ask));
+        app.submit_prompt("do it".into());
+        assert_eq!(app.queued.len(), 1);
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.herdr_report().state, State::Blocked);
+
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert_ne!(app.herdr_report().state, State::Blocked);
+        assert_eq!(app.queued.len(), 1);
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.starts_with("1 queued prompt(s) held"))
+        );
+        app.queued.clear();
+
+        // Opened by the user on a refusal that left a policy in effect.
+        start(&mut app, "claude-2");
+        refuse(&mut app, &[PermissionPolicy::AcceptEdits]);
+        app.open_policy_picker();
+        assert!(disabled(&app, PermissionPolicy::AcceptEdits));
+        app.driver_gone();
+        assert!(!disabled(&app, PermissionPolicy::AcceptEdits));
     }
 
     #[test]
