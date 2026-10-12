@@ -593,7 +593,8 @@ fn pi_harness() -> unharness::harness::pi::PiHarness {
 /// to the empty session pi made for a missing id
 /// (`fixtures/resume_missing.jsonl`) would make that id resume next time.
 /// There the turn fails unsent; where the listing shows the session, it
-/// goes once the listing is in.
+/// goes once the listing is in, and until then an interrupt drops it
+/// without anything reaching pi.
 #[tokio::test]
 async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
     if !python_available() {
@@ -657,6 +658,57 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
         ["get_state", "get_commands", "get_fork_messages", "prompt"],
     );
     assert_eq!(sent[3]["message"], "hi");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+
+    // Before the listing answers the turn is still held: an interrupt
+    // ends it at once, and neither it nor an `abort` reaches pi (the fake
+    // logs what it reads, so it reads everything once the gate opens).
+    let fake = Fake::new();
+    let gate = fake._tmp.path().join("gate");
+    let fixture = fake._tmp.path().join("resumed_gated.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "# gate\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    cfg.env.push((
+        "UNHARNESS_FAKE_GATE".into(),
+        gate.to_string_lossy().into_owned(),
+    ));
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    fake.sent_lines_eventually(3).await;
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            })
+        ),
+        "{events:?}"
+    );
+    std::fs::write(&gate, "").unwrap();
+    // The listing comes, and nothing more is sent.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fake.sent_lines()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+    );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 

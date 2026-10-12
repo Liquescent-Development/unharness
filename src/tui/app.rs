@@ -1838,7 +1838,7 @@ impl App {
             ));
         } else {
             self.transcript.push_notice(format!(
-                "{reason}: {name} runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+                "{reason}: {name} runs a new session without the conversation so far; your next prompt tells it"
             ));
         }
     }
@@ -8154,7 +8154,7 @@ pub(crate) mod tests {
         });
         assert!(has_notice(
             &app,
-            "this agent cannot resume sessions: Claude runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+            "this agent cannot resume sessions: Claude runs a new session without the conversation so far; your next prompt tells it"
         ));
         app.on_event(AgentEvent::TextDelta("hi".into()));
         app.on_event(AgentEvent::TurnCompleted {
