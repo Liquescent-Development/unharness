@@ -42,7 +42,8 @@ use super::auth::{self, AuthMethod};
 use super::elicitation::{self, Form, Refusal};
 use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
 use super::parse::{
-    AcpParser, SessionOptions, can_close, can_fork, can_load, can_resume, error_text, mcp_http,
+    AcpParser, RequestEnd, SessionOptions, can_close, can_fork, can_load, can_resume, error_text,
+    mcp_http,
 };
 use super::spawn::{SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 use crate::core::jsonrpc::{self, RpcMessage};
@@ -273,6 +274,20 @@ fn requested_call(evs: &[AgentEvent]) -> Option<String> {
         AgentEvent::PermissionRequest(req) => req.tool_call_id.clone(),
         _ => None,
     })
+}
+
+/// A request for `call` was answered or withdrawn: a call only the
+/// request named ends here, since the agent reports nothing about it
+/// ([`AcpParser::answered`]).
+async fn settle(
+    parser: &AcpParser,
+    call: Option<&String>,
+    end: RequestEnd,
+    events: &mpsc::Sender<AgentEvent>,
+) {
+    if let Some(ev) = call.and_then(|c| parser.answered(c, end)) {
+        let _ = events.send(ev).await;
+    }
 }
 
 /// A turn being cancelled: its requests are answered `cancelled`, and the
@@ -772,6 +787,7 @@ impl Driver {
         let rpc_id = pending.rpc_id();
         self.withdrawn.insert(id.clone());
         let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
+        settle(&self.parser, pending.call(), RequestEnd::Withdrawn, events).await;
         self.proc
             .write_line(&jsonrpc::error_response(
                 rpc_id,
@@ -823,7 +839,7 @@ impl Driver {
                     call: requested_call(&evs),
                 };
                 if self.cancelling.is_some() {
-                    return self.refuse_late(pending).await;
+                    return self.refuse_late(pending, events).await;
                 }
                 let rid = request_key(id);
                 self.withdrawn.remove(&rid);
@@ -1134,6 +1150,7 @@ impl Driver {
             let line = jsonrpc::response(pending.rpc_id(), pending.cancelled());
             res = res.and(self.proc.write_line(&line).await);
             let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
+            settle(&self.parser, pending.call(), RequestEnd::Cancelled, events).await;
         }
         let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
         if !turn_running {
@@ -1212,16 +1229,23 @@ impl Driver {
 
     /// A request that comes while the turn is being cancelled is answered
     /// at once, as the open ones were, and its call waited for.
-    async fn refuse_late(&mut self, pending: Pending) -> Result<()> {
+    async fn refuse_late(
+        &mut self,
+        pending: Pending,
+        events: &mpsc::Sender<AgentEvent>,
+    ) -> Result<()> {
         if let Some(c) = self.cancelling.as_mut()
             && c.by.is_some()
             && let Some(call) = pending.call()
         {
             c.calls.insert(call.clone());
         }
-        self.proc
+        let res = self
+            .proc
             .write_line(&jsonrpc::response(pending.rpc_id(), pending.cancelled()))
-            .await
+            .await;
+        settle(&self.parser, pending.call(), RequestEnd::Cancelled, events).await;
+        res
     }
 }
 
@@ -1348,7 +1372,7 @@ async fn drive(
                         Some(Pending::Elicitation { rpc_id, form, .. }) => {
                             d.proc.write_line(&jsonrpc::response(&rpc_id, form.answer(&decision))).await
                         }
-                        Some(Pending::Permission { rpc_id, options, .. }) => {
+                        Some(Pending::Permission { rpc_id, options, call }) => {
                             let outcome = permission_outcome(&options, &decision);
                             if matches!(decision, PermissionDecision::Allow { .. })
                                 && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
@@ -1357,7 +1381,10 @@ async fn drive(
                                     "the agent offered no way to allow this just once; the request was cancelled".into(),
                                 )).await;
                             }
-                            d.proc.write_line(&jsonrpc::response(&rpc_id, outcome)).await
+                            let end = RequestEnd::of(&outcome, &options);
+                            let res = d.proc.write_line(&jsonrpc::response(&rpc_id, outcome)).await;
+                            settle(&d.parser, call.as_ref(), end, &events).await;
+                            res
                         }
                         // Withdrawn by the agent while the user answered.
                         None if d.withdrawn.remove(&id) => Ok(()),
@@ -1710,27 +1737,43 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         let _ = events.send(ev).await;
                     }
                 }
-                return d.refuse_late(pending).await;
+                return d.refuse_late(pending, events).await;
             }
             if allowed {
                 let allow = PermissionDecision::Allow {
                     updated_input: None,
                 };
+                let answer = permission_outcome(&options, &allow);
                 d.proc
-                    .write_line(&jsonrpc::response(id, permission_outcome(&options, &allow)))
+                    .write_line(&jsonrpc::response(id, answer.clone()))
                     .await?;
-            } else {
-                let rid = request_key(id);
-                d.withdrawn.remove(&rid);
-                d.pending.insert(
-                    rid,
-                    Pending::Permission {
-                        rpc_id: id.clone(),
-                        call: requested_call(&evs),
-                        options,
-                    },
-                );
+                for ev in evs {
+                    let _ = events.send(ev).await;
+                }
+                // The question was left out of `evs`: the call is the request's.
+                let call = params
+                    .pointer("/toolCall/toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                settle(
+                    &d.parser,
+                    call.as_ref(),
+                    RequestEnd::of(&answer, &options),
+                    events,
+                )
+                .await;
+                return Ok(());
             }
+            let rid = request_key(id);
+            d.withdrawn.remove(&rid);
+            d.pending.insert(
+                rid,
+                Pending::Permission {
+                    rpc_id: id.clone(),
+                    call: requested_call(&evs),
+                    options,
+                },
+            );
             for ev in evs {
                 let _ = events.send(ev).await;
             }

@@ -178,6 +178,42 @@ struct ToolState {
     terminal: String,
     started: bool,
     finished: bool,
+    /// A `tool_call` or `tool_call_update` named it: the agent reports on
+    /// it. A call seen only in a permission request is not reported on
+    /// (a vibe subagent's, whose calls are never sent).
+    announced: bool,
+}
+
+/// What became of a permission request, as the client answered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestEnd {
+    Allowed,
+    Denied,
+    /// Answered `cancelled`: the turn was being stopped, or no option fit.
+    Cancelled,
+    /// The agent stopped waiting for the answer (`$/cancel_request`).
+    Withdrawn,
+}
+
+impl RequestEnd {
+    /// What an answer sent to a request offering `options` said.
+    pub fn of(answer: &Value, options: &Value) -> Self {
+        let Some(chosen) = answer
+            .pointer("/outcome/optionId")
+            .filter(|_| answer.pointer("/outcome/outcome") == Some(&json!("selected")))
+        else {
+            return RequestEnd::Cancelled;
+        };
+        let kind = options
+            .as_array()
+            .and_then(|o| o.iter().find(|o| o.get("optionId") == Some(chosen)))
+            .map(|o| s(o, "kind"))
+            .unwrap_or_default();
+        match kind.starts_with("allow_") {
+            true => RequestEnd::Allowed,
+            false => RequestEnd::Denied,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -294,6 +330,34 @@ impl AcpParser {
     pub fn tool_kind(&self, tool_call_id: &str) -> Option<&str> {
         let tool = self.tools.get(tool_call_id)?;
         (!tool.kind.is_empty()).then_some(tool.kind.as_str())
+    }
+
+    /// The request for `tool_call_id` was answered (or withdrawn). A call
+    /// that only the request named is ended here, since the agent sends
+    /// nothing more about it: vibe-acp 2.26.1 asks about a subagent's
+    /// calls by id alone and never reports them. Allowed, it ran where
+    /// its result is not seen. `None` for a call the agent reports on: its
+    /// own update ends it. An update that names the call after all is
+    /// still passed on, its result too.
+    pub fn answered(&self, tool_call_id: &str, end: RequestEnd) -> Option<AgentEvent> {
+        let tool = self.tools.get(tool_call_id)?;
+        if !tool.started || tool.announced || tool.finished {
+            return None;
+        }
+        let (output, is_error) = match end {
+            RequestEnd::Allowed => (
+                "allowed; the agent does not report this call, so what it did is not known",
+                false,
+            ),
+            RequestEnd::Denied => ("denied", true),
+            RequestEnd::Cancelled => ("not run: the request was cancelled", true),
+            RequestEnd::Withdrawn => ("the agent stopped waiting for the answer", true),
+        };
+        Some(AgentEvent::ToolCallResult {
+            id: tool_call_id.to_string(),
+            output: output.to_string(),
+            is_error,
+        })
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -500,6 +564,7 @@ impl AcpParser {
         }
         let tool = self.tools.entry(id.clone()).or_default();
         merge_tool(tool, update);
+        tool.announced = true;
         if tool.input.get("questions").is_some_and(Value::is_array)
             && !self.question_calls.contains(&id)
         {
@@ -1316,6 +1381,142 @@ mod tests {
                 && matches!(event.as_ref(), AgentEvent::Notice(n)
                     if n == "task: Write the word hello into note.txt in this directory.")))
         );
+    }
+
+    /// A fixture's events with each answer it sent to a permission
+    /// request passed to the parser, as the transport does.
+    fn vibe_answered(case: &str) -> Vec<AgentEvent> {
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl"))).unwrap();
+        let mut p = vibe_parser();
+        let mut asked: HashMap<String, (String, Value)> = HashMap::new();
+        let mut events = Vec::new();
+        for line in text.lines().filter(|l| !l.starts_with(['!', '#'])) {
+            if let Some(sent) = line.strip_prefix(">> ") {
+                let sent: Value = serde_json::from_str(sent).unwrap();
+                if let Some((call, options)) = sent
+                    .get("result")
+                    .filter(|r| r.get("outcome").is_some())
+                    .and_then(|_| asked.remove(&sent["id"].to_string()))
+                {
+                    let end = RequestEnd::of(&sent["result"], &options);
+                    events.extend(p.answered(&call, end));
+                }
+                continue;
+            }
+            let msg: Value = serde_json::from_str(line).unwrap();
+            if msg["method"] == "session/request_permission" {
+                let call = s(&msg["params"]["toolCall"], "toolCallId").to_string();
+                asked.insert(
+                    msg["id"].to_string(),
+                    (call, msg["params"]["options"].clone()),
+                );
+            }
+            events.extend(p.feed(line));
+        }
+        events
+    }
+
+    /// The child's write, asked about by an id no update named, ends when
+    /// it is allowed: the agent reports nothing more about it (#198), so
+    /// no call is left running at the end of the turn.
+    #[test]
+    fn a_call_only_a_request_named_ends_with_its_answer() {
+        let events = vibe_answered("vibe_acp_subagent");
+        let child = "effect-996cefd7-ea1a-59ec-94d3-077046b0e175";
+        let at = |want: &dyn Fn(&AgentEvent) -> bool| events.iter().position(want).unwrap();
+        let asked = at(
+            &|e| matches!(e, AgentEvent::PermissionRequest(r) if r.tool_call_id.as_deref() == Some(child)),
+        );
+        let ended = at(&|e| {
+            matches!(e, AgentEvent::ToolCallResult { id, output, is_error: false }
+                if id == child && output.starts_with("allowed; the agent does not report"))
+        });
+        assert_eq!(ended, asked + 1);
+        let mut open: Vec<&str> = Vec::new();
+        for ev in &events {
+            match ev {
+                AgentEvent::ToolCallStarted { id, .. } => open.push(id),
+                AgentEvent::ToolCallResult { id, .. } => open.retain(|o| o != id),
+                _ => {}
+            }
+        }
+        assert!(open.is_empty(), "still running: {open:?}");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done
+            })
+        ));
+    }
+
+    /// A call an update named ends with the agent's own report: its answer
+    /// ends nothing (`vibe_acp_allow_deny`, whose denied command vibe
+    /// reports failed).
+    #[test]
+    fn an_announced_call_is_ended_by_the_agent_not_its_answer() {
+        let events = vibe_answered("vibe_acp_allow_deny");
+        let results: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolCallResult { output, .. } => Some(output.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !results
+                .iter()
+                .any(|o| o.starts_with("allowed;") || *o == "denied")
+        );
+        assert_eq!(events, vibe_events("vibe_acp_allow_deny"));
+    }
+
+    #[test]
+    fn a_request_only_call_ends_as_it_was_answered() {
+        let options = json!([
+            {"optionId": "allow_once", "kind": "allow_once"},
+            {"optionId": "nope", "kind": "reject_once"}
+        ]);
+        let picked = |id: &str| json!({"outcome": {"outcome": "selected", "optionId": id}});
+        let cancelled = json!({"outcome": {"outcome": "cancelled"}});
+        assert_eq!(
+            RequestEnd::of(&picked("allow_once"), &options),
+            RequestEnd::Allowed
+        );
+        assert_eq!(
+            RequestEnd::of(&picked("nope"), &options),
+            RequestEnd::Denied
+        );
+        assert_eq!(RequestEnd::of(&cancelled, &options), RequestEnd::Cancelled);
+        let request = |id: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"{id}","method":"session/request_permission","params":{{"sessionId":"s","toolCall":{{"toolCallId":"{id}"}},"options":[]}}}}"#
+            )
+        };
+        let mut p = parser();
+        for (id, end, error) in [
+            ("a", RequestEnd::Allowed, false),
+            ("d", RequestEnd::Denied, true),
+            ("c", RequestEnd::Cancelled, true),
+            ("w", RequestEnd::Withdrawn, true),
+        ] {
+            p.feed(&request(id));
+            assert!(matches!(
+                p.answered(id, end),
+                Some(AgentEvent::ToolCallResult { id: got, is_error, .. }) if got == id && is_error == error
+            ));
+        }
+        // Never asked about, or named by an update: not the answer's to end.
+        assert_eq!(p.answered("unseen", RequestEnd::Allowed), None);
+        p.feed(r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"t","kind":"edit","status":"pending"}}}"#);
+        p.feed(&request("t"));
+        assert_eq!(p.answered("t", RequestEnd::Allowed), None);
+        // One an update names after all still reports its own result.
+        let late = p.feed(r#"{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"a","status":"completed","rawOutput":"ok"}}}"#);
+        assert!(matches!(
+            late.as_slice(),
+            [AgentEvent::ToolCallResult { id, is_error: false, .. }] if id == "a"
+        ));
     }
 
     /// A subagent the agent does not wait for: started, and its end never

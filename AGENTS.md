@@ -891,8 +891,15 @@ recorded ones. For anything else:
   parent's session, id-only for a call no update named
   (`vibe/acp/agent.py:879-887`): a bare `tool` asked about as `Opaque`
   under every policy but bypass (`fixtures/vibe_acp_subagent.jsonl`, also
-  through `VibeHarness` in an e2e test), whose call is never finished
-  and stays running in the transcript. Nothing stops a child from here:
+  through `VibeHarness` in an e2e test). Since nothing more comes about
+  a call only a request named, the ACP transport ends it with the answer
+  (#198, `AcpParser::answered`): allowed, by the user or the policy, it
+  is done with a note that what it did is not known; denied, answered
+  `cancelled` or withdrawn, it failed. An update that names it after all
+  still reports its result. A call an update named and never ended stays
+  running after a turn that ended normally, for every harness (the TUI
+  ends a turn's open calls only when it was interrupted or failed); no
+  ACP recording has one. Nothing stops a child from here:
   ACP has no method for it, `session/cancel` while the parent waited
   failed the wait and the child ran on and answered (a discovery
   recording, not committed), and only the model can (`subagent.stop`,

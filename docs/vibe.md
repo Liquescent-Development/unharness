@@ -110,7 +110,9 @@ the agent does not wait for stays listed as at work until the session
 ends, even once it has finished. Its own tool calls are not shown (vibe
 does not send them), and it cannot be stopped from unharness. Under `ask`
 a subagent's writes and commands are asked about like the agent's own, but
-vibe does not say what they are, so no allow rule answers them.
+vibe does not say what they are, so no allow rule answers them. Each shows
+as a `tool` call that ends with your answer, since vibe does not report
+what it did.
 `unharness --print` does not wait for vibe's subagents.
 ## Rewind
 

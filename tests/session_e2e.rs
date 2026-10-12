@@ -4358,6 +4358,106 @@ async fn vibe_reports_a_subagent_and_asks_for_its_write() {
         .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
         .collect();
     assert_eq!(answers, ["allow_once"]);
+    // The child's call ends with the answer: nothing more comes about it
+    // (#198).
+    let asked = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+        .unwrap();
+    assert!(matches!(
+        &events[asked + 1],
+        AgentEvent::ToolCallResult { id, is_error: false, .. } if id == VIBE_CHILD_CALL
+    ));
+    assert_eq!(open_calls(&events), Vec::<String>::new());
+    shut_down(&mut handle).await;
+}
+
+/// The call of a vibe subagent's request in `vibe_acp_subagent.jsonl`,
+/// which no update names.
+const VIBE_CHILD_CALL: &str = "effect-996cefd7-ea1a-59ec-94d3-077046b0e175";
+
+/// The tool calls started in `events` and not ended.
+fn open_calls(events: &[AgentEvent]) -> Vec<String> {
+    let mut open = Vec::new();
+    for ev in events {
+        match ev {
+            AgentEvent::ToolCallStarted { id, .. } => open.push(id.clone()),
+            AgentEvent::ToolCallResult { id, .. } => open.retain(|o| o != id),
+            _ => {}
+        }
+    }
+    open
+}
+
+/// Denied, a vibe subagent's call no update names ends as denied.
+#[tokio::test]
+async fn vibe_a_denied_call_only_its_request_named_ends_denied() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("use the scribe subagent"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
+            reason: "no".into(),
+        })
+    })
+    .await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult { id, output, is_error: true }
+            if id == VIBE_CHILD_CALL && output == "denied"
+    )));
+    assert_eq!(open_calls(&events), Vec::<String>::new());
+    shut_down(&mut handle).await;
+}
+
+/// Under bypass the request is answered without asking, and its call,
+/// which no update names, ends with that answer.
+#[tokio::test]
+async fn acp_bypass_ends_a_call_only_its_request_named() {
+    if !python_available() {
+        return;
+    }
+    // No mode map: nothing is sent to set the mode, and the prompt is
+    // the third request.
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_subagent.jsonl"))
+            .unwrap();
+    let lines: Vec<String> = recorded
+        .lines()
+        .filter(|l| !l.contains("session/set_config_option") && !l.contains(r#""id":3,"#))
+        .map(|l| l.replace(r#""id":4,"result""#, r#""id":3,"result""#))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("subagent.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let fake = Fake::new();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("use the scribe subagent"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::ToolCallResult { id, is_error: false, .. } if id == VIBE_CHILD_CALL
+    )));
+    assert_eq!(open_calls(&events), Vec::<String>::new());
     shut_down(&mut handle).await;
 }
 
