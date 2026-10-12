@@ -1861,6 +1861,69 @@ mod tests {
         assert!(!can_fork(&json!({"sessionCapabilities": {}})));
     }
 
+    /// vibe-acp 2.26.1 forking a session that is open in the same process
+    /// (`record-acp.py --fork`), whose mode `--config mode=unharness-ask`
+    /// set: the mode option reads it back, the fork answers at once with
+    /// the source's mode, its turn knows the source's code word, and a
+    /// write and a command there are asked about.
+    #[test]
+    fn fixture_vibe_acp_fork_open() {
+        let case = "vibe_acp_fork_open";
+        assert_eq!(
+            vibe_asked(case),
+            [
+                (
+                    "edit".to_string(),
+                    ToolAction::Edit {
+                        paths: vec!["/WORKSPACE/word.txt".into()]
+                    }
+                ),
+                (
+                    "execute".to_string(),
+                    ToolAction::Shell {
+                        command: "printf 'mango' > /WORKSPACE/word.txt && cat /WORKSPACE/word.txt"
+                            .into(),
+                        cwd: None
+                    }
+                ),
+            ]
+        );
+        let text =
+            std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl"))).unwrap();
+        // session/new, the --config answer, the fork's answer.
+        let modes: Vec<Option<String>> = text
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| {
+                parser()
+                    .session_options(v.pointer("/result/configOptions"))
+                    .map(|o| o.current_mode)
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                Some("accept-edits".into()),
+                Some("unharness-ask".into()),
+                Some("unharness-ask".into())
+            ]
+        );
+        // The fork's turn, after its SessionStarted, knows the code word.
+        let events = vibe_events(case);
+        let fork = events
+            .iter()
+            .rposition(|e| matches!(e, AgentEvent::SessionStarted { .. }))
+            .unwrap();
+        let said: String = events[fork..]
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(said.contains("mango"), "{said}");
+    }
+
     #[test]
     fn fixture_file_links() {
         assert_fixture(

@@ -599,11 +599,14 @@ recorded ones. For anything else:
   `session/fork`, `session/load` and `session/fork` (vibe's answer in
   `ask`, so nothing was set), the fork answered from the first turn, a
   write and then a shell command were asked about and denied and no file
-  was made, `/quit` closed the fork and left no `vibe-acp`. Unverified:
-  codex-acp 2.2.2 and claude-agent-acp 0.89.1 (the versions the issue
-  names), an agent that forks with neither resume nor load, the fork of a
-  session that is open in the same process (the TUI always forks in a new
-  one), and whether vibe's `session/load` of the source writes to it.
+  was made, `/quit` closed the fork and left no `vibe-acp`. A session
+  open in the same process (which the TUI never forks: it always forks in
+  a new one) vibe-acp 2.26.1 forked at once, in the source's mode and with
+  its usage from zero (`record-acp.py --fork`,
+  `fixtures/vibe_acp_fork_open.jsonl`). Unverified: codex-acp 2.2.2 and
+  claude-agent-acp 0.89.1 (the versions the issue names), an agent that
+  forks with neither resume nor load, and whether vibe's `session/load`
+  of the source writes to it.
   Sessions in place of one not resumed or forked (#187,
   `Driver::replaced`): where the driver sends `session/new` because the
   session it was given could not be reattached or forked (the agent
