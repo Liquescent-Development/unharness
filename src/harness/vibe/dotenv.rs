@@ -250,37 +250,62 @@ pub fn parse(text: &str) -> Vec<Binding> {
 
 /// `${NAME}` and `${NAME:-default}` in `value` replaced, each looked up
 /// with `lookup` (`parse_variables`, `Variable.resolve`): a name that is
-/// not there takes the default, else nothing.
+/// not there takes the default, else nothing. Linear in the value: where
+/// the next `}`, and the next `}` or `:`, is from each byte is found in
+/// one pass from the end, so a `${` that starts no variable costs no scan
+/// to the end of a value the sandbox can write.
 fn interpolate(value: &str, lookup: impl Fn(&str) -> Option<Option<String>>) -> String {
+    let bytes = value.as_bytes();
+    let len = bytes.len();
+    // `next_close[i]`: the first `}` at or after `i`; `next_stop[i]`: the
+    // first `}` or `:`; `len` for none. Both are ASCII, so every index is
+    // a char boundary.
+    let mut next_close = vec![len; len + 1];
+    let mut next_stop = vec![len; len + 1];
+    for i in (0..len).rev() {
+        next_close[i] = if bytes[i] == b'}' {
+            i
+        } else {
+            next_close[i + 1]
+        };
+        next_stop[i] = if matches!(bytes[i], b'}' | b':') {
+            i
+        } else {
+            next_stop[i + 1]
+        };
+    }
     let mut out = String::new();
-    let mut rest = value;
-    while let Some(at) = rest.find("${") {
-        let after = &rest[at + 2..];
-        let name_len = after.find(['}', ':']).unwrap_or(after.len());
-        let name = &after[..name_len];
-        let tail = &after[name_len..];
-        let (default, used) = if tail.starts_with('}') {
-            (None, name_len + 1)
-        } else if let Some(def) = tail.strip_prefix(":-")
-            && let Some(close) = def.find('}')
+    let mut copied = 0;
+    let mut from = 0;
+    while let Some(found) = value[from..].find("${") {
+        let at = from + found;
+        let name_start = at + 2;
+        let stop = next_stop[name_start];
+        let (default, end) = if stop < len && bytes[stop] == b'}' {
+            (None, stop + 1)
+        } else if stop + 1 < len
+            && bytes[stop] == b':'
+            && bytes[stop + 1] == b'-'
+            && next_close[stop + 2] < len
         {
-            (Some(&def[..close]), name_len + 2 + close + 1)
+            let close = next_close[stop + 2];
+            (Some(&value[stop + 2..close]), close + 1)
         } else {
             // No variable here: the `$` is text, and the search goes on
             // after it.
-            out.push_str(&rest[..=at]);
-            rest = &rest[at + 1..];
+            from = at + 1;
             continue;
         };
-        out.push_str(&rest[..at]);
-        let resolved = match lookup(name) {
+        out.push_str(&value[copied..at]);
+        let resolved = match lookup(&value[name_start..stop]) {
             Some(found) => found.unwrap_or_default(),
             None => default.unwrap_or_default().to_string(),
         };
         out.push_str(&resolved);
-        rest = &after[used..];
+        copied = end;
+        from = end;
     }
-    out.push_str(rest);
+    out.push_str(&value[copied..]);
     out
 }
 
@@ -399,6 +424,32 @@ mod tests {
                 b("F", Some("")),
             ]
         );
+    }
+
+    /// A value or file the sandbox can write cannot make a read slow: a
+    /// MiB of `${` that starts no variable, in the shapes that would have
+    /// each scan to the end, is read at once (#212). Each took about 0.1 s
+    /// here in a debug build; with a scan per `${` one took 196 s in a
+    /// release build. The bound leaves room for a loaded machine.
+    #[test]
+    fn a_mib_of_dollar_braces_is_read_at_once() {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+        let mib = 1 << 20;
+        for unit in ["${", "${a:", "${a:-", "${${a:x"] {
+            let value = unit.repeat(mib / unit.len());
+            let started = std::time::Instant::now();
+            let got = interpolate(&value, |_| None);
+            assert!(
+                started.elapsed() < BOUND,
+                "{unit:?}: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(got, value, "{unit:?}");
+        }
+        let text = "A='${\\'\n".repeat(mib / 8) + &"B=\"${:x\n".repeat(mib / 8);
+        let started = std::time::Instant::now();
+        let _ = values(&text, &HashMap::new());
+        assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
     }
 
     /// `load_dotenv_values`: what the environment gives a value keeps it,
