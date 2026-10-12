@@ -101,7 +101,11 @@ since it is already the same file; the other harnesses still get it. A
 file whose name holds a control character or `\` is not projected.
 
 pi reads `.pi/prompts` only in a project it trusts (`pi --approve`, or once
-trusted from pi's own interface); unharness does not trust it for you. In
+trusted from pi's own interface); unharness does not trust it for you.
+Mistral Vibe gets nothing projected: it reads neither `.agents/commands`
+nor `.agents/agents` (see [Mistral Vibe](vibe.md#trusted-folders)), and
+reads a project's `.agents/skills` only in a folder trusted in vibe;
+unharness says so when a vibe session starts in one it does not trust. In
 the TUI a projected command is typed as on the harness's own interface
 (`/review`, pi's skills as `/skill:<name>`): unharness passes it on
 ([Agent commands](tui.md#agent-commands)).

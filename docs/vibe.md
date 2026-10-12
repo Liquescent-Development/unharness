@@ -46,11 +46,25 @@ there are not loaded. Your own `~/.vibe` and `~/.agents/skills` are read
 either way.
 
 `unharness doctor` says whether the folder it runs in is trusted, by
-which entry (a folder above it counts), and what vibe ignores there. To
-trust a folder, start `vibe` in it and answer its prompt. unharness only
-reads the file: it never trusts a folder for you and never passes
-`--trust`, because a trusted folder's `.vibe/config.toml` can choose
-vibe's agent, tools and MCP servers.
+which entry (a folder above it counts), and what vibe ignores there. When
+a vibe session starts in a folder vibe does not trust and that has an
+`AGENTS.md`, a `.vibe/` or `.agents/skills/`, unharness says so once: in
+the TUI as a notice, with `--print` on stderr. To trust a folder, start
+`vibe` in it and answer its prompt. unharness only reads the file: it
+never trusts a folder for you, never passes `--trust` and never asks vibe
+to trust one over its protocol, because a trusted folder's
+`.vibe/config.toml` can choose vibe's agent, tools and MCP servers. An
+agent that writes `trusted_folders.toml` (it is writable from the
+sandbox, under vibe's home) is reported, as for vibe's other
+configuration below.
+
+Commands and subagents under `.agents/` ([Rules, skills, commands and
+subagents](skills.md#commands-and-subagents)) are not projected for vibe.
+vibe reads neither `.agents/commands` nor `.agents/agents`: its slash
+commands are skills, its `.vibe/prompts/` are system prompts chosen by
+name, and its own agents (`.vibe/agents/<name>.toml`) are configuration
+profiles, one of which, named like a built-in, replaces vibe's own mode of
+that name, `ask` included.
 
 ## Policies
 

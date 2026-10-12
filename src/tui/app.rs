@@ -509,6 +509,8 @@ pub struct App {
     live_caps: HashMap<HarnessId, CapsUpdate>,
     /// The harnesses already told which MCP servers they do not get.
     mcp_warned: HashSet<HarnessId>,
+    /// The harnesses whose [`Harness::session_notice`] was shown.
+    session_noticed: HashSet<HarnessId>,
 
     pub modal: Option<Modal>,
     pending_prompts: VecDeque<PermissionRequest>,
@@ -946,6 +948,7 @@ impl App {
             compacting: false,
             live_caps: HashMap::new(),
             mcp_warned: HashSet::new(),
+            session_noticed: HashSet::new(),
             modal: None,
             pending_prompts: VecDeque::new(),
             asked_planning: HashSet::new(),
@@ -1357,6 +1360,19 @@ impl App {
             }
         }
         servers
+    }
+
+    /// Show what the active harness says about running in this folder
+    /// ([`Harness::session_notice`]), once per harness in a run: a session
+    /// starts again on every model, policy or sandbox change.
+    pub fn show_session_notice(&mut self) {
+        if self.session_noticed.contains(&self.active) {
+            return;
+        }
+        if let Some(notice) = self.harness().session_notice(&self.cwd) {
+            self.session_noticed.insert(self.active);
+            self.transcript.push_notice(notice);
+        }
     }
 
     /// Start watching the active harness's configuration files, before its
@@ -10888,6 +10904,72 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Claude, with something to say before each session.
+    struct Noting(ClaudeHarness);
+
+    impl Harness for Noting {
+        fn descriptor(&self) -> &'static crate::harness::HarnessDescriptor {
+            self.0.descriptor()
+        }
+        fn capabilities(&self) -> crate::core::Capabilities {
+            self.0.capabilities()
+        }
+        fn probe(&self, binary_override: Option<&Path>) -> crate::harness::Probe {
+            self.0.probe(binary_override)
+        }
+        fn list_models(
+            &self,
+            binary: &Path,
+            provider: &crate::core::ProviderId,
+            sandbox: &crate::core::Sandbox,
+        ) -> anyhow::Result<Vec<ModelInfo>> {
+            self.0.list_models(binary, provider, sandbox)
+        }
+        fn session_notice(&self, cwd: &Path) -> Option<String> {
+            Some(format!("about {}", cwd.display()))
+        }
+        fn start_session(
+            &self,
+            cfg: crate::core::SessionConfig,
+        ) -> anyhow::Result<crate::core::SessionHandle> {
+            self.0.start_session(cfg)
+        }
+        fn build_print_command(
+            &self,
+            cfg: &crate::harness::PrintConfig,
+        ) -> anyhow::Result<std::process::Command> {
+            self.0.build_print_command(cfg)
+        }
+    }
+
+    /// A session starts again on every model, policy or sandbox change:
+    /// the harness's notice is said with the first.
+    #[test]
+    fn a_session_notice_is_said_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let registry = Arc::new(Registry::empty().with(Box::new(Noting(ClaudeHarness::default()))));
+        let mut app = test_app_with(
+            cwd.clone(),
+            HarnessId::CLAUDE,
+            None,
+            false,
+            Config::default(),
+            registry,
+        );
+        let before = notices(&app).len();
+        app.show_session_notice();
+        app.show_session_notice();
+        let said = notices(&app);
+        assert_eq!(said.len(), before + 1, "{said:?}");
+        assert_eq!(said.last().unwrap(), &format!("about {}", cwd.display()));
+        // A harness with nothing to say adds nothing.
+        let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+        let before = notices(&app).len();
+        app.show_session_notice();
+        assert_eq!(notices(&app).len(), before);
     }
 
     #[test]

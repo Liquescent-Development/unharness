@@ -179,6 +179,31 @@ pub fn describe(home: &Path, folder: &Path) -> (String, bool) {
     }
 }
 
+/// What to tell the user as vibe starts a session in `folder`: that it
+/// ignores the folder's project configuration, when there is some and vibe
+/// does not trust the folder (also when it cannot read [`TRUST_FILE`],
+/// since it then trusts none). Nothing otherwise. Read only, as
+/// [`folder_trust`]: unharness never trusts a folder for the user.
+pub fn notice(home: &Path, folder: &Path) -> Option<String> {
+    let found = project_config(folder);
+    if found.is_empty() {
+        return None;
+    }
+    let what = found.join(", ");
+    let why = match folder_trust(home, folder) {
+        Trust::Trusted(_) | Trust::VibeHome => return None,
+        Trust::Declined(by) => format!("you declined {} in vibe", by.display()),
+        Trust::Undecided => "it has not been trusted in vibe".to_string(),
+        Trust::Unreadable(why) => format!(
+            "vibe cannot read {} ({why}) and trusts no folder",
+            home.join(TRUST_FILE).display()
+        ),
+    };
+    Some(format!(
+        "vibe ignores this folder's {what}: {why}. To use them, trust the folder in vibe itself (`vibe` started here asks); unharness never does"
+    ))
+}
+
 /// `path` with its links resolved, as vibe's `Path.resolve()` gives it;
 /// as it is when that fails (vibe's is not strict either).
 fn resolved(path: &Path) -> PathBuf {
@@ -376,6 +401,45 @@ mod tests {
         std::fs::remove_file(s.ws.join(".vibe/config.toml")).unwrap();
         std::fs::create_dir(s.ws.join(".vibe/skills")).unwrap();
         assert!(project_config(&s.ws).contains(&".vibe/"));
+    }
+
+    #[test]
+    fn the_notice_is_for_project_configuration_vibe_ignores() {
+        let s = setup();
+        // Nothing to ignore, nothing to say, trusted or not.
+        assert_eq!(notice(&s.home, &s.ws), None);
+        std::fs::create_dir_all(s.ws.join(".agents/skills/hello")).unwrap();
+        std::fs::write(s.ws.join("AGENTS.md"), "x").unwrap();
+
+        let text = notice(&s.home, &s.ws).unwrap();
+        assert!(
+            text.starts_with(
+                "vibe ignores this folder's AGENTS.md, .agents/skills/: it has not been trusted in vibe."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("`vibe` started here asks"), "{text}");
+
+        let projects = s.ws.parent().unwrap().to_path_buf();
+        write_trust(&s.home, &[], &[&projects]);
+        let text = notice(&s.home, &s.ws).unwrap();
+        assert!(
+            text.contains(&format!("you declined {} in vibe", projects.display())),
+            "{text}"
+        );
+
+        std::fs::write(s.home.join(TRUST_FILE), "trusted = [").unwrap();
+        let text = notice(&s.home, &s.ws).unwrap();
+        assert!(text.contains("trusts no folder"), "{text}");
+
+        write_trust(&s.home, &[&projects], &[]);
+        assert_eq!(notice(&s.home, &s.ws), None);
+
+        // The folder holding vibe's home reads no project configuration
+        // whatever it is told, so there is nothing to trust there.
+        let home = s.ws.join(".vibe");
+        std::fs::create_dir(&home).unwrap();
+        assert_eq!(notice(&home, &s.ws), None);
     }
 
     #[test]

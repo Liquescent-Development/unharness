@@ -776,14 +776,54 @@ recorded ones. For anything else:
   (`_trusted_workdir`, `project_roots` in `harness_files/
   _harness_manager.py`), and the line warns when the folder has one of
   them. The project `.vibe/config.toml` and `.agents/skills/` ignored was
-  seen live in #171's discovery; the project `AGENTS.md` is read in the
-  source only. The policies line now names what a harness does not offer
-  (`(not plan auto)` for vibe): without colour (a pipe) the dimmed ones had
-  read as offered. Checked live (`unharness doctor`, scratch `XDG_*` and
+  seen live in #171's discovery, the project `AGENTS.md` ignored in
+  #171's live check (below). The policies line now names what a harness
+  does not offer (`(not plan auto)` for vibe): without colour (a pipe)
+  the dimmed ones had read as offered. Checked live (`unharness doctor`, scratch `XDG_*` and
   `VIBE_HOME`): a home with no key, one with a copy of `.env`, a path
   that does not exist (still missing afterwards, and no scratch home left
   in the temporary directory), and folders trusted, declined, undecided
   and under a trusted one. Unverified: macOS.
+  Trust (#171, 2.26.1): `Harness::session_notice` (empty for the others)
+  gives vibe `trust::notice`, said once per harness in a TUI run
+  (`App::show_session_notice`, beside `prepare`: a session starts again
+  on every model, policy or sandbox change) and as a warning on stderr
+  in `--print`, when the folder has project configuration and vibe does
+  not trust it (no entry, declined, or a file it cannot read). unharness
+  never trusts a folder: no `--trust` (only `vibe` has it; `vibe-acp`
+  takes `--setup` alone), no `trust/decision` ext method (`vibe/acp/
+  agent.py:1199`), since a trusted folder's `.vibe/config.toml` picks
+  vibe's agent, tools and MCP servers. vibe reports trust itself on
+  `session/new` (`_meta.workspace_trust`: `status`, and `details` with
+  `detected_files`, also the git repo root's, when there is something to
+  trust); it is not read: the notice is unharness's own reading, as
+  doctor's, of the folder only (vibe's `project_roots` is the trusted
+  cwd alone, so a repo root's `.agents/skills` is not read from a
+  subfolder either way). Nothing is projected to vibe from `.agents/`:
+  it reads neither `commands` nor `agents` (`find_local_config_dirs`,
+  `harness_files/_harness_manager.py`); its slash commands are skills,
+  `.vibe/prompts/` are system prompts by id (`core/prompts`), and
+  `.vibe/agents/<name>.toml` is a profile of configuration overrides
+  (`agent_type`, `description`, `instructions`, anything else a config
+  key) that, named like a built-in (`ask`, `auto-approve`, …), replaces
+  it (`core/agents/registry.py`), so a projected `.agents/agents/ask.md`
+  would take the place of the mode behind `ask`. Checked live in the TUI
+  (tmux, Landlock, scratch `XDG_*` and `VIBE_HOME`, a folder with an
+  `AGENTS.md` holding a code word and a `.agents/skills/pineapple-greet`
+  skill): untrusted, the notice came at launch, `/pine` listed nothing,
+  and asked without tools for the code word vibe answered `UNKNOWN`
+  (its reasoning said no `AGENTS.md` named one); with the folder written
+  into the scratch `trusted_folders.toml` outside any session, no notice,
+  `/pine` listed `/pineapple-greet` and vibe answered the code word (the
+  two sessions ran different default models, `mistral-medium-3.5` and
+  `glm-5-3`). Under `bypass` a command of vibe's appending to
+  `trusted_folders.toml` was reported by the guard at the turn's end with
+  the copy from before. `--print` in an untrusted copy of the folder
+  wrote the notice on stderr. A new home's first session also reported
+  `trusted_folders.toml` and the three caches (vibe creates them).
+  Unverified: macOS, a folder trusted through a repo root vibe offered
+  (`trust_repo`), whether vibe 2.26.1 offers a project subagent profile
+  to the model.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
