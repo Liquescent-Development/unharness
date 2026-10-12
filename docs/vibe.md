@@ -16,7 +16,10 @@ place of the built-in ones (see [ACP agents](acp.md#mistral-vibe)); the
 rest stays.
 
 unharness was checked against vibe 2.26.1, and `unharness doctor` warns
-below it. Update with `uv tool upgrade mistral-vibe`.
+below it. Update with `uv tool upgrade mistral-vibe`. To read the
+version, doctor runs `vibe-acp --version` with vibe's home pointed at an
+empty directory of its own, which it removes afterwards, since vibe sets
+up its home even for `--version`: doctor never creates `~/.vibe`.
 
 ## Signing in
 
@@ -29,6 +32,25 @@ shows it or copies it. A key in the keyring, or another provider configured
 in vibe, is found once a session starts; a session that fails for want
 of one says what vibe offers and to run `vibe --setup` (or the table's
 `sign_in`), which unharness never runs itself.
+
+When there is no key and no `~/.vibe` (`$VIBE_HOME`) at all, doctor says
+vibe has not been set up.
+
+## Trusted folders
+
+vibe reads a project's own configuration only in folders you trust in
+vibe (`~/.vibe/trusted_folders.toml`): elsewhere it ignores the folder's
+`AGENTS.md`, its `.vibe/` (`config.toml`, hooks, tools, skills, agents,
+prompts) and its `.agents/skills/`, so the project skills unharness puts
+there are not loaded. Your own `~/.vibe` and `~/.agents/skills` are read
+either way.
+
+`unharness doctor` says whether the folder it runs in is trusted, by
+which entry (a folder above it counts), and what vibe ignores there. To
+trust a folder, start `vibe` in it and answer its prompt. unharness only
+reads the file: it never trusts a folder for you and never passes
+`--trust`, because a trusted folder's `.vibe/config.toml` can choose
+vibe's agent, tools and MCP servers.
 
 ## Policies
 

@@ -53,6 +53,16 @@ pub struct Probe {
     pub auth: AuthInfo,
 }
 
+/// A line `doctor` shows under a harness beside its own: what the harness
+/// knows of its CLI in the folder doctor runs in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorNote {
+    pub label: &'static str,
+    pub text: String,
+    /// Shown as something to look at.
+    pub warning: bool,
+}
+
 /// The oldest release of a CLI unharness works with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MinVersion {
@@ -116,6 +126,12 @@ pub trait Harness: Send + Sync {
     /// that `doctor` warns when it gives none. Default: yes.
     fn reports_version(&self) -> bool {
         true
+    }
+
+    /// What `doctor` says of the harness in `cwd` beyond its version,
+    /// sign-in and capabilities. Read only, and cheap. Default: nothing.
+    fn doctor_notes(&self, _cwd: &Path) -> Vec<DoctorNote> {
+        Vec::new()
     }
 
     /// Whether the harness is signed in, for choosing a default at startup.
@@ -245,10 +261,13 @@ pub fn resolve_binary(desc: &HarnessDescriptor, override_path: Option<&Path>) ->
 /// is not a terminal, `--version` included, and anything else on stderr
 /// (a warning, a log line) is not a version.
 pub fn probe_version(binary: &Path) -> Option<String> {
-    let output = std::process::Command::new(binary)
-        .arg("--version")
-        .output()
-        .ok()?;
+    probe_version_of(std::process::Command::new(binary))
+}
+
+/// [`probe_version`] for a command set up by the caller (its environment,
+/// say), to which `--version` is added.
+pub fn probe_version_of(mut command: std::process::Command) -> Option<String> {
+    let output = command.arg("--version").output().ok()?;
     if !output.status.success() {
         return None;
     }
