@@ -722,9 +722,13 @@ recorded ones. For anything else:
   pinned by an agent profile or admin config, `default_effort` on a first
   run with no session yet (it waits for one, as above), macOS.
   The rest of the harness (#163, 2.26.1, `docs/vibe.md`): `ask`,
-  `accept-edits`, `auto` (#174, below) and `bypass`, no plan (#166);
-  stdio MCP servers only (no `mcpCapabilities`; a server's tool comes as
-  kind `other`, named `mcp_<server>.<tool>`, and is asked about,
+  `accept-edits`, `auto` (#174, below) and `bypass`. No plan, parked
+  (#166): the Unified runtime, vibe 2.26.1's default, hides its `plan`
+  agent from the mode list (`_UNIFIED_HIDDEN_PICKER_AGENTS`,
+  `app_server/_projection.py`) and `session/set_mode plan` answers `{}`
+  without switching; only `--legacy-harness`, a runtime being retired,
+  lists it. Stdio MCP servers only (no `mcpCapabilities`; a server's
+  tool comes as kind `other`, named `mcp_<server>.<tool>`, and is asked about,
   `fixtures/vibe_acp_mcp.jsonl`). Sign-in (`quick_auth`, `probe`) is
   `MISTRAL_API_KEY` set in the environment or given a value in
   `$VIBE_HOME/.env` (parsed as python-dotenv does, presence only, a regular
@@ -1188,6 +1192,45 @@ recorded ones. For anything else:
   profiles (unit-tested only). vibe's scratchpad under
   `$VIBE_HOME/logs/session/` is written unasked under every profile
   (`is_scratchpad_path` comes first), as before.
+  Acceptance (#176, vibe 2.26.1, Claude Code 2.1.296 haiku for the
+  switch): every item of #176 was run in the TUI (tmux, Landlock, scratch
+  XDG directories and `VIBE_HOME`, whose `config.toml` set
+  `[tools.write_file] permission = "always"`, a git workspace in `/tmp`)
+  or headless where #176 says so, and held: under `ask` a write (three
+  ways: `write_file`, a shell redirect, vibe's `file_system.write_file`)
+  and `touch` came as modals and were denied, and "allow always" made a
+  shell rule that answered the same `touch` next turn; `/policy` changes
+  set the mode in the same process (`accept-edits`: `write_file` ran
+  unasked, `touch` asked; `bypass`: nothing asked); a question answered
+  in the modal; Esc during `sleep 45` ended the turn interrupted and the
+  `sleep` was gone; `/model` and `/effort off` after a prompt started a
+  new session with a handoff summary (`runtime-state.json`
+  `mistral-medium-3.5`, `reasoning_effort` `off`; both `config.toml`
+  byte-identical; no `set_config_option` but `mode` on the wire); an
+  attached PNG named nothing telling was answered from; `\/compact` ran
+  vibe's, `/compact` said vibe cannot; a skill in `~/.agents/skills` ran
+  as `/name`; a generic subagent ended with its report; the stdio MCP
+  server's tool was called (asked about under `ask`); `/fork` (the fork
+  answered in `unharness-ask`) and `--resume` in a new unharness (loaded
+  in `auto-approve`, set back to `unharness-ask` and read back) carried
+  the conversation; a switch to Claude (with a handoff summary over
+  `bridge_max_chars = 600`) and back carried it both ways; the guard
+  said nothing in six sessions after the new home's first (which
+  reported the files vibe creates, as above) and reported a command's append to
+  `trusted_folders.toml`; `/quit`, Ctrl+D and `tmux kill-server` each
+  left no `vibe-acp` and no `setsid sleep` it started; a write to the
+  home directory was refused by the sandbox; `--print` (text, json,
+  stream-json, a write denied under `ask` and listed in `denied`),
+  `--print --native` and `--no-tui` under `ask` asked about or denied the
+  write despite the `always`; `doctor` showed version, sign-in and
+  trust. Not checked there: pasting an image from the clipboard (no
+  display; `/attach` was used), and the real `~/.agents/skills` (vibe
+  looks under `Path.home()`, so `vibe-acp` was given a scratch `HOME`).
+  macOS is parked (#175): no Mac was available, so the Seatbelt profile
+  with vibe's home writable, vibe's processes on quit there (no reaper),
+  `quick_auth` and the install path are unverified, as is everything
+  marked macOS above. Also unverified: http MCP servers (vibe 2.26.1
+  takes none over ACP) and plan (#166, above).
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
