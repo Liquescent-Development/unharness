@@ -184,13 +184,18 @@ fn cli_plan(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> SpawnPlan
         provider: cfg.provider.as_ref().map(|p| p.as_str()),
         policy: cfg.policy.unwrap_or(PermissionPolicy::Ask),
     };
-    match choice
+    let mut plan = match choice
         .provider
         .and_then(|id| providers.iter().find(|p| p.id == id))
     {
         Some(provider) => provider_env(provider, &choice),
         None => spawn_env(home, &choice),
-    }
+    };
+    // vibe's CLI is given no `auto` (`cli_agent`), so it is not offered
+    // the mode behind it either.
+    plan.env
+        .retain(|(key, _)| key != "VIBE_SMART_APPROVE_AVAILABLE");
+    plan
 }
 
 /// `vibe -p` (`--print --native`) or `vibe` in its own interface
@@ -264,12 +269,19 @@ fn cli_warnings(cfg: &PrintConfig, home: &Path, providers: &[Provider]) -> Vec<S
     warnings
 }
 
+/// vibe's mode that backs `auto` (#174): a model classifies each call
+/// that would ask, runs what it judges safe and escalates the rest
+/// (`fixtures/vibe_acp_auto*.jsonl`).
+pub const SMART_APPROVE: &str = "smart-approve";
+
 /// `ask` is vibe's mode that asks before every write and command; under
 /// `accept-edits` the agent stays in it and unharness answers the edits.
-/// `bypass` is `auto-approve`. (`fixtures/vibe_acp_mode*.jsonl`.)
+/// `auto` is smart-approve, `bypass` is `auto-approve`.
+/// (`fixtures/vibe_acp_mode*.jsonl`, `fixtures/vibe_acp_auto*.jsonl`.)
 fn mode_map() -> ModeMap {
     ModeMap::new([
         (crate::core::PermissionPolicy::Ask, "ask"),
+        (crate::core::PermissionPolicy::Auto, SMART_APPROVE),
         (crate::core::PermissionPolicy::Bypass, "auto-approve"),
     ])
 }
@@ -536,6 +548,21 @@ fn user_model(home: &Path, alias: &str) -> UserModel {
         .unwrap_or_default()
 }
 
+/// The smart-approve part of vibe's environment, on vibe's own
+/// configuration and on a provider alike: the mode offered in every
+/// session, and under `auto` new sessions started in it (see
+/// [`spawn_env`]).
+fn smart_approve_env(plan: &mut SpawnPlan, choice: &SpawnChoice<'_>) {
+    plan.env.push((
+        "VIBE_SMART_APPROVE_AVAILABLE".to_string(),
+        "true".to_string(),
+    ));
+    if choice.policy == crate::core::PermissionPolicy::Auto {
+        plan.env
+            .push(("VIBE_DEFAULT_AGENT".to_string(), SMART_APPROVE.to_string()));
+    }
+}
+
 /// vibe's environment for a model and thinking level, with `home` its
 /// configuration directory. The model goes in `VIBE_ACTIVE_MODEL`. A
 /// level goes in a whole entry for the model in `VIBE_MODELS`, the only
@@ -548,8 +575,20 @@ fn user_model(home: &Path, alias: &str) -> UserModel {
 /// listed, and the JSON is built, never pasted together. With a level and
 /// no model chosen, the model the last session ran is kept, since the
 /// level goes with it.
+///
+/// smart-approve, the mode behind `auto`, is listed by vibe 2.26.1 only
+/// for the cohort of a remote experiment, and `session/set_mode` to a mode
+/// it does not list answers `{}` and changes nothing.
+/// `VIBE_SMART_APPROVE_AVAILABLE` lists it in every session of the
+/// process, a loaded one too, so that a policy changed to auto sets it and
+/// reads it back with no restart; it does not make it the default, and a
+/// user's `disabled_agents` still hides it. Under `auto`,
+/// `VIBE_DEFAULT_AGENT` starts each new session in it, which also has vibe
+/// look for its classifier model as the session opens
+/// (`vibe/core/agents/manager.py`, `vibe/app_server/_runtime.py`).
 pub fn spawn_env(home: &Path, choice: &SpawnChoice<'_>) -> SpawnPlan {
     let mut plan = SpawnPlan::default();
+    smart_approve_env(&mut plan, choice);
     if let Some(model) = choice.model {
         plan.env
             .push(("VIBE_ACTIVE_MODEL".to_string(), model.to_string()));
@@ -759,6 +798,7 @@ fn plan_for(providers: &[Provider], choice: &SpawnChoice<'_>) -> SpawnPlan {
 /// the name of the variable vibe reads it from.
 pub fn provider_env(provider: &Provider, choice: &SpawnChoice<'_>) -> SpawnPlan {
     let mut plan = SpawnPlan::default();
+    smart_approve_env(&mut plan, choice);
     let name = format!("{PROVIDER_PREFIX}{}", provider.id);
     let active = choice.model.unwrap_or(&provider.models[0]).to_string();
     let level = match choice.effort {
@@ -1069,6 +1109,14 @@ mod tests {
         }
     }
 
+    /// What every vibe process is started with: smart-approve offered.
+    fn available() -> (String, String) {
+        (
+            "VIBE_SMART_APPROVE_AVAILABLE".to_string(),
+            "true".to_string(),
+        )
+    }
+
     fn known() -> KnownModels {
         KnownModels {
             descriptions: [
@@ -1116,18 +1164,69 @@ mod tests {
         let plan = spawn_env(home.path(), &choice(Some("mistral-medium-3.5"), None, &k));
         assert_eq!(
             plan.env,
-            [(
-                "VIBE_ACTIVE_MODEL".to_string(),
-                "mistral-medium-3.5".to_string()
-            )]
+            [
+                available(),
+                (
+                    "VIBE_ACTIVE_MODEL".to_string(),
+                    "mistral-medium-3.5".to_string()
+                )
+            ]
         );
         assert_eq!(plan.overrides, None);
         assert_eq!(plan.unmet, None);
-        // Nothing chosen, nothing set.
+        // Nothing chosen, nothing set but smart-approve offered.
         assert_eq!(
             spawn_env(home.path(), &choice(None, None, &k)),
-            SpawnPlan::default()
+            SpawnPlan {
+                env: vec![available()],
+                ..Default::default()
+            }
         );
+    }
+
+    /// Under auto a new session starts in smart-approve
+    /// (`acp/fixtures/vibe_acp_auto.jsonl`: `currentModeId:
+    /// "smart-approve"`, nothing sent to set it). Under every policy the
+    /// mode is offered, so that a change to auto, or a session loaded
+    /// under it, can set it: vibe 2.26.1 outside the experiment's cohort
+    /// listed it only with `VIBE_SMART_APPROVE_AVAILABLE` (checked live).
+    #[test]
+    fn auto_starts_in_smart_approve() {
+        let home = tempfile::tempdir().unwrap();
+        let k = known();
+        for policy in [
+            PermissionPolicy::Plan,
+            PermissionPolicy::Ask,
+            PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Auto,
+            PermissionPolicy::Bypass,
+        ] {
+            let plan = spawn_env(
+                home.path(),
+                &SpawnChoice {
+                    policy,
+                    ..choice(None, None, &k)
+                },
+            );
+            assert_eq!(var(&plan, "VIBE_SMART_APPROVE_AVAILABLE"), Some("true"));
+            let default = var(&plan, "VIBE_DEFAULT_AGENT");
+            if policy == PermissionPolicy::Auto {
+                assert_eq!(default, Some(SMART_APPROVE));
+            } else {
+                assert_eq!(default, None, "{policy}");
+            }
+        }
+        // With a model and level as before.
+        let plan = spawn_env(
+            home.path(),
+            &SpawnChoice {
+                policy: PermissionPolicy::Auto,
+                ..choice(Some("glm-5-3"), Some("low"), &k)
+            },
+        );
+        assert_eq!(var(&plan, "VIBE_DEFAULT_AGENT"), Some(SMART_APPROVE));
+        assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("glm-5-3"));
+        assert!(var(&plan, "VIBE_MODELS").is_some());
     }
 
     #[test]
@@ -1315,11 +1414,16 @@ provider = "mine"
         for p in [
             PermissionPolicy::Ask,
             PermissionPolicy::AcceptEdits,
+            PermissionPolicy::Auto,
             PermissionPolicy::Bypass,
         ] {
             assert!(caps.supports_policy(p).is_some(), "{p}");
         }
-        assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
+        // auto is smart-approve (#174).
+        assert_eq!(
+            mode_map().for_policy(PermissionPolicy::Auto),
+            Some((PermissionPolicy::Auto, SMART_APPROVE))
+        );
         assert!(caps.supports_policy(PermissionPolicy::Plan).is_none());
         assert!(!caps.plan_mode);
         // Through its `_rewind/to`; a fork's messages have ids of its own.
@@ -1946,7 +2050,19 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
         );
         // None chosen: the first.
         assert_eq!(var(&plan, "VIBE_ACTIVE_MODEL"), Some("qwen3.8-q5kxl-x2"));
-        assert_eq!(plan.env.len(), 3, "one VIBE_MODELS, nothing else");
+        assert_eq!(plan.env.len(), 4, "one VIBE_MODELS, nothing else");
+        // smart-approve is offered on a provider too, and under auto the
+        // session starts in it (#174).
+        assert_eq!(var(&plan, "VIBE_SMART_APPROVE_AVAILABLE"), Some("true"));
+        assert_eq!(var(&plan, "VIBE_DEFAULT_AGENT"), None);
+        let auto = provider_env(
+            &lan,
+            &SpawnChoice {
+                policy: PermissionPolicy::Auto,
+                ..on("lan", None, None, &known)
+            },
+        );
+        assert_eq!(var(&auto, "VIBE_DEFAULT_AGENT"), Some(SMART_APPROVE));
         assert_eq!(plan.overrides.as_deref(), Some("qwen3.8-q5kxl-x2"));
         assert_eq!(plan.unmet, None);
         assert_eq!(
