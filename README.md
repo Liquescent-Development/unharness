@@ -121,7 +121,7 @@ caveat in the TUI instead of failing silently:
 | Image attachments | yes | yes | per model | per agent | exec only |
 | PDF and text file attachments | yes | no | no | yes (as a link the agent reads) | no |
 | Plan / todo list | yes | yes | no | yes | exec only |
-| Subagents: start, end, tool calls, report | yes | yes | no | no | Antigravity: start, end, report |
+| Subagents: start, end, tool calls, report | yes | yes | no | Mistral Vibe: start; end and report when its agent waits for one | Antigravity: start, end, report |
 | Subagents: task description and progress in words | yes | no (a name and its tool calls) | no | no | no (Antigravity: a role) |
 | Subagents: stop one | yes | yes | no | no | no |
 | Steer a running turn | yes | yes | yes | no (queued) | no (queued) |
