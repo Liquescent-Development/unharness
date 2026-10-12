@@ -1758,6 +1758,7 @@ impl App {
     pub fn driver_gone(&mut self) {
         self.transcript.push_error("session driver is gone");
         self.session_alive = false;
+        self.forget_refusals();
         self.session_blank = false;
         self.blank_session = None;
         self.idle_start_paused = true;
@@ -2341,10 +2342,13 @@ impl App {
         let had_content = self.conversation.has_content();
         // A session started with nothing to resume and sent nothing knows
         // nothing of this conversation, and serves the next. Any other ends,
-        // a blank one resumed on a session of this conversation too.
+        // a blank one resumed on a session of this conversation too, and
+        // one that refused a policy, so that the next is asked for it again
+        // (its process may have been started with what refused it).
         let keep = self.session_alive
             && self.session_blank
-            && !self.session_ids.contains_key(&self.active);
+            && !self.session_ids.contains_key(&self.active)
+            && !self.session_refused();
         self.end_remote_control();
         let said = self.transcript.blocks.len();
         if self.session_alive && !keep {
@@ -3148,6 +3152,7 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                self.forget_refusals();
                 if self.session_blank {
                     self.transcript.push_notice(format!(
                         "{} exited{} before any prompt; your next prompt starts it again",
@@ -3403,7 +3408,27 @@ impl App {
         self.drop_prompts();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
+        self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
+    }
+
+    /// The active harness's session is gone. What it refused was for it
+    /// (`CapsUpdate::refused_policies`: a mode that did not take, a
+    /// profile shadowed): the next session is asked for the wanted policy
+    /// again, and refuses it again if it still cannot hold it. The rest of
+    /// what it reported is the agent's, kept until the next one says.
+    fn forget_refusals(&mut self) {
+        if let Some(update) = self.live_caps.get_mut(&self.active) {
+            update.refused_policies = None;
+        }
+    }
+
+    /// The active harness's session refused a policy.
+    fn session_refused(&self) -> bool {
+        self.live_caps
+            .get(&self.active)
+            .and_then(|u| u.refused_policies.as_ref())
+            .is_some_and(|r| !r.is_empty())
     }
 
     /// The allow rules that answer a request, if the user has them for it
@@ -8560,6 +8585,88 @@ pub(crate) mod tests {
         app.submit_prompt("do it".into());
         assert!(app.take_actions().is_empty());
         assert!(!app.is_generating);
+    }
+
+    /// A refusal is for the session that made it (#216): it holds while
+    /// that session lives, and once it ends, by `/clear`, by exiting or by
+    /// a switch away, the policy is offered again and the next session is
+    /// asked for it.
+    #[test]
+    fn a_refused_policy_is_offered_again_once_the_session_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(vec![PermissionPolicy::AcceptEdits]),
+                ..Default::default()
+            }));
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+            assert!(
+                !app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            app.take_actions();
+        };
+        let offered_again = |app: &App| {
+            assert!(
+                app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+            assert!(app.policy_warning().is_none());
+        };
+
+        // Refused by a session nothing was sent to yet (at launch).
+        start(&mut app, "claude-1");
+        refuse(&mut app);
+        // It holds while the session lives, whatever else it reports.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            slash_commands: Some(true),
+            ..Default::default()
+        }));
+        app.open_policy_picker();
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Policy(p)) if p.list.current() == Some(&PermissionPolicy::Ask)
+        ));
+        app.modal = None;
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        // `/clear` ends it (a blank session is otherwise kept), so that the
+        // next one, started by the event loop, is asked again.
+        app.handle_slash_command("/clear");
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_alive);
+        offered_again(&app);
+
+        // Refused by a session a turn went to, which then exits.
+        start(&mut app, "claude-2");
+        refuse(&mut app);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(
+            !app.offered_policies()
+                .contains(&PermissionPolicy::AcceptEdits)
+        );
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        offered_again(&app);
+
+        // Refused, then a switch away and back.
+        start(&mut app, "claude-3");
+        refuse(&mut app);
+        app.switch_harness(HarnessId::CODEX);
+        app.switch_harness(HarnessId::CLAUDE);
+        offered_again(&app);
     }
 
     #[test]

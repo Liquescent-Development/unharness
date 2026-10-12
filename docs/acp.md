@@ -133,9 +133,10 @@ offers one (its answer says which mode is in effect), else with
 `session/set_mode`. If the agent does not offer the mode, refuses it, or
 answers with another one, the policy is not available for that session:
 the TUI asks for another one (Ctrl+P) and keeps the prompt, and `--print`
-fails without sending it. If the agent goes into another mode by itself, the
-mapped one is set again, and a turn that is running is stopped when the new
-mode could run what the policy asks about.
+fails without sending it. The next session (after `/clear`, a restart, or a
+switch away and back) is asked for the policy again. If the agent goes into
+another mode by itself, the mapped one is set again, and a turn that is
+running is stopped when the new mode could run what the policy asks about.
 
 An agent that has session modes and no `modes` map gets no policy below
 `bypass`: not `ask` (even with `asks_permission = true`), not

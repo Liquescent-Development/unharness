@@ -407,11 +407,15 @@ recorded ones. For anything else:
   (`CapsUpdate::refused_policies`): the waiting prompt fails unsent, a
   running one is cancelled, the TUI gives way as to an unsupported policy
   (the picker, or the nearest less permissive one sent as `SetPolicy`), and
-  `--print` exits 1. An agent with modes and no map has every policy below
-  `bypass` refused the same way (decided on #155), naming the missing
-  map, since the mode it is in may run what the policy asks about: a vibe
-  session loaded in `auto-approve` would run commands unasked under
-  `accept-edits`. Only `bypass` leaves the mode alone. A
+  `--print` exits 1. The TUI forgets the refusal when that session ends
+  (shut down, exited, its driver gone: `App::forget_refusals`), and
+  `/clear` ends a session that refused one also when nothing was sent to
+  it, so that the next session is asked for the policy again (#216). An
+  agent with modes and no map has every policy below `bypass` refused the
+  same way (decided on #155), naming the missing map, since the mode it
+  is in may run what the policy asks about: a vibe session loaded in
+  `auto-approve` would run commands unasked under `accept-edits`. Only
+  `bypass` leaves the mode alone. A
   mode the agent reports going into by itself (`current_mode_update`, the
   mode option of `config_option_update`) is set back, and a running turn
   cancelled first when that mode is not one the map gives a policy at or
