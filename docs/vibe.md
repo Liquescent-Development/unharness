@@ -212,7 +212,8 @@ the policy as vibe's agent:
 The model and effort go to vibe by environment, as for a session. Only a
 session says what vibe's own models are, so an effort is passed on only
 for a model your `config.toml` defines; otherwise unharness says it is
-left out. unharness's MCP servers are not passed on, and neither is
+left out. A provider chosen with `--provider` goes the same way as for a
+session (see Providers). unharness's MCP servers are not passed on, and neither is
 `--trust`: whether vibe reads the project's own configuration stays
 vibe's and your decision. `--format` takes `text`, `json` and
 `stream-json` (vibe's `streaming`), and the exit status is vibe's (see
