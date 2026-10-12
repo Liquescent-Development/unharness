@@ -402,6 +402,18 @@ recorded ones. For anything else:
   mode, taken at its word, since vibe answers `{}` also for one it does not
   list (`plan`) and changes nothing. Neither request was followed by a
   `current_mode_update` or `config_option_update` from vibe in three runs.
+  Only one mode request is out at a time (#211): vibe-acp 2.26.1 runs
+  every incoming request as a task of its own (`acp/task/dispatcher.py`,
+  read in its source) and its `set_config_option` and `set_mode` await
+  the switch before they read back, so two could apply and answer in
+  either order. A policy change while one is out sends nothing and holds
+  the prompt; that answer then does not decide what is held but says
+  which mode the agent is in (its read-back, else the mode asked for
+  unless it was refused), from which the mode is applied again, a
+  running turn cancelled first when that mode is not one the map gives a
+  policy at or below the current one. Before, bypass and back to ask
+  before vibe answered held its `auto-approve` under `ask` (found in a
+  code review).
   A mode not offered, an error, a read-back that differs, or a reattach
   whose answer names no modes refuses the policy for the session
   (`CapsUpdate::refused_policies`): the waiting prompt fails unsent, a
@@ -426,7 +438,9 @@ recorded ones. For anything else:
   an agent that resumes with
   `{}` but has modes and no map (taken to have none, so nothing is
   refused), and claude-agent-acp
-  under a map (its recordings start in `default`, so nothing was sent).
+  under a map (its recordings start in `default`, so nothing was sent),
+  and a policy changed while a mode request is out on a real agent (e2e
+  tests with the fake only).
   Withdrawn requests (#158, `Driver::withdraw`): claude-agent-acp 0.85.1
   sends `$/cancel_request` (`{"requestId": 0}`) for a
   `session/request_permission` the client has not answered once the call is
