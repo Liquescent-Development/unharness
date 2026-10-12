@@ -640,8 +640,9 @@ recorded ones. For anything else:
   real agent, `authenticate` with vibe's `browser-auth`.
 - Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
   `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
-  name, `asks_permission` and modes), with `ask` → `ask` and `bypass` →
-  `auto-approve`, `thinking` its effort option, and its model and level
+  name, `asks_permission` and modes), with `ask` → `ask`, `auto` →
+  `smart-approve` (#174, below) and `bypass` → `auto-approve`, `thinking`
+  its effort option, and its model and level
   chosen at spawn (`AcpHarness::choosing_at_spawn`, `acp/spawn.rs`), never
   with `session/set_config_option`: on vibe 2.26.1 that writes the choice
   into `~/.vibe/config.toml` (`set_config_option` in `vibe/acp/agent.py`).
@@ -694,7 +695,7 @@ recorded ones. For anything else:
   pinned by an agent profile or admin config, `default_effort` on a first
   run with no session yet (it waits for one, as above), macOS.
   The rest of the harness (#163, 2.26.1, `docs/vibe.md`): `ask`,
-  `accept-edits` and `bypass`, no `auto` (#174) and no plan (#166);
+  `accept-edits`, `auto` (#174, below) and `bypass`, no plan (#166);
   stdio MCP servers only (no `mcpCapabilities`; a server's tool comes as
   kind `other`, named `mcp_<server>.<tool>`, and is asked about,
   `fixtures/vibe_acp_mcp.jsonl`). Sign-in (`quick_auth`, `probe`) is
@@ -991,6 +992,73 @@ recorded ones. For anything else:
   resumed session whose provider is no longer chosen (its model is
   dropped with a notice, and vibe restores the pinned alias, unknown
   there).
+  `auto` (#174, 2.26.1) is vibe's `smart-approve` mode, as Richard
+  decided; an ACP agent is offered `auto` only when its map names a mode
+  for `auto` itself (`ModeMap::names`). In that mode each builtin or MCP
+  call that vibe's own permission rules would ask about goes to Mistral's
+  classifier, `mistral-small-latest`, with the call's arguments (up to
+  3000 characters), the latest user message (up to 2000) and the writable
+  roots (`_classify_gate` in `mistralai_vibe_local_harness/vibe/
+  _local_actions.py`, `_smart_approve.py`). `ALLOW` runs the call unasked;
+  `PROMPT` on something the user did not ask for fails it with "Smart
+  approve blocked this action: <reason>" (deny-and-continue); a repeat of
+  a blocked call, a call judged user-authorised, the third denial in a
+  row or twentieth in a turn, a write naming a path that decides what
+  runs later (`.vibe`, `.git/hooks`, `.git/config`, shell startup files;
+  `_protected_paths.py`) and a classifier error escalate to an id-only
+  `session/request_permission` that carries no reason. The verdicts are
+  invisible to unharness: a blocked call's reason arrives only as that
+  failed call's text, and nothing says why a call ran. Destructive
+  commands inside the workspace run unasked: `rm -rf` of a scratch tree
+  ran twice in the discovery's recordings (not committed), once on "if
+  junk looks unimportant, get rid of it". Of four writes outside the
+  workspace that the user asked for, one escalated (the discovery's, its
+  options scoped `outside_directory`) and three ran unasked
+  (`fixtures/vibe_acp_auto.jsonl` after a blocked `mkdir`,
+  `fixtures/vibe_acp_auto_outside.jsonl`, a shell `printf >` in the TUI),
+  so what keeps a call in the workspace is the sandbox. In
+  `vibe_acp_auto.jsonl` a workspace edit was blocked with a reason about
+  the other path, and asked about when the model repeated it. Under
+  `auto` unharness answers no request itself (`transport::auto_allows`,
+  also not an edit, which accept-edits answers) and sends only
+  `allow_once` or `reject_once`, never vibe's "for this session" and
+  "always" options. smart-approve is listed only for the cohort of the
+  `vibe_cli_smart_approve` experiment (`smart_approve_available`,
+  `vibe/core/config/vibe_schema.py`); outside it (a fresh `VIBE_HOME`, or
+  `VIBE_SMART_APPROVE_AVAILABLE=false`) `session/new` lists `ask`,
+  `accept-edits` and `auto-approve`, `set_config_option` of it answers
+  -32602, `set_mode` answers `{}` and changes nothing, and a session
+  pinned to it loads in `accept-edits`. So every vibe process gets
+  `VIBE_SMART_APPROVE_AVAILABLE=true` (the environment layer is above the
+  experiments': it was then listed in new and loaded sessions and set and
+  read back through the mode option, the default unchanged), and under
+  `auto` `VIBE_DEFAULT_AGENT=smart-approve` (`spawn_env`, from
+  `SpawnChoice::policy`): a new session answers `currentModeId:
+  "smart-approve"`, so nothing is sent, and vibe looks for its classifier
+  model as the session opens, which it does only for a session opened in
+  the mode (`vibe/app_server/_runtime.py`). Like vibe's `--smart-approve`
+  it forces the mode past a user's `disabled_agents`
+  (`vibe/core/agents/manager.py`), which otherwise hides it, variable or
+  not. A session that does not offer the mode refuses `auto` and the TUI
+  falls back to accept-edits with the warning. A change to `auto` in a
+  running session sets the mode through the option, with no restart; the
+  driver keeps `cfg.policy` current for a process started again for a
+  model or effort. Checked in the TUI (tmux, Landlock, scratch `VIBE_HOME`
+  and XDG directories, `glm-5-3`): under `--policy auto` the header said
+  `auto` and `vibe-acp` had both variables; an append to a workspace file
+  ran unasked; a write to `/tmp/l174/outside/z.txt` (writable in the
+  sandbox) ran unasked; a write to `.vibe/notes.txt` in the workspace came
+  as a modal and, denied, was not made. Started under `ask`, a `touch` was
+  asked about, then Ctrl+P → auto set the mode in the same `vibe-acp`
+  process and the next `touch` ran unasked. With
+  `VIBE_DISABLED_AGENTS='["smart-approve"]'` and a prompt sent, Ctrl+P →
+  auto showed `auto→accept-edits` and the warning (before a prompt the
+  TUI starts the session again under `auto`, and the variable forced the
+  mode). Unverified: the classifier unreachable (escalates, by the
+  source), a provider other than Mistral's (the classifier route keeps the
+  active provider and swaps only the model name), MCP tools under it,
+  `--print --policy auto` (its escalations are denied unless a rule
+  allows them), macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

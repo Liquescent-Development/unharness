@@ -19,8 +19,9 @@ The table name is the harness id: `unharness -H claude-acp`, or
 ## Mistral Vibe
 
 Mistral Vibe's `vibe-acp` is built in: `unharness -H vibe` with nothing in
-the config, `ask` mapped to vibe's `ask` mode and `bypass` to
-`auto-approve` (see Modes below). A `[harnesses.vibe]` table sets its
+the config, `ask` mapped to vibe's `ask` mode, `auto` to `smart-approve`
+and `bypass` to `auto-approve` (see Modes below, and
+[Mistral Vibe](vibe.md#auto) for what `auto` lets through). A `[harnesses.vibe]` table sets its
 `command`, `display_name`, `asks_permission`, `modes` and `sign_in` in
 place of the built-in ones; the rest stays. When vibe is not signed in,
 unharness says to run `vibe --setup` ([Sign-in](#sign-in)). Allow rules,
@@ -67,7 +68,7 @@ unharness applies the permission policy to the requests an agent makes:
 |---|---|
 | `ask` | shows every request |
 | `accept-edits` | answers file edits itself and shows the rest |
-| `auto` | falls back to `accept-edits` |
+| `auto` | shows every request, where the agent's own mode backs it (Mistral Vibe's `smart-approve`); otherwise not offered and falls back to `accept-edits` |
 | `bypass` | answers everything |
 
 What a request is for (an edit, a command, …) is the tool call's kind as
@@ -132,6 +133,12 @@ through, and a session can be in any of them: a vibe session loaded again
 in `auto-approve` would run commands unasked under `accept-edits`. Only
 `bypass` leaves the agent in whatever mode it is in. With a map, every
 policy needs an entry at or below it.
+
+`auto` is offered only when the map names a mode for it, since the
+agent's own judgement is what `auto` means: what the agent then asks about
+is what that mode left to you, and unharness shows it, edits included. A
+session that does not offer the mode refuses `auto`, and the TUI takes
+`accept-edits` with a warning.
 
 Checked with Mistral Vibe 2.26.1: `ask = "ask"` held (a write was asked
 about and denied, and not made). `plan` is hidden by vibe's runtime and

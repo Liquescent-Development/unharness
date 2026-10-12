@@ -72,13 +72,43 @@ that name, `ask` included.
 |---|---|
 | `ask` | its `ask` mode: every write and command is asked about |
 | `accept-edits` | its `ask` mode, and unharness answers the edits |
-| `auto` | not offered yet; falls back to `accept-edits` |
+| `auto` | its `smart-approve` mode: a Mistral model decides what runs (see [Auto](#auto)) |
 | `bypass` | its `auto-approve` mode |
 | `plan` | not offered: vibe's runtime hides its plan mode |
 
 vibe starts every session in a mode of its own that writes files without
 asking, so unharness puts each session in the mode above, and reads it back,
 before the first prompt (see [Modes](acp.md#modes)).
+
+### Auto
+
+Under `auto` vibe runs in its `smart-approve` mode. Every call that vibe's
+own rules would ask about goes first to a Mistral model
+(`mistral-small-latest`), which is sent the call's arguments and part of
+your latest message, and decides:
+
+- what it judges safe runs without asking. In vibe 2.26.1 that included
+  `rm -rf` of a directory in the project, and three of four writes
+  outside the project that you had asked for (the fourth was asked
+  about);
+- what it judges risky and you did not ask for is blocked, and the call
+  fails with its reason ("Smart approve blocked this action: …"), which
+  the model sees and works around;
+- the rest comes to you as a request: a call blocked once and tried
+  again, a write to a file that decides what runs later (`.vibe/`,
+  `.git/hooks`, shell startup files), or a call the model could not
+  judge. unharness shows each one; only "allow once" or "deny" is sent
+  back, and "always allow" makes an unharness rule.
+
+unharness does not see the model's verdicts on the calls that ran, and
+cannot make vibe ask about something it let through: what keeps a call
+inside the project is the sandbox. smart-approve is a remote experiment
+in vibe that only some accounts see; unharness starts `vibe-acp` with
+`VIBE_SMART_APPROVE_AVAILABLE=true` so that every session offers it, and
+under `auto` with `VIBE_DEFAULT_AGENT=smart-approve` so that a new session
+starts in it (which, as with vibe's own `--smart-approve`, also overrides
+a `disabled_agents` in your vibe config). A session that does not offer
+it falls back to `accept-edits`, with a warning.
 
 "Always allow" rules work for vibe's edits and commands. vibe names a file
 the way the model wrote it, often relative to the project; unharness takes
@@ -229,7 +259,10 @@ vibe's and your decision. `--format` takes `text`, `json` and
 ## Not checked yet
 
 - macOS.
-- vibe's plan mode, and its `smart-approve` mode for `auto`.
+- vibe's plan mode.
+- Under `auto`: the classifier being unreachable (vibe then asks), and a
+  provider other than Mistral's (vibe sends the classifier's model name
+  to it).
 - A subagent given more work, or stopped, by vibe's agent.
 - A key in the OS keyring.
 - Providers: a key named by `api_key_env_var`, styles other than `openai`,
