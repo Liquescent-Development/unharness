@@ -108,7 +108,7 @@ See [Usage](docs/usage.md) for every command and flag.
 | Codex | `codex app-server` JSON-RPC (long-lived), `exec --json` fallback | yes (app-server) | thread id | `model/list`; built-in and configured providers |
 | pi | `pi --mode rpc` (long-lived) | yes, through an extension unharness loads | `--session-id` | `get_available_models`, many providers |
 | Antigravity | `agy --print= --input-format stream-json` (long-lived) | no | `--conversation` | `agy models` |
-| Mistral Vibe | `vibe-acp`, ACP over stdio (long-lived) | yes, in its `ask` mode | `session/load` | from the session, chosen when it starts |
+| Mistral Vibe | `vibe-acp`, ACP over stdio (long-lived) | yes, in unharness's own `ask` profile | `session/load` | from the session, chosen when it starts |
 | ACP agents | Agent Client Protocol v1 over stdio (long-lived) | yes, when the agent asks | `session/resume` or `session/load` | from the session |
 
 unharness drives the vendor CLIs, which change more slowly than the agent

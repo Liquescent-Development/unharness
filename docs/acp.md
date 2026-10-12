@@ -19,8 +19,9 @@ The table name is the harness id: `unharness -H claude-acp`, or
 ## Mistral Vibe
 
 Mistral Vibe's `vibe-acp` is built in: `unharness -H vibe` with nothing in
-the config, `ask` mapped to vibe's `ask` mode, `auto` to `smart-approve`
-and `bypass` to `auto-approve` (see Modes below, and
+the config, `ask` and `accept-edits` mapped to profiles of unharness's own
+([Your vibe configuration](vibe.md#your-vibe-configuration)), `auto` to
+`smart-approve` and `bypass` to `auto-approve` (see Modes below, and
 [Mistral Vibe](vibe.md#auto) for what `auto` lets through). A `[harnesses.vibe]` table sets its
 `command`, `display_name`, `asks_permission`, `modes` and `sign_in` in
 place of the built-in ones; the rest stays. When vibe is not signed in,
