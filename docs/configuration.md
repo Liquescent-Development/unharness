@@ -12,10 +12,11 @@ doctor` prints the path, and `unharness init` creates the file.
 > A config file that does not parse stops unharness and names the file and
 > line. unharness never falls back to defaults, which would run without your
 > sandbox and policy settings. A harness table that is wrong (an unknown
-> policy, a `modes` map or a provider that is not whole) stops a run,
-> `unharness switch` and `unharness models` too;
-> `unharness doctor` names what is wrong, shows the rest without that
-> harness, and exits 1.
+> policy, a `modes` map or a provider that is not whole, an ACP agent
+> without a command) stops a run, `unharness switch` and `unharness models`
+> too, and is never replaced by the built-in or preset of its name;
+> `unharness doctor` names what is wrong, leaves out a harness it cannot
+> build, shows the rest, and exits 1.
 
 ## Example
 

@@ -209,13 +209,30 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
     );
     println!();
 
-    match registry.resolve(None, config.default_harness.as_deref(), &overrides) {
-        Ok((h, bin)) => println!(
-            "Active Default: {} ({})",
-            h.descriptor().display_name.bold().green(),
-            bin.display().to_string().dimmed()
-        ),
-        Err(e) => println!("Active Default: {}", format!("Error: {e}").red()),
+    // A default whose table is left out is not replaced by another one:
+    // unharness would not start.
+    let default_left_out = config.default_harness.as_deref().and_then(|d| {
+        let d = d.trim().to_lowercase();
+        let d = HarnessId::parse(&d).map_or(d, |id| id.as_str().to_string());
+        config_errors
+            .iter()
+            .filter(|e| e.left_out)
+            .find_map(|e| e.table.as_deref().filter(|t| *t == d))
+    });
+    if let Some(table) = default_left_out {
+        println!(
+            "Active Default: {}",
+            format!("[harnesses.{table}] is wrong (see Config above)").red()
+        );
+    } else {
+        match registry.resolve(None, config.default_harness.as_deref(), &overrides) {
+            Ok((h, bin)) => println!(
+                "Active Default: {} ({})",
+                h.descriptor().display_name.bold().green(),
+                bin.display().to_string().dimmed()
+            ),
+            Err(e) => println!("Active Default: {}", format!("Error: {e}").red()),
+        }
     }
     println!(
         "Default Policy: {}",
@@ -308,15 +325,12 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                 "Workspace Skills",
                 &discover_skills_in_dir(&workspace_skills_dir(root)),
             );
-            for (k, settings) in &config.harnesses {
-                if settings.protocol.as_deref() == Some("acp") && settings.command.is_empty() {
-                    println!(
-                        "  {} harness '{}' has protocol = \"acp\" but no command in the config",
-                        "[!]".yellow(),
-                        k
-                    );
-                } else if registry.parse(k).is_none()
-                    && !config_errors.iter().any(|e| e.table.as_deref() == Some(k))
+            for k in config.harnesses.keys() {
+                // A table left out is named under Config.
+                if registry.parse(k).is_none()
+                    && !config_errors
+                        .iter()
+                        .any(|e| e.left_out && e.table.as_deref() == Some(k))
                 {
                     println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k);
                 }
