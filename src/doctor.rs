@@ -14,7 +14,8 @@ use crate::core::sandbox::{
     self, Sandbox, SandboxEnv, SandboxLevel, SandboxPaths, SandboxRequest, SandboxSetup,
 };
 use crate::core::{
-    HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, resolve_policy,
+    Capabilities, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport,
+    resolve_policy,
 };
 use crate::harness::{MinVersion, parse_version};
 use crate::runner::{binary_overrides, configured_policy};
@@ -89,14 +90,6 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                 println!("      {} Auth: {}", "↳".dimmed(), details);
 
                 let caps = h.capabilities();
-                let policies: Vec<String> = PermissionPolicy::ALL
-                    .iter()
-                    .map(|p| match caps.supports_policy(*p) {
-                        Some(s) if s.degraded.is_some() => format!("{p}*"),
-                        Some(_) => p.to_string(),
-                        None => format!("{}", p.to_string().dimmed()),
-                    })
-                    .collect();
                 println!(
                     "      {} Permissions: {} · policies: {}{}",
                     "↳".dimmed(),
@@ -105,7 +98,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                     } else {
                         "not interactive".yellow()
                     },
-                    policies.join(" "),
+                    describe_policies(&caps),
                     if caps.resume_by_id { " · resume" } else { "" }
                 );
                 let (default, fits) =
@@ -562,6 +555,30 @@ fn report_rules(root: &Path) {
     }
 }
 
+/// The policies a harness offers, `*` marking one with caveats, and then
+/// the ones it does not, which are also told apart without colour (a pipe,
+/// `NO_COLOR`).
+fn describe_policies(caps: &Capabilities) -> String {
+    let mut offered = Vec::new();
+    let mut not = Vec::new();
+    for p in PermissionPolicy::ALL {
+        match caps.supports_policy(p) {
+            Some(s) if s.degraded.is_some() => offered.push(format!("{p}*")),
+            Some(_) => offered.push(p.to_string()),
+            None => not.push(p.to_string()),
+        }
+    }
+    let mut text = if offered.is_empty() {
+        "none".to_string()
+    } else {
+        offered.join(" ")
+    };
+    if !not.is_empty() {
+        text.push_str(&format!(" {}", format!("(not {})", not.join(" ")).dimmed()));
+    }
+    text
+}
+
 /// The version as doctor shows it: its three numbers when they can be
 /// read out of what `--version` printed, else that text's first line.
 fn describe_version(version: Option<&str>) -> String {
@@ -665,6 +682,25 @@ fn describe_default_policy(
 mod tests {
     use super::*;
     use crate::config::HarnessSettings;
+
+    /// Without colour (a pipe) a policy not offered read like one that is
+    /// (#172: vibe's line said "plan ask accept-edits auto bypass").
+    #[test]
+    fn policies_not_offered_are_named_as_such() {
+        use crate::harness::Harness;
+        let vibe = crate::harness::vibe::VibeHarness::new().capabilities();
+        let line = describe_policies(&vibe);
+        assert!(line.starts_with("ask accept-edits bypass "), "{line}");
+        assert!(line.contains("(not plan auto)"), "{line}");
+        let mut all = vibe.clone();
+        all.permission_policies = PermissionPolicy::ALL
+            .iter()
+            .map(|p| PolicySupport::full(*p))
+            .collect();
+        assert_eq!(describe_policies(&all), "plan ask accept-edits auto bypass");
+        all.permission_policies.clear();
+        assert!(describe_policies(&all).starts_with("none "));
+    }
 
     #[test]
     fn a_version_that_cannot_be_read_or_is_too_old_is_warned_about() {
