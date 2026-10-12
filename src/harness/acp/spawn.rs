@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::parse::SessionOptions;
-use crate::core::{CapsUpdate, ProviderId};
+use crate::core::{CapsUpdate, PermissionPolicy, ProviderId};
 
 /// What the agent's sessions have said about its models, kept for the
 /// processes started after them in this run.
@@ -65,6 +65,9 @@ pub struct SpawnChoice<'a> {
     /// The chosen model's value, as the session's model option lists it.
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    /// The session's policy as the process starts: an agent may need to be
+    /// told at spawn to offer the mode that backs it (vibe's smart-approve).
+    pub policy: PermissionPolicy,
     pub known: &'a KnownModels,
     /// What the session adds to unharness's own environment.
     pub env: &'a [(String, String)],

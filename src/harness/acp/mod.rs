@@ -278,14 +278,20 @@ impl Harness for AcpHarness {
             // (codex-acp 2.1.1 asked for nothing in three recordings). One
             // with session modes of its own also needs a mode map, or its
             // session refuses every policy below bypass (`modes::mode_step`).
+            // `auto` is the agent's own judgement, so only for one whose map
+            // names a mode for it (vibe's smart-approve); a session that does
+            // not offer that mode refuses it.
             permission_policies: self
                 .asks
                 .then_some(PolicySupport::full(PermissionPolicy::Ask))
                 .into_iter()
-                .chain([
-                    PolicySupport::full(PermissionPolicy::AcceptEdits),
-                    PolicySupport::full(PermissionPolicy::Bypass),
-                ])
+                .chain([PolicySupport::full(PermissionPolicy::AcceptEdits)])
+                .chain(
+                    self.modes
+                        .names(PermissionPolicy::Auto)
+                        .then_some(PolicySupport::full(PermissionPolicy::Auto)),
+                )
+                .chain([PolicySupport::full(PermissionPolicy::Bypass)])
                 .collect(),
             // Effort levels, image input and resume are reported by the session.
             effort_levels: Vec::new(),
@@ -452,6 +458,25 @@ mod tests {
             Some((PermissionPolicy::Ask, "ask"))
         );
         assert!(h.asks && h.effort_option.is_some());
+        // A map that names a mode for auto itself declares auto; one that
+        // leaves it to ask's entry does not.
+        assert!(
+            h.capabilities()
+                .supports_policy(PermissionPolicy::Auto)
+                .is_none()
+        );
+        let with_auto = AcpHarness::new("x", None, &["x".into()])
+            .unwrap()
+            .with_modes(ModeMap::new([
+                (PermissionPolicy::Ask, "ask"),
+                (PermissionPolicy::Auto, "smart-approve"),
+            ]));
+        assert!(
+            with_auto
+                .capabilities()
+                .supports_policy(PermissionPolicy::Auto)
+                .is_some()
+        );
 
         // Nor a sign-in command: doctor names one that is declared.
         let auth = |h: &AcpHarness| h.probe(None).auth.details.unwrap();

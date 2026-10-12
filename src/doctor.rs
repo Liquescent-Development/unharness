@@ -702,8 +702,8 @@ mod tests {
         use crate::harness::Harness;
         let vibe = crate::harness::vibe::VibeHarness::new().capabilities();
         let line = describe_policies(&vibe);
-        assert!(line.starts_with("ask accept-edits bypass "), "{line}");
-        assert!(line.contains("(not plan auto)"), "{line}");
+        assert!(line.starts_with("ask accept-edits auto bypass "), "{line}");
+        assert!(line.contains("(not plan)"), "{line}");
         let mut all = vibe.clone();
         all.permission_policies = PermissionPolicy::ALL
             .iter()

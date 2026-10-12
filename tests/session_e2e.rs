@@ -4461,6 +4461,123 @@ async fn acp_bypass_ends_a_call_only_its_request_named() {
     shut_down(&mut handle).await;
 }
 
+/// Under auto vibe runs in its smart-approve mode (#174): its process is
+/// started offering the mode and with new sessions in it, so its session
+/// answers `currentModeId: "smart-approve"` and nothing is sent to set it.
+/// What the classifier blocks comes back as a failed call; what it
+/// escalates, here an edit inside the workspace (a repeat of a blocked
+/// one), is the user's to answer, not allowed by the policy as an edit
+/// is under accept-edits, and only "allow once" is sent.
+#[tokio::test]
+async fn vibe_auto_is_smart_approve_and_its_escalations_are_asked() {
+    if !python_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_auto.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Auto, true);
+    cfg.model = None;
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "VIBE_DEFAULT_AGENT,VIBE_SMART_APPROVE_AVAILABLE".to_string(),
+        ),
+        ("VIBE_HOME".to_string(), home.path().display().to_string()),
+    ]);
+    let vibe = vibe_harness();
+    assert!(
+        vibe.capabilities()
+            .supports_policy(PermissionPolicy::Auto)
+            .is_some()
+    );
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn(
+            "Read alpha.txt, then append the line edited to it, then write the text hi into the file /tmp/l174/outside/x.txt.",
+        ))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    let asked = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+        .count();
+    assert_eq!(asked, 1, "{events:?}");
+    let blocked = events
+        .iter()
+        .filter(|e| {
+            matches!(e, AgentEvent::ToolCallResult { is_error: true, output, .. }
+                if output.starts_with("Smart approve blocked this action"))
+        })
+        .count();
+    assert_eq!(blocked, 2);
+    assert_eq!(
+        env_and_methods(&fake),
+        [
+            r#"env {"VIBE_DEFAULT_AGENT":"smart-approve","VIBE_SMART_APPROVE_AVAILABLE":"true"}"#,
+            "initialize",
+            "session/new",
+            "session/prompt",
+        ]
+    );
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
+        .collect();
+    assert_eq!(answers, ["allow_once"]);
+    shut_down(&mut handle).await;
+}
+
+/// A vibe session that does not offer smart-approve (vibe-acp 2.26.1
+/// outside the experiment's cohort lists ask, accept-edits and
+/// auto-approve, `fixtures/vibe_acp_close.jsonl`) refuses auto, and the
+/// turn fails rather than run in another mode; the TUI then takes the
+/// nearest less permissive policy, accept-edits, whose mode (`ask`) is set.
+#[tokio::test]
+async fn vibe_auto_without_smart_approve_is_refused() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_close.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Auto, true);
+    cfg.model = None;
+    let mut handle = vibe_acp_with_auto().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("write p.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(refused(&events, PermissionPolicy::Auto), "{events:?}");
+    let why = turn_error(&events).expect("the turn fails");
+    assert!(why.contains("does not offer mode 'smart-approve'"), "{why}");
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    handle
+        .send(SessionCommand::SetPolicy(PermissionPolicy::AcceptEdits))
+        .await
+        .unwrap();
+    let sent = fake.sent_lines_eventually(3).await;
+    assert_eq!(sent[2]["method"], "session/set_config_option");
+    assert_eq!(sent[2]["params"]["value"], "ask");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// vibe's mode map with auto (`vibe::mode_map`), on the generic harness.
+fn vibe_acp_with_auto() -> unharness::harness::acp::AcpHarness {
+    acp_with_modes(&[
+        (PermissionPolicy::Ask, "ask"),
+        (PermissionPolicy::Auto, "smart-approve"),
+        (PermissionPolicy::Bypass, "auto-approve"),
+    ])
+}
+
 /// vibe falls back to its default model for one it does not have, and
 /// resets a level the model does not offer, both without an error: the
 /// session's answer is compared with the choice.

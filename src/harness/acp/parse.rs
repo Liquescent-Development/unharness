@@ -1895,6 +1895,18 @@ mod tests {
         assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_provider");
     }
 
+    /// vibe-acp 2.26.1 in smart-approve, the mode behind `auto` (#174): a
+    /// call its classifier blocks fails with the reason as its content, the
+    /// same call repeated is asked about by id alone, and a write outside
+    /// the workspace that the classifier allowed runs unasked.
+    #[test]
+    fn fixture_vibe_acp_auto() {
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_auto");
+        let mut p = parser().declaring_effort(Some("thinking".into()));
+        assert_fixture(&mut p, &fixtures_dir(file!()), "vibe_acp_auto_outside");
+    }
+
     #[test]
     fn effort_is_read_from_thought_level() {
         let options = json!([

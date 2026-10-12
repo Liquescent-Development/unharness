@@ -160,7 +160,12 @@ pub fn auto_allows(policy: PermissionPolicy, kind: &str) -> bool {
     match policy {
         // Not declared for ACP agents; never sent one.
         PermissionPolicy::Plan | PermissionPolicy::Ask => false,
-        PermissionPolicy::AcceptEdits | PermissionPolicy::Auto => kind == "edit",
+        PermissionPolicy::AcceptEdits => kind == "edit",
+        // Declared only for an agent whose own mode backs it (vibe's
+        // smart-approve, #174): what it sends is what that mode's judgement
+        // escalated, an edit included (`fixtures/vibe_acp_auto.jsonl`), and
+        // goes to the user.
+        PermissionPolicy::Auto => false,
         PermissionPolicy::Bypass => true,
     }
 }
@@ -354,6 +359,7 @@ fn spawn_plan(spec: &AgentSpec, cfg: &SessionConfig) -> Option<SpawnPlan> {
     Some(build(&SpawnChoice {
         model: cfg.model.as_ref().map(|m| m.model.as_str()),
         effort: cfg.effort.as_deref(),
+        policy: cfg.policy,
         known: &known,
         env: &cfg.env,
         provider: cfg.provider.as_ref().map(|p| p.as_str()),
@@ -1446,6 +1452,9 @@ async fn drive(
                     }
                     SessionCommand::SetPolicy(p) => {
                         d.policy = p;
+                        // A process started again (a model or effort chosen
+                        // at spawn) is started for the policy in effect.
+                        d.cfg.policy = p;
                         d.apply_mode(&events).await
                     }
                     SessionCommand::Shutdown => {
@@ -1870,6 +1879,9 @@ mod tests {
         assert!(!auto_allows(Ask, "edit"));
         assert!(auto_allows(AcceptEdits, "edit"));
         assert!(!auto_allows(AcceptEdits, "execute"));
+        // What an agent's auto mode escalates is the user's to answer.
+        assert!(!auto_allows(Auto, "edit"));
+        assert!(!auto_allows(Auto, "execute"));
         assert!(auto_allows(Bypass, "execute"));
     }
 
