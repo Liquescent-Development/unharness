@@ -387,6 +387,7 @@ fn spawn_plan(spec: &AgentSpec, cfg: &SessionConfig) -> Option<SpawnPlan> {
         known: &known,
         env: &cfg.env,
         provider: cfg.provider.as_ref().map(|p| p.as_str()),
+        cwd: &cfg.cwd,
     }))
 }
 
@@ -645,11 +646,18 @@ impl Driver {
             return Ok(());
         };
         let policy = self.policy;
+        let own = self
+            .spawning
+            .plan
+            .as_ref()
+            .map(|p| p.own_modes.clone())
+            .unwrap_or_default();
         match mode_step(
             self.harness.as_str(),
             policy,
             &self.mode_map,
             &self.agent_modes,
+            &own,
         ) {
             ModeStep::Leave => {
                 self.mode = ModeState::Ready { held: None };

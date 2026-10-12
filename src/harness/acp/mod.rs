@@ -16,7 +16,7 @@ pub mod transport;
 
 use std::path::{Path, PathBuf};
 
-pub use modes::ModeMap;
+pub use modes::{ModeMap, OwnModes};
 pub use spawn::{KnownModels, ProviderModels, SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 
 use anyhow::{Result, bail};
