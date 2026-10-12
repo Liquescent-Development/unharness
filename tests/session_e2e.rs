@@ -3617,6 +3617,21 @@ fn headless_run(
     format: unharness::headless::Format,
     report_turn: bool,
 ) -> unharness::headless::Headless<Vec<u8>, Vec<u8>> {
+    headless_run_with(
+        fake,
+        format,
+        unharness::core::SubagentSupport {
+            report_turn,
+            ..Default::default()
+        },
+    )
+}
+
+fn headless_run_with(
+    fake: &Fake,
+    format: unharness::headless::Format,
+    subagents: unharness::core::SubagentSupport,
+) -> unharness::headless::Headless<Vec<u8>, Vec<u8>> {
     let rules =
         unharness::core::Rules::load_in(&fake._tmp.path().join("config"), Some(fake._tmp.path()))
             .unwrap();
@@ -3625,7 +3640,7 @@ fn headless_run(
         rules,
         fake._tmp.path().to_path_buf(),
         "fake",
-        report_turn,
+        subagents,
         Vec::new(),
         Vec::new(),
     );
@@ -3672,6 +3687,42 @@ async fn headless_denies_what_no_rule_allows_and_ends_with_the_turn() {
     assert_eq!(responses[0]["response"]["response"]["behavior"], "deny");
     // One prompt, and the session is shut down after it.
     assert_eq!(sent.iter().filter(|v| v["type"] == "user").count(), 1);
+}
+
+/// vibe-acp 2.26.1 tells a subagent's end only when the agent waits for
+/// it: a print run does not wait for one the agent left at work, and says
+/// so (#170).
+#[tokio::test]
+async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent_background.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let vibe = vibe_harness();
+    let handle = vibe.start_session(cfg).unwrap();
+    let mut run = headless_run_with(
+        &fake,
+        unharness::headless::Format::Json,
+        vibe.capabilities().subagents,
+    );
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "spawn pinger".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 0);
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "done");
+    assert_eq!(result["text"], "spawned");
+    let err = String::from_utf8_lossy(&run.err);
+    assert!(
+        err.contains("not waiting for 1 subagent(s): fake tells a subagent's end only when"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -4251,6 +4302,62 @@ async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
             .iter()
             .any(|v| v["params"]["configId"] == "model" || v["params"]["configId"] == "thinking")
     );
+    shut_down(&mut handle).await;
+}
+
+/// vibe-acp 2.26.1's subagents through the built-in harness under `ask`
+/// (#170): the spawn starts one, the child's write, asked about by an id
+/// no update named, reaches the user as a request no rule can know, and
+/// the wait's answer ends it with its report.
+#[tokio::test]
+async fn vibe_reports_a_subagent_and_asks_for_its_write() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_subagent.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = vibe_harness().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("use the scribe subagent"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    let spawn = "effect-f30db937-2271-52a4-9828-ce2c89567293";
+    let summaries: Vec<String> = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AgentEvent::SubagentStarted { .. }
+                    | AgentEvent::SubagentEnded { .. }
+                    | AgentEvent::PermissionRequest(_)
+            )
+        })
+        .map(|e| e.summary())
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            format!(r#"SubagentStarted id={spawn} kind=scribe "scribe""#),
+            "PermissionRequest id=0 ToolUse tool [opaque]".to_string(),
+            format!(
+                r#"SubagentEnded id={spawn} completed "Done. Created `note.txt` with the word \"hello\".""#
+            ),
+        ]
+    );
+    let answers: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
+        .collect();
+    assert_eq!(answers, ["allow_once"]);
     shut_down(&mut handle).await;
 }
 

@@ -100,6 +100,19 @@ The stdio servers in unharness's `[mcp_servers]` are handed to each vibe
 session. vibe 2.26.1 does not take http ones over ACP. A server's tools
 show as `mcp_<server>.<tool>` in vibe and are asked about under `ask`.
 
+## Subagents
+
+vibe's agent can start subagents: a generic one, or one of yours
+(`~/.vibe/agents/<name>.toml` with `agent_type = "subagent"`). Each is
+listed under the prompt from the moment it starts. vibe tells unharness
+that one has ended, and its report, only when the agent waits for it: one
+the agent does not wait for stays listed as at work until the session
+ends, even once it has finished. Its own tool calls are not shown (vibe
+does not send them), and it cannot be stopped from unharness. Under `ask`
+a subagent's writes and commands are asked about like the agent's own, but
+vibe does not say what they are, so no allow rule answers them.
+`unharness --print` does not wait for vibe's subagents.
+
 ## What vibe may write
 
 With the sandbox on, vibe can write to the project and to its home,
@@ -157,6 +170,7 @@ vibe's and your decision. `--format` takes `text`, `json` and
 
 - macOS.
 - vibe's plan mode, and its `smart-approve` mode for `auto`.
+- A subagent given more work, or stopped, by vibe's agent.
 - A key in the OS keyring, and providers other than Mistral's.
 - Plugins: none were installed, so whether vibe updates them by itself (a
   change unharness would report) is not known.

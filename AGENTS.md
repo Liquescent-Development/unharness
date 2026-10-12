@@ -741,9 +741,10 @@ recorded ones. For anything else:
   reached only from the app server's `session/relocate`. Without the
   flag a relative diff path is now unknown for every agent, also with no
   `locations`. `_meta.tool_name` (`file_system.write_file`,
-  `search_tool_functions`, `mcp_tiny.shout`) is not read: as the name it
+  `search_tool_functions`, `mcp_tiny.shout`) is not read as the name: it
   would replace the kind the TUI, the bridge and the rules read, and
-  would make an `other` call `Other` instead of `Opaque`. Fixtures:
+  would make an `other` call `Other` instead of `Opaque` (the subagents
+  below read it only to find `subagent.*` calls). Fixtures:
   `vibe_acp_allow_deny` (a write allowed, a command denied, which vibe
   reports as failed, "Tool execution denied by approval callback"; also
   through `VibeHarness` in an e2e test), `vibe_acp_mcp`, `vibe_acp_cancel`
@@ -865,6 +866,50 @@ recorded ones. For anything else:
   only), `--resume` with a `vibe-acp` session's id, a prompt on stdin
   (only that `--prompt=` with nothing there exits 1, "No prompt
   provided"), vibe's trust prompt, macOS.
+  Subagents (#170, `vibe/subagents.rs`, an `acp::parse::MetaReader` the
+  vibe harness gives the ACP parser, since only vibe's own `_meta` says
+  what such a call is): under vibe 2.26.1's Unified runtime the model
+  spawns a generic child or a custom one (`agents/<name>.toml` with
+  `agent_type = "subagent"`; the built-in `explore` is not offered) with
+  its runtime's `subagent.spawn`, which vibe sends as one call (kind
+  `think`, title `Starting <name>`, `_meta.tool_name`, `agent`, `task`)
+  completed with `_meta.child_session_id`. That completion is
+  `SubagentStarted`, its id the spawning call's as for every harness, its
+  description the name, its kind the profile, and the task goes in its
+  own transcript; a second spawn of a name, completed without a child, is
+  only a call. The child runs in the background. Its end comes only as
+  the answer of a `subagent.wait` for its `agentName`
+  (`rawOutput.structured_content`, `type: "success"`, the report in
+  `value`), which is `SubagentEnded`; a wait that failed ("client
+  interrupt", recorded; a timeout or a child's failed turn, read in
+  `_subagents/_controller.py`) ends nothing. Otherwise vibe puts a
+  child's answer into the parent model's input
+  (`_subagents/_notifications.py`) and the client hears nothing, so a
+  row the agent did not wait for stays at work until the session ends,
+  saying that its end shows only when the agent waits for it. A child's
+  own tool calls are never sent. Its permission requests are, on the
+  parent's session, id-only for a call no update named
+  (`vibe/acp/agent.py:879-887`): a bare `tool` asked about as `Opaque`
+  under every policy but bypass (`fixtures/vibe_acp_subagent.jsonl`, also
+  through `VibeHarness` in an e2e test), whose call is never finished
+  and stays running in the transcript. Nothing stops a child from here:
+  ACP has no method for it, `session/cancel` while the parent waited
+  failed the wait and the child ran on and answered (a discovery
+  recording, not committed), and only the model can (`subagent.stop`,
+  `.interrupt`); so no `stop`. `--print` cannot wait for an end that may
+  never be sent: `SubagentSupport::unreported_ends` ends the run with the
+  turn and says how many subagents it did not wait for, and the session,
+  vibe's children with it, goes with the run
+  (`fixtures/vibe_acp_subagent_background.jsonl`, an e2e test; live, the
+  child answered into the parent's turn and still no end came). Checked
+  in the TUI (tmux, Landlock, a scratch `VIBE_HOME` with a `scribe`
+  profile): the row came with the spawn, the child's write was asked
+  about as `tool` and allowed, the row completed with the report, its
+  transcript showed the task and the report, and `/quit` left no
+  `vibe-acp`. Unverified: `subagent.send_message` (a new report would
+  show as a second end), `.stop` and `.interrupt` by the model (the row
+  stays at work), nested subagents, a child at `session/close` or
+  process exit, a custom subagent from a trusted project, macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

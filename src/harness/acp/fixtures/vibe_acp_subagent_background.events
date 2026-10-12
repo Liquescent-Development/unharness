@@ -1,0 +1,21 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=cee605de-6558-8207-fd85-515f91e21bb5 model=glm-5-3
+CapabilitiesChanged efforts=off,low,medium,high,max plan_mode=false models=2
+CapabilitiesChanged efforts=off,low,medium,high,max models=2
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=0 window=800000
+Context used=0 window=800000
+Context used=0 window=800000
+Context used=0 window=800000
+ToolCallStarted id=effect-68e8e3a0-6f66-5d6d-bcf8-de9de815a615 name=think input={"agent":"generic","task":"Reply with the single word pon...
+SubagentStarted id=effect-68e8e3a0-6f66-5d6d-bcf8-de9de815a615 kind=generic "pinger"
+SubagentProgress id=effect-68e8e3a0-6f66-5d6d-bcf8-de9de815a615 "its end shows only when the agent waits for it"
+Sub parent=effect-68e8e3a0-6f66-5d6d-bcf8-de9de815a615 Notice "task: Reply with the single word pong."
+ToolCallResult id=effect-68e8e3a0-6f66-5d6d-bcf8-de9de815a615 error=false "Started pinger"
+TextDelta "spawned"
+Context used=0 window=800000
+Context used=8709 window=800000
+Context used=8709 window=800000
+Usage in=8705 out=4 cache_read=0 cache_write=0 cost=0.0122 cumulative=false
+TurnCompleted Done

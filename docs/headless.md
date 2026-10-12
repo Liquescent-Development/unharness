@@ -17,7 +17,9 @@ The run ends when the answer is complete: the turn is over, and every
 subagent the agent started has ended. Claude Code reports each
 background subagent that finishes in a turn of its own, after the turn
 it was started in; the run waits for those turns too. While it waits,
-unharness says so on stderr.
+unharness says so on stderr. Mistral Vibe tells a subagent's end only when
+its agent waits for it, so a vibe run ends with the turn, and says how many
+subagents it did not wait for.
 
 ## Permissions
 

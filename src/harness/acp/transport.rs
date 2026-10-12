@@ -305,6 +305,9 @@ pub struct AgentSpec {
     /// A relative path in an edit's `diff` is in the session's directory
     /// (`AcpHarness::resolving_relative_edits`).
     pub relative_edits: bool,
+    /// Reads what the agent says in fields of its own
+    /// (`AcpHarness::reading_meta_with`).
+    pub meta_reader: Option<super::parse::MetaReaderFactory>,
 }
 
 /// The agent's command line, in `cfg.cwd`, with `extra` in its environment.
@@ -355,7 +358,8 @@ pub fn start(
     slot.set(&proc);
     let parser = AcpParser::new(harness)
         .declaring_effort(spec.effort_option.clone())
-        .resolving_relative_edits(spec.relative_edits.then(|| cfg.cwd.clone()));
+        .resolving_relative_edits(spec.relative_edits.then(|| cfg.cwd.clone()))
+        .reading_meta(spec.meta_reader.map(|make| make()));
     tokio::spawn(drive(
         harness,
         proc,
