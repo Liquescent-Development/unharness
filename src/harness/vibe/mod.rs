@@ -545,13 +545,18 @@ enum KeyAt {
 /// Whether `MISTRAL_API_KEY` has a value in `env_value` (unharness's own
 /// environment, which vibe inherits) or in `<home>/.env`. Presence only:
 /// the value is never kept, copied or shown. `.env` is read only when it
-/// is a regular file (vibe also reads a FIFO, which could block), and only
-/// its first 64 KiB.
+/// is a regular file (vibe also reads a FIFO, which is neither opened nor
+/// read: opening one would serve whatever writes it), and only its first
+/// 64 KiB.
 fn api_key_at(env_value: Option<&std::ffi::OsStr>, home: &Path) -> Option<KeyAt> {
     if env_value.is_some_and(|v| !v.is_empty()) {
         return Some(KeyAt::Environment);
     }
-    let file = crate::sync::open_regular(&home.join(".env"), true).ok()?;
+    let path = home.join(".env");
+    if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let file = crate::sync::open_regular(&path, true).ok()?;
     let bytes = crate::sync::read_at_most(&file, ENV_FILE_LIMIT).ok()?;
     let environ = process_env().into_iter().collect();
     dotenv_has_value(&String::from_utf8_lossy(&bytes), API_KEY_VAR, &environ)
@@ -2115,8 +2120,9 @@ provider = "mine"
     #[test]
     fn a_fifo_for_dotenv_is_not_waited_on() {
         let home = tempfile::tempdir().unwrap();
-        crate::sync::testing::mkfifo(&home.path().join(".env"));
-        assert_eq!(api_key_at(None, home.path()), None);
+        dotenv::assert_fifo_unopened(&home.path().join(".env"), || {
+            assert_eq!(api_key_at(None, home.path()), None);
+        });
     }
 
     #[test]

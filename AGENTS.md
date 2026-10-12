@@ -1127,11 +1127,13 @@ recorded ones. For anything else:
   `VIBE_TOOLS__<NAME>__…` in the environment or in `$VIBE_HOME/.env` name
   (#212: vibe-acp loads `.env` into its environment before any
   configuration layer, `load_dotenv_values`, so unharness parses it as
-  python-dotenv 1.2.2 does, `${VAR}` expanded, and takes those variables
+  python-dotenv 1.2.2 does, `${VAR}` expanded in linear time, and takes those variables
   alone from it, each that is not empty and whose key the environment
   does not give a value that is not empty; parser checked against
-  python-dotenv's own output, not a live vibe), `never` kept where any
-  of them says it; bash gets vibe 2.26.1's default allowlist
+  python-dotenv's own output, not a live vibe; looked at before it is
+  opened: neither a file nor a FIFO is no `.env`, as for vibe, and a FIFO
+  is refused unopened, since opening a 1Password local env file has it
+  serve its content), `never` kept where any of them says it; bash gets vibe 2.26.1's default allowlist
   (`_get_default_allowlist`, `builtins/bash.py`) without `git status`
   (which rewrites `.git/index`), written into the file with that comment.
   An entry runs a part unasked only when vibe's guardrails pass: no

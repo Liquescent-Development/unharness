@@ -306,18 +306,39 @@ pub fn read_tool_keys(
 /// configuration layer is read (`load_dotenv_values` in
 /// `vibe/core/config/vibe_schema.py`, from `acp/entrypoint.py`), parsed as
 /// python-dotenv does ([`super::dotenv`]), each value that is not empty
-/// for a key the process's environment (`inherited` with the session's
-/// `env` over it) does not give a value that is not empty. The file holds
-/// the API key: only those variables are taken from it, and no other
-/// value is kept or shown. Read as a config file is: one that is there and
-/// is not a regular UTF-8 file of at most 1 MiB is an error (vibe also
-/// reads a FIFO, which could block here).
+/// for a key the process's environment (`inherited` with `env`, what
+/// unharness and the session set, over it) does not give a value that is
+/// not empty. The file holds the API key: only those variables are taken
+/// from it, and no other value is kept or shown.
+///
+/// Looked at before it is opened, as vibe does: what is neither a file
+/// nor a FIFO, or cannot be looked at, vibe skips, and so does this. A
+/// FIFO (1Password's local env files are one) is refused without being
+/// opened: opening it would have it serve its content, which vibe then
+/// would not get. A file is read as a config file is: one that is not
+/// UTF-8 or is over 1 MiB is an error.
 fn dotenv_tool_vars(
     home: &Path,
     inherited: &[(String, String)],
     env: &[(String, String)],
 ) -> Result<Vec<(String, String)>> {
-    let Some(text) = read_config(&home.join(".env"))? else {
+    let path = home.join(".env");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(Vec::new());
+    };
+    #[cfg(unix)]
+    if std::os::unix::fs::FileTypeExt::is_fifo(&meta.file_type()) {
+        bail!(
+            "{} is a FIFO (as a 1Password local env file is); unharness cannot read the \
+             VIBE_TOOLS settings vibe takes from it without taking its content, so ask and \
+             accept-edits are refused; use auto or bypass, or make it a regular file",
+            path.display()
+        );
+    }
+    if !meta.is_file() {
+        return Ok(Vec::new());
+    }
+    let Some(text) = read_config(&path)? else {
         return Ok(Vec::new());
     };
     let environ: std::collections::HashMap<String, String> =
@@ -994,10 +1015,29 @@ mod tests {
             "{err}"
         );
         std::fs::remove_file(&dotenv).unwrap();
+        // A FIFO is refused, saying what to do, and never opened.
         #[cfg(unix)]
-        {
-            crate::sync::testing::mkfifo(&dotenv);
-            assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
+        super::super::dotenv::assert_fifo_unopened(&dotenv, || {
+            let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+            assert!(
+                err.contains("is a FIFO") && err.contains("use auto or bypass"),
+                "{err}"
+            );
+        });
+        // What is neither a file nor a FIFO vibe skips, and so is it here.
+        std::fs::create_dir(&dotenv).unwrap();
+        assert_eq!(
+            read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+            ToolKeys::default()
+        );
+        std::fs::remove_dir(&dotenv).unwrap();
+        #[cfg(unix)]
+        for target in [Path::new("/dev/null"), &home.join(".env")] {
+            std::os::unix::fs::symlink(target, &dotenv).unwrap();
+            assert_eq!(
+                read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+                ToolKeys::default()
+            );
             std::fs::remove_file(&dotenv).unwrap();
         }
         assert_eq!(

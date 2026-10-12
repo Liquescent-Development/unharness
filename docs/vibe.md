@@ -101,13 +101,19 @@ vibe applies above all of those:
 - Each turns `bypass_tool_permissions` off and makes `write_file`, `edit`,
   the shells and every other tool your `config.toml`, the project's
   `.vibe/config.toml` or a `VIBE_TOOLS` variable, in the environment or in
-  `~/.vibe/.env`, names ask (a tool you set to `never` stays off). From
-  `.env`, which holds your key, unharness takes those variables alone, and
-  only where the environment does not set them, as vibe does; nothing of
-  it is copied or shown. A `config.toml` or `.env` that unharness cannot
-  read (not a regular file, as a 1Password FIFO is not, or not valid)
-  refuses `ask` and `accept-edits` with the reason. `unharness-accept-edits` lets `write_file` and
-  `edit` run in the session's directory.
+  `~/.vibe/.env`, names ask (a tool you set to `never` stays off).
+  `unharness-accept-edits` lets `write_file` and `edit` run in the
+  session's directory.
+- From `.env`, which holds your key, unharness takes those variables
+  alone, and only where the environment does not set them to a value that
+  is not empty, as vibe does; nothing of it is copied or shown. A
+  `config.toml` or `.env` that unharness cannot read (not UTF-8, over
+  1 MiB, not valid)
+  refuses `ask` and `accept-edits` with the reason, and so does a `.env`
+  that is a FIFO, as a 1Password local env file is: unharness does not
+  open it, since that would take what it serves. Use `auto` or `bypass`
+  there, or make `.env` a regular file. A `.env` that is neither a file
+  nor a FIFO vibe skips, and so does unharness.
 - Read-only commands still run without asking: the profile lists vibe
   2.26.1's own read-only commands (`ls`, `cat`, `grep`, `git diff`, …,
   without `git status`, which rewrites `.git/index`), and vibe still asks

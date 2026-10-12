@@ -344,6 +344,31 @@ pub fn loaded(text: &str, environ: &HashMap<String, String>) -> Vec<(String, Str
         .collect()
 }
 
+/// Runs `during` with a FIFO at `path` that a writer waits on, and checks
+/// that nothing opened it meanwhile: opening it for reading would have let
+/// the writer's open finish.
+#[cfg(all(test, unix))]
+pub(crate) fn assert_fifo_unopened(path: &std::path::Path, during: impl FnOnce()) {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::time::Duration;
+    crate::sync::testing::mkfifo(path);
+    let at = path.to_path_buf();
+    let writer =
+        std::thread::spawn(move || std::fs::OpenOptions::new().write(true).open(at).map(drop));
+    std::thread::sleep(Duration::from_millis(50));
+    during();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!writer.is_finished(), "{} was opened", path.display());
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .unwrap();
+    writer.join().unwrap().unwrap();
+    drop(reader);
+    std::fs::remove_file(path).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
