@@ -367,6 +367,12 @@ impl<O: Write, E: Write> Headless<O, E> {
                 let line = format!("{}: {n}", self.name);
                 self.note(&line);
             }
+            // A print run resumes nothing, so this is not expected; said
+            // as a notice should a harness send it.
+            AgentEvent::SessionReplaced { reason } if self.format != Format::StreamJson => {
+                let line = format!("{}: {reason}; a new session runs instead", self.name);
+                self.note(&line);
+            }
             AgentEvent::Error(e) if self.format != Format::StreamJson => {
                 let line = format!("{} {}: {e}", "[unharness]".red().bold(), self.name);
                 self.err_line(line);
@@ -929,6 +935,10 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             }
         },
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
+        AgentEvent::SessionReplaced { reason } => json!({
+            "type": "notice",
+            "message": format!("{reason}; a new session runs instead"),
+        }),
         AgentEvent::Error(e) => json!({"type": "error", "message": e}),
         AgentEvent::ProcessExited { code } => json!({"type": "process_exited", "code": code}),
     }

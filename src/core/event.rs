@@ -13,6 +13,14 @@ pub enum AgentEvent {
         session_id: String,
         model: Option<String>,
     },
+    /// The session the harness was to resume or fork could not be, and the
+    /// one it runs instead knows nothing of the conversation: what the old
+    /// one was told is owed to it. `reason` says what failed. Comes before
+    /// or after that session's `SessionStarted`, which may name the id the
+    /// old one had (pi creates a missing session under the id it is given).
+    SessionReplaced {
+        reason: String,
+    },
     TurnStarted,
     TextDelta(String),
     ThinkingDelta(String),
@@ -513,6 +521,9 @@ impl AgentEvent {
                 session_id,
                 model.as_deref().unwrap_or("-")
             ),
+            AgentEvent::SessionReplaced { reason } => {
+                format!("SessionReplaced {:?}", short(reason))
+            }
             AgentEvent::TurnStarted => "TurnStarted".to_string(),
             AgentEvent::TextDelta(t) => format!("TextDelta {:?}", short(t)),
             AgentEvent::ThinkingDelta(t) => format!("ThinkingDelta {:?}", short(t)),

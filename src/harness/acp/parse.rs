@@ -1065,6 +1065,19 @@ mod tests {
         assert!(!can_close(&json!({"sessionCapabilities": {}})));
     }
 
+    /// vibe-acp 2.26.1 answers `session/load` and `session/fork` of a
+    /// session it does not have with -32602 "Session not found" (an error
+    /// here; the driver takes the answer before the parser sees it and
+    /// reports `SessionReplaced`); the new session the driver starts in
+    /// its place reports as any other.
+    #[test]
+    fn fixture_vibe_acp_missing_session() {
+        let dir = fixtures_dir(file!());
+        for case in ["vibe_acp_load_missing", "vibe_acp_fork_missing"] {
+            assert_fixture(&mut parser(), &dir, case);
+        }
+    }
+
     /// The questions of every request in a fixture, with the tool call
     /// each is tied to.
     fn asked_questions(case: &str) -> Vec<(Option<String>, Vec<crate::core::Question>)> {

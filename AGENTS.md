@@ -525,9 +525,7 @@ recorded ones. For anything else:
   source's turn, and a vibe fork's cost started at zero. The source is
   sent nothing but the reattach, and is left open in the agent (vibe)
   until the process ends; only the fork is closed. An agent that cannot
-  fork, or whose fork fails twice, gets a new session with a notice that
-  it does not know the conversation (the TUI still takes it as the
-  branch, so nothing is bridged; the same holds for a resume that fails).
+  fork, or whose fork fails twice, gets a new session (below).
   The fork is of the whole session, which is what `/fork` copies, so
   there is no fork at an earlier point: `/rewind` on an ACP agent starts
   it fresh with the transcript up to there, and the agents' own fork
@@ -543,6 +541,29 @@ recorded ones. For anything else:
   names), an agent that forks with neither resume nor load, the fork of a
   session that is open in the same process (the TUI always forks in a new
   one), and whether vibe's `session/load` of the source writes to it.
+  Sessions in place of one not resumed or forked (#187,
+  `Driver::replaced`): where the driver sends `session/new` because the
+  session it was given could not be reattached or forked (the agent
+  cannot, `session/resume` or `load` answers an error, the fork fails
+  twice or its source cannot be reattached), it reports
+  `AgentEvent::SessionReplaced` with the reason before the new session's
+  `SessionStarted`, and forgets `resume` and `fork`, so that a process
+  started again for its spawn plan does not try them again; an
+  auth-required answer starts none (#162). vibe-acp 2.26.1 answers
+  `session/load` and `session/fork` of a session it does not have with
+  -32602 "Session not found" (`record-acp.py --fallback-new`,
+  `fixtures/vibe_acp_{load,fork}_missing.jsonl`). The TUI
+  (`App::session_replaced`) takes the new session as one started for a
+  harness switched to (see Bridging). Checked in the TUI (tmux, Landlock,
+  scratch `VIBE_HOME`, built-in vibe, `--policy ask`): a turn given a code
+  word, `/quit`, the session's directory removed from
+  `logs/session/unified/`, then `--resume`: the notice named "Session not
+  found", the next prompt carried the bridge (read back from the new
+  session's journal) and was answered with the code word, and the saved
+  conversation named the new session. Unverified: what codex-acp and
+  claude-agent-acp answer for a session they do not have, and a fork whose
+  source loads but whose second fork fails (the same path, not
+  recorded).
   Sign-in (#162, `auth.rs`): unharness never sends `authenticate` and runs
   no sign-in; an answer with the spec's auth-required error (-32000) to
   `session/new`, `load`, `resume`, `fork` (also the reattach before a
@@ -1324,6 +1345,28 @@ recorded ones. For anything else:
   between 8,000 and 2,000,000 tokens. Unverified: a
   summary turn on pi, agy or an ACP agent, and one in which the agent
   asks for a tool anyway.
+  A session that a harness runs in place of one it could not resume or
+  fork (`AgentEvent::SessionReplaced`, #187) is bridged as a new one:
+  before anything went to it the old id is forgotten (the new one is
+  committed with the first prompt, which carries the bridge); after a
+  prompt went with its start (resumed by that prompt, so without the
+  conversation) the next prompt bridges from the start, the last turn
+  included. Rewind anchors and a pending fork of the harness go. A
+  handoff summary asked of such a session is not used: the switch goes
+  on without one, and the session left is forgotten. Sent by the ACP
+  driver (above) and by pi's parser: pi 1.1.0 given a `--session-id` it
+  has no session for warns on stderr and creates an empty one under that
+  id, so a resumed session whose first `get_fork_messages` lists no user
+  message is one (`fixtures/resume_missing.jsonl`, `record-pi.py
+  --resume`; `--fork` of a missing session exits 1). The others fail
+  instead of starting fresh, so they report nothing: Claude Code 2.1.296
+  `--resume` of an unknown id ("No conversation found with session ID",
+  exit 1) and Codex 0.157.0 `exec resume` ("thread/resume failed: no
+  rollout found", exit 1; the app-server driver fails the turn on a
+  `thread/resume` error). Such a resume is tried again with the next
+  prompt (read in the TUI, not run). Unverified: agy's `--conversation` of a missing conversation
+  (a per-turn harness reporting another id than the one resumed is not
+  taken as a replacement).
 - Claude's `total_cost_usd` is a running total per process, and an ACP
   `usage_update.cost` is a running total per session; both parsers report the
   per-turn difference.

@@ -941,15 +941,25 @@ impl Driver {
         self.signed_out = true;
     }
 
-    /// The source could not be forked: a new session, which knows nothing
-    /// of the conversation, rather than the source itself.
+    /// The source could not be forked: a new session rather than the
+    /// source itself, reported as one (`replaced`).
     async fn fork_failed(&mut self, why: &str, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+        self.replaced(format!("could not fork the session ({why})"), events)
+            .await
+    }
+
+    /// The session could not be resumed or forked: a new one, which knows
+    /// nothing of the conversation, is started in its place, and the TUI
+    /// is told so (`SessionReplaced`), so that it sends the conversation
+    /// with the next prompt as it does to any new session. An agent not
+    /// signed in gets none (`not_signed_in`).
+    async fn replaced(&mut self, reason: String, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
         self.parser.set_replaying(false);
-        let _ = events
-            .send(AgentEvent::Notice(format!(
-                "could not fork the session ({why}); starting a new one, which does not know this conversation"
-            )))
-            .await;
+        // Nothing is resumed from here on, also by a process started again
+        // for its spawn plan (`restart_with`).
+        self.cfg.resume = None;
+        self.cfg.fork = false;
+        let _ = events.send(AgentEvent::SessionReplaced { reason }).await;
         self.new_session().await
     }
 
@@ -1319,12 +1329,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         // never reattached and written to.
                         Some(id) if d.cfg.fork && can_fork(caps) => d.fork(&id, false).await?,
                         Some(_) if d.cfg.fork => {
-                            let _ = events
-                                .send(AgentEvent::Notice(
-                                    "this agent cannot fork sessions; starting a new one, which does not know this conversation".into(),
-                                ))
-                                .await;
-                            d.new_session().await?;
+                            d.replaced("this agent cannot fork sessions".into(), events)
+                                .await?;
                         }
                         Some(id) if can_resume(caps) || can_load(caps) => {
                             // `resume` reattaches silently; `load` replays the
@@ -1342,12 +1348,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                                 .await?;
                         }
                         Some(_) => {
-                            let _ = events
-                                .send(AgentEvent::Notice(
-                                    "this agent cannot resume sessions; starting a new one".into(),
-                                ))
-                                .await;
-                            d.new_session().await?;
+                            d.replaced("this agent cannot resume sessions".into(), events)
+                                .await?;
                         }
                         None => d.new_session().await?,
                     }
@@ -1371,14 +1373,8 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                     return d.fork_failed(&error_text(e), events).await;
                 }
                 (Some(Outstanding::Session { reattach: true }), Some(e)) => {
-                    d.parser.set_replaying(false);
-                    let _ = events
-                        .send(AgentEvent::Notice(format!(
-                            "could not resume the session ({}); starting a new one",
-                            error_text(e)
-                        )))
-                        .await;
-                    return d.new_session().await;
+                    let reason = format!("could not resume the session ({})", error_text(e));
+                    return d.replaced(reason, events).await;
                 }
                 // Without a session nothing can run: fail the waiting turn.
                 (Some(Outstanding::Initialize | Outstanding::Session { .. }), Some(e)) => {

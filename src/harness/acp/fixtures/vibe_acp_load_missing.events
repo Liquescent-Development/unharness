@@ -1,0 +1,20 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Error "Session not found: 3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f60"
+Context used=0 window=209715
+SessionStarted id=4b47571d-ea77-0161-9bf3-0f91f0369bbf model=mistral-medium-3.5
+CapabilitiesChanged efforts= plan_mode=false models=1
+CapabilitiesChanged efforts= models=1
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=0 window=209715
+ThinkingDelta "The user wants me"
+Context used=0 window=209715
+ThinkingDelta " to reply with the"
+ThinkingDelta " single word \"pong\". This is a simple, direct request. I ..."
+ThinkingDelta " \"pong\" without any additional text,"
+ThinkingDelta " formatting, or explanation."
+TextDelta "pong"
+Context used=0 window=209715
+Context used=8624 window=209715
+Context used=8624 window=209715
+Usage in=8579 out=45 cache_read=0 cache_write=0 cost=0.0132 cumulative=false
+TurnCompleted Done

@@ -91,7 +91,11 @@ briefly first (the files they edited, the calls that failed, the final
 answer; then a few lines), and only then are turns left out, from the
 middle: the first prompt and the newest turn are always kept. Returning
 to a harness resumes its own session and bridges only what happened
-since.
+since. A harness that cannot resume or fork its session (an ACP agent
+that no longer has it or cannot fork, a pi session whose file is gone)
+starts a new one, says so, and is told the conversation with your next
+prompt, as a harness switched to is; the conversation then keeps the
+new session.
 
 When the conversation will not fit, the harness you are leaving is first
 asked for a handoff summary (one more turn, shown as "handoff summary

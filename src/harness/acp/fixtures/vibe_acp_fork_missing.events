@@ -1,0 +1,15 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Error "Session not found: 3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f61"
+Error "Session not found: 3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f61"
+Context used=0 window=800000
+SessionStarted id=2cda0472-ef5b-7b86-2b00-1694a93b61b2 model=glm-5-3
+CapabilitiesChanged efforts= plan_mode=false models=2
+CapabilitiesChanged efforts= models=2
+CapabilitiesChanged commands=15 slash_commands=true
+Context used=0 window=800000
+TextDelta "pong"
+Context used=0 window=800000
+Context used=8319 window=800000
+Context used=8319 window=800000
+Usage in=8316 out=3 cache_read=0 cache_write=0 cost=0.0117 cumulative=false
+TurnCompleted Done

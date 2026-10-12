@@ -3,6 +3,12 @@
 record-claude.py: `>>` sent lines, `!!` stderr, plain = stdout).
 
 Usage: scripts/record-pi.py OUT.jsonl [--provider P --model M] [--no-models] PROMPT [PROMPT...]
+       scripts/record-pi.py OUT.jsonl --resume ID [--no-models] [PROMPT...]
+
+With `--resume ID` pi is started on that stored session as unharness
+resumes one (`--session-id`, the session saved), and the session's user
+messages are listed (`get_fork_messages`) before the first prompt, as the
+driver does; the prompts may then be left out.
 
 With `--extension src/harness/pi/gate.ts --select Allow --select Deny` the
 gate's dialogs are answered in that order (the last answer repeats);
@@ -34,7 +40,7 @@ def redact(line: str, cwd: str) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("prompts", nargs="+")
+    ap.add_argument("prompts", nargs="*")
     ap.add_argument("--provider")
     ap.add_argument("--model")
     ap.add_argument("--thinking")
@@ -64,10 +70,19 @@ def main() -> int:
                     help="send abort instead of answering the first select dialog")
     ap.add_argument("--session-id",
                     help="pass --session-id as unharness does (a pi before 0.76.0 refuses it)")
+    ap.add_argument("--resume", metavar="ID",
+                    help="resume this stored session as the driver does (see above)")
     args = ap.parse_args()
+    if not args.prompts and not args.resume:
+        ap.error("a PROMPT is needed (only --resume runs without one)")
+    if args.resume and (args.session_id or args.image):
+        ap.error("--resume takes neither --session-id nor --image")
 
     cwd = os.getcwd()
-    cmd = ["pi", "--mode", "rpc", "--no-session"]
+    if args.resume:
+        cmd = ["pi", "--mode", "rpc", "--session-id", args.resume]
+    else:
+        cmd = ["pi", "--mode", "rpc", "--no-session"]
     if args.session_id:
         cmd += ["--session-id", args.session_id]
     if args.provider:
@@ -129,7 +144,12 @@ def main() -> int:
         send({"id": next_id(), "type": "get_available_thinking_levels"})
 
     prompts = list(args.prompts)
-    first = {"id": next_id(), "type": "prompt", "message": prompts.pop(0)}
+    if args.resume:
+        # The prompts follow the listing (below).
+        send({"id": next_id(), "type": "get_fork_messages"})
+        first = None
+    else:
+        first = {"id": next_id(), "type": "prompt", "message": prompts.pop(0)}
     if args.image:
         import base64
         import mimetypes
@@ -140,7 +160,8 @@ def main() -> int:
             "data": data,
             "mimeType": mimetypes.guess_type(args.image)[0] or "image/png",
         }]
-    send(first)
+    if first:
+        send(first)
 
     steered = False
     aborted = False
