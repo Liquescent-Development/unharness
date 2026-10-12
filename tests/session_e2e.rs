@@ -4641,3 +4641,189 @@ async fn vibe_asks_before_a_write_and_a_command() {
     assert_eq!(answers, ["allow_once", "reject_once"]);
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
+
+/// The fake ACP agent as vibe-acp, which rewinds with its `_rewind/to`.
+fn vibe_rewinding(fake: &Fake, fixture: &Path) -> SessionHandle {
+    let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    acp_harness()
+        .rewinding_with(unharness::harness::vibe::REWIND_METHOD)
+        .start_session(cfg)
+        .unwrap()
+}
+
+fn turn_anchors(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TurnAnchor { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// vibe-acp 2.26.1: each turn's anchor is the `messageId` it echoed the
+/// prompt with, and a rewind to the second one goes as `_rewind/to` with
+/// `restoreFiles: false` (files are unharness's), before the next turn,
+/// which then knows only the first turn's code word.
+#[tokio::test]
+async fn acp_vibe_rewinds_through_its_extension() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_rewind.jsonl");
+    let mut handle = vibe_rewinding(&fake, &fixture);
+
+    handle.send(SessionCommand::turn("alpha")).await.unwrap();
+    let first = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        turn_anchors(&first),
+        ["0b774d1b-00a0-4a1f-b468-92bad5480550"]
+    );
+    handle.send(SessionCommand::turn("beta")).await.unwrap();
+    let second = run_turn(&mut handle, |_| None).await;
+    let anchor = turn_anchors(&second);
+    assert_eq!(anchor, ["f0539b32-76a6-4bb8-976b-af5b729addcd"]);
+
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchor[0].clone(),
+        })
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("which code words?"))
+        .await
+        .unwrap();
+    let third = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !third
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RewindFailed { .. } | AgentEvent::Error(_))),
+        "{third:?}"
+    );
+    assert_eq!(
+        turn_anchors(&third),
+        ["29e7094a-5c47-4bec-8f20-7ae5dccb1d56"]
+    );
+    assert!(
+        third
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "PINEAPPLE"))
+    );
+    shut_down(&mut handle).await;
+
+    let sent = fake.sent_lines();
+    let methods: Vec<&str> = sent.iter().filter_map(|v| v["method"].as_str()).collect();
+    assert_eq!(
+        methods[..6],
+        [
+            "initialize",
+            "session/new",
+            "session/prompt",
+            "session/prompt",
+            "_rewind/to",
+            "session/prompt"
+        ]
+    );
+    assert_eq!(
+        sent[4]["params"],
+        serde_json::json!({
+            "sessionId": "e87bcb64-c3ef-212a-cc8a-efefd9580b99",
+            "messageId": "f0539b32-76a6-4bb8-976b-af5b729addcd",
+            "restoreFiles": false,
+        })
+    );
+}
+
+/// A rewind vibe refuses (an id it never gave: -32602) is `RewindFailed`
+/// with its reason, and the turn after it still goes; a rewind to the
+/// first message empties the session.
+#[tokio::test]
+async fn acp_vibe_rewind_refused_is_reported() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_rewind_first.jsonl");
+    let mut handle = vibe_rewinding(&fake, &fixture);
+
+    handle.send(SessionCommand::turn("kiwi")).await.unwrap();
+    let first = run_turn(&mut handle, |_| None).await;
+    let anchor = turn_anchors(&first);
+    assert_eq!(anchor, ["f0304197-cf76-4a4f-a15f-c2aae9798282"]);
+
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: "no-such-message".into(),
+        })
+        .await
+        .unwrap();
+    let failed = next_event(&mut handle).await;
+    assert!(
+        matches!(&failed, AgentEvent::RewindFailed { reason }
+            if reason.contains("Rewindable history entry not found")),
+        "{failed:?}"
+    );
+    handle
+        .send(SessionCommand::Rewind {
+            anchor: anchor[0].clone(),
+        })
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("which code words?"))
+        .await
+        .unwrap();
+    let second = run_turn(&mut handle, |_| None).await;
+    assert!(
+        !second
+            .iter()
+            .any(|e| matches!(e, AgentEvent::RewindFailed { .. } | AgentEvent::Error(_))),
+        "{second:?}"
+    );
+    assert!(
+        second
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "NONE"))
+    );
+    shut_down(&mut handle).await;
+}
+
+/// One anchor goes for every turn, empty for one whose message the agent
+/// did not echo, so that the next turn's is not taken for it. Synthetic:
+/// the rewind recording without the first turn's `user_message_chunk`.
+#[tokio::test]
+async fn acp_vibe_turn_without_an_echo_has_an_empty_anchor() {
+    if !python_available() {
+        return;
+    }
+    let recorded =
+        std::fs::read_to_string(repo().join("src/harness/acp/fixtures/vibe_acp_rewind.jsonl"))
+            .unwrap();
+    let lines: Vec<&str> = recorded
+        .lines()
+        .filter(|l| !l.contains("\"messageId\":\"0b774d1b-00a0-4a1f-b468-92bad5480550\""))
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = dir.path().join("rewind.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let fake = Fake::new();
+    let mut handle = vibe_rewinding(&fake, &fixture);
+
+    handle.send(SessionCommand::turn("alpha")).await.unwrap();
+    let first = run_turn(&mut handle, |_| None).await;
+    assert!(turn_anchors(&first).is_empty());
+    assert_eq!(
+        next_event(&mut handle).await,
+        AgentEvent::TurnAnchor { id: String::new() }
+    );
+    handle.send(SessionCommand::turn("beta")).await.unwrap();
+    let second = run_turn(&mut handle, |_| None).await;
+    assert_eq!(
+        turn_anchors(&second),
+        ["f0539b32-76a6-4bb8-976b-af5b729addcd"]
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}

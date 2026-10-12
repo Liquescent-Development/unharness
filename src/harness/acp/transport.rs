@@ -308,6 +308,9 @@ pub struct AgentSpec {
     /// Reads what the agent says in fields of its own
     /// (`AcpHarness::reading_meta_with`).
     pub meta_reader: Option<super::parse::MetaReaderFactory>,
+    /// The extension method that rewinds the session to a user message
+    /// (`AcpHarness::rewinding_with`), or none.
+    pub rewind: Option<&'static str>,
 }
 
 /// The agent's command line, in `cfg.cwd`, with `extra` in its environment.
@@ -359,7 +362,8 @@ pub fn start(
     let parser = AcpParser::new(harness)
         .declaring_effort(spec.effort_option.clone())
         .resolving_relative_edits(spec.relative_edits.then(|| cfg.cwd.clone()))
-        .reading_meta(spec.meta_reader.map(|make| make()));
+        .reading_meta(spec.meta_reader.map(|make| make()))
+        .anchoring_turns(spec.rewind.is_some());
     tokio::spawn(drive(
         harness,
         proc,
@@ -406,6 +410,8 @@ enum Outstanding {
     /// The stored session reattached so that the agent can fork it.
     ForkSource,
     Prompt,
+    /// The extension request that rewinds the session; turns wait for it.
+    Rewind,
     /// Setting the agent's mode for `policy`; `seq` tells the newest.
     Mode {
         seq: u64,
@@ -479,6 +485,12 @@ struct Driver {
     signed_out: bool,
     /// The running turn is being cancelled, until its prompt answers.
     cancelling: Option<Cancelling>,
+    /// A rewind to this message, to go before the next turn.
+    queued_rewind: Option<String>,
+    /// A turn was sent and its `TurnAnchor` has not been reported (only
+    /// for an agent that rewinds): one goes for every turn, empty for one
+    /// that never reached the agent or whose message was not echoed.
+    anchor_owed: bool,
 }
 
 impl Driver {
@@ -506,6 +518,19 @@ impl Driver {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
         };
+        // A rewind goes first, and the turn waits for its answer: the
+        // agent refuses one while a turn runs, and a turn sent beside it
+        // would land in the history it cuts.
+        if let (Some(anchor), Some(method)) = (self.queued_rewind.take(), self.spawning.spec.rewind)
+        {
+            // Files are unharness's to restore, from its checkpoints.
+            let params =
+                json!({"sessionId": session_id, "messageId": anchor, "restoreFiles": false});
+            return self.request(method, params, Outstanding::Rewind).await;
+        }
+        if self.outstanding.values().any(|o| *o == Outstanding::Rewind) {
+            return Ok(());
+        }
         match &self.mode {
             ModeState::Setting => Ok(()),
             ModeState::Refused(why) => {
@@ -1172,6 +1197,19 @@ impl Driver {
         Ok(())
     }
 
+    /// Report the anchor still owed for a turn that is over, or that will
+    /// not be sent, as empty (`AgentEvent::TurnAnchor`).
+    async fn settle_anchor(&mut self, events: &mpsc::Sender<AgentEvent>) {
+        let turn_open = self.queued_turn.is_some()
+            || self.outstanding.values().any(|o| *o == Outstanding::Prompt);
+        if self.anchor_owed && !turn_open {
+            self.anchor_owed = false;
+            let _ = events
+                .send(AgentEvent::TurnAnchor { id: String::new() })
+                .await;
+        }
+    }
+
     /// A request that comes while the turn is being cancelled is answered
     /// at once, as the open ones were, and its call waited for.
     async fn refuse_late(&mut self, pending: Pending) -> Result<()> {
@@ -1233,6 +1271,8 @@ async fn drive(
         auth_methods: Vec::new(),
         signed_out: false,
         cancelling: None,
+        queued_rewind: None,
+        anchor_owed: false,
     };
     if let Err(e) = d
         .request("initialize", initialize_params(), Outstanding::Initialize)
@@ -1265,6 +1305,7 @@ async fn drive(
                 let res: Result<()> = match cmd {
                     SessionCommand::SendTurn { text, attachments } => {
                         d.queued_turn = Some((text, attachments));
+                        d.anchor_owed = d.spawning.spec.rewind.is_some();
                         d.flush_turn(&events).await
                     }
                     // No subagents are reported here, so none can be running.
@@ -1274,6 +1315,11 @@ async fn drive(
                             reason: "this agent has no remote control".into(),
                         })).await;
                         Ok(())
+                    }
+                    // Sent once the session is there, before the next turn.
+                    SessionCommand::Rewind { anchor } if d.spawning.spec.rewind.is_some() => {
+                        d.queued_rewind = Some(anchor);
+                        d.flush_turn(&events).await
                     }
                     SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
                         let _ = events.send(AgentEvent::Error(
@@ -1436,6 +1482,7 @@ async fn drive(
                 }
             }
         }
+        d.settle_anchor(&events).await;
     }
 }
 
@@ -1565,6 +1612,18 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         .on_mode_answer((seq, policy, mode, via), &result, error.as_ref(), events)
                         .await;
                 }
+                // Either way the turn that waited goes now: after a failed
+                // rewind into the session as it was, which the user is told.
+                (Some(Outstanding::Rewind), error) => {
+                    if let Some(e) = error {
+                        let _ = events
+                            .send(AgentEvent::RewindFailed {
+                                reason: error_text(e),
+                            })
+                            .await;
+                    }
+                    return d.flush_turn(events).await;
+                }
                 (Some(Outstanding::Prompt), Some(e)) => {
                     let _ = events
                         .send(AgentEvent::TurnCompleted {
@@ -1685,6 +1744,11 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
 
 async fn forward(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) {
     for ev in d.parser.feed(line) {
+        // One anchor per turn sent: a message the agent echoes outside
+        // one is not a turn of ours.
+        if matches!(ev, AgentEvent::TurnAnchor { .. }) && !std::mem::take(&mut d.anchor_owed) {
+            continue;
+        }
         let _ = events.send(ev).await;
     }
 }

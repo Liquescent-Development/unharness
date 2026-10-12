@@ -1,0 +1,26 @@
+CapabilitiesChanged image_input=true resume_by_id=true mcp_http=false
+Context used=0 window=800000
+SessionStarted id=4d0164a2-7067-a191-c1f5-9c14fd6f9fc3 model=glm-5-3
+CapabilitiesChanged efforts= plan_mode=false models=2
+TurnAnchor id=f0304197-cf76-4a4f-a15f-c2aae9798282
+Context used=0 window=800000
+CapabilitiesChanged commands=15 slash_commands=true
+TextDelta "OK"
+Context used=0 window=800000
+Context used=8320 window=800000
+Context used=8320 window=800000
+Usage in=8317 out=3 cache_read=0 cache_write=0 cost=0.0117 cumulative=false
+TurnCompleted Done
+Error "Rewindable history entry not found: no-such-message"
+TurnAnchor id=a5525a04-a370-4f76-a687-2fdf21558a02
+Context used=8320 window=800000
+ThinkingDelta "The"
+Context used=8320 window=800000
+ThinkingDelta " user is asking about \"code words\" they've told me. Looki..."
+ThinkingDelta " no code words in the context. Reply NONE."
+TextDelta "NONE"
+Context used=8320 window=800000
+Context used=8370 window=800000
+Context used=8370 window=800000
+Usage in=16639 out=51 cache_read=0 cache_write=0 cost=0.0119 cumulative=false
+TurnCompleted Done
