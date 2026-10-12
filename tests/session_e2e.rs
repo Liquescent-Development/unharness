@@ -9,8 +9,8 @@ use std::time::Duration;
 use serde_json::Value;
 use unharness::core::{
     AgentEvent, CapsUpdate, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision,
-    PermissionKind, PermissionPolicy, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
-    StopReason,
+    PermissionKind, PermissionPolicy, PermissionRequest, RemoteControl, SessionCommand,
+    SessionConfig, SessionHandle, StopReason, ToolAction,
 };
 use unharness::harness::Harness;
 
@@ -60,6 +60,7 @@ impl Fake {
         SessionConfig {
             binary: fake_harness(),
             cwd: self._tmp.path().to_path_buf(),
+            workspace_root: None,
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
             provider: None,
             effort: None,
@@ -2282,28 +2283,42 @@ async fn acp_url_elicitation_is_refused() {
     assert_eq!(answers[0]["error"]["code"], -32602);
 }
 
+/// The optionIds the driver answered permission requests with, in order.
+fn permission_answers(fake: &Fake) -> Vec<Value> {
+    fake.sent_lines()
+        .into_iter()
+        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
+        .collect()
+}
+
+fn asked(events: &[AgentEvent]) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
+}
+
 /// vibe-acp 2.26.1 names the call in a request by its id alone; the kind
-/// came on the `tool_call` before it.
+/// and the file came on the `tool_call` before it. Under accept-edits the
+/// write in the workspace is answered by the policy, and the one outside it
+/// is asked about (#204).
 #[tokio::test]
-async fn acp_accept_edits_reads_the_kind_of_an_id_only_request() {
+async fn acp_accept_edits_answers_only_an_edit_inside_the_workspace() {
     if !python_available() {
         return;
     }
     let fake = Fake::new();
-    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_ask.jsonl");
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_accept_edits_outside.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
     cfg.model = None;
+    // The recording's workspace; the session runs in a directory below it
+    // as far as the policy is concerned, which takes the root.
+    cfg.workspace_root = Some("/WORKSPACE".into());
     // vibe started in `ask`, the mode accept-edits maps to: nothing is sent.
     let mut handle = vibe_acp().start_session(cfg).unwrap();
-    let asked = |events: &[AgentEvent]| {
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::PermissionRequest(_)))
-    };
 
-    // The edit is answered by the policy: shown, not asked about.
+    // The edit in the workspace is answered by the policy: shown, not asked.
     handle
-        .send(SessionCommand::turn("write a.txt"))
+        .send(SessionCommand::turn("write in.txt"))
         .await
         .unwrap();
     let events = run_turn(&mut handle, |_| None).await;
@@ -2312,8 +2327,105 @@ async fn acp_accept_edits_reads_the_kind_of_an_id_only_request() {
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolCallStarted { name, .. } if name == "edit"))
     );
-    assert!(!asked(&events));
-    // The command is asked about, and the user's answer is what is sent.
+    assert!(!asked(&events), "{events:?}");
+    // The one outside is the user's, and the user's answer is what is sent.
+    handle
+        .send(SessionCommand::turn("write outside"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
+            reason: "no".into(),
+        })
+    })
+    .await;
+    assert!(
+        events.iter().any(|e| matches!(e,
+            AgentEvent::PermissionRequest(PermissionRequest {
+                kind: PermissionKind::ToolUse { action: ToolAction::Edit { paths }, .. },
+                ..
+            }) if paths == &[PathBuf::from("/tmp/l204/outside/x.txt")])),
+        "{events:?}"
+    );
+    assert_eq!(permission_answers(&fake), ["allow_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// The same requests with the workspace where the session runs (no root
+/// above it): the first write is outside it too, and both are asked about.
+#[tokio::test]
+async fn acp_accept_edits_takes_the_sessions_directory_without_a_root() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_accept_edits_outside.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
+    cfg.model = None;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    let allow = |e: &AgentEvent| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    };
+    let deny = |e: &AgentEvent| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
+            reason: "no".into(),
+        })
+    };
+    handle
+        .send(SessionCommand::turn("write in.txt"))
+        .await
+        .unwrap();
+    assert!(asked(&run_turn(&mut handle, allow).await));
+    handle
+        .send(SessionCommand::turn("write outside"))
+        .await
+        .unwrap();
+    assert!(asked(&run_turn(&mut handle, deny).await));
+    assert_eq!(permission_answers(&fake), ["allow_once", "reject_once"]);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// vibe-acp 2.26.1 writes the path in an edit's diff as the model wrote it
+/// (`a.txt`): for an agent not known to put such a path in the session's
+/// directory it is unknown, and accept-edits asks about the edit (#204),
+/// as about the command.
+#[tokio::test]
+async fn acp_accept_edits_asks_about_an_edit_of_a_relative_path() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_ask.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
+    cfg.model = None;
+    cfg.workspace_root = Some("/WORKSPACE".into());
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+
+    handle
+        .send(SessionCommand::turn("write a.txt"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |e| {
+        matches!(e, AgentEvent::PermissionRequest(_)).then_some(PermissionDecision::Allow {
+            updated_input: None,
+        })
+    })
+    .await;
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AgentEvent::PermissionRequest(PermissionRequest {
+                kind: PermissionKind::ToolUse {
+                    action: ToolAction::Opaque,
+                    ..
+                },
+                ..
+            })
+        )),
+        "{events:?}"
+    );
     handle.send(SessionCommand::turn("touch x")).await.unwrap();
     let events = run_turn(&mut handle, |e| {
         matches!(e, AgentEvent::PermissionRequest(_)).then(|| PermissionDecision::Deny {
@@ -2322,12 +2434,7 @@ async fn acp_accept_edits_reads_the_kind_of_an_id_only_request() {
     })
     .await;
     assert!(asked(&events));
-    let answers: Vec<Value> = fake
-        .sent_lines()
-        .into_iter()
-        .filter_map(|v| v["result"]["outcome"]["optionId"].as_str().map(Value::from))
-        .collect();
-    assert_eq!(answers, ["allow_once", "reject_once"]);
+    assert_eq!(permission_answers(&fake), ["allow_once", "reject_once"]);
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
@@ -3503,6 +3610,7 @@ impl Confined {
         SessionConfig {
             binary: fake_harness(),
             cwd: self.root.join("ws"),
+            workspace_root: None,
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "haiku")),
             provider: None,
             effort: None,

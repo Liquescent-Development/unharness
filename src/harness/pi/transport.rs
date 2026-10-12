@@ -402,6 +402,7 @@ mod tests {
         let cfg = SessionConfig {
             binary: PathBuf::from("pi"),
             cwd: PathBuf::from("/tmp"),
+            workspace_root: None,
             model: Some(ModelRef::new(
                 HarnessId::PI,
                 "anthropic",

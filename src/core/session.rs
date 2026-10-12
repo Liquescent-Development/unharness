@@ -4,7 +4,7 @@
 //! process and returns a `SessionHandle`. The TUI only ever talks to the
 //! handle: it reads `AgentEvent`s and sends `SessionCommand`s.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
@@ -20,6 +20,11 @@ use super::sandbox::Sandbox;
 pub struct SessionConfig {
     pub binary: PathBuf,
     pub cwd: PathBuf,
+    /// The workspace's root (`sync::find_workspace_root`, found once at
+    /// launch), which `cwd` may be below; `None` when there is none, and
+    /// then `cwd` stands in. What allow rules and the sandbox take the
+    /// workspace to be ([`SessionConfig::workspace`]).
+    pub workspace_root: Option<PathBuf>,
     pub model: Option<ModelRef>,
     /// The provider the user chose (`--provider`, `default_provider`, the
     /// picker); `None` leaves it to the harness's own configuration.
@@ -39,6 +44,13 @@ pub struct SessionConfig {
     pub mcp_servers: Vec<McpServer>,
     /// What confines the harness process, every time it is spawned.
     pub sandbox: Sandbox,
+}
+
+impl SessionConfig {
+    /// The workspace: its root, else the session's directory.
+    pub fn workspace(&self) -> &Path {
+        self.workspace_root.as_deref().unwrap_or(&self.cwd)
+    }
 }
 
 /// Something sent along with a turn's text.

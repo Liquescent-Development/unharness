@@ -349,6 +349,37 @@ fn path_rule_covers(rule: &Rule, path: &Path, dirs: Dirs) -> bool {
     glob_match(&segments(&pattern), &segments(&path))
 }
 
+/// Whether `action` is an edit of files that are all inside `workspace`,
+/// compared as rules compare paths: each as the file it really is
+/// ([`real_path`]), so a link in the workspace to a file outside is outside.
+/// A path that cannot be told (relative, a link to nothing yet), anything
+/// but an edit, an edit of no file, and a file under one of `kept` (where
+/// unharness keeps what decides how an agent is run, see [`own_dirs`]) are
+/// not.
+pub fn edits_within(action: &ToolAction, workspace: &Path, kept: &[PathBuf]) -> bool {
+    let ToolAction::Edit { paths } = action else {
+        return false;
+    };
+    let Some(base) = real_path(workspace) else {
+        return false;
+    };
+    let kept: Vec<PathBuf> = kept.iter().filter_map(|p| real_path(p)).collect();
+    !paths.is_empty()
+        && paths.iter().all(|p| {
+            real_path(p)
+                .is_some_and(|p| p.starts_with(&base) && !kept.iter().any(|k| p.starts_with(k)))
+        })
+}
+
+/// unharness's own config and state directories, which no rule reaches.
+pub fn own_dirs() -> Vec<PathBuf> {
+    let state = dirs::state_dir().or_else(dirs::data_local_dir);
+    Rules::default_dir()
+        .into_iter()
+        .chain(state.map(|d| d.join("unharness")))
+        .collect()
+}
+
 /// The file a path names once symbolic links are followed, so that a link
 /// inside an allowed directory does not carry the rule to wherever it
 /// points. The path need not exist yet: what does exist of it is resolved.
@@ -1423,5 +1454,49 @@ mod tests {
         );
         assert_eq!(Rule::mcp("probe/x").describe(), "the MCP tool `probe/x`");
         assert_eq!(Rule::tool("WebFetch").describe(), "every use of `WebFetch`");
+    }
+
+    /// What accept-edits answers on its own for an ACP agent (#204).
+    #[test]
+    fn edits_within_takes_the_files_as_they_really_are() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        let kept = ws.join("cfg/unharness");
+        std::fs::create_dir_all(ws.join("src")).unwrap();
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), ws.join("link")).unwrap();
+        // A link to nothing yet: a write would create the file wherever it points.
+        std::os::unix::fs::symlink(root.join("outside/new"), ws.join("dangling")).unwrap();
+        let edit = |paths: &[&Path]| ToolAction::Edit {
+            paths: paths.iter().map(|p| p.to_path_buf()).collect(),
+        };
+        let within = |a: &ToolAction| edits_within(a, &ws, std::slice::from_ref(&kept));
+        assert!(within(&edit(&[&ws.join("src/main.rs")])));
+        assert!(within(&edit(&[&ws.join("new/dir/file")])));
+        assert!(!within(&edit(&[&root.join("outside/x")])));
+        assert!(!within(&edit(&[&ws.join("link/x")])));
+        assert!(!within(&edit(&[&ws.join("dangling")])));
+        assert!(!within(&edit(&[&ws.join("src/../../outside/x")])));
+        assert!(!within(&edit(&[Path::new("src/main.rs")])));
+        assert!(!within(&edit(&[&kept.join("allow.toml")])));
+        assert!(!within(&edit(&[
+            &ws.join("src/a"),
+            &root.join("outside/b")
+        ])));
+        assert!(!within(&edit(&[])));
+        assert!(!within(&ToolAction::Opaque));
+        assert!(!within(&ToolAction::Read {
+            path: ws.join("src/main.rs")
+        }));
+        assert!(!within(&shell("touch x")));
+        // The workspace is compared as it really is too.
+        std::os::unix::fs::symlink(&ws, root.join("ws-link")).unwrap();
+        assert!(edits_within(
+            &edit(&[&ws.join("src/a")]),
+            &root.join("ws-link"),
+            &[]
+        ));
     }
 }

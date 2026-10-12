@@ -581,6 +581,7 @@ mod tests {
         SessionConfig {
             binary: PathBuf::from("claude"),
             cwd: PathBuf::from("/tmp"),
+            workspace_root: None,
             model: Some(ModelRef::new(HarnessId::CLAUDE, "anthropic", "opus")),
             provider: None,
             effort: Some("high".into()),

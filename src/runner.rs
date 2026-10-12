@@ -318,6 +318,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         let handle = harness.start_session(SessionConfig {
             binary,
             cwd: cwd.to_path_buf(),
+            workspace_root: ws_root.clone(),
             model: model_ref,
             provider: chosen_provider.clone().map(ProviderId::new),
             effort,

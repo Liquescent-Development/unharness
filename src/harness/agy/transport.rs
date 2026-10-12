@@ -298,6 +298,7 @@ mod tests {
         SessionConfig {
             binary: PathBuf::from("agy"),
             cwd: PathBuf::from("/tmp"),
+            workspace_root: None,
             model: Some(ModelRef::new(
                 HarnessId::AGY,
                 "google",
