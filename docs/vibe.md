@@ -112,6 +112,18 @@ does not send them), and it cannot be stopped from unharness. Under `ask`
 a subagent's writes and commands are asked about like the agent's own, but
 vibe does not say what they are, so no allow rule answers them.
 `unharness --print` does not wait for vibe's subagents.
+## Rewind
+
+`/rewind` rewinds vibe's own session: unharness asks vibe (its `_rewind/to`
+extension, which is not part of ACP) to drop the chosen prompt and
+everything after it, so vibe really no longer knows those turns, and the
+session keeps its id. Files are left to unharness: vibe is told not to
+restore any, and `f` in the picker restores them from unharness's own
+checkpoints, as for every harness. Going back to before the session's
+first prompt starts a fresh session, and so does a rewind after `/fork`
+to a prompt from before the fork (a forked vibe session gives the turns it
+inherited new ids). If vibe refuses a rewind, unharness starts a fresh
+session with the conversation so far.
 
 ## What vibe may write
 
