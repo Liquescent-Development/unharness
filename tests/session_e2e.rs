@@ -4501,6 +4501,109 @@ async fn vibe_says_when_the_session_runs_another_model_or_level() {
     shut_down(&mut handle).await;
 }
 
+/// A provider of `[harnesses.vibe.providers]` chosen for a session goes to
+/// vibe in its environment as valid JSON with no key, in one process, and
+/// the session's models are reported as that provider's, its own only
+/// (`fixtures/vibe_acp_provider.jsonl`, vibe-acp 2.26.1 on a local
+/// OpenAI-compatible server, #173). Neither option is sent.
+#[tokio::test]
+async fn vibe_runs_on_a_configured_provider_by_environment() {
+    if !python_available() {
+        return;
+    }
+    let settings: unharness::config::Config = toml::from_str(&format!(
+        "[harnesses.vibe]\ncommand = [{:?}]\n\
+         [harnesses.vibe.providers.lan]\napi_base = \"https://LOCAL-LLM/v1\"\n\
+         models = [\"qwen3.8-q5kxl-x2\"]\n",
+        fake_harness().to_string_lossy()
+    ))
+    .unwrap();
+    let vibe =
+        unharness::harness::vibe::VibeHarness::from_settings(&settings.harnesses["vibe"]).unwrap();
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_provider.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.provider = Some("lan".into());
+    cfg.env.push((
+        "UNHARNESS_FAKE_ENV".to_string(),
+        "VIBE_PROVIDERS,VIBE_MODELS,VIBE_ACTIVE_MODEL".to_string(),
+    ));
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("Reply with the single word: pong"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t == "pong")),
+        "{events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, AgentEvent::Notice(_))),
+        "{events:?}"
+    );
+    let models: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::CapabilitiesChanged(CapsUpdate {
+                models: Some(m),
+                provider,
+                ..
+            }) => Some((provider.clone(), m.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(!models.is_empty());
+    for (provider, list) in models {
+        assert_eq!(provider.map(|p| p.0), Some("lan".to_string()));
+        let listed: Vec<(String, String)> = list
+            .iter()
+            .map(|m| (m.model_ref.provider.0.clone(), m.model_ref.model.clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("lan".to_string(), "qwen3.8-q5kxl-x2".to_string())]
+        );
+    }
+
+    let logged = fake.sent_lines();
+    let envs: Vec<&Value> = logged.iter().filter_map(|v| v.get("env")).collect();
+    assert_eq!(envs.len(), 1, "one process");
+    let json =
+        |key: &str| -> Value { serde_json::from_str(envs[0][key].as_str().unwrap()).unwrap() };
+    assert_eq!(
+        json("VIBE_PROVIDERS"),
+        serde_json::json!([{"name": "unharness-lan", "api_base": "https://LOCAL-LLM/v1",
+            "api_style": "openai", "backend": "generic", "api_key_env_var": ""}])
+    );
+    assert_eq!(
+        json("VIBE_MODELS"),
+        serde_json::json!([{"alias": "qwen3.8-q5kxl-x2", "name": "qwen3.8-q5kxl-x2",
+            "provider": "unharness-lan"}])
+    );
+    assert_eq!(envs[0]["VIBE_ACTIVE_MODEL"], "qwen3.8-q5kxl-x2");
+    assert_eq!(
+        env_and_methods(&fake)[1..],
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option \"mode\"",
+            "session/prompt",
+        ]
+    );
+    shut_down(&mut handle).await;
+
+    // One it does not have is refused before anything starts.
+    let fake = Fake::new();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.provider = Some("cloud".into());
+    assert!(vibe.start_session(cfg).is_err());
+}
+
 /// vibe-acp 2.26.1 with no API key (`fixtures/vibe_acp_not_signed_in.jsonl`).
 fn vibe_not_signed_in() -> PathBuf {
     repo().join("src/harness/acp/fixtures/vibe_acp_not_signed_in.jsonl")

@@ -94,6 +94,51 @@ vibe over ACP, because vibe writes a choice made that way into your
 `config.toml`. They are given to `vibe-acp` when it starts; see
 [ACP agents](acp.md#mistral-vibe) for what that means for a running session.
 
+## Providers
+
+vibe's own configuration (`config.toml`) can define providers and models,
+and those are plain model choices in unharness (`/model`). A provider can
+also be defined in unharness's config, for vibe alone, without touching
+vibe's:
+
+```toml
+[harnesses.vibe.providers.lan]
+api_base = "http://127.0.0.1:8080/v1"   # an OpenAI-compatible server
+models   = ["qwen3-coder", "gemma-4"]   # the first runs when none is chosen
+# api_style       = "openai"            # openai | reasoning | openai-responses | anthropic
+# backend         = "generic"           # generic | mistral
+# api_key_env_var = "LAN_API_KEY"       # the variable that holds the key; none is sent without it
+```
+
+Then `unharness -H vibe --provider lan` (or `default_provider = "lan"`, or
+`/provider` in the TUI) runs vibe on it, and `--model` or `/model` picks
+among its `models`; a model it does not list is refused. `agent` is vibe's
+own configuration, and `/provider` lists it first to go back to it.
+
+The provider is handed to `vibe-acp` in its environment when it starts
+(`VIBE_PROVIDERS`, `VIBE_MODELS`, `VIBE_ACTIVE_MODEL`, as JSON) and is never
+written to `config.toml`. vibe sees it as `unharness-<name>`, so that a
+provider of the same name in your vibe configuration is left alone; the
+models keep their names, and one with the name of a model of yours is
+replaced by this one for that process. A chosen effort goes with the model
+that runs. A change of provider restarts vibe on it, and once a session
+was prompted starts a new session told the conversation so far, as a
+model change does.
+
+The key is only ever named: set the variable in the environment you start
+unharness from. unharness never reads it, copies it or writes it anywhere.
+The providers are read from unharness's own config directory, never from
+the project: an agent cannot add one. A provider table that is wrong (a
+missing `api_base` or `models`, an unknown key or style, an
+`api_key_env_var` that is not a variable's name) stops unharness with the
+table's name.
+
+Checked with vibe 2.26.1 and an OpenAI-compatible server that needs no
+key: the model answered in the TUI under the sandbox, ran a shell command,
+and `config.toml` was unchanged. With a Mistral key at hand vibe still
+reached Mistral's servers for its experiments, account and connectors in
+such a session.
+
 ## MCP servers
 
 The stdio servers in unharness's `[mcp_servers]` are handed to each vibe
@@ -167,7 +212,8 @@ the policy as vibe's agent:
 The model and effort go to vibe by environment, as for a session. Only a
 session says what vibe's own models are, so an effort is passed on only
 for a model your `config.toml` defines; otherwise unharness says it is
-left out. unharness's MCP servers are not passed on, and neither is
+left out. A provider chosen with `--provider` goes the same way as for a
+session (see Providers). unharness's MCP servers are not passed on, and neither is
 `--trust`: whether vibe reads the project's own configuration stays
 vibe's and your decision. `--format` takes `text`, `json` and
 `stream-json` (vibe's `streaming`), and the exit status is vibe's (see
@@ -185,6 +231,9 @@ vibe's and your decision. `--format` takes `text`, `json` and
 - macOS.
 - vibe's plan mode, and its `smart-approve` mode for `auto`.
 - A subagent given more work, or stopped, by vibe's agent.
-- A key in the OS keyring, and providers other than Mistral's.
+- A key in the OS keyring.
+- Providers: a key named by `api_key_env_var`, styles other than `openai`,
+  the `mistral` backend, and whether vibe calls Mistral in such a session
+  without a Mistral key.
 - Plugins: none were installed, so whether vibe updates them by itself (a
   change unharness would report) is not known.

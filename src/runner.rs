@@ -101,6 +101,23 @@ fn check_configured_policies(config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Providers defined in the config must be whole: a session on one that
+/// is not would fail, or run somewhere else. Only Mistral Vibe takes them.
+pub fn check_configured_providers(config: &Config) -> Result<()> {
+    for (name, h) in &config.harnesses {
+        if h.providers.is_empty() {
+            continue;
+        }
+        if name != HarnessId::VIBE.as_str() {
+            bail!(
+                "[harnesses.{name}] providers: only Mistral Vibe takes providers from unharness's config"
+            );
+        }
+        crate::harness::vibe::providers(&h.providers).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+    }
+    Ok(())
+}
+
 /// The policy of a run without the TUI. Nobody is there to choose another
 /// one, so a policy the harness does not have, with nothing less permissive
 /// in its place, ends the run. Nor is anybody there to approve a plan, so
@@ -192,6 +209,7 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
     let settings = config.harness(id.as_str());
 
     check_configured_policies(config)?;
+    check_configured_providers(config)?;
     let policy = requested_policy(&args, config, id)?;
     // The sandbox keeps unharness's config directory from being written,
     // but only knows of it once it exists; allow rules will be kept there.
@@ -587,6 +605,29 @@ mod tests {
             e.contains("[harnesses.vibe]") && e.contains("'always'"),
             "{e}"
         );
+    }
+
+    /// Providers are vibe's only, and a wrong one ends the run before
+    /// anything starts (the registry would otherwise build vibe without).
+    #[test]
+    fn configured_providers_are_checked() {
+        let parse = |text: &str| -> Config { toml::from_str(text).unwrap() };
+        let good = "[harnesses.vibe.providers.lan]\napi_base = \"http://127.0.0.1:8080/v1\"\nmodels = [\"m\"]\n";
+        assert!(check_configured_providers(&parse(good)).is_ok());
+        assert!(check_configured_providers(&Config::default()).is_ok());
+        let e = check_configured_providers(&parse(
+            "[harnesses.vibe.providers.lan]\napi_base = \"http://h\"\nmodels = []\n",
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("[harnesses.vibe.providers.lan]") && e.contains("models"),
+            "{e}"
+        );
+        let e = check_configured_providers(&parse(&good.replace("vibe", "codex")))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("[harnesses.codex]"), "{e}");
     }
 
     #[test]

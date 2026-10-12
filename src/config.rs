@@ -137,6 +137,34 @@ pub struct HarnessSettings {
     /// unharness knows it needs (an ACP agent's state, an MCP server's data).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sandbox_writable: Vec<PathBuf>,
+    /// Mistral Vibe only: providers by name, each with its models, offered
+    /// beside vibe's own configuration (`--provider`, `/provider`). Handed
+    /// to vibe in its environment when one is chosen, never written to its
+    /// configuration (`harness::vibe::providers`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub providers: BTreeMap<String, ProviderSettings>,
+}
+
+/// A provider in `[harnesses.vibe.providers.<name>]`: where vibe sends the
+/// model's requests, in which form, and the models there. The API key is
+/// only named, by the variable that holds it, never written here. Checked
+/// when unharness starts (`harness::vibe::providers`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSettings {
+    /// The API's base URL, e.g. `http://127.0.0.1:8080/v1`.
+    pub api_base: String,
+    /// openai (the default), reasoning, openai-responses or anthropic.
+    pub api_style: Option<String>,
+    /// generic (the default) or mistral.
+    pub backend: Option<String>,
+    /// The environment variable that holds the API key; none is sent
+    /// without one.
+    pub api_key_env_var: Option<String>,
+    /// The model names the server knows, the first being the one used
+    /// when none is chosen.
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 impl Config {
@@ -419,6 +447,12 @@ impl Config {
             sign_in: local.sign_in.or(global.sign_in),
             relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
+            // A workspace's provider of the same name replaces the global one.
+            providers: {
+                let mut providers = global.providers;
+                providers.extend(local.providers);
+                providers
+            },
         }
     }
 }
@@ -426,6 +460,26 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A workspace's provider of the same name replaces the global one;
+    /// the others are kept.
+    #[test]
+    fn providers_merge_by_name() {
+        let global: Config = toml::from_str(
+            "[harnesses.vibe.providers.lan]\napi_base = \"http://a/v1\"\nmodels = [\"m\"]\n\
+             [harnesses.vibe.providers.box]\napi_base = \"http://b/v1\"\nmodels = [\"n\"]\n",
+        )
+        .unwrap();
+        let local: Config = toml::from_str(
+            "[harnesses.vibe.providers.lan]\napi_base = \"http://c/v1\"\nmodels = [\"o\"]\n",
+        )
+        .unwrap();
+        let merged = Config::merge(global, local);
+        let providers = &merged.harnesses["vibe"].providers;
+        assert_eq!(providers["lan"].api_base, "http://c/v1");
+        assert_eq!(providers["lan"].models, ["o"]);
+        assert_eq!(providers["box"].api_base, "http://b/v1");
+    }
 
     #[test]
     fn a_default_policy_is_set_in_place() {

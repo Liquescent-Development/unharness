@@ -3957,6 +3957,11 @@ impl App {
     /// on the new one, resumed.
     pub fn set_provider(&mut self, provider: ProviderId) {
         let changed = self.current_provider() != Some(&provider);
+        // Where the model is chosen when the process starts as well
+        // (Mistral Vibe), the provider goes with it.
+        if changed && self.caps().model_per_process && !self.may_restart_for("provider") {
+            return;
+        }
         let restart = changed && self.session_alive && self.caps().provider_per_process;
         if restart && self.is_generating {
             self.transcript
@@ -3981,6 +3986,14 @@ impl App {
         self.providers.insert(self.active, provider.clone());
         self.chosen_providers.insert(self.active);
         self.idle_start_paused = false;
+        // A session that was prompted keeps the model it last ran: a new
+        // one runs on the provider, told the conversation (`set_model`).
+        if changed && self.caps().model_per_process && self.renews_for_choice() {
+            self.transcript
+                .push_system(format!("Provider: {provider} (pick a model with Ctrl+M)"));
+            self.renew_session(&format!("provider {provider}"));
+            return;
+        }
         self.transcript.push_system(if restart {
             format!(
                 "Provider: {provider} ({} restarts on it; pick a model with Ctrl+M)",
@@ -11897,6 +11910,65 @@ pub(crate) mod tests {
         app.set_model("glm-5-3".into());
         assert_eq!(app.take_actions(), vec![Action::Shutdown]);
         assert_eq!(app.current_model().unwrap().model, "glm-5-3");
+        assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    }
+
+    /// With a provider in `[harnesses.vibe.providers]` vibe has more than
+    /// one, chosen when it starts as its model is: before the first prompt
+    /// a change starts the session again, after one it starts a new
+    /// session told the conversation, and never mid-turn.
+    #[test]
+    fn a_vibe_provider_goes_with_the_model() {
+        let cwd = tempfile::tempdir().unwrap();
+        let settings = crate::config::HarnessSettings {
+            providers: [(
+                "lan".to_string(),
+                crate::config::ProviderSettings {
+                    api_base: "http://127.0.0.1:8080/v1".into(),
+                    models: vec!["qwen3-coder".into()],
+                    ..Default::default()
+                },
+            )]
+            .into(),
+            ..Default::default()
+        };
+        let vibe = crate::harness::vibe::VibeHarness::from_settings(&settings).unwrap();
+        let registry = Arc::new(Registry::empty().with(Box::new(vibe)));
+        let mut app = test_app_with(
+            cwd.path().to_path_buf(),
+            HarnessId::VIBE,
+            None,
+            false,
+            Config::default(),
+            registry,
+        );
+        assert!(app.caps().multi_provider && app.caps().provider_per_process);
+
+        blank_session(&mut app);
+        app.set_provider("lan".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.chosen_provider(), Some(&"lan".into()));
+
+        app.start_when_idle();
+        app.take_actions();
+        prompted_vibe(&mut app);
+        // Mid-turn: refused.
+        app.set_provider("agent".into());
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.chosen_provider(), Some(&"lan".into()));
+
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.set_provider("agent".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.chosen_provider(), Some(&"agent".into()));
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.contains("starts a new session for provider agent"))
+        );
         assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
     }
 

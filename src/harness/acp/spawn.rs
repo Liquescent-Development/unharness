@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use super::parse::SessionOptions;
+use crate::core::{CapsUpdate, ProviderId};
 
 /// What the agent's sessions have said about its models, kept for the
 /// processes started after them in this run.
@@ -67,6 +68,8 @@ pub struct SpawnChoice<'a> {
     pub known: &'a KnownModels,
     /// What the session adds to unharness's own environment.
     pub env: &'a [(String, String)],
+    /// The provider the user chose (`SessionConfig::provider`).
+    pub provider: Option<&'a str>,
 }
 
 /// What the builder made of a [`SpawnChoice`].
@@ -80,6 +83,37 @@ pub struct SpawnPlan {
     /// transport starts the process again once a session has said what
     /// was missing, if that is enough; otherwise it tells the user.
     pub unmet: Option<String>,
+    /// The process runs on a provider the harness defined for it in its
+    /// environment: the agent lists its own models beside that provider's,
+    /// and only these are reported, as that provider's.
+    pub provider: Option<ProviderModels>,
+}
+
+/// A provider handed to the agent in its environment, and its models.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderModels {
+    pub provider: String,
+    /// The values the session's model option lists them under.
+    pub models: Vec<String>,
+}
+
+impl SpawnPlan {
+    /// What a session reports, for a process on a provider of the
+    /// harness's ([`SpawnPlan::provider`]): the provider, and of the models
+    /// only that provider's.
+    pub fn restrict(&self, update: &mut CapsUpdate) {
+        let Some(p) = &self.provider else {
+            return;
+        };
+        let id = ProviderId::new(p.provider.clone());
+        update.provider = Some(id.clone());
+        if let Some(models) = &mut update.models {
+            models.retain(|m| p.models.contains(&m.model_ref.model));
+            for m in models.iter_mut() {
+                m.model_ref.provider = id.clone();
+            }
+        }
+    }
 }
 
 /// Builds the agent's environment for a model and effort. Pure but for
@@ -100,6 +134,48 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    /// A session on a provider in the agent's environment lists the
+    /// agent's own models too (vibe 2.26.1, `fixtures/vibe_acp_provider.jsonl`):
+    /// only the provider's are reported, as its.
+    #[test]
+    fn a_provider_plan_reports_its_models_only() {
+        use crate::core::{HarnessId, ModelInfo, ModelRef};
+        let model = |v: &str| ModelInfo {
+            model_ref: ModelRef::new(HarnessId::VIBE, "agent", v),
+            display_name: v.to_string(),
+            description: None,
+            effort_levels: None,
+        };
+        let update = CapsUpdate {
+            models: Some(vec![model("mistral-medium-3.5"), model("qwen")]),
+            ..Default::default()
+        };
+        let mut same = update.clone();
+        SpawnPlan::default().restrict(&mut same);
+        assert_eq!(same, update, "a plan without a provider leaves it be");
+
+        let plan = SpawnPlan {
+            provider: Some(ProviderModels {
+                provider: "lan".into(),
+                models: vec!["qwen".into()],
+            }),
+            ..Default::default()
+        };
+        let mut update = update;
+        plan.restrict(&mut update);
+        assert_eq!(update.provider, Some(ProviderId::from("lan")));
+        let models = update.models.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_ref.model, "qwen");
+        assert_eq!(models[0].model_ref.provider, ProviderId::from("lan"));
+
+        // An update without models still names the provider.
+        let mut bare = CapsUpdate::default();
+        plan.restrict(&mut bare);
+        assert_eq!(bare.provider, Some(ProviderId::from("lan")));
+        assert!(bare.models.is_none());
     }
 
     #[test]
