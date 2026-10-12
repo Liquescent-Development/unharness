@@ -168,7 +168,13 @@ in another `-p` run.
 ## The harness's own output
 
 `--native` runs the harness's own print command instead (`claude -p`,
-`codex exec`, `pi --print`, `agy --print`) and passes its output through;
-`--format` is then the harness's. Its policies are the ones that command
-can hold to: `ask` is not available on Codex there, and pi blocks every
-gated tool call. ACP agents have no such command.
+`codex exec`, `pi --print`, `agy --print`, `vibe -p`) and passes its
+output through; `--format` is then the harness's. Its policies are the
+ones that command can hold to: `ask` is not available on Codex there, and
+pi blocks every gated tool call. Under `ask` Mistral Vibe denies every
+write and command and goes on; its `--format` takes `text`, `json` and
+`stream-json` (vibe's `streaming`). The exit status is the harness's:
+vibe's is `0` when it finished, `1` for a usage or configuration error,
+`2` when something under it failed (the model's API) and `3` when it
+stopped early (a limit, a refusal, `Ctrl+C`). ACP agents other than
+Mistral Vibe have no such command.

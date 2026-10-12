@@ -801,3 +801,92 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     );
     assert!(out.stdout.is_empty());
 }
+
+/// `--print --native` and `--no-tui` with the built-in vibe: the `vibe`
+/// beside the configured `vibe-acp` (a stand-in that writes down what it
+/// was given) runs with the policy's agent and the model by environment,
+/// and its exit status is unharness's (3: vibe stopped on a limit).
+#[test]
+fn native_print_and_no_tui_run_vibes_own_cli() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    for dir in [
+        "home",
+        "config/unharness",
+        "state",
+        "data",
+        "cache",
+        "ws",
+        "bin",
+        "vibe",
+    ] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let seen = root.join("seen");
+    for (name, body) in [
+        ("vibe-acp", "exit 0".to_string()),
+        (
+            "vibe",
+            format!(
+                "{{ printf '%s\\n' \"$@\"; echo \"model=$VIBE_ACTIVE_MODEL\"; echo \"cwd=$PWD\"; }} > '{}'\nexit 3",
+                seen.display()
+            ),
+        ),
+    ] {
+        let path = root.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        root.join("config/unharness/config.toml"),
+        format!(
+            "[harnesses.vibe]\ncommand = [\"{}\"]\n",
+            root.join("bin/vibe-acp").display()
+        ),
+    )
+    .unwrap();
+    let ws = root.join("ws").canonicalize().unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+            .args(["-H", "vibe", "--sandbox", "off"])
+            .args(args)
+            .current_dir(&ws)
+            .env("HOME", root.join("home"))
+            .env("VIBE_HOME", root.join("vibe"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env_remove("VIBE_ACTIVE_MODEL")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        assert_eq!(out.status.code(), Some(3), "{stderr}");
+        std::fs::read_to_string(&seen).unwrap()
+    };
+    let ws = ws.display().to_string();
+    let print = run(&[
+        "--policy",
+        "ask",
+        "-m",
+        "mistral-medium-3.5",
+        "--print",
+        "--native",
+        "--format",
+        "stream-json",
+        "write x",
+    ]);
+    assert_eq!(
+        print,
+        format!(
+            "--workdir\n{ws}\n--agent\nask\n--output\nstreaming\n--prompt=write x\nmodel=mistral-medium-3.5\ncwd={ws}\n"
+        )
+    );
+    let tui = run(&["--policy", "bypass", "--no-tui", "hi"]);
+    assert_eq!(
+        tui,
+        format!("--workdir\n{ws}\n--agent\nauto-approve\n--\nhi\nmodel=\ncwd={ws}\n")
+    );
+}

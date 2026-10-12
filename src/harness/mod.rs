@@ -250,6 +250,15 @@ pub trait Harness: Send + Sync {
 
     /// Build the vendor command line for `--print --native` or `--no-tui`.
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<std::process::Command>;
+
+    /// What of `cfg` the command [`build_print_command`] makes leaves out
+    /// (a choice its CLI cannot be given that way), for the user to hear
+    /// before it runs. Default: nothing.
+    ///
+    /// [`build_print_command`]: Harness::build_print_command
+    fn print_warnings(&self, _cfg: &PrintConfig) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Resolve a binary: an explicit override that exists, else the first

@@ -21,7 +21,7 @@ use serde_json::json;
 
 pub mod trust;
 
-use super::acp::{AcpHarness, ModeMap, SpawnChoice, SpawnPlan};
+use super::acp::{AcpHarness, KnownModels, ModeMap, SpawnChoice, SpawnPlan};
 use super::{
     AuthInfo, DoctorNote, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
     probe_version_of, resolve_binary,
@@ -30,8 +30,8 @@ use crate::config::HarnessSettings;
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessCommand, HarnessId, PolicySupport, ProviderId, SessionConfig,
-    SessionHandle,
+    Capabilities, HarnessCommand, HarnessId, PermissionPolicy, PolicySupport, ProviderId,
+    SessionConfig, SessionHandle,
 };
 
 /// The command unharness runs when the config names none.
@@ -102,6 +102,141 @@ const GUARDED_CACHES: [&str; 3] = [
     "whoami_cache.json",
     "connector_bootstrap_cache.json",
 ];
+
+/// vibe's own CLI (`--print --native`, `--no-tui`), installed beside
+/// `vibe-acp` by the `mistral-vibe` package.
+const CLI: &str = "vibe";
+
+/// The agent (`--agent`) that backs each policy in vibe's own CLI: its
+/// built-in profiles (`vibe/core/agents/models.py`, 2.26.1). `ask` asks
+/// before every write and command, and in print mode (`-p`) denies them
+/// ("Tool execution denied by approval callback"); `accept-edits` runs
+/// `write_file` and `edit` unasked; `auto-approve` runs everything. `auto`
+/// (its `smart-approve`, #174) and `plan` (#166) are not offered.
+fn cli_agent(policy: PermissionPolicy) -> Option<&'static str> {
+    match policy {
+        PermissionPolicy::Ask => Some("ask"),
+        PermissionPolicy::AcceptEdits => Some("accept-edits"),
+        PermissionPolicy::Bypass => Some("auto-approve"),
+        PermissionPolicy::Auto | PermissionPolicy::Plan => None,
+    }
+}
+
+/// vibe's `--output` for unharness's `--format` (`text`, `json`,
+/// `stream-json`), or vibe's own name for one.
+fn cli_output(format: &str) -> Result<&'static str> {
+    Ok(match format {
+        "text" => "text",
+        "json" => "json",
+        "stream-json" | "streaming" => "streaming",
+        other => anyhow::bail!(
+            "vibe's print mode has no format '{other}'; --format takes text, json or stream-json (vibe's streaming)"
+        ),
+    })
+}
+
+/// `vibe` beside `acp` (the `vibe-acp` sessions run), else on `PATH`.
+fn cli_binary(acp: &Path) -> Option<PathBuf> {
+    let beside = acp
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(CLI))
+        .filter(|path| is_executable(path));
+    beside.or_else(|| super::which(CLI))
+}
+
+fn is_executable(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    path.is_file()
+}
+
+/// The model and level of a run of vibe's own CLI, by environment as for a
+/// session, with `home` vibe's. No session has said what its models are,
+/// so a level is only given for a model the user's `config.toml` defines.
+fn cli_plan(cfg: &PrintConfig, home: &Path) -> SpawnPlan {
+    spawn_env(
+        home,
+        &SpawnChoice {
+            model: cfg.model.as_ref().map(|m| m.model.as_str()),
+            effort: cfg.effort.as_deref(),
+            known: &KnownModels::default(),
+            env: &[],
+        },
+    )
+}
+
+/// `vibe -p` (`--print --native`) or `vibe` in its own interface
+/// (`--no-tui`), in the session's directory, with the policy's agent and
+/// the model and level by environment ([`cli_plan`]). Never `--trust`:
+/// whether vibe reads the project's configuration is the user's to decide
+/// in vibe. vibe's exit status is passed on (0 finished, 1 usage or
+/// configuration error, 2 infrastructure failure, 3 stopped: a limit, a
+/// refusal, SIGINT or SIGTERM; `HeadlessRun`, `vibe/cli/headless_run.py`).
+fn cli_command(cfg: &PrintConfig, home: &Path) -> Result<std::process::Command> {
+    let Some(binary) = cli_binary(&cfg.binary) else {
+        anyhow::bail!(
+            "vibe's own CLI (`{CLI}`) is neither beside {} nor on PATH",
+            cfg.binary.display()
+        );
+    };
+    let policy = cfg.policy.unwrap_or(PermissionPolicy::Ask);
+    let Some(agent) = cli_agent(policy) else {
+        anyhow::bail!("vibe's own CLI has no agent for the policy '{policy}'");
+    };
+    let mut cmd = std::process::Command::new(binary);
+    cmd.current_dir(&cfg.cwd);
+    for (key, value) in cli_plan(cfg, home).env {
+        cmd.env(key, value);
+    }
+    cmd.arg("--workdir").arg(&cfg.cwd);
+    cmd.arg("--agent").arg(agent);
+    if cfg.print_mode
+        && let Some(format) = &cfg.format
+    {
+        cmd.arg("--output").arg(cli_output(format)?);
+    }
+    if let Some(id) = &cfg.resume {
+        cmd.arg("--resume").arg(id);
+    }
+    cmd.args(&cfg.extra_args);
+    match (&cfg.prompt, cfg.print_mode) {
+        // One word, so that a prompt that starts with `-` is not taken for
+        // a flag; empty, vibe reads the prompt from stdin.
+        (prompt, true) => {
+            cmd.arg(format!("--prompt={}", prompt.as_deref().unwrap_or("")));
+        }
+        (Some(prompt), false) => {
+            cmd.arg("--").arg(prompt);
+        }
+        (None, false) => {}
+    }
+    Ok(cmd)
+}
+
+/// What [`cli_command`] leaves out: a level it cannot give (see
+/// [`cli_plan`]) and the MCP servers, which reach vibe only over ACP.
+fn cli_warnings(cfg: &PrintConfig, home: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(why) = cli_plan(cfg, home).unmet {
+        warnings.push(format!(
+            "vibe runs without the thinking level asked for: {why} (only a vibe-acp session tells a model's name; one defined in vibe's config.toml needs none)"
+        ));
+    }
+    if !cfg.mcp_servers.is_empty() {
+        let names: Vec<&str> = cfg.mcp_servers.iter().map(|s| s.name.as_str()).collect();
+        warnings.push(format!(
+            "vibe's own CLI takes no MCP servers from unharness, only from its own configuration; not passed on: {}",
+            names.join(", ")
+        ));
+    }
+    warnings
+}
 
 /// `ask` is vibe's mode that asks before every write and command; under
 /// `accept-edits` the agent stays in it and unharness answers the edits.
@@ -546,8 +681,16 @@ impl Harness for VibeHarness {
         self.acp.own_mcp_servers()
     }
 
-    fn print_policies(&self, print_mode: bool) -> Vec<PolicySupport> {
-        self.acp.print_policies(print_mode)
+    /// vibe's own CLI holds to each policy it has an agent for
+    /// ([`cli_agent`]): its interface asks under `ask`, and its print mode
+    /// denies what it would have asked about and goes on (2.26.1, live).
+    /// `ask` stays tied to `asks_permission`, as for a session.
+    fn print_policies(&self, _print_mode: bool) -> Vec<PolicySupport> {
+        self.capabilities()
+            .permission_policies
+            .into_iter()
+            .filter(|p| cli_agent(p.policy).is_some())
+            .collect()
     }
 
     fn default_sandbox(&self) -> SandboxLevel {
@@ -562,8 +705,14 @@ impl Harness for VibeHarness {
         self.acp.start_session(cfg)
     }
 
+    /// `vibe -p` (`--print --native`) or `vibe` in its own interface
+    /// (`--no-tui`): see [`cli_command`].
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<std::process::Command> {
-        self.acp.build_print_command(cfg)
+        cli_command(cfg, &vibe_home(&[]))
+    }
+
+    fn print_warnings(&self, cfg: &PrintConfig) -> Vec<String> {
+        cli_warnings(cfg, &vibe_home(&[]))
     }
 }
 
@@ -868,6 +1017,267 @@ provider = "mine"
             ..Default::default()
         };
         assert!(VibeHarness::from_settings(&bad).is_err());
+    }
+
+    /// A directory with `vibe-acp` and `vibe` in it, and a print run of
+    /// the first.
+    fn cli_setup() -> (tempfile::TempDir, PrintConfig) {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["vibe-acp", "vibe"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let cfg = PrintConfig {
+            binary: dir.path().join("vibe-acp"),
+            cwd: PathBuf::from("/ws"),
+            prompt: Some("fix it".into()),
+            print_mode: true,
+            policy: Some(PermissionPolicy::Ask),
+            ..Default::default()
+        };
+        (dir, cfg)
+    }
+
+    fn cli_args(cmd: &std::process::Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect()
+    }
+
+    fn cli_env(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == key)
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().to_string()))
+    }
+
+    /// `vibe -p` with the policy's agent (2.26.1's `--help` and built-in
+    /// profiles), the session's directory, and the prompt as one word.
+    #[test]
+    fn the_print_command_per_policy() {
+        let (dir, cfg) = cli_setup();
+        let home = dir.path();
+        for (policy, agent) in [
+            (PermissionPolicy::Ask, "ask"),
+            (PermissionPolicy::AcceptEdits, "accept-edits"),
+            (PermissionPolicy::Bypass, "auto-approve"),
+        ] {
+            let cfg = PrintConfig {
+                policy: Some(policy),
+                ..cfg.clone()
+            };
+            let cmd = cli_command(&cfg, home).unwrap();
+            assert_eq!(cmd.get_program(), dir.path().join("vibe"));
+            assert_eq!(cmd.get_current_dir(), Some(Path::new("/ws")));
+            assert_eq!(
+                cli_args(&cmd),
+                ["--workdir", "/ws", "--agent", agent, "--prompt=fix it"]
+            );
+        }
+        // No agent stands for these; none more permissive is taken.
+        for policy in [PermissionPolicy::Auto, PermissionPolicy::Plan] {
+            let cfg = PrintConfig {
+                policy: Some(policy),
+                ..cfg.clone()
+            };
+            assert!(cli_command(&cfg, home).is_err(), "{policy}");
+        }
+        // Never `--trust`.
+        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        assert!(!a.iter().any(|a| a == "--trust"));
+    }
+
+    #[test]
+    fn the_print_command_formats_resume_and_stdin() {
+        let (dir, cfg) = cli_setup();
+        let home = dir.path();
+        let with = |format: &str| PrintConfig {
+            format: Some(format.into()),
+            ..cfg.clone()
+        };
+        for (format, output) in [
+            ("text", "text"),
+            ("json", "json"),
+            ("stream-json", "streaming"),
+            ("streaming", "streaming"),
+        ] {
+            let a = cli_args(&cli_command(&with(format), home).unwrap());
+            assert!(a.windows(2).any(|w| w == ["--output", output]), "{a:?}");
+        }
+        assert!(cli_command(&with("yaml"), home).is_err());
+
+        let cfg = PrintConfig {
+            resume: Some("s-1".into()),
+            extra_args: vec!["--max-turns".into(), "3".into()],
+            prompt: Some("-n is a flag".into()),
+            ..cfg
+        };
+        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        assert!(a.windows(2).any(|w| w == ["--resume", "s-1"]));
+        assert!(a.windows(2).any(|w| w == ["--max-turns", "3"]));
+        assert_eq!(a.last().unwrap(), "--prompt=-n is a flag");
+        // No prompt: vibe reads it from stdin.
+        let cfg = PrintConfig {
+            prompt: None,
+            ..cfg
+        };
+        let a = cli_args(&cli_command(&cfg, home).unwrap());
+        assert_eq!(a.last().unwrap(), "--prompt=");
+    }
+
+    /// `--no-tui`: vibe's own interface with the agent and the prompt as
+    /// its first message, after `--`; no print-mode flags.
+    #[test]
+    fn the_interface_command() {
+        let (dir, cfg) = cli_setup();
+        let cfg = PrintConfig {
+            print_mode: false,
+            format: Some("json".into()),
+            policy: Some(PermissionPolicy::AcceptEdits),
+            ..cfg
+        };
+        let a = cli_args(&cli_command(&cfg, dir.path()).unwrap());
+        assert_eq!(
+            a,
+            [
+                "--workdir",
+                "/ws",
+                "--agent",
+                "accept-edits",
+                "--",
+                "fix it"
+            ]
+        );
+        let cfg = PrintConfig {
+            prompt: None,
+            ..cfg
+        };
+        let a = cli_args(&cli_command(&cfg, dir.path()).unwrap());
+        assert_eq!(a, ["--workdir", "/ws", "--agent", "accept-edits"]);
+    }
+
+    /// The model and level go in the environment as for a session; a level
+    /// only for a model the user's config defines, since no session has
+    /// said what the others are.
+    #[test]
+    fn the_cli_gets_the_model_and_level_by_environment() {
+        let (dir, cfg) = cli_setup();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.toml"),
+            "[[models]]\nname = \"devstral-2\"\nprovider = \"mistral\"\nalias = \"dev\"\n",
+        )
+        .unwrap();
+        let model = |m: &str| Some(crate::core::ModelRef::new(HarnessId::VIBE, "acp", m));
+        let cfg = PrintConfig {
+            model: model("dev"),
+            effort: Some("high".into()),
+            ..cfg
+        };
+        let cmd = cli_command(&cfg, home).unwrap();
+        assert_eq!(cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(), Some("dev"));
+        let models: serde_json::Value =
+            serde_json::from_str(&cli_env(&cmd, "VIBE_MODELS").unwrap()).unwrap();
+        assert_eq!(
+            models,
+            json!([{"alias": "dev", "name": "devstral-2", "provider": "mistral",
+                    "thinking": "high"}])
+        );
+        assert!(cli_warnings(&cfg, home).is_empty());
+        // Nothing of it on the command line.
+        assert!(!cli_args(&cmd).iter().any(|a| a.contains("dev")));
+
+        // A built-in model: its name is not known here, so the model goes
+        // and the level is left out, with a warning.
+        let cfg = PrintConfig {
+            model: model("glm-5-3"),
+            ..cfg
+        };
+        let cmd = cli_command(&cfg, home).unwrap();
+        assert_eq!(
+            cli_env(&cmd, "VIBE_ACTIVE_MODEL").as_deref(),
+            Some("glm-5-3")
+        );
+        assert_eq!(cli_env(&cmd, "VIBE_MODELS"), None);
+        let warnings = cli_warnings(&cfg, home);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("without the thinking level"));
+
+        // Nothing chosen, nothing set.
+        let (dir, cfg) = cli_setup();
+        let cmd = cli_command(&cfg, dir.path()).unwrap();
+        assert_eq!(cmd.get_envs().count(), 0);
+        assert!(cli_warnings(&cfg, dir.path()).is_empty());
+    }
+
+    #[test]
+    fn mcp_servers_are_not_passed_to_the_cli() {
+        let (dir, cfg) = cli_setup();
+        let cfg = PrintConfig {
+            mcp_servers: vec![crate::core::McpServer {
+                name: "tiny".into(),
+                transport: crate::core::McpTransport::Stdio {
+                    command: "tiny".into(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+            }],
+            ..cfg
+        };
+        let warnings = cli_warnings(&cfg, dir.path());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].ends_with("not passed on: tiny"), "{warnings:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_cli_is_the_vibe_beside_vibe_acp() {
+        let (dir, _) = cli_setup();
+        let beside = dir.path().join("vibe");
+        assert_eq!(
+            cli_binary(&dir.path().join("vibe-acp")),
+            Some(beside.clone())
+        );
+        // One that cannot be run is not taken (PATH's, if any, is).
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&beside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_ne!(cli_binary(&dir.path().join("vibe-acp")), Some(beside));
+    }
+
+    /// `ask`, `accept-edits` and `bypass` in vibe's print mode and in its
+    /// own interface; `ask` only while `asks_permission` holds.
+    #[test]
+    fn print_policies_are_the_agents_vibe_has() {
+        let policies = |h: &VibeHarness, print_mode| -> Vec<PermissionPolicy> {
+            h.print_policies(print_mode)
+                .iter()
+                .map(|p| p.policy)
+                .collect()
+        };
+        let h = VibeHarness::new();
+        for print_mode in [true, false] {
+            assert_eq!(
+                policies(&h, print_mode),
+                [
+                    PermissionPolicy::Ask,
+                    PermissionPolicy::AcceptEdits,
+                    PermissionPolicy::Bypass
+                ]
+            );
+        }
+        let h = VibeHarness::from_settings(&HarnessSettings {
+            asks_permission: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            policies(&h, true),
+            [PermissionPolicy::AcceptEdits, PermissionPolicy::Bypass]
+        );
     }
 
     /// What `vibe-acp --version` and `vibe --version` print (2.26.1).

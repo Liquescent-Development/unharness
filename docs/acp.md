@@ -242,5 +242,6 @@ by its name only.
   it. (Mistral Vibe calls its option `thinking`; unharness knows it, see
   above.)
 - ACP agents run [headless](headless.md) with `-p` like any harness, but
-  have no `--native` or `--no-tui` mode.
+  have no `--native` or `--no-tui` mode. Mistral Vibe has both, through
+  its own `vibe` ([Mistral Vibe](vibe.md#vibes-own-cli)).
 - Sign in with the agent's own CLI ([Sign-in](#sign-in)).
