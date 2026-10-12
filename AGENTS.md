@@ -665,7 +665,9 @@ recorded ones. For anything else:
   real agent, `authenticate` with vibe's `browser-auth`.
 - Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
   `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
-  name, `asks_permission` and modes), with `ask` → `ask`, `auto` →
+  name, `asks_permission` and modes), with `ask` → `unharness-ask` and
+  `accept-edits` → `unharness-accept-edits` (unharness's own profiles,
+  #196, below), `auto` →
   `smart-approve` (#174, below) and `bypass` → `auto-approve`, `thinking`
   its effort option, and its model and level
   chosen at spawn (`AcpHarness::choosing_at_spawn`, `acp/spawn.rs`), never
@@ -855,9 +857,9 @@ recorded ones. For anything else:
   is `vibe --workdir <cwd> --agent <a> [--output] [--resume <id>]
   --prompt=<text>` (one word, so a prompt starting with `-` is no flag;
   empty, vibe reads stdin), `--no-tui` the same without `--output` and
-  with the prompt after `--`. The agent is vibe's built-in profile
-  (`vibe/core/agents/models.py`) `ask`, `accept-edits` (`write_file` and
-  `edit` always) or `auto-approve`, whatever a `modes` table says (that
+  with the prompt after `--`. The agent is unharness's `unharness-ask` or
+  `unharness-accept-edits` (#196, below) or vibe's built-in
+  `auto-approve` (`vibe/core/agents/models.py`), whatever a `modes` table says (that
   is for `vibe-acp`); `auto` and `plan` have none, so `print_policies`
   is the session's policies (`ask` still tied to `asks_permission`).
   `vibe` is the one beside the `vibe-acp` in use, else on `PATH`. The
@@ -886,9 +888,9 @@ recorded ones. For anything else:
   Deny), and `/exit` ended it with 0. Its "Always allow" wrote
   `[tools.write_file] permission = "always"` into `config.toml` (a
   guarded file, but `--no-tui` is not watched), after which a `--print
-  --native --policy ask` run wrote a file unasked: a tool vibe's
-  configuration lets run is run under its `ask` too. Not checked over
-  `vibe-acp`. Unverified: a level through `--native` (unit-tested
+  --native --policy ask` run in vibe's built-in `ask` wrote a file
+  unasked; since #196 the agent is unharness's profile, which asks
+  about such a tool (below). Unverified: a level through `--native` (unit-tested
   only), `--resume` with a `vibe-acp` session's id, a prompt on stdin
   (only that `--prompt=` with nothing there exits 1, "No prompt
   provided"), vibe's trust prompt, macOS.
@@ -1086,6 +1088,97 @@ recorded ones. For anything else:
   active provider and swaps only the model name), MCP tools under it,
   `--print --policy auto` (its escalations are denied unless a rule
   allows them), macOS.
+  Own profiles (#196, 2.26.1, `vibe/profiles.rs`, Richard's decision):
+  in vibe's built-in `ask` a tool runs with no
+  `session/request_permission` when its configuration allows it:
+  `[tools.<name>] permission = "always"` or an allowlist entry (what vibe's
+  own "Always allow" persists), `bypass_tool_permissions = true`, the same
+  in a trusted project's `.vibe/config.toml` or a `VIBE_*` variable, or a
+  profile named `ask` in `~/.vibe/agents/` or a trusted project's
+  `.vibe/agents/` that replaces the built-in (the discovery's recordings,
+  #196). vibe applies an agent profile above every layer but admin config
+  (`default_orchestrator.py`: defaults, GrowthBook, user TOML, project
+  TOML, environment, runtime overrides, profile, admin), its `tools`
+  merged key by key (`WithDeepMerge`, a list inside replaced whole,
+  `core/utils/merge.py`), so a key the profile does not name keeps the
+  lower layers' value. So unharness writes `unharness-ask.toml` and
+  `unharness-accept-edits.toml` under `<state dir>/unharness/vibe-agents/`
+  (protected: never writable in the sandbox, readable), in a
+  subdirectory named after a digest of their text (two unharness whose
+  vibe configurations name other tools never rewrite each other's while
+  a vibe reads them; a file that differs is replaced by a rename), and
+  every `vibe-acp` process gets `VIBE_AGENT_PATHS='["<dir>", …what the
+  variable named before]'`, whatever the policy, so that a later policy
+  change sets the mode with no restart. Each profile sets
+  `bypass_tool_permissions = false`, `disabled_tools =
+  ["exit_plan_mode"]` (the built-in's) and `[tools.<name>] permission =
+  "ask"`, `allowlist = []` for `write_file`, `edit`, `powershell`,
+  `git_bash` and every key the user's `config.toml`, the project's (found
+  as vibe finds it, from the session's directory up to the one holding
+  vibe's home, trusted or not: it can only ask more) and `VIBE_TOOLS` /
+  `VIBE_TOOLS__<NAME>__…` in the environment name, `never` kept where any
+  of them says it; bash gets vibe 2.26.1's default allowlist
+  (`_get_default_allowlist`, `builtins/bash.py`) without `git status`
+  (which rewrites `.git/index`), written into the file with that comment.
+  An entry runs a part unasked only when vibe's guardrails pass: no
+  redirect, `$()` or `sudo`, no path outside the workdir, none of the
+  writing options `_shell_command_policy.py` gates (`sort -o`, `find
+  -delete`/`-exec`, `tree -o`, `uniq in out`, `git … --output`, `date`
+  setting the clock). `allowlist = []` on the file tools matters: an
+  allowlist glob answers ALWAYS before the outside-workdir check
+  (`resolve_file_tool_permission`, `core/tools/utils.py`).
+  `unharness-accept-edits` is the same with `write_file` and `edit`
+  `always`: vibe runs them in its workdir and still asks for a path
+  outside it or a sensitive one, which the transport answers as for any
+  ACP agent (an edit inside the workspace allowed, #204; else the user).
+  A config file that is there and cannot be read (not regular, over
+  1 MiB, not UTF-8 or TOML, `tools` not a table) or a state directory
+  that cannot be written refuses both policies with the reason
+  (`SpawnPlan::own_modes`), never a degraded profile. Profiles are found
+  in `agent_paths` first, then a trusted project's `.vibe/agents/`, then
+  `~/.vibe/agents/`, the first of a name kept (`core/agents/
+  registry.py`), and `agent_paths` concatenates across layers in order
+  (`WithConcatMerge`), so a directory the user's or a trusted project's
+  config lists comes before unharness's. Each description carries a nonce
+  (32 hex digits in `vibe-agents/nonce`, made once, linked into place);
+  the ACP mode step holds a mode of the plan's `own_modes` only when the
+  session describes it with it, in `availableModes` and in the mode
+  option, and refuses the policy otherwise (`acp::modes::OwnModes`,
+  a unit test, and an e2e test with another nonce). The
+  nonce is readable from the sandbox (vibe reads it there), so it tells a
+  profile that is not unharness's from its own, not a copy of it: an
+  agent in a trusted folder that writes a `.vibe/config.toml` naming an
+  `agent_paths` directory with a copied `unharness-ask.toml` gets past it
+  (such a config can already start MCP servers, #171). vibe's CLI cannot
+  be checked that way, so `cli_command` refuses a run whose profile is in
+  an `agent_paths` directory of either config file. Admin config (fetched
+  from the organisation at startup, `layers/admin.py`) still wins over the
+  profile. The mode is set through the mode option as before; vibe's
+  `set_config_option` and `set_mode` both call `agents.switch`
+  (`acp/agent.py`), and the session lists the custom modes in both.
+  Recorded with the environment the driver sets (bwrap, a scratch
+  `VIBE_HOME` whose `config.toml` had `bypass_tool_permissions = true`,
+  `write_file` and `bash` `always`, and an `agents/ask.toml` allowing
+  `write_file`): `fixtures/vibe_acp_own_profile.jsonl` under
+  `unharness-ask`, a `touch` and a write both asked about, denied, nothing
+  written; `fixtures/vibe_acp_own_profile_edits.jsonl` under
+  `unharness-accept-edits`, the write in the workspace ran unasked, a
+  write to `/tmp/l196/outside.txt` and the `touch` were asked about
+  (e2e tests through `VibeHarness` with the recorded nonce, and one with
+  another nonce refused). Checked live with the same home: `unharness
+  --print --native --policy ask` (Landlock) had vibe ask about
+  `file_system.write_file` and deny it, nothing written; the TUI (tmux,
+  Landlock) under `ask` showed the write's modal. The e2e tests built
+  before #196 on recordings in vibe's `ask` run with that map as a
+  `modes` table. Unverified: admin config, MCP tool keys (named in the
+  profile like any key; no recording), a subagent's calls under the
+  profile (its tool modes are its parent's ceiling,
+  `_subagents/_configuration.py`, read only), Windows shells, whether
+  vibe re-reads profiles for a later session in the same process (it
+  discovers them at every session open, read), and `--no-tui` with the
+  profiles (unit-tested only). vibe's scratchpad under
+  `$VIBE_HOME/logs/session/` is written unasked under every profile
+  (`is_scratchpad_path` comes first), as before.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own

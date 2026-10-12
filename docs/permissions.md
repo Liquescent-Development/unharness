@@ -9,8 +9,8 @@ own allow rules. Set the policy with `--policy`, `UNHARNESS_POLICY`,
 | Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity | Mistral Vibe |
 |---|---|---|---|---|---|---|
 | `plan` | `plan` mode: reads and plans, asks before anything else, and waits for you to [approve the plan](#plan) | not available | not available | not available | not available | not available |
-| `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available | `ask` mode, prompts in the TUI |
-| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn | `ask` mode, unharness answers the edits in the workspace |
+| `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available | unharness's `unharness-ask` profile, prompts in the TUI ([whatever vibe's configuration allows](vibe.md#your-vibe-configuration)) |
+| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn | unharness's `unharness-accept-edits` profile: edits in the session's directory run, unharness answers the other edits in the workspace |
 | `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* | `smart-approve` (classifier, [what it lets through](vibe.md#auto)) |
 | `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` | `auto-approve` |
 

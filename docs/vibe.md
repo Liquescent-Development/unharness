@@ -64,14 +64,15 @@ vibe reads neither `.agents/commands` nor `.agents/agents`: its slash
 commands are skills, its `.vibe/prompts/` are system prompts chosen by
 name, and its own agents (`.vibe/agents/<name>.toml`) are configuration
 profiles, one of which, named like a built-in, replaces vibe's own mode of
-that name, `ask` included.
+that name, `ask` included. unharness's `ask` and `accept-edits` are
+profiles of its own (below), so such a replacement does not change them.
 
 ## Policies
 
 | Policy | vibe |
 |---|---|
-| `ask` | its `ask` mode: every write and command is asked about |
-| `accept-edits` | its `ask` mode, and unharness answers the edits in the workspace; one outside it is asked about |
+| `ask` | unharness's profile `unharness-ask`: every write and command is asked about, whatever vibe's configuration allows (see [Your vibe configuration](#your-vibe-configuration)) |
+| `accept-edits` | unharness's profile `unharness-accept-edits`: edits in the session's directory run, an edit vibe still asks about is answered by unharness when it is in the workspace and asked about otherwise, commands are asked about |
 | `auto` | its `smart-approve` mode: a Mistral model decides what runs (see [Auto](#auto)) |
 | `bypass` | its `auto-approve` mode |
 | `plan` | not offered: vibe's runtime hides its plan mode |
@@ -79,6 +80,43 @@ that name, `ask` included.
 vibe starts every session in a mode of its own that writes files without
 asking, so unharness puts each session in the mode above, and reads it back,
 before the first prompt (see [Modes](acp.md#modes)).
+
+### Your vibe configuration
+
+vibe's own `ask` mode runs a tool unasked when vibe's configuration says
+so, and nothing tells unharness: `[tools.<name>] permission = "always"` or
+an `allowlist` entry (what vibe's own "Always allow" writes into
+`config.toml`), `bypass_tool_permissions = true`, the same in a trusted
+project's `.vibe/config.toml` or in a `VIBE_*` variable, or a profile named
+`ask` in `~/.vibe/agents/` that replaces vibe's own. So under `ask` and
+`accept-edits` unharness runs vibe in profiles of its own instead, which
+vibe applies above all of those:
+
+- unharness writes `unharness-ask.toml` and `unharness-accept-edits.toml`
+  under its state directory (`~/.local/state/unharness/vibe-agents/`), which
+  nothing in the sandbox can write, and gives `vibe-acp` that directory in
+  `VIBE_AGENT_PATHS`. Neither your vibe configuration nor `~/.vibe` is
+  written.
+- Each turns `bypass_tool_permissions` off and makes `write_file`, `edit`,
+  the shells and every other tool your `config.toml`, the project's
+  `.vibe/config.toml` or a `VIBE_TOOLS` variable names ask (a tool you set
+  to `never` stays off). `unharness-accept-edits` lets `write_file` and
+  `edit` run in the session's directory.
+- Read-only commands still run without asking: the profile lists vibe
+  2.26.1's own read-only commands (`ls`, `cat`, `grep`, `git diff`, …,
+  without `git status`, which rewrites `.git/index`), and vibe still asks
+  when one has a redirect, `$()`, `sudo`, a path outside the project or an
+  option that writes (`sort -o`, `find -delete`).
+- Each profile's description carries a code unharness keeps beside them.
+  vibe takes a profile of the same name from an `agent_paths` directory
+  your `config.toml` or a trusted project's config lists before
+  unharness's; when the session describes the mode otherwise, `ask` and
+  `accept-edits` are refused for that session (the TUI asks you to choose
+  another policy) instead of running in that profile.
+
+What vibe's admin configuration, set by your organisation and fetched
+when vibe starts, enforces still wins over any profile: if it allows a
+tool, vibe runs it unasked under these policies too.
 
 ### Auto
 
@@ -234,8 +272,8 @@ the policy as vibe's agent:
 
 | Policy | `--agent` |
 |---|---|
-| `ask` | `ask`: its interface asks before every write and command; `vibe -p` denies them and goes on |
-| `accept-edits` | `accept-edits`: edits run unasked, commands as under `ask` |
+| `ask` | `unharness-ask`: its interface asks before every write and command; `vibe -p` denies them and goes on |
+| `accept-edits` | `unharness-accept-edits`: edits in the session's directory run unasked, commands as under `ask` |
 | `auto` | not offered; falls back to `accept-edits` |
 | `bypass` | `auto-approve` |
 
@@ -250,11 +288,16 @@ vibe's and your decision. `--format` takes `text`, `json` and
 [Headless runs](headless.md#the-harnesss-own-output)). unharness runs the
 `vibe` installed beside `vibe-acp`, else the one on `PATH`.
 
-"Always allow" in vibe's own interface writes the tool into vibe's
-`config.toml` (`[tools.write_file] permission = "always"`), and vibe's
-`ask` then runs that tool unasked (seen with `-p`). unharness tells you when
-`config.toml` changes during a session or a `-p` run, but not after
-`--no-tui`.
+The profiles are unharness's own, found through `VIBE_AGENT_PATHS` as for
+a session (see [Your vibe configuration](#your-vibe-configuration)). There
+is no session to describe the profile here, so unharness looks itself: a
+run whose profile vibe would take from an `agent_paths` directory of your
+vibe configuration, or whose configuration unharness cannot read, is
+refused before vibe starts. "Always allow" in vibe's own interface still
+writes the tool into vibe's `config.toml` (`[tools.write_file] permission =
+"always"`); the profiles then ask about it anyway, so it holds only for the
+rest of that run. unharness tells you when `config.toml` changes during a
+session or a `-p` run, but not after `--no-tui`.
 
 ## Not checked yet
 
