@@ -487,6 +487,12 @@ impl Harness for VibeHarness {
         }]
     }
 
+    /// That vibe ignores the folder's project configuration, when it does
+    /// ([`trust::notice`]).
+    fn session_notice(&self, cwd: &Path) -> Option<String> {
+        trust::notice(&vibe_home(&[]), cwd)
+    }
+
     /// Signed in when the key is in the environment or vibe's `.env`;
     /// otherwise not known: it may be in the OS keyring, whose check is
     /// not quick, or the user's configuration may choose a provider with

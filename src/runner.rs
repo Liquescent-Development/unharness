@@ -287,6 +287,9 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         if let Some(note) = harness.prepare()? {
             run.warn(note);
         }
+        if let Some(notice) = harness.session_notice(cwd) {
+            run.warn(notice);
+        }
         let info = RunInfo {
             harness: id.as_str().to_string(),
             policy: res.effective.to_string(),

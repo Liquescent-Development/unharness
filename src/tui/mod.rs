@@ -943,6 +943,7 @@ async fn run_actions(
                 if let Ok(Some(note)) = &prepared {
                     app.transcript.push_notice(note.clone());
                 }
+                app.show_session_notice();
                 let mcp_servers = app.session_mcp_servers();
                 match prepared.and_then(|_| start_session(app, resume, mcp_servers)) {
                     Ok(handle) => {

@@ -194,6 +194,15 @@ pub trait Harness: Send + Sync {
         Ok(None)
     }
 
+    /// What the user should know before a session of this harness starts
+    /// in `cwd` about how its CLI runs there, which unharness does not
+    /// decide (vibe ignoring an untrusted folder's project configuration).
+    /// Shown once per harness in the TUI, on stderr in `--print`. Read
+    /// only, and cheap. Default: nothing.
+    fn session_notice(&self, _cwd: &Path) -> Option<String> {
+        None
+    }
+
     /// The directories this CLI writes outside the workspace (sessions,
     /// credentials, logs), which the sandbox must leave writable. `~` is the
     /// home directory. This is the vendor writing its own files.
