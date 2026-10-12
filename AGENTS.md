@@ -755,6 +755,35 @@ recorded ones. For anything else:
   sleep 300 &` run by vibe's shell under `bypass` adopted by the reaper
   and gone after `/quit`. Unverified: the keyring and other providers,
   plugins (none installed; whether vibe updates them itself), macOS.
+  Doctor (#172, 2.26.1): `vibe-acp --version` sets up the home it is
+  given before it reads its arguments (creates a missing one, tightens its
+  mode, appends to `logs/vibe.log`, empties a `trusted_folders.toml` it
+  cannot parse), and the version probe runs outside the sandbox in
+  `doctor` and at every TUI start, so `probe` gives it a new 0700
+  directory under the temporary directory as `VIBE_HOME` and removes it
+  afterwards (`version_aside`); an strace of `--version` with `VIBE_HOME`
+  elsewhere wrote nothing outside it. With no key and no home, doctor says
+  vibe has not been set up and names `vibe --setup` (or the table's
+  `sign_in`). `Harness::doctor_notes` (empty for the others) gives vibe a
+  `Trust` line from `vibe/trust.rs`, which #171 builds on:
+  `trusted_folders.toml` read only (a regular file of at most 1 MiB; none
+  is no entry, one vibe cannot parse is said so), the folder resolved and
+  walked up to the closest entry, `trusted` before `untrusted`, entries
+  compared as the strings vibe stored (`TrustedFoldersManager.is_trusted`);
+  a folder whose `.vibe` is the home reads no project configuration
+  (`cwd_is_user_config_home`). In a folder it does not trust vibe reads
+  none of its `AGENTS.md`, `.vibe/` and `.agents/skills/`
+  (`_trusted_workdir`, `project_roots` in `harness_files/
+  _harness_manager.py`), and the line warns when the folder has one of
+  them. The project `.vibe/config.toml` and `.agents/skills/` ignored was
+  seen live in #171's discovery; the project `AGENTS.md` is read in the
+  source only. The policies line now names what a harness does not offer
+  (`(not plan auto)` for vibe): without colour (a pipe) the dimmed ones had
+  read as offered. Checked live (`unharness doctor`, scratch `XDG_*` and
+  `VIBE_HOME`): a home with no key, one with a copy of `.env`, a path
+  that does not exist (still missing afterwards, and no scratch home left
+  in the temporary directory), and folders trusted, declined, undecided
+  and under a trusted one. Unverified: macOS.
 - Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
   recorded session offered the plan tool.
 - Subagent threads in Codex report on the main stream under their own
