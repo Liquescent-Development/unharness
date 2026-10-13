@@ -217,7 +217,13 @@ recorded ones. For anything else:
 1. Add a `HarnessId` constant in `src/core/ids.rs` (ids are interned names;
    the constant is only for built-ins).
 2. Create `src/harness/<name>/{mod.rs, transport.rs, parse.rs, fixtures/}`
-   implementing `Harness` and declaring honest `Capabilities`. Override
+   implementing `Harness` and declaring honest `Capabilities`. The
+   transport implements `core::driver::StreamProtocol` (one process for
+   the session: its handshake, what a command becomes, what it makes of a
+   line, how its CLI is ended) and starts with `driver::start`, or
+   `core::driver::per_turn::PerTurnProtocol` (a process per turn); the
+   driver owns the process, ending and reaping it, and the answer to a
+   command the `Capabilities` do not offer. Override
    `quick_auth` only if sign-in can be checked in well under a second; it
    runs at startup to choose the default harness. Declare the CLI's own
    state directories in `sandbox_paths`, and run a turn with the sandbox on.

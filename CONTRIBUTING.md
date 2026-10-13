@@ -26,8 +26,10 @@ to lay out the transcript, to render and to draw.
 
 ```
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
-               AgentEvent, SessionHandle/SessionCommand, LineProcess,
-               per-turn driver, JSON-RPC framing, Registry, SessionsStore,
+               AgentEvent, SessionHandle/SessionCommand, LineProcess, the
+               session driver (driver/: the loop around a StreamProtocol,
+               one process per session; per_turn.rs, one per turn),
+               JSON-RPC framing, Registry, SessionsStore,
                file checkpoints, allow rules (rules.rs), the sandbox
                (sandbox/: levels, profile, Landlock and Seatbelt backends)
                and the watch on vendor config (guard.rs)
@@ -83,7 +85,9 @@ If the agent speaks ACP, a config table is enough; see
 [ACP agents](docs/acp.md). Otherwise:
 
 1. Add a module under `src/harness/<name>/` implementing `Harness`, with
-   honest `Capabilities` and its `sandbox_paths`.
+   honest `Capabilities` and its `sandbox_paths`, and a transport that
+   implements `core::driver::StreamProtocol` (or `PerTurnProtocol` for a
+   CLI run once per turn).
 2. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events`. Write `src/harness/<name>/NOTES.md`: what was recorded and
    checked live, on which version, and what is unverified.
