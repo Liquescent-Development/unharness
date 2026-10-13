@@ -898,7 +898,7 @@ impl Driver {
     /// A session answer: the hooks keep what it says
     /// ([`AgentHooks::learn`]), and decide whether the process has to start
     /// again (its environment lacked what this session told,
-    /// [`AgentHooks::respawn`]), once. `Some` is the plan to start it
+    /// [`AgentHooks::respawn_plan`]), once. `Some` is the plan to start it
     /// again with.
     fn learn_from_session(&mut self) -> Option<SpawnPlan> {
         self.hooks()
@@ -906,7 +906,7 @@ impl Driver {
         if self.restarted {
             return None;
         }
-        self.hooks().respawn(&self.spawning.plan, &self.cfg)
+        self.hooks().respawn_plan(&self.spawning.plan, &self.cfg)
     }
 
     /// End the process to start it again with `plan`, before anything

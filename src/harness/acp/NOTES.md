@@ -51,7 +51,7 @@ table's `asks_permission`, `modes` and `sign_in`, and no hooks
 (`NoHooks`). The hooks are what the driver calls back into a harness
 for where its agent does what the protocol does not say: its model and
 effort chosen at spawn (`chooses_at_spawn`, `spawn_plan`, `learn`, and
-`respawn`, the restart for a model's name), a reader of its own `_meta`
+`respawn_plan`, the restart for a model's name), a reader of its own `_meta`
 (`meta_reader`) and a rewind extension (`rewind_method`). Each defaults
 to the protocol's way, and the driver calls them for every agent; the
 running process's `SpawnPlan` is empty for an agent whose hooks add

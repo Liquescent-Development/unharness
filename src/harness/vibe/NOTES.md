@@ -20,7 +20,7 @@ fails the session, and merges the given fields over the model's own
 (`vibe/core/config/layers/environment.py`, `exclude_unset`). The name is
 the model option's `description`, so a run's first process that has a
 level and does not know it yet is started again once its session has
-answered (`AgentHooks::learn` and `respawn`), before anything is sent
+answered (`AgentHooks::learn` and `respawn_plan`), before anything is sent
 (the second process is numbered from id 1 again); the provider is
 read, never written, from the user's
 `config.toml` entry for the alias, else `mistral`. With a level and no

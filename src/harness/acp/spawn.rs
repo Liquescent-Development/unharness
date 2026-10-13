@@ -18,7 +18,7 @@
 //! the model's name): [`KnownModels`] keeps that across the agent's
 //! processes in a run (`AgentHooks::learn`), and a process started before
 //! it was known is started again once its session has said it
-//! (`AgentHooks::respawn`, `transport.rs`).
+//! (`AgentHooks::respawn_plan`, `transport.rs`).
 
 use std::collections::HashMap;
 use std::path::Path;

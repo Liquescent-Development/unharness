@@ -612,7 +612,7 @@ impl AgentHooks for VibeHooks {
 
     /// A process started with a level for a model whose name it did not
     /// know yet, once a plan made now, with what its session said, has it.
-    fn respawn(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
+    fn respawn_plan(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
         running.unmet.as_ref()?;
         Some(self.spawn_plan(cfg)).filter(|next| next.unmet.is_none())
     }

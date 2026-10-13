@@ -92,7 +92,7 @@ pub trait AgentHooks: Send + Sync {
     /// What the agent's process for `cfg` is started with: variables for
     /// its environment, and what the driver holds its sessions to
     /// ([`SpawnPlan`]). Called for every process, also one started again
-    /// ([`Self::respawn`]); nothing by default. Pure but for reading the
+    /// ([`Self::respawn_plan`]); nothing by default. Pure but for reading the
     /// agent's own configuration (never writing it) and writing what the
     /// harness keeps in unharness's own state directory (vibe's
     /// profiles).
@@ -114,7 +114,7 @@ pub trait AgentHooks: Send + Sync {
     /// goes in a model entry that needs the model's name), or `None` to go
     /// on. The session's answer is then not passed on: the next process
     /// answers again. Asked once per session at most.
-    fn respawn(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
+    fn respawn_plan(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
         let _ = (running, cfg);
         None
     }
