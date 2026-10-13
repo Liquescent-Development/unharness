@@ -890,3 +890,153 @@ fn native_print_and_no_tui_run_vibes_own_cli() {
         format!("--workdir\n{ws}\n--agent\nauto-approve\n--\nhi\nmodel=\ncwd={ws}\n")
     );
 }
+
+/// A home, config and state of its own, a workspace, and an empty `PATH`
+/// (no vendor CLI is started), with `config` as the global config.
+fn scratch_with_config(config: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    // `ws/.git` makes it a workspace, so doctor reads its tables there.
+    for dir in [
+        "home",
+        "config/unharness",
+        "state",
+        "data",
+        "cache",
+        "ws/.git",
+        "bin",
+    ] {
+        std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+    }
+    std::fs::write(tmp.path().join("config/unharness/config.toml"), config).unwrap();
+    tmp
+}
+
+fn unharness_in(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_unharness"))
+        .args(args)
+        .current_dir(root.join("ws"))
+        .env("PATH", root.join("bin"))
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// `doctor` with a `[harnesses.vibe]` table that cannot be built (a
+/// provider without models), an ACP agent named like a preset whose modes
+/// do not parse (the preset's binary on PATH) and one without a command:
+/// the errors are said first and the tables named in the harness list,
+/// neither the built-in vibe nor the preset is shown in their place nor
+/// taken as the default, the rest is, and the exit status is 1 (#217).
+#[test]
+fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = scratch_with_config(
+        "default_harness = \"gemini\"\n\
+         [harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
+         [harnesses.vibe.providers.lan]\napi_base = \"http://127.0.0.1:8080/v1\"\nmodels = []\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+         display_name = \"My Gemini\"\nmodes = { always = \"auto-approve\" }\n\
+         [harnesses.nocmd]\nprotocol = \"acp\"\n\
+         [harnesses.claud]\ndefault_policy = \"nah\"\n",
+    );
+    let gemini = tmp.path().join("bin/gemini");
+    std::fs::write(&gemini, "#!/bin/sh\necho 0.1.0\n").unwrap();
+    std::fs::set_permissions(&gemini, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    for said in [
+        "unharness will not start until this is fixed",
+        "[harnesses.vibe.providers.lan]",
+        "[harnesses.gemini]: unknown policy 'always'",
+        "[harnesses.nocmd] protocol = \"acp\" but no command",
+        "[harnesses.claud] default_policy: unknown policy 'nah'",
+        "[harnesses.vibe] not shown: the table is wrong",
+        "[harnesses.gemini] not shown: the table is wrong",
+        "[harnesses.nocmd] not shown: the table is wrong",
+        "Active Default: [harnesses.gemini] is wrong (see Config above)",
+        // A table with an error that is not left out is still unknown.
+        "unknown harness 'claud'",
+        "fix them before starting unharness",
+    ] {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+    // The built-in vibe (and its `vibe-acp`) and the preset are not shown
+    // in their place; the harnesses whose tables are whole are.
+    for not_said in [
+        "Mistral Vibe",
+        "vibe-acp",
+        "Gemini",
+        "unknown harness 'vibe'",
+        "unknown harness 'gemini'",
+        "unknown harness 'nocmd'",
+    ] {
+        assert!(!stdout.contains(not_said), "{not_said}: {stdout}");
+    }
+    assert!(stdout.contains("Claude Code") && stdout.contains("Conversations:"));
+    assert!(stdout.contains("Workspace Context:\n  Root:"), "{stdout}");
+
+    // With the tables fixed doctor shows vibe and the agent and ends well.
+    std::fs::write(
+        tmp.path().join("config/unharness/config.toml"),
+        "[harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+         display_name = \"My Gemini\"\n",
+    )
+    .unwrap();
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("Mistral Vibe")
+            && stdout.contains("My Gemini")
+            && !stdout.contains("will not start"),
+        "{stdout}"
+    );
+}
+
+/// `switch` and `models` with a `[harnesses.vibe]` table whose modes do
+/// not parse fail with the error a run gives, and `switch` writes nothing
+/// (#217).
+#[test]
+fn switch_and_models_fail_on_a_wrong_harness_table_as_a_run_does() {
+    let config = "[harnesses.vibe]\nmodes = { always = \"auto-approve\" }\n";
+    let tmp = scratch_with_config(config);
+    let error = "[harnesses.vibe]: unknown policy 'always'";
+    for args in [
+        &["--print", "hi"][..],
+        &["switch", "vibe", "--global"],
+        &["switch", "claude"],
+        &["models", "--harness", "vibe"],
+    ] {
+        let out = unharness_in(tmp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(error), "{args:?}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("config/unharness/config.toml")).unwrap(),
+        config
+    );
+    assert!(!tmp.path().join("config/unharness/workspaces").exists());
+
+    // An ACP agent without a command is no harness either: a run that
+    // defaults to it fails rather than starting the preset of its name.
+    let tmp = scratch_with_config(
+        "default_harness = \"gemini\"\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ndisplay_name = \"My Gemini\"\n",
+    );
+    let out = unharness_in(tmp.path(), &["--print", "--sandbox", "off", "hi"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("[harnesses.gemini] protocol = \"acp\" but no command"),
+        "{stderr}"
+    );
+}

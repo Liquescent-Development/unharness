@@ -15,14 +15,31 @@ pub struct Registry {
 impl Registry {
     /// All harnesses in default priority order.
     pub fn new() -> Self {
-        Self::from_config(&crate::config::Config::default())
+        // The default config has no table to be wrong.
+        Self::checked(&crate::config::Config::default()).0
     }
 
-    /// Build the registry, honouring per-harness transport settings.
-    pub fn from_config(config: &crate::config::Config) -> Self {
+    /// Build the registry, honouring per-harness settings. A table that is
+    /// wrong ([`config_errors`]) is an error, never the built-in or preset
+    /// of its name in its place: a run, `switch` and `models` go through
+    /// here.
+    pub fn from_config(config: &crate::config::Config) -> Result<Self> {
+        let (registry, errors) = Self::checked(config);
+        match errors.into_iter().next() {
+            Some(e) => Err(anyhow::anyhow!(e.message)),
+            None => Ok(registry),
+        }
+    }
+
+    /// The harnesses the config defines whole, and what is wrong with it
+    /// (`doctor`, which shows the rest). A harness whose table cannot be
+    /// built is left out, no preset takes its name, and its errors say so.
+    pub fn checked(config: &crate::config::Config) -> (Self, Vec<ConfigError>) {
         use crate::harness::acp::{AcpHarness, ModeMap as AcpModeMap};
         use crate::harness::agy::AgyHarness;
         use crate::harness::codex::{CodexHarness, CodexTransport};
+        let mut errors = config_errors(config);
+        let mut left_out: Vec<String> = Vec::new();
         let codex_transport = config
             .harness("codex")
             .and_then(|h| h.transport.as_deref())
@@ -41,14 +58,24 @@ impl Registry {
             Box::new(crate::harness::pi::PiHarness::default()),
         ];
         // A `[harnesses.vibe]` table sets its command, modes and the rest
-        // in place of the built-in's; one whose modes do not parse is an
-        // error at startup (`runner::check_configured_policies`).
-        harnesses.push(Box::new(
-            config
-                .harness("vibe")
-                .and_then(|s| crate::harness::vibe::VibeHarness::from_settings(s).ok())
-                .unwrap_or_default(),
-        ));
+        // in place of the built-in's; one that cannot be built (its modes
+        // or providers, both in `config_errors`) leaves vibe out.
+        let vibe = HarnessId::VIBE.as_str();
+        match config.harness(vibe) {
+            None => harnesses.push(Box::new(crate::harness::vibe::VibeHarness::default())),
+            Some(s) => match crate::harness::vibe::VibeHarness::from_settings(s) {
+                Ok(h) => harnesses.push(Box::new(h)),
+                Err(e) => {
+                    if !errors.iter().any(|c| c.table.as_deref() == Some(vibe)) {
+                        errors.push(ConfigError::new(
+                            Some(vibe),
+                            format!("[harnesses.{vibe}]: {e:#}"),
+                        ));
+                    }
+                    left_out.push(vibe.to_string());
+                }
+            },
+        }
 
         // ACP agents: the ones defined in config (by name, for a stable
         // order), then the presets found on PATH. Neither may take a
@@ -62,25 +89,32 @@ impl Registry {
             .collect();
         defined.sort_by_key(|(name, _)| name.as_str());
         for (name, settings) in defined {
-            // A definition without a command is reported by `doctor`.
-            if let Ok(h) =
-                AcpHarness::new(name, settings.display_name.as_deref(), &settings.command)
-            {
-                // A map that does not parse is an error at startup
-                // (`runner::check_configured_policies`); none is taken here.
-                let modes = AcpModeMap::from_config(&settings.modes).unwrap_or_default();
-                harnesses.push(Box::new(
-                    h.asking_permission(settings.asks_permission.unwrap_or(false))
-                        .with_modes(modes)
-                        .signing_in_with(settings.sign_in.as_deref()),
-                ));
-            }
+            // A definition without a command, or with a map that does not
+            // parse, is in `config_errors`, and leaves the agent out rather
+            // than in a mode of its own.
+            let (Ok(h), Ok(modes)) = (
+                AcpHarness::new(name, settings.display_name.as_deref(), &settings.command),
+                AcpModeMap::from_config(&settings.modes),
+            ) else {
+                left_out.push(name.clone());
+                continue;
+            };
+            harnesses.push(Box::new(
+                h.asking_permission(settings.asks_permission.unwrap_or(false))
+                    .with_modes(modes)
+                    .signing_in_with(settings.sign_in.as_deref()),
+            ));
         }
-        let taken: Vec<HarnessId> = harnesses.iter().map(|h| h.descriptor().id).collect();
+        // A table left out keeps its name: no preset takes its place.
+        let mut taken: Vec<HarnessId> = harnesses.iter().map(|h| h.descriptor().id).collect();
+        taken.extend(left_out.iter().map(|name| HarnessId::intern(name)));
         for preset in AcpHarness::installed_presets(&taken) {
             harnesses.push(Box::new(preset));
         }
-        Registry { harnesses }
+        for e in &mut errors {
+            e.left_out = e.table.as_ref().is_some_and(|t| left_out.contains(t));
+        }
+        (Registry { harnesses }, errors)
     }
 
     pub fn empty() -> Self {
@@ -205,6 +239,87 @@ impl Registry {
             })
             .collect()
     }
+}
+
+/// Something wrong with the harness settings in the config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError {
+    /// The `[harnesses.<name>]` table it is in, if any.
+    pub table: Option<String>,
+    pub message: String,
+    /// The table's harness could not be built and is not registered.
+    pub left_out: bool,
+}
+
+impl ConfigError {
+    fn new(table: Option<&str>, message: String) -> Self {
+        ConfigError {
+            table: table.map(str::to_string),
+            message,
+            left_out: false,
+        }
+    }
+}
+
+/// What is wrong with the config's harness settings, in a stable order:
+/// the global policy, then per table its policy, an ACP agent without a
+/// command, its mode map and its providers. A policy must be one (the TUI
+/// reads them again when the harness is switched, where an error could no
+/// longer end the run), a mode map must parse (else the agent is left in
+/// a mode of its own choosing), a provider must be whole and Mistral
+/// Vibe's (a session on it would fail, or run somewhere else).
+pub fn config_errors(config: &crate::config::Config) -> Vec<ConfigError> {
+    use crate::core::PermissionPolicy;
+    const POLICIES: &str = "plan, ask, accept-edits, auto, bypass";
+    let mut errors = Vec::new();
+    if let Some(p) = config.default_policy.as_deref()
+        && PermissionPolicy::parse(p).is_none()
+    {
+        errors.push(ConfigError::new(
+            None,
+            format!("unknown policy '{p}' in config ({POLICIES})"),
+        ));
+    }
+    let mut tables: Vec<(&String, &crate::config::HarnessSettings)> =
+        config.harnesses.iter().collect();
+    tables.sort_by_key(|(name, _)| name.as_str());
+    for (name, h) in tables {
+        let table = Some(name.as_str());
+        if let Some(p) = h.default_policy.as_deref()
+            && PermissionPolicy::parse(p).is_none()
+        {
+            errors.push(ConfigError::new(
+                table,
+                format!("[harnesses.{name}] default_policy: unknown policy '{p}' ({POLICIES})"),
+            ));
+        }
+        if h.protocol.as_deref() == Some("acp")
+            && HarnessId::parse(name).is_none()
+            && h.command.is_empty()
+        {
+            errors.push(ConfigError::new(
+                table,
+                format!("[harnesses.{name}] protocol = \"acp\" but no command"),
+            ));
+        }
+        if let Err(e) = crate::harness::acp::ModeMap::from_config(&h.modes) {
+            errors.push(ConfigError::new(table, format!("[harnesses.{name}]: {e}")));
+        }
+        if h.providers.is_empty() {
+            continue;
+        }
+        if name != HarnessId::VIBE.as_str() {
+            errors.push(ConfigError::new(
+                table,
+                format!(
+                    "[harnesses.{name}] providers: only Mistral Vibe takes providers from unharness's config"
+                ),
+            ));
+        } else if let Err(e) = crate::harness::vibe::providers(&h.providers) {
+            errors.push(ConfigError::new(table, format!("{e:#}")));
+        }
+    }
+    errors
 }
 
 impl Default for Registry {
@@ -396,5 +511,110 @@ mod tests {
         );
         let (h, _) = reg.resolve(None, Some("z-missing"), &ov).unwrap();
         assert_eq!(h.descriptor().id.as_str(), "z-in");
+    }
+
+    fn parse(text: &str) -> crate::config::Config {
+        toml::from_str(text).unwrap()
+    }
+
+    /// Policies a config names must be ones, in every table and in a mode
+    /// map.
+    #[test]
+    fn configured_policies_are_checked() {
+        assert!(config_errors(&parse("default_policy = \"ask\"\n")).is_empty());
+        let e = config_errors(&parse("default_policy = \"nah\"\n"));
+        assert_eq!(e.len(), 1);
+        assert!(
+            e[0].table.is_none() && e[0].message.contains("'nah'"),
+            "{e:?}"
+        );
+        let e = config_errors(&parse("[harnesses.agy]\ndefault_policy = \"nah\"\n"));
+        assert_eq!(e[0].table.as_deref(), Some("agy"));
+        assert!(e[0].message.contains("[harnesses.agy]"), "{e:?}");
+
+        // A mode map names policies too.
+        let good = "[harnesses.vibe]\nmodes = { ask = \"ask\" }\n";
+        assert!(config_errors(&parse(good)).is_empty());
+        let e = config_errors(&parse(
+            "[harnesses.vibe]\nmodes = { ask = \"ask\", always = \"auto-approve\" }\n",
+        ));
+        assert!(
+            e[0].message.contains("[harnesses.vibe]") && e[0].message.contains("'always'"),
+            "{e:?}"
+        );
+    }
+
+    /// Providers are vibe's only, and must be whole.
+    #[test]
+    fn configured_providers_are_checked() {
+        let good = "[harnesses.vibe.providers.lan]\napi_base = \"http://127.0.0.1:8080/v1\"\nmodels = [\"m\"]\n";
+        assert!(config_errors(&parse(good)).is_empty());
+        assert!(config_errors(&crate::config::Config::default()).is_empty());
+        let e = config_errors(&parse(
+            "[harnesses.vibe.providers.lan]\napi_base = \"http://h\"\nmodels = []\n",
+        ));
+        assert!(
+            e[0].message.contains("[harnesses.vibe.providers.lan]")
+                && e[0].message.contains("models"),
+            "{e:?}"
+        );
+        let e = config_errors(&parse(&good.replace("vibe", "codex")));
+        assert!(e[0].message.contains("[harnesses.codex]"), "{e:?}");
+    }
+
+    /// A table that cannot be built is an error, and is never the built-in
+    /// in its place: `from_config` fails, `checked` leaves the harness out
+    /// and says so (#217).
+    #[test]
+    fn a_wrong_table_is_no_harness() {
+        let bad_vibe = "[harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
+                        [harnesses.vibe.providers.lan]\napi_base = \"http://h\"\nmodels = []\n";
+        let e = Registry::from_config(&parse(bad_vibe)).err().unwrap();
+        assert!(
+            e.to_string().contains("[harnesses.vibe.providers.lan]"),
+            "{e}"
+        );
+        let (reg, errors) = Registry::checked(&parse(bad_vibe));
+        assert!(reg.get(HarnessId::VIBE).is_none());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].left_out && errors[0].table.as_deref() == Some("vibe"));
+
+        let bad_acp = "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                       modes = { always = \"x\" }\n";
+        assert!(Registry::from_config(&parse(bad_acp)).is_err());
+        let (reg, errors) = Registry::checked(&parse(bad_acp));
+        assert!(reg.parse("myagent").is_none());
+        assert!(errors.len() == 1 && errors[0].left_out, "{errors:?}");
+        // The rest is still there.
+        assert!(reg.get(HarnessId::VIBE).is_some() && reg.get(HarnessId::CLAUDE).is_some());
+
+        // A preset's name with a wrong table, or none without a command,
+        // is not taken by the preset, whatever is on PATH.
+        for bad in [
+            "[harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+             modes = { always = \"x\" }\n",
+            "[harnesses.gemini]\nprotocol = \"acp\"\ndisplay_name = \"My Gemini\"\n",
+        ] {
+            assert!(Registry::from_config(&parse(bad)).is_err(), "{bad}");
+            let (reg, errors) = Registry::checked(&parse(bad));
+            assert!(reg.parse("gemini").is_none(), "{bad}");
+            assert!(errors.iter().all(|e| e.left_out), "{errors:?}");
+        }
+        let e = config_errors(&parse("[harnesses.gemini]\nprotocol = \"acp\"\n"));
+        assert_eq!(
+            e[0].message,
+            "[harnesses.gemini] protocol = \"acp\" but no command"
+        );
+
+        // A wrong default policy is an error; the harness itself is whole.
+        let (reg, errors) =
+            Registry::checked(&parse("[harnesses.vibe]\ndefault_policy = \"nah\"\n"));
+        assert!(reg.get(HarnessId::VIBE).is_some());
+        assert!(errors.len() == 1 && !errors[0].left_out, "{errors:?}");
+
+        let good = "[harnesses.vibe]\nmodes = { ask = \"ask\" }\n\
+                    [harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n";
+        let reg = Registry::from_config(&parse(good)).unwrap();
+        assert!(reg.get(HarnessId::VIBE).is_some() && reg.parse("myagent").is_some());
     }
 }
