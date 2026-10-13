@@ -4,6 +4,7 @@
 pub mod caps;
 pub mod checkpoints;
 pub mod conversations;
+pub mod driver;
 pub mod event;
 pub mod guard;
 pub mod ids;
