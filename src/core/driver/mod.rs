@@ -154,6 +154,9 @@ pub trait StreamProtocol: Send + 'static {
         None
     }
 
+    /// The [`deadline`](Self::deadline) has come. This must clear it or
+    /// move it later: a deadline left in the past is due again at once, and
+    /// the loop would call this over and over.
     fn on_deadline(&mut self, _io: &mut Io<'_>) -> impl Future<Output = ()> + Send {
         async {}
     }
