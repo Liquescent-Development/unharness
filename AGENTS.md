@@ -241,8 +241,8 @@ its `src/harness/<name>/NOTES.md`, and what crosses harnesses is in
 | Harness | Note | Checked on | Parked or not declared |
 |---|---|---|---|
 | Claude Code | [`src/harness/claude/NOTES.md`](src/harness/claude/NOTES.md) | 2.1.289 to 2.1.296 | |
-| Codex | [`src/harness/codex/NOTES.md`](src/harness/codex/NOTES.md) | 0.157.0 | |
-| pi | [`src/harness/pi/NOTES.md`](src/harness/pi/NOTES.md), which lists the notes that cover it | 0.87.1 to 1.1.0 | |
+| Codex | [`src/harness/codex/NOTES.md`](src/harness/codex/NOTES.md) | 0.157.0 | `ask` on `exec`, `--print` and `--no-tui` ([ask](docs/dev/ask.md)) |
+| pi | [`src/harness/pi/NOTES.md`](src/harness/pi/NOTES.md), which lists the notes that cover it | 0.87.1 to 1.1.0 | plan mode: pi plans only through an extension ([plan mode](docs/dev/plan-mode.md)) |
 | Antigravity (`agy`) | [`src/harness/agy/NOTES.md`](src/harness/agy/NOTES.md) | 1.2.17; subagents on 1.3.1 | plan mode (`--mode plan` acts in the same turn) |
 | ACP | [`src/harness/acp/NOTES.md`](src/harness/acp/NOTES.md) | claude-agent-acp 0.85.1, codex-acp 2.1.1, vibe-acp 2.26.1 | |
 | ACP presets (gemini, opencode, goose, copilot, cursor, qwen, kiro) | [`src/harness/acp/NOTES.md`](src/harness/acp/NOTES.md) | not installed when added | unverified until recorded |
