@@ -131,6 +131,23 @@ impl AcpHarness {
         self.profile.sign_in.as_deref()
     }
 
+    /// A session of the agent, its commands held to `caps`, what the
+    /// harness declares (`core::driver` answers one they do not offer): a
+    /// harness built around this one (Mistral Vibe) gives its own.
+    pub fn start_session_with(
+        &self,
+        cfg: SessionConfig,
+        caps: &Capabilities,
+    ) -> Result<SessionHandle> {
+        transport::start(
+            self.descriptor.id,
+            self.args.clone(),
+            self.profile.clone(),
+            cfg,
+            caps,
+        )
+    }
+
     /// The presets whose name is not taken, each with whether its binary
     /// is on PATH.
     pub fn presets(taken: &[HarnessId]) -> Vec<(&'static str, bool)> {
@@ -343,12 +360,7 @@ impl Harness for AcpHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        transport::start(
-            self.descriptor.id,
-            self.args.clone(),
-            self.profile.clone(),
-            cfg,
-        )
+        self.start_session_with(cfg, &self.capabilities())
     }
 
     fn build_print_command(&self, _cfg: &PrintConfig) -> Result<std::process::Command> {

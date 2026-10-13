@@ -17,6 +17,13 @@
 //! its line falls in the CLI's output. What a request was for, and which are
 //! still open, stays the protocol's; the loop only routes.
 //!
+//! From a line of its CLI's, a protocol can have the loop end the CLI the
+//! orderly way ([`Io::end`], ACP signed out) or end it and start another
+//! in its place once it has exited ([`Io::respawn`], ACP started again with
+//! what its session told). A protocol whose CLI lets go of a session on a
+//! request ends it with [`Shutdown::Request`]: stdin closes once that is
+//! answered, or after a while (ACP's `session/close`).
+//!
 //! A harness whose CLI runs once per turn (Codex `exec`) implements
 //! [`per_turn::PerTurnProtocol`] instead, the per-turn flavour.
 
@@ -24,6 +31,7 @@ pub mod per_turn;
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
@@ -48,6 +56,16 @@ pub struct Io<'a> {
     proc: &'a mut LineProcess,
     events: &'a mpsc::Sender<AgentEvent>,
     requests: &'a mut Requests,
+    /// What the protocol asked of the CLI, for the loop to keep track of.
+    asked: &'a mut Option<Asked>,
+}
+
+/// What a protocol asked of its CLI through [`Io`] beyond a line.
+enum Asked {
+    /// [`Io::end`].
+    End,
+    /// [`Io::respawn`].
+    Respawn(Box<Command>),
 }
 
 /// The TUI dropped the session's handle while it was being told
@@ -60,11 +78,13 @@ impl<'a> Io<'a> {
         proc: &'a mut LineProcess,
         events: &'a mpsc::Sender<AgentEvent>,
         requests: &'a mut Requests,
+        asked: &'a mut Option<Asked>,
     ) -> Self {
         Io {
             proc,
             events,
             requests,
+            asked,
         }
     }
 
@@ -108,6 +128,28 @@ impl<'a> Io<'a> {
     /// dropped the handle.
     pub async fn forward(&self, event: AgentEvent) -> Result<(), Gone> {
         self.events.send(event).await.map_err(|_| Gone)
+    }
+
+    /// End the CLI now, as a shutdown that sends nothing first does
+    /// ([`LineProcess::end`]: stdin closed, `END_GRACE` to exit by itself),
+    /// for a reason of the protocol's own (ACP: the agent wants the user
+    /// signed in). As after a `Shutdown`, it is not killed when the handle
+    /// goes, and the TUI is told `ProcessExited` once it has exited.
+    pub fn end(&mut self) {
+        self.proc.end();
+        *self.asked = Some(Asked::End);
+    }
+
+    /// End the CLI the orderly way now, and once it has exited start
+    /// `command` in its place, in the session's sandbox (ACP: an agent whose
+    /// environment lacked what its session told). What the ending CLI says
+    /// meanwhile is not told, nor its exit; the new one is a new connection,
+    /// its requests numbered from 1 again, and
+    /// [`StreamProtocol::respawned`] greets it. A `Shutdown` meanwhile ends
+    /// the session instead.
+    pub fn respawn(&mut self, command: Command) {
+        self.proc.end();
+        *self.asked = Some(Asked::Respawn(Box::new(command)));
     }
 }
 
@@ -201,6 +243,30 @@ pub enum Shutdown {
     /// once mid-turn (`LineProcess::end_or_kill`): a CLI that is sent
     /// nothing to stop the turn could go on with it where nobody sees it.
     EndOrKill { turn_open: bool },
+    /// Send the JSON-RPC request `method` (numbered after the protocol's
+    /// own), and close stdin once it is answered or after `within`,
+    /// whichever comes first; the CLI's grace starts then (ACP's
+    /// `session/close`, so that an agent that outlives its stdin, or serves
+    /// more than one session, lets go of it). Its answer is the loop's: the
+    /// protocol is not told it, also when it comes after stdin closed. A
+    /// request that cannot be written closes stdin at once, and a handle
+    /// dropped during the wait closes it then. Another `Shutdown` during
+    /// the wait changes nothing; one after it is carried out as any other
+    /// ([`StreamProtocol::shutdown`] asked again, the CLI ended as that
+    /// says), on a CLI whose stdin is already closed.
+    Request {
+        method: String,
+        params: Value,
+        within: Duration,
+    },
+}
+
+/// A CLI ended with a [`Shutdown::Request`].
+struct Closing {
+    /// The request's id: its answer is the loop's.
+    id: u64,
+    /// When stdin closes, answered or not; `None` once it is closed.
+    by: Option<Instant>,
 }
 
 /// What one long-lived harness does over its CLI's stdin and stdout; the
@@ -283,6 +349,19 @@ pub trait StreamProtocol: Send + 'static {
     fn restarted(&mut self, _result: Result<()>) -> Vec<AgentEvent> {
         Vec::new()
     }
+
+    /// The CLI an [`Io::respawn`] ended has exited, and `started` says
+    /// whether the one in its place is running: what that one is sent first
+    /// (ACP: `initialize` again). `false` ends the session, as a start that
+    /// failed does: what is running is killed, and the TUI is told
+    /// `ProcessExited` after what this told it.
+    fn respawned(
+        &mut self,
+        started: Result<()>,
+        _io: &mut Io<'_>,
+    ) -> impl Future<Output = bool> + Send {
+        async move { started.is_ok() }
+    }
 }
 
 /// Spawn `command` in `sandbox` and drive it with `protocol` for the
@@ -311,6 +390,9 @@ pub fn start<P: StreamProtocol>(
         events,
         cmds,
         requests: Requests::default(),
+        asked: None,
+        respawning: None,
+        closing: None,
         shutting_down: false,
     };
     tokio::spawn(session.run());
@@ -327,6 +409,13 @@ struct Loop<P> {
     proc: LineProcess,
     /// The JSON-RPC requests `proc` was sent through [`Io`].
     requests: Requests,
+    /// What the protocol asked of `proc` through [`Io`] and the loop has
+    /// not taken in yet ([`Loop::take_asked`]).
+    asked: Option<Asked>,
+    /// `proc` is ending to be started again as this ([`Io::respawn`]).
+    respawning: Option<Box<Command>>,
+    /// `proc` was ended with a [`Shutdown::Request`].
+    closing: Option<Closing>,
     /// What a restarted CLI is confined by: the session's.
     sandbox: Sandbox,
     slot: ProcessSlot,
@@ -338,19 +427,27 @@ struct Loop<P> {
 
 impl<P: StreamProtocol> Loop<P> {
     async fn run(mut self) {
-        self.protocol
-            .start(&mut Io::new(
-                &mut self.proc,
-                &self.events,
-                &mut self.requests,
-            ))
-            .await;
+        let mut io = Io::new(
+            &mut self.proc,
+            &self.events,
+            &mut self.requests,
+            &mut self.asked,
+        );
+        self.protocol.start(&mut io).await;
+        self.take_asked();
         loop {
             let deadline = self.protocol.deadline();
+            let close_by = self.closing.as_ref().and_then(|c| c.by);
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                    let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+                    let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests, &mut self.asked);
                     self.protocol.on_deadline(&mut io).await;
+                    self.take_asked();
+                }
+                // Not answered in time: stdin closes now.
+                _ = tokio::time::sleep_until(close_by.unwrap_or_else(Instant::now)), if close_by.is_some() => {
+                    self.stop_waiting();
+                    self.proc.end();
                 }
                 cmd = self.cmds.recv() => {
                     // The TUI dropped the handle.
@@ -358,13 +455,31 @@ impl<P: StreamProtocol> Loop<P> {
                     self.command(cmd).await;
                 }
                 raw = self.proc.lines.recv() => match raw {
+                    // A CLI ending to be started again says nothing more.
+                    Some(RawLine::Stdout(_) | RawLine::Stderr(_)) if self.respawning.is_some() => {}
+                    Some(RawLine::Exited(_)) if self.respawning.is_some() && !self.shutting_down => {
+                        if !self.respawn().await {
+                            return;
+                        }
+                    }
                     Some(RawLine::Stdout(line)) => {
                         let answer = self.requests.answer(&line);
-                        let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+                        if let (Some(answer), Some(closing)) = (&answer, &self.closing)
+                            && answer.id == RequestId::Number(closing.id)
+                        {
+                            // What it was ended with is answered: stdin
+                            // closes now, if it has not.
+                            if self.stop_waiting() {
+                                self.proc.end();
+                            }
+                            continue;
+                        }
+                        let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests, &mut self.asked);
                         let told = match answer {
                             Some(answer) => self.protocol.on_answer(answer, &mut io).await,
                             None => self.protocol.on_stdout(&line, &mut io).await,
                         };
+                        self.take_asked();
                         if told.is_err() {
                             self.gone().await;
                             return;
@@ -386,16 +501,83 @@ impl<P: StreamProtocol> Loop<P> {
                 },
             }
         }
-        if !self.shutting_down {
+        if self.stop_waiting() {
+            // Its grace starts now rather than with the answer.
+            self.proc.end();
+        } else if !self.shutting_down {
             self.proc.kill().await;
         }
+    }
+
+    /// Stop waiting for the answer to what the CLI was ended with (which
+    /// stays the loop's, should it come). Whether it was waited for.
+    fn stop_waiting(&mut self) -> bool {
+        self.closing.as_mut().is_some_and(|c| c.by.take().is_some())
+    }
+
+    /// Take in what the protocol asked of the CLI through [`Io`] (which
+    /// has already ended it).
+    fn take_asked(&mut self) {
+        match self.asked.take() {
+            None => {}
+            Some(Asked::End) => {
+                self.shutting_down = true;
+                self.stop_waiting();
+            }
+            Some(Asked::Respawn(command)) => {
+                self.stop_waiting();
+                self.respawning = Some(command);
+            }
+        }
+    }
+
+    /// The CLI an [`Io::respawn`] ended has exited: start the one in its
+    /// place, and have the protocol greet it. Whether the session goes on.
+    async fn respawn(&mut self) -> bool {
+        let Some(command) = self.respawning.take() else {
+            return true;
+        };
+        let started = match LineProcess::spawn(*command, &self.sandbox) {
+            Ok(proc) => {
+                self.proc = proc;
+                self.slot.set(&self.proc);
+                self.requests = Requests::default();
+                self.closing = None;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        };
+        let mut io = Io::new(
+            &mut self.proc,
+            &self.events,
+            &mut self.requests,
+            &mut self.asked,
+        );
+        if !self.protocol.respawned(started, &mut io).await {
+            self.proc.kill().await;
+            let _ = self
+                .events
+                .send(AgentEvent::ProcessExited { code: None })
+                .await;
+            return false;
+        }
+        self.take_asked();
+        true
     }
 
     /// Carry out `cmd`, and what it led to.
     async fn command(&mut self, cmd: SessionCommand) {
         if cmd == SessionCommand::Shutdown {
+            // It ends with that answer, or when it is not answered in time.
+            if self.closing.as_ref().is_some_and(|c| c.by.is_some()) {
+                return;
+            }
             self.shutting_down = true;
-            end(&mut self.proc, self.protocol.shutdown()).await;
+            if let Some(closing) =
+                end(&mut self.proc, &mut self.requests, self.protocol.shutdown()).await
+            {
+                self.closing = Some(closing);
+            }
             return;
         }
         let mut next = Some(cmd);
@@ -405,8 +587,14 @@ impl<P: StreamProtocol> Loop<P> {
                 self.cannot(what).await;
                 continue;
             }
-            let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+            let mut io = Io::new(
+                &mut self.proc,
+                &self.events,
+                &mut self.requests,
+                &mut self.asked,
+            );
             let encoded = self.protocol.encode(cmd, &mut io).await;
+            self.take_asked();
             match encoded {
                 Encoded::Write(line) => {
                     if let Err(e) = self.proc.write_line(&line).await {
@@ -425,6 +613,7 @@ impl<P: StreamProtocol> Loop<P> {
                             self.proc = proc;
                             self.slot.set(&self.proc);
                             self.requests = Requests::default();
+                            self.closing = None;
                             next = Some(then);
                             Ok(())
                         }
@@ -449,10 +638,19 @@ impl<P: StreamProtocol> Loop<P> {
     /// killed otherwise.
     async fn gone(&mut self) {
         if self.shutting_down {
+            // Nothing will wait for an answer now: its grace starts.
+            if self.stop_waiting() {
+                self.proc.end();
+            }
             return;
         }
         if shutdown_queued(&mut self.cmds) {
-            end(&mut self.proc, self.protocol.shutdown()).await;
+            if end(&mut self.proc, &mut self.requests, self.protocol.shutdown())
+                .await
+                .is_some()
+            {
+                self.proc.end();
+            }
         } else {
             self.proc.kill().await;
         }
@@ -500,8 +698,10 @@ async fn exited(proc: &mut LineProcess) -> Option<i32> {
     None
 }
 
-/// End `proc` as `how` says. `Exited` follows on its lines.
-async fn end(proc: &mut LineProcess, how: Shutdown) {
+/// End `proc` as `how` says, its requests numbered on from `requests`.
+/// `Exited` follows on its lines. For a [`Shutdown::Request`] written,
+/// stdin is still open: what waits for its answer.
+async fn end(proc: &mut LineProcess, requests: &mut Requests, how: Shutdown) -> Option<Closing> {
     match how {
         Shutdown::End { first } => {
             for line in first {
@@ -510,7 +710,27 @@ async fn end(proc: &mut LineProcess, how: Shutdown) {
             proc.end();
         }
         Shutdown::EndOrKill { turn_open } => proc.end_or_kill(turn_open).await,
+        Shutdown::Request {
+            method,
+            params,
+            within,
+        } => {
+            let id = requests.next();
+            match proc
+                .write_line(&jsonrpc::request(id, &method, params))
+                .await
+            {
+                Ok(()) => {
+                    return Some(Closing {
+                        id,
+                        by: Some(Instant::now() + within),
+                    });
+                }
+                Err(_) => proc.end(),
+            }
+        }
     }
+    None
 }
 
 #[cfg(test)]
@@ -659,13 +879,17 @@ mod tests {
     /// request of its text, and `SetModel` restarts the CLI as `restart` and
     /// sends `again`. An answer is told as `<method> <- <result>` (`?` for
     /// one it does not wait for), and the one to `a` sends `d`; any other
-    /// line is told as it is.
+    /// line is told as it is. A line `respawn` has the CLI started again as
+    /// `respawn`, greeted with `hello`; a line `end` ends it. With `close`
+    /// it is ended with a `close` request, waited for that long.
     struct Rpc {
         parser: Echo,
         /// The protocol's own book: what each open request is for.
         open: HashMap<RequestId, String>,
         at_start: bool,
         restart: Option<fn() -> Command>,
+        respawn: Option<fn() -> Command>,
+        close: Option<Duration>,
     }
 
     impl Rpc {
@@ -675,6 +899,8 @@ mod tests {
                 open: HashMap::new(),
                 at_start: false,
                 restart: None,
+                respawn: None,
+                close: None,
             }
         }
 
@@ -727,7 +953,28 @@ mod tests {
         }
 
         async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
-            io.forward(AgentEvent::TextDelta(line.to_string())).await
+            io.forward(AgentEvent::TextDelta(line.to_string())).await?;
+            match line {
+                "respawn" => io.respawn(self.respawn.expect("no respawn")()),
+                "end" => io.end(),
+                _ => {}
+            }
+            Ok(())
+        }
+
+        async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+            self.open.clear();
+            match started {
+                Ok(()) => {
+                    self.send("hello", io).await;
+                    true
+                }
+                Err(e) => {
+                    io.emit(AgentEvent::Notice(format!("respawn failed: {e}")))
+                        .await;
+                    false
+                }
+            }
         }
 
         async fn on_answer(&mut self, answer: Answer<'_>, io: &mut Io<'_>) -> Result<(), Gone> {
@@ -746,7 +993,14 @@ mod tests {
         }
 
         fn shutdown(&mut self) -> Shutdown {
-            Shutdown::EndOrKill { turn_open: false }
+            match self.close {
+                Some(within) => Shutdown::Request {
+                    method: "close".into(),
+                    params: json!({"k": "close"}),
+                    within,
+                },
+                None => Shutdown::EndOrKill { turn_open: false },
+            }
         }
 
         // The old CLI's requests went with it.
@@ -1290,5 +1544,230 @@ mod tests {
                 AgentEvent::ProcessExited { code: None }
             ]
         );
+    }
+
+    /// Wait until `path` exists: what a CLI does once its input closes.
+    async fn input_closed(path: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() {
+            assert!(Instant::now() < deadline, "its input stayed open");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    // Asked for from a line of its, the CLI is ended the orderly way and,
+    // once it has exited, started again: what the old one says meanwhile is
+    // not told, and the new one is greeted, its requests numbered from 1
+    // again and its process the session's.
+    #[tokio::test]
+    async fn a_cli_respawned_from_a_line_is_ended_and_started_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ended = dir.path().join("ended");
+        let rpc = Rpc {
+            // The old one is sent requests of its own.
+            at_start: true,
+            respawn: Some(|| {
+                sh(r#"echo $$; read -r l; printf '%s\n' "$l"
+                      echo '{"jsonrpc":"2.0","id":1,"result":"hi"}'; cat >/dev/null"#)
+            }),
+            ..Rpc::new()
+        };
+        // Deaf to SIGTERM; once its input closes it says goodbye and takes
+        // a while to finish, which only a CLI given its grace does.
+        let script = format!(
+            "trap '' TERM; echo $$; echo respawn; cat >/dev/null; echo bye; sleep 0.3; touch {}",
+            ended.display()
+        );
+        let mut h = run(&script, rpc);
+        let _old = pid(&mut h).await;
+        assert_eq!(next(&mut h).await, said("respawn"));
+        let _new = pid(&mut h).await;
+        // Started once the old one had finished by itself.
+        assert!(ended.exists(), "the old CLI was not given its grace");
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"k": "hello"}})
+        );
+        assert_eq!(next(&mut h).await, said(r#"hello <- "hi""#));
+        #[cfg(target_os = "linux")]
+        assert!(gone_within(_old, Duration::from_secs(2)).await);
+        h.process_slot().kill();
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: None }]
+        );
+        #[cfg(target_os = "linux")]
+        assert!(gone_within(_new, Duration::from_secs(2)).await);
+    }
+
+    // No CLI is left to go on with: the protocol says why, and the session
+    // has ended.
+    #[tokio::test]
+    async fn a_respawn_that_fails_ends_the_session() {
+        let rpc = Rpc {
+            respawn: Some(|| Command::new("/definitely/not/a/binary")),
+            ..Rpc::new()
+        };
+        let mut h = run("echo respawn; cat >/dev/null; echo bye", rpc);
+        assert_eq!(next(&mut h).await, said("respawn"));
+        let tail = until_exited(&mut h).await;
+        let [
+            AgentEvent::Notice(failed),
+            AgentEvent::ProcessExited { code: None },
+        ] = &tail[..]
+        else {
+            panic!("{tail:?}");
+        };
+        assert!(failed.starts_with("respawn failed: "), "{failed}");
+    }
+
+    #[tokio::test]
+    async fn a_cli_shut_down_while_it_ends_to_be_respawned_is_not_started_again() {
+        let rpc = Rpc {
+            respawn: Some(|| sh("echo started; cat >/dev/null")),
+            ..Rpc::new()
+        };
+        let mut h = run("echo respawn; cat >/dev/null; sleep 0.3", rpc);
+        assert_eq!(next(&mut h).await, said("respawn"));
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: Some(0) }]
+        );
+    }
+
+    // Ended from a line of its, the CLI is ended as a shutdown ends it:
+    // given its grace, also once the handle is dropped.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_ended_from_a_line_is_given_its_grace_when_the_handle_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let eof = dir.path().join("eof");
+        let script = format!(
+            "echo $$; echo end; cat >/dev/null; touch {}; trap '' TERM; while :; do sleep 1; done",
+            eof.display()
+        );
+        let mut h = run(&script, Rpc::new());
+        let cli = pid(&mut h).await;
+        assert_eq!(next(&mut h).await, said("end"));
+        input_closed(&eof).await;
+        drop(h);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
+    }
+
+    // Ended with a request, numbered after the protocol's own, the CLI
+    // keeps its input until the answer, which the protocol is not told;
+    // what it says meanwhile is told as ever.
+    #[tokio::test]
+    async fn a_cli_ended_with_a_request_keeps_its_input_until_the_answer() {
+        let rpc = Rpc {
+            close: Some(Duration::from_secs(10)),
+            ..Rpc::new()
+        };
+        let mut h = run(
+            r#"read -r a; printf '%s\n' "$a"; read -r c; printf '%s\n' "$c"
+               echo meanwhile; echo '{"jsonrpc":"2.0","id":2,"result":{}}'
+               cat >/dev/null; echo eof"#,
+            rpc,
+        );
+        h.send(SessionCommand::turn("one")).await.unwrap();
+        assert_eq!(line(&mut h).await["id"], 1);
+        let started = Instant::now();
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "close", "params": {"k": "close"}})
+        );
+        assert_eq!(
+            until_exited(&mut h).await,
+            [
+                said("meanwhile"),
+                said("eof"),
+                AgentEvent::ProcessExited { code: Some(0) }
+            ]
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // Not answered, its input closes once the wait is up; another shutdown
+    // meanwhile sends nothing and does not cut it short, and an answer
+    // after the wait is still not the protocol's.
+    #[tokio::test]
+    async fn a_cli_ended_with_a_request_not_answered_in_time_keeps_its_input_that_long() {
+        let within = Duration::from_millis(500);
+        let rpc = Rpc {
+            close: Some(within),
+            ..Rpc::new()
+        };
+        let mut h = run(
+            r#"while read -r l; do printf '%s\n' "$l"; done
+               echo '{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"late"}}'; echo eof"#,
+            rpc,
+        );
+        let started = Instant::now();
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(line(&mut h).await["method"], "close");
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(next(&mut h).await, said("eof"));
+        assert!(started.elapsed() >= within, "{:?}", started.elapsed());
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: Some(0) }]
+        );
+    }
+
+    // A request to end with that cannot be written leaves nothing to wait
+    // for: stdin closes at once, and the CLI is given its grace.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_whose_request_to_end_cannot_be_written_is_ended_at_once() {
+        let rpc = Rpc {
+            close: Some(Duration::from_secs(30)),
+            ..Rpc::new()
+        };
+        // Closes its input (and gives a reaper time to let go of it), and
+        // never ends by itself.
+        let mut h = run(
+            "exec 0<&-; sleep 0.2; echo $$; trap '' TERM; while :; do sleep 1; done",
+            rpc,
+        );
+        let cli = pid(&mut h).await;
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: None }]
+        );
+    }
+
+    // Nothing waits for the answer once the handle is dropped: its input
+    // closes then, and it is given its grace.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_waiting_for_the_answer_to_end_has_its_input_closed_when_the_handle_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let eof = dir.path().join("eof");
+        let rpc = Rpc {
+            close: Some(Duration::from_secs(30)),
+            ..Rpc::new()
+        };
+        let script = format!(
+            r#"echo $$; read -r c; printf '%s\n' "$c"; cat >/dev/null; touch {}
+               trap '' TERM; while :; do sleep 1; done"#,
+            eof.display()
+        );
+        let mut h = run(&script, rpc);
+        let cli = pid(&mut h).await;
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(line(&mut h).await["method"], "close");
+        drop(h);
+        input_closed(&eof).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
     }
 }

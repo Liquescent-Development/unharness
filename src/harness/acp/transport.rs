@@ -27,6 +27,13 @@
 //! the turn fails with what the agent offers and what to run (`auth.rs`),
 //! and the process is ended, so that the next prompt starts one that reads
 //! the sign-in afresh.
+//!
+//! The [`Driver`] is the session's protocol on `core::driver`'s loop, which
+//! owns the agent's process: it numbers the driver's requests and routes
+//! their answers back ([`Driver::on_answer`]), starts the process again
+//! for an agent whose environment lacked what its session told
+//! ([`Driver::restart_with`], `Io::respawn`), and closes stdin after
+//! `session/close` (`Shutdown::Request`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -35,7 +42,6 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::auth::{self, AuthMethod};
@@ -47,15 +53,14 @@ use super::parse::{
 };
 use super::profile::{AcpProfile, AgentHooks};
 use super::spawn::SpawnPlan;
-use crate::core::jsonrpc::{self, RpcMessage};
+use crate::core::driver::{self, Answer, Encoded, Gone, Io, Shutdown, StreamProtocol};
+use crate::core::jsonrpc::{self, RequestId, RpcMessage};
 use crate::core::mcp;
-use crate::core::process::{LineProcess, RawLine};
 use crate::core::rules::{self, ToolAction};
-use crate::core::session::ProcessSlot;
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
-    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, ProcessModel,
-    RemoteControl, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
+    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, SessionCommand,
+    SessionConfig, SessionHandle, StopReason,
 };
 use crate::harness::which;
 
@@ -309,14 +314,9 @@ fn requested_call(evs: &[AgentEvent]) -> Option<String> {
 /// A request for `call` was answered or withdrawn: a call only the
 /// request named ends here, since the agent reports nothing about it
 /// ([`AcpParser::answered`]).
-async fn settle(
-    parser: &AcpParser,
-    call: Option<&String>,
-    end: RequestEnd,
-    events: &mpsc::Sender<AgentEvent>,
-) {
+async fn settle(parser: &AcpParser, call: Option<&String>, end: RequestEnd, io: &mut Io<'_>) {
     if let Some(ev) = call.and_then(|c| parser.answered(c, end)) {
-        let _ = events.send(ev).await;
+        io.emit(ev).await;
     }
 }
 
@@ -351,42 +351,36 @@ fn agent_command(args: &[String], cfg: &SessionConfig, extra: &[(String, String)
 
 /// Start a session of the agent `harness` runs with `args`, as its
 /// `profile` says: what unharness knows about it that the protocol does
-/// not say, and its hooks, which the driver calls for every agent.
+/// not say, and its hooks, which the driver calls for every agent. `caps`
+/// is what the harness declares: the loop answers a command they do not
+/// offer.
 pub fn start(
     harness: HarnessId,
     args: Vec<String>,
     profile: AcpProfile,
     cfg: SessionConfig,
+    caps: &Capabilities,
 ) -> Result<SessionHandle> {
     let plan = profile.hooks.spawn_plan(&cfg);
-    let proc = LineProcess::spawn(agent_command(&args, &cfg, &plan.env), &cfg.sandbox)?;
-    let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness,
-        process_model: ProcessModel::LongLived,
-    });
-    let slot = handle.process_slot();
-    slot.set(&proc);
+    let command = agent_command(&args, &cfg, &plan.env);
     let parser = AcpParser::new(harness)
         .declaring_effort(profile.effort_option.clone())
         .resolving_relative_edits(profile.relative_edits.then(|| cfg.cwd.clone()))
         .reading_meta(profile.hooks.meta_reader())
         .anchoring_turns(profile.hooks.rewind_method().is_some());
-    tokio::spawn(drive(
+    let sandbox = cfg.sandbox.clone();
+    let driver = Driver::new(
         harness,
-        proc,
         parser,
         Spawning {
             args,
             profile,
             plan,
-            slot,
             restart: None,
         },
         cfg,
-        events_tx,
-        cmd_rx,
-    ));
-    Ok(handle)
+    );
+    driver::start(harness, caps, command, &sandbox, driver)
 }
 
 /// How the driver starts the agent's process, and starts it again for an
@@ -398,7 +392,6 @@ struct Spawning {
     /// What the running process was started with ([`AgentHooks::spawn_plan`]):
     /// nothing for an agent whose hooks add nothing.
     plan: SpawnPlan,
-    slot: ProcessSlot,
     /// The process is ending to be started again with this plan.
     restart: Option<SpawnPlan>,
 }
@@ -428,9 +421,6 @@ enum Outstanding {
     },
     /// Config changes: only an error matters, and the parser reports it.
     Other,
-    /// `session/close` at shutdown: its answer, `{}` or an error, says
-    /// nothing anyone is waiting for.
-    Close,
 }
 
 /// Where the agent's mode stands for the driver's policy.
@@ -445,16 +435,17 @@ enum ModeState {
     Refused(String),
 }
 
+/// The ACP client of one session: the protocol the loop drives the agent's
+/// process with (`StreamProtocol`).
 struct Driver {
     harness: HarnessId,
-    proc: LineProcess,
     spawning: Spawning,
     /// The process was started again once already (only one restart is
     /// made to bring in what a session said).
     restarted: bool,
     parser: AcpParser,
     cfg: SessionConfig,
-    next_id: u64,
+    /// What each request still to be answered is for, by its id.
     outstanding: HashMap<u64, Outstanding>,
     session_id: Option<String>,
     /// `mcpServers` for every session request, once the agent has said
@@ -492,6 +483,9 @@ struct Driver {
     auth_methods: Vec<AuthMethod>,
     /// The agent wants the user signed in: the process is to end.
     signed_out: bool,
+    /// The session is ending (shut down, or signed out): nothing more goes
+    /// to it, and what it says on the way out is not news.
+    ending: bool,
     /// The running turn is being cancelled, until its prompt answers.
     cancelling: Option<Cancelling>,
     /// A rewind to this message, to go before the next turn.
@@ -503,22 +497,61 @@ struct Driver {
 }
 
 impl Driver {
+    fn new(harness: HarnessId, parser: AcpParser, spawning: Spawning, cfg: SessionConfig) -> Self {
+        let mode_map = spawning.profile.modes.clone();
+        Driver {
+            harness,
+            spawning,
+            restarted: false,
+            parser,
+            policy: cfg.policy,
+            cfg,
+            outstanding: HashMap::new(),
+            session_id: None,
+            mcp_servers: json!([]),
+            options: SessionOptions::default(),
+            pending: HashMap::new(),
+            withdrawn: HashSet::new(),
+            queued_turn: None,
+            last_stderr: None,
+            mode_map,
+            agent_modes: AgentModes::default(),
+            mode: ModeState::Setting,
+            reapply: false,
+            refused: Vec::new(),
+            setup_pending: false,
+            can_close: false,
+            reattach_via: None,
+            auth_methods: Vec::new(),
+            signed_out: false,
+            ending: false,
+            cancelling: None,
+            queued_rewind: None,
+            anchor_owed: false,
+        }
+    }
+
     /// What the driver calls back into the harness for.
     fn hooks(&self) -> &dyn AgentHooks {
         &*self.spawning.profile.hooks
     }
 
-    async fn request(&mut self, method: &str, params: Value, kind: Outstanding) -> Result<()> {
-        self.next_id += 1;
-        self.outstanding.insert(self.next_id, kind);
-        self.proc
-            .write_line(&jsonrpc::request(self.next_id, method, params))
-            .await
+    async fn request(
+        &mut self,
+        io: &mut Io<'_>,
+        method: &str,
+        params: Value,
+        kind: Outstanding,
+    ) -> Result<()> {
+        let (id, sent) = io.request(method, params).await;
+        self.outstanding.insert(id, kind);
+        sent
     }
 
-    async fn new_session(&mut self) -> Result<()> {
+    async fn new_session(&mut self, io: &mut Io<'_>) -> Result<()> {
         let params = json!({"cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
         self.request(
+            io,
             "session/new",
             params,
             Outstanding::Session { reattach: false },
@@ -528,7 +561,7 @@ impl Driver {
 
     /// Send the waiting turn if the session and its mode are ready, or
     /// fail it if its policy was refused.
-    async fn flush_turn(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn flush_turn(&mut self, io: &mut Io<'_>) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
         };
@@ -541,7 +574,7 @@ impl Driver {
             // Files are unharness's to restore, from its checkpoints.
             let params =
                 json!({"sessionId": session_id, "messageId": anchor, "restoreFiles": false});
-            return self.request(method, params, Outstanding::Rewind).await;
+            return self.request(io, method, params, Outstanding::Rewind).await;
         }
         if self.outstanding.values().any(|o| *o == Outstanding::Rewind) {
             return Ok(());
@@ -550,11 +583,10 @@ impl Driver {
             ModeState::Setting => Ok(()),
             ModeState::Refused(why) => {
                 if self.queued_turn.take().is_some() {
-                    let _ = events
-                        .send(AgentEvent::TurnCompleted {
-                            stop_reason: StopReason::Error(why.clone()),
-                        })
-                        .await;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error(why.clone()),
+                    })
+                    .await;
                 }
                 Ok(())
             }
@@ -562,10 +594,11 @@ impl Driver {
                 let Some((text, attachments)) = self.queued_turn.take() else {
                     return Ok(());
                 };
-                let _ = events.send(AgentEvent::TurnStarted).await;
+                io.emit(AgentEvent::TurnStarted).await;
                 let sent = match prompt_blocks(&text, &attachments) {
                     Ok(prompt) => {
                         self.request(
+                            io,
                             "session/prompt",
                             json!({"sessionId": session_id, "prompt": prompt}),
                             Outstanding::Prompt,
@@ -575,22 +608,27 @@ impl Driver {
                     Err(e) => Err(e),
                 };
                 if let Err(e) = sent {
-                    let _ = events
-                        .send(AgentEvent::TurnCompleted {
-                            stop_reason: StopReason::Error(e.to_string()),
-                        })
-                        .await;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error(e.to_string()),
+                    })
+                    .await;
                 }
                 Ok(())
             }
         }
     }
 
-    async fn set_option(&mut self, option: Option<String>, value: &str) -> Result<bool> {
+    async fn set_option(
+        &mut self,
+        io: &mut Io<'_>,
+        option: Option<String>,
+        value: &str,
+    ) -> Result<bool> {
         let (Some(session_id), Some(option)) = (self.session_id.clone(), option) else {
             return Ok(false);
         };
         self.request(
+            io,
             "session/set_config_option",
             json!({"sessionId": session_id, "configId": option, "value": value}),
             Outstanding::Other,
@@ -602,14 +640,14 @@ impl Driver {
     /// The session exists (created or reattached): hold it to the mode its
     /// policy maps to, then send the configured model and effort and the
     /// turn that was waiting for it.
-    async fn session_ready(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn session_ready(&mut self, io: &mut Io<'_>) -> Result<()> {
         self.setup_pending = true;
-        self.apply_mode(events).await
+        self.apply_mode(io).await
     }
 
     /// Bring the agent's mode in line with the policy; once it is, go on
     /// with what waited for it.
-    async fn apply_mode(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn apply_mode(&mut self, io: &mut Io<'_>) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
         };
@@ -638,11 +676,11 @@ impl Driver {
         ) {
             ModeStep::Leave => {
                 self.mode = ModeState::Ready { held: None };
-                self.mode_ready(events).await
+                self.mode_ready(io).await
             }
             ModeStep::Keep(mode) => {
                 self.mode = ModeState::Ready { held: Some(mode) };
-                self.mode_ready(events).await
+                self.mode_ready(io).await
             }
             ModeStep::Set { mode, via } => {
                 let (method, params) = match &via {
@@ -656,55 +694,54 @@ impl Driver {
                     ),
                 };
                 self.mode = ModeState::Setting;
-                self.request(method, params, Outstanding::Mode { policy, mode, via })
+                self.request(io, method, params, Outstanding::Mode { policy, mode, via })
                     .await
             }
-            ModeStep::Refuse(why) => self.refuse(why, events).await,
+            ModeStep::Refuse(why) => self.refuse(why, io).await,
         }
     }
 
     /// The mode is what the policy needs: send what waited for it.
-    async fn mode_ready(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn mode_ready(&mut self, io: &mut Io<'_>) -> Result<()> {
         // Chosen at spawn: nothing is sent for them.
         if std::mem::take(&mut self.setup_pending) && !self.hooks().chooses_at_spawn() {
             if let Some(model) = self.cfg.model.clone()
                 && self.options.current_model.as_deref() != Some(&model.model)
             {
-                self.set_option(self.options.model_option.clone(), &model.model)
+                self.set_option(io, self.options.model_option.clone(), &model.model)
                     .await?;
             }
             if let Some(effort) = self.cfg.effort.clone() {
-                self.set_option(self.options.effort_option.clone(), &effort)
+                self.set_option(io, self.options.effort_option.clone(), &effort)
                     .await?;
             }
         }
-        self.flush_turn(events).await
+        self.flush_turn(io).await
     }
 
     /// The policy cannot be held in this session: say so, take it out of
     /// what is offered, fail the turn that waited for it and stop one that
     /// is running.
-    async fn refuse(&mut self, why: String, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn refuse(&mut self, why: String, io: &mut Io<'_>) -> Result<()> {
         self.mode = ModeState::Refused(why.clone());
         if !self.refused.contains(&self.policy) {
             self.refused.push(self.policy);
             self.refused.sort();
-            let _ = events
-                .send(AgentEvent::CapabilitiesChanged(CapsUpdate {
-                    refused_policies: Some(self.refused.clone()),
-                    ..Default::default()
-                }))
-                .await;
+            io.emit(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(self.refused.clone()),
+                ..Default::default()
+            }))
+            .await;
         }
         if self.queued_turn.is_none() {
-            let _ = events.send(AgentEvent::Error(why)).await;
+            io.emit(AgentEvent::Error(why)).await;
         }
         // A turn running when the policy changed goes on in whatever mode
         // the agent is in, which may run what the policy asks about.
         if self.outstanding.values().any(|o| *o == Outstanding::Prompt) {
-            self.cancel_turn(events).await?;
+            self.cancel_turn(io).await?;
         }
-        self.flush_turn(events).await
+        self.flush_turn(io).await
     }
 
     /// The answer to a mode request: the mode took, or the policy is refused.
@@ -713,7 +750,7 @@ impl Driver {
         (policy, mode, via): (PermissionPolicy, String, SetVia),
         result: &Value,
         error: Option<&Value>,
-        events: &mpsc::Sender<AgentEvent>,
+        io: &mut Io<'_>,
     ) -> Result<()> {
         let options = self.parser.session_options(result.get("configOptions"));
         if let Some(o) = &options {
@@ -740,22 +777,21 @@ impl Driver {
                 && !self.mode_map.within(policy, &now)
             {
                 let name = self.harness.as_str();
-                let _ = events
-                    .send(AgentEvent::Notice(format!(
+                io.emit(AgentEvent::Notice(format!(
                         "{name} is in mode '{now}' (the policy changed to {policy} while a mode was being set), which can run what {policy} asks about; the turn is stopped and the mode for {policy} set again"
                     )))
                     .await;
-                self.cancel_turn(events).await?;
+                self.cancel_turn(io).await?;
             }
-            return self.apply_mode(events).await;
+            return self.apply_mode(io).await;
         }
         match read_back(self.harness.as_str(), policy, &mode, &via, answer) {
             Ok(()) => {
                 self.agent_modes.current = Some(mode.clone());
                 self.mode = ModeState::Ready { held: Some(mode) };
-                self.mode_ready(events).await
+                self.mode_ready(io).await
             }
-            Err(why) => self.refuse(why, events).await,
+            Err(why) => self.refuse(why, io).await,
         }
     }
 
@@ -763,7 +799,7 @@ impl Driver {
     /// option of a `config_option_update`). One it went to by itself, away
     /// from the mode the policy maps to, is set back; if being in it could
     /// run what the policy asks about, the running turn is cancelled first.
-    async fn on_mode_report(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn on_mode_report(&mut self, io: &mut Io<'_>) -> Result<()> {
         let ModeState::Ready { held: Some(held) } = &self.mode else {
             return Ok(());
         };
@@ -777,20 +813,18 @@ impl Driver {
         let policy = self.policy;
         let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
         if turn_running && !self.mode_map.within(policy, &now) {
-            let _ = events
-                .send(AgentEvent::Notice(format!(
+            io.emit(AgentEvent::Notice(format!(
                     "{name} went into its mode '{now}', which can run what {policy} asks about; the turn is stopped and mode '{held}' set again"
                 )))
                 .await;
-            self.cancel_turn(events).await?;
+            self.cancel_turn(io).await?;
         } else {
-            let _ = events
-                .send(AgentEvent::Notice(format!(
-                    "{name} went into its mode '{now}'; mode '{held}' ({policy}) is set again"
-                )))
-                .await;
+            io.emit(AgentEvent::Notice(format!(
+                "{name} went into its mode '{now}'; mode '{held}' ({policy}) is set again"
+            )))
+            .await;
         }
-        self.apply_mode(events).await
+        self.apply_mode(io).await
     }
 
     /// `$/cancel_request`: the agent withdraws a request it sent. One that
@@ -802,7 +836,7 @@ impl Driver {
     ///
     /// An elicitation that waits for the user is withdrawn the same way:
     /// it is kept under its id with the permission requests.
-    async fn withdraw(&mut self, params: &Value, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn withdraw(&mut self, params: &Value, io: &mut Io<'_>) -> Result<()> {
         let Some(id) = params.get("requestId").map(request_key) else {
             return Ok(());
         };
@@ -811,36 +845,14 @@ impl Driver {
         };
         let rpc_id = pending.rpc_id();
         self.withdrawn.insert(id.clone());
-        let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
-        settle(&self.parser, pending.call(), RequestEnd::Withdrawn, events).await;
-        self.proc
-            .write_line(&jsonrpc::error_response(
-                rpc_id,
-                REQUEST_CANCELLED,
-                "Request cancelled",
-            ))
-            .await
-    }
-
-    /// `session/close` for the session, if the agent takes it, at a
-    /// shutdown between turns, so that an agent that outlives its stdin, or
-    /// serves more than one session, lets go of it. Whether it was sent:
-    /// stdin is then closed once it is answered, or after [`CLOSE_WAIT`]
-    /// (vibe-acp 2.26.1 left it unanswered when stdin closed right behind
-    /// it).
-    async fn close_session(&mut self) -> bool {
-        let Some(session_id) = self.session_id.clone() else {
-            return false;
-        };
-        self.can_close
-            && self
-                .request(
-                    "session/close",
-                    json!({"sessionId": session_id}),
-                    Outstanding::Close,
-                )
-                .await
-                .is_ok()
+        io.emit(AgentEvent::PermissionWithdrawn { id }).await;
+        settle(&self.parser, pending.call(), RequestEnd::Withdrawn, io).await;
+        io.write(&jsonrpc::error_response(
+            rpc_id,
+            REQUEST_CANCELLED,
+            "Request cancelled",
+        ))
+        .await
     }
 
     /// `elicitation/create`: a form waits for the user, whatever the
@@ -852,7 +864,7 @@ impl Driver {
         line: &str,
         id: &Value,
         params: &Value,
-        events: &mpsc::Sender<AgentEvent>,
+        io: &mut Io<'_>,
     ) -> Result<()> {
         let name = self.harness.as_str();
         match Form::from_request(line, params) {
@@ -864,33 +876,32 @@ impl Driver {
                     call: requested_call(&evs),
                 };
                 if self.cancelling.is_some() {
-                    return self.refuse_late(pending, events).await;
+                    return self.refuse_late(pending, io).await;
                 }
                 let rid = request_key(id);
                 self.withdrawn.remove(&rid);
                 self.pending.insert(rid, pending);
                 for ev in evs {
-                    let _ = events.send(ev).await;
+                    io.emit(ev).await;
                 }
                 Ok(())
             }
             Err(refusal) => {
-                let _ = events
-                    .send(AgentEvent::Notice(format!(
-                        "{name} asked for {}; it was refused",
-                        match &refusal {
-                            Refusal::NotForm(what) => what.clone(),
-                            Refusal::Unsupported(why) => format!("a form, but {why}"),
-                        }
-                    )))
-                    .await;
+                io.emit(AgentEvent::Notice(format!(
+                    "{name} asked for {}; it was refused",
+                    match &refusal {
+                        Refusal::NotForm(what) => what.clone(),
+                        Refusal::Unsupported(why) => format!("a form, but {why}"),
+                    }
+                )))
+                .await;
                 let line = match refusal {
                     Refusal::NotForm(_) => {
                         jsonrpc::error_response(id, -32602, "unsupported by unharness")
                     }
                     Refusal::Unsupported(_) => jsonrpc::response(id, elicitation::declined()),
                 };
-                self.proc.write_line(&line).await
+                io.write(&line).await
             }
         }
     }
@@ -911,36 +922,24 @@ impl Driver {
 
     /// End the process to start it again with `plan`, before anything
     /// went to its session. The session answer that led here is not
-    /// passed on: the next process answers again.
-    fn restart_with(&mut self, plan: SpawnPlan) {
+    /// passed on: the next process answers again. The loop starts it
+    /// once this one has exited, and [`Driver::respawned`] greets it.
+    fn restart_with(&mut self, plan: SpawnPlan, io: &mut Io<'_>) {
         self.restarted = true;
+        let command = agent_command(&self.spawning.args, &self.cfg, &plan.env);
         self.spawning.restart = Some(plan);
         self.session_id = None;
         self.mode = ModeState::Setting;
         self.outstanding.clear();
         self.reapply = false;
         self.parser.set_replaying(false);
-        self.proc.end();
-    }
-
-    /// The process that was ending for a restart has exited: start the
-    /// next one and begin its handshake.
-    async fn respawn(&mut self, plan: SpawnPlan) -> Result<()> {
-        let command = agent_command(&self.spawning.args, &self.cfg, &plan.env);
-        self.proc = LineProcess::spawn(command, &self.cfg.sandbox)?;
-        self.spawning.slot.set(&self.proc);
-        self.spawning.plan = plan;
-        self.last_stderr = None;
-        // A new connection: its requests are numbered from the start.
-        self.next_id = 0;
-        self.request("initialize", initialize_params(), Outstanding::Initialize)
-            .await
+        io.respawn(command);
     }
 
     /// What the session runs, against what was chosen for an agent that
     /// chooses at spawn: an agent may fall back to another model, or
     /// reset a level the model does not offer, without an error.
-    async fn check_choice(&self, events: &mpsc::Sender<AgentEvent>) {
+    async fn check_choice(&self, io: &mut Io<'_>) {
         if !self.hooks().chooses_at_spawn() {
             return;
         }
@@ -950,12 +949,11 @@ impl Driver {
             && let Some(current) = &self.options.current_model
             && *current != model.model
         {
-            let _ = events
-                .send(AgentEvent::Notice(format!(
-                    "{name} runs model '{current}', not '{}' as chosen (it may not offer that model)",
-                    model.model
-                )))
-                .await;
+            io.emit(AgentEvent::Notice(format!(
+                "{name} runs model '{current}', not '{}' as chosen (it may not offer that model)",
+                model.model
+            )))
+            .await;
         }
         // On a provider of the harness's, with none of its models chosen
         // (an agent profile or admin configuration can name another).
@@ -964,13 +962,12 @@ impl Driver {
             && let Some(current) = &self.options.current_model
             && !p.models.contains(current)
         {
-            let _ = events
-                .send(AgentEvent::Notice(format!(
-                    "{name} runs model '{current}', which is not one of provider {}'s ({})",
-                    p.provider,
-                    p.models.join(", ")
-                )))
-                .await;
+            io.emit(AgentEvent::Notice(format!(
+                "{name} runs model '{current}', which is not one of provider {}'s ({})",
+                p.provider,
+                p.models.join(", ")
+            )))
+            .await;
         }
         if let Some(effort) = &self.cfg.effort
             && let Some(current) = &self.options.current_effort
@@ -980,11 +977,10 @@ impl Driver {
                 Some(why) => why.clone(),
                 None => format!("the model offers {}", self.options.efforts.join(", ")),
             };
-            let _ = events
-                .send(AgentEvent::Notice(format!(
-                    "{name} runs effort '{current}', not '{effort}' as chosen ({why})"
-                )))
-                .await;
+            io.emit(AgentEvent::Notice(format!(
+                "{name} runs effort '{current}', not '{effort}' as chosen ({why})"
+            )))
+            .await;
         }
     }
 
@@ -997,10 +993,10 @@ impl Driver {
     /// so an agent that resumes sessions has the fork resumed before
     /// anything goes to it. The source is never sent a prompt, a mode or a
     /// config change.
-    async fn fork(&mut self, source: &str, retried: bool) -> Result<()> {
+    async fn fork(&mut self, source: &str, retried: bool, io: &mut Io<'_>) -> Result<()> {
         let params =
             json!({"sessionId": source, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
-        self.request("session/fork", params, Outstanding::Fork { retried })
+        self.request(io, "session/fork", params, Outstanding::Fork { retried })
             .await
     }
 
@@ -1011,7 +1007,7 @@ impl Driver {
         result: &Value,
         error: Option<&Value>,
         retried: bool,
-        events: &mpsc::Sender<AgentEvent>,
+        io: &mut Io<'_>,
     ) -> Result<()> {
         let source = self.cfg.resume.clone().unwrap_or_default();
         let fork = result.get("sessionId").and_then(Value::as_str);
@@ -1025,9 +1021,10 @@ impl Driver {
                     let params = json!({
                         "sessionId": source, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers,
                     });
-                    self.request(method, params, Outstanding::ForkSource).await
+                    self.request(io, method, params, Outstanding::ForkSource)
+                        .await
                 }
-                _ => self.fork_failed(&why, events).await,
+                _ => self.fork_failed(&why, io).await,
             };
         };
         if self.reattach_via == Some("session/resume") {
@@ -1038,6 +1035,7 @@ impl Driver {
                 json!({"sessionId": fork, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers});
             return self
                 .request(
+                    io,
                     "session/resume",
                     params,
                     Outstanding::Session { reattach: true },
@@ -1045,7 +1043,7 @@ impl Driver {
                 .await;
         }
         // The fork is open, and its answer is a new session's.
-        self.on_session_answer(line, result, false, events).await
+        self.on_session_answer(line, result, false, io).await
     }
 
     /// The agent answered a session request (new, load, resume, fork, or
@@ -1056,7 +1054,7 @@ impl Driver {
     /// what the agent offers and what to run, and the process is ended
     /// (`signed_out`), so that the next prompt starts one that reads the
     /// sign-in afresh.
-    async fn not_signed_in(&mut self, error: &Value, events: &mpsc::Sender<AgentEvent>) {
+    async fn not_signed_in(&mut self, error: &Value, io: &mut Io<'_>) {
         self.parser.set_replaying(false);
         self.queued_turn = None;
         let why = auth::not_signed_in(
@@ -1065,18 +1063,17 @@ impl Driver {
             &self.auth_methods,
             self.spawning.profile.sign_in.as_deref(),
         );
-        let _ = events
-            .send(AgentEvent::TurnCompleted {
-                stop_reason: StopReason::Error(why),
-            })
-            .await;
+        io.emit(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(why),
+        })
+        .await;
         self.signed_out = true;
     }
 
     /// The source could not be forked: a new session rather than the
     /// source itself, reported as one (`replaced`).
-    async fn fork_failed(&mut self, why: &str, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
-        self.replaced(format!("could not fork the session ({why})"), events)
+    async fn fork_failed(&mut self, why: &str, io: &mut Io<'_>) -> Result<()> {
+        self.replaced(format!("could not fork the session ({why})"), io)
             .await
     }
 
@@ -1085,14 +1082,14 @@ impl Driver {
     /// is told so (`SessionReplaced`), so that it sends the conversation
     /// with the next prompt as it does to any new session. An agent not
     /// signed in gets none (`not_signed_in`).
-    async fn replaced(&mut self, reason: String, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn replaced(&mut self, reason: String, io: &mut Io<'_>) -> Result<()> {
         self.parser.set_replaying(false);
         // Nothing is resumed from here on, also by a process started again
         // for its spawn plan (`restart_with`).
         self.cfg.resume = None;
         self.cfg.fork = false;
-        let _ = events.send(AgentEvent::SessionReplaced { reason }).await;
-        self.new_session().await
+        io.emit(AgentEvent::SessionReplaced { reason }).await;
+        self.new_session(io).await
     }
 
     /// A session answer (new, reattached, or a fork's): take its options
@@ -1102,14 +1099,14 @@ impl Driver {
         line: &str,
         result: &Value,
         reattach: bool,
-        events: &mpsc::Sender<AgentEvent>,
+        io: &mut Io<'_>,
     ) -> Result<()> {
         self.options = self
             .parser
             .session_options(result.get("configOptions"))
             .unwrap_or_default();
         if let Some(plan) = self.learn_from_session() {
-            self.restart_with(plan);
+            self.restart_with(plan, io);
             return Ok(());
         }
         self.parser.set_replaying(false);
@@ -1126,23 +1123,18 @@ impl Driver {
             // session id (some agents add it): announce it here.
             let session_id = self.cfg.resume.clone().unwrap_or_default();
             self.session_id = Some(session_id.clone());
-            let _ = events
-                .send(AgentEvent::SessionStarted {
-                    session_id,
-                    model: self.options.current_model.clone(),
-                })
-                .await;
+            io.emit(AgentEvent::SessionStarted {
+                session_id,
+                model: self.options.current_model.clone(),
+            })
+            .await;
             let mut update = self.options.caps_update(self.harness);
             self.spawning.plan.restrict(&mut update);
-            let _ = events.send(AgentEvent::CapabilitiesChanged(update)).await;
+            io.emit(AgentEvent::CapabilitiesChanged(update)).await;
         }
-        forward(self, line, events).await;
-        self.check_choice(events).await;
-        self.session_ready(events).await
-    }
-
-    fn closing(&self) -> bool {
-        self.outstanding.values().any(|o| *o == Outstanding::Close)
+        self.forward(line, io).await;
+        self.check_choice(io).await;
+        self.session_ready(io).await
     }
 
     /// Cancel the running turn: every open permission request answered
@@ -1160,13 +1152,13 @@ impl Driver {
     /// fails at once, and the cancel then ends the turn `cancelled`
     /// (`fixtures/vibe_acp_interrupt.jsonl`); claude-agent-acp 0.85.1 and
     /// codex-acp 2.1.1 did the same.
-    async fn cancel_turn(&mut self, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
+    async fn cancel_turn(&mut self, io: &mut Io<'_>) -> Result<()> {
         let Some(session_id) = self.session_id.clone() else {
             return Ok(());
         };
         // Asked again while it waits: the cancel goes now.
         if self.cancelling.as_ref().is_some_and(|c| c.by.is_some()) {
-            return self.send_cancel().await;
+            return self.send_cancel(io).await;
         }
         let mut res = Ok(());
         let mut calls = HashSet::new();
@@ -1179,13 +1171,13 @@ impl Driver {
                 None => untied = true,
             }
             let line = jsonrpc::response(pending.rpc_id(), pending.cancelled());
-            res = res.and(self.proc.write_line(&line).await);
-            let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
-            settle(&self.parser, pending.call(), RequestEnd::Cancelled, events).await;
+            res = res.and(io.write(&line).await);
+            io.emit(AgentEvent::PermissionWithdrawn { id }).await;
+            settle(&self.parser, pending.call(), RequestEnd::Cancelled, io).await;
         }
         let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
         if !turn_running {
-            return res.and(self.cancel_now(&session_id).await);
+            return res.and(self.cancel_now(&session_id, io).await);
         }
         let waits = untied || !calls.is_empty();
         self.cancelling = Some(Cancelling {
@@ -1194,22 +1186,21 @@ impl Driver {
             by: Some(Instant::now() + SETTLE_WAIT),
         });
         if !waits {
-            return res.and(self.send_cancel().await);
+            return res.and(self.send_cancel(io).await);
         }
         res
     }
 
-    async fn cancel_now(&mut self, session_id: &str) -> Result<()> {
-        self.proc
-            .write_line(&jsonrpc::notification(
-                "session/cancel",
-                json!({"sessionId": session_id}),
-            ))
-            .await
+    async fn cancel_now(&mut self, session_id: &str, io: &mut Io<'_>) -> Result<()> {
+        io.write(&jsonrpc::notification(
+            "session/cancel",
+            json!({"sessionId": session_id}),
+        ))
+        .await
     }
 
     /// The `session/cancel` a cancelled turn owes, once.
-    async fn send_cancel(&mut self) -> Result<()> {
+    async fn send_cancel(&mut self, io: &mut Io<'_>) -> Result<()> {
         let Some(c) = self.cancelling.as_mut() else {
             return Ok(());
         };
@@ -1218,7 +1209,7 @@ impl Driver {
         }
         c.calls.clear();
         let session_id = c.session_id.clone();
-        self.cancel_now(&session_id).await
+        self.cancel_now(&session_id, io).await
     }
 
     /// When the owed `session/cancel` goes whatever is left.
@@ -1228,7 +1219,7 @@ impl Driver {
 
     /// A tool call was reported: one the owed `session/cancel` waits for
     /// has ended.
-    async fn call_reported(&mut self, update: &Value) -> Result<()> {
+    async fn call_reported(&mut self, update: &Value, io: &mut Io<'_>) -> Result<()> {
         let Some(c) = self.cancelling.as_mut() else {
             return Ok(());
         };
@@ -1240,42 +1231,45 @@ impl Driver {
             return Ok(());
         };
         if ended && c.calls.remove(id) && c.calls.is_empty() {
-            return self.send_cancel().await;
+            return self.send_cancel(io).await;
         }
         Ok(())
     }
 
-    /// Report the anchor still owed for a turn that is over, or that will
-    /// not be sent, as empty (`AgentEvent::TurnAnchor`).
-    async fn settle_anchor(&mut self, events: &mpsc::Sender<AgentEvent>) {
+    /// The anchor still owed for a turn that is over, or that will not be
+    /// sent, as empty (`AgentEvent::TurnAnchor`). Looked at after whatever
+    /// the agent or the TUI sent ([`Driver::after_line`], `encode`,
+    /// `on_stderr`, `on_deadline`).
+    fn owed_anchor(&mut self) -> Option<AgentEvent> {
         let turn_open = self.queued_turn.is_some()
             || self.outstanding.values().any(|o| *o == Outstanding::Prompt);
         if self.anchor_owed && !turn_open {
             self.anchor_owed = false;
-            let _ = events
-                .send(AgentEvent::TurnAnchor { id: String::new() })
-                .await;
+            return Some(AgentEvent::TurnAnchor { id: String::new() });
+        }
+        None
+    }
+
+    /// Report the anchor still owed ([`Driver::owed_anchor`]).
+    async fn settle_anchor(&mut self, io: &mut Io<'_>) {
+        if let Some(ev) = self.owed_anchor() {
+            io.emit(ev).await;
         }
     }
 
     /// A request that comes while the turn is being cancelled is answered
     /// at once, as the open ones were, and its call waited for.
-    async fn refuse_late(
-        &mut self,
-        pending: Pending,
-        events: &mpsc::Sender<AgentEvent>,
-    ) -> Result<()> {
+    async fn refuse_late(&mut self, pending: Pending, io: &mut Io<'_>) -> Result<()> {
         if let Some(c) = self.cancelling.as_mut()
             && c.by.is_some()
             && let Some(call) = pending.call()
         {
             c.calls.insert(call.clone());
         }
-        let res = self
-            .proc
-            .write_line(&jsonrpc::response(pending.rpc_id(), pending.cancelled()))
+        let res = io
+            .write(&jsonrpc::response(pending.rpc_id(), pending.cancelled()))
             .await;
-        settle(&self.parser, pending.call(), RequestEnd::Cancelled, events).await;
+        settle(&self.parser, pending.call(), RequestEnd::Cancelled, io).await;
         res
     }
 }
@@ -1288,543 +1282,580 @@ fn initialize_params() -> Value {
     })
 }
 
-async fn drive(
-    harness: HarnessId,
-    proc: LineProcess,
-    parser: AcpParser,
-    spawning: Spawning,
-    cfg: SessionConfig,
-    events: mpsc::Sender<AgentEvent>,
-    mut cmds: mpsc::Receiver<SessionCommand>,
-) {
-    let mode_map = spawning.profile.modes.clone();
-    let mut d = Driver {
-        harness,
-        proc,
-        spawning,
-        restarted: false,
-        parser,
-        policy: cfg.policy,
-        cfg,
-        next_id: 0,
-        outstanding: HashMap::new(),
-        session_id: None,
-        mcp_servers: json!([]),
-        options: SessionOptions::default(),
-        pending: HashMap::new(),
-        withdrawn: HashSet::new(),
-        queued_turn: None,
-        last_stderr: None,
-        mode_map,
-        agent_modes: AgentModes::default(),
-        mode: ModeState::Setting,
-        reapply: false,
-        refused: Vec::new(),
-        setup_pending: false,
-        can_close: false,
-        reattach_via: None,
-        auth_methods: Vec::new(),
-        signed_out: false,
-        cancelling: None,
-        queued_rewind: None,
-        anchor_owed: false,
-    };
-    if let Err(e) = d
-        .request("initialize", initialize_params(), Outstanding::Initialize)
-        .await
-    {
-        let _ = events
-            .send(AgentEvent::Error(format!("{harness}: {e}")))
-            .await;
-    }
-    let mut shutting_down = false;
-    // Until when stdin stays open for the answer to `session/close`.
-    let mut close_by: Option<Instant> = None;
-
-    loop {
-        tokio::select! {
-            cmd = cmds.recv() => {
-                let Some(cmd) = cmd else {
-                    if close_by.is_some() {
-                        // Its grace starts now rather than with the answer.
-                        d.proc.end();
-                    } else if !shutting_down {
-                        d.proc.kill().await;
-                    }
-                    return;
-                };
-                // The session is ending: nothing more goes to it.
-                if shutting_down {
-                    continue;
-                }
-                let res: Result<()> = match cmd {
-                    SessionCommand::SendTurn { text, attachments } => {
-                        d.queued_turn = Some((text, attachments));
-                        d.anchor_owed = d.hooks().rewind_method().is_some();
-                        d.flush_turn(&events).await
-                    }
-                    // No subagents are reported here, so none can be running.
-                    SessionCommand::StopSubagent { .. } => Ok(()),
-                    SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "this agent has no remote control".into(),
-                        })).await;
-                        Ok(())
-                    }
-                    // Sent once the session is there, before the next turn.
-                    SessionCommand::Rewind { anchor } if d.hooks().rewind_method().is_some() => {
-                        d.queued_rewind = Some(anchor);
-                        d.flush_turn(&events).await
-                    }
-                    SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
-                        let _ = events.send(AgentEvent::Error(
-                            "this agent cannot be steered or rewound".into(),
-                        )).await;
-                        Ok(())
-                    }
-                    SessionCommand::Compact { .. } => {
-                        let _ = events.send(AgentEvent::TurnCompleted {
-                            stop_reason: StopReason::Error("this agent cannot compact on request".into()),
-                        }).await;
-                        Ok(())
-                    }
-                    SessionCommand::Interrupt => {
-                        // Waiting for the session or its mode: it is never sent.
-                        if d.queued_turn.take().is_some() {
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Interrupted,
-                            }).await;
-                            Ok(())
-                        } else {
-                            d.cancel_turn(&events).await
-                        }
-                    }
-                    SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some(Pending::Elicitation { rpc_id, form, .. }) => {
-                            d.proc.write_line(&jsonrpc::response(&rpc_id, form.answer(&decision))).await
-                        }
-                        Some(Pending::Permission { rpc_id, options, call }) => {
-                            let outcome = permission_outcome(&options, &decision);
-                            if matches!(decision, PermissionDecision::Allow { .. })
-                                && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
-                            {
-                                let _ = events.send(AgentEvent::Notice(
-                                    "the agent offered no way to allow this just once; the request was cancelled".into(),
-                                )).await;
-                            }
-                            let end = RequestEnd::of(&outcome, &options);
-                            let res = d.proc.write_line(&jsonrpc::response(&rpc_id, outcome)).await;
-                            settle(&d.parser, call.as_ref(), end, &events).await;
-                            res
-                        }
-                        // Withdrawn by the agent while the user answered.
-                        None if d.withdrawn.remove(&id) => Ok(()),
-                        None => {
-                            let _ = events.send(AgentEvent::Notice(format!("no pending permission request {id}"))).await;
-                            Ok(())
-                        }
-                    },
-                    // Chosen at spawn: the TUI starts the session again
-                    // (`Capabilities::model_per_process`).
-                    SessionCommand::SetModel(m) if d.hooks().chooses_at_spawn() => {
-                        d.cfg.model = Some(m);
-                        let _ = events.send(AgentEvent::Notice(format!(
-                            "{harness}'s model is chosen when it starts: it applies from its next start"
-                        ))).await;
-                        Ok(())
-                    }
-                    SessionCommand::SetEffort(e) if d.hooks().chooses_at_spawn() => {
-                        d.cfg.effort = e;
-                        let _ = events.send(AgentEvent::Notice(format!(
-                            "{harness}'s effort is chosen when it starts: it applies from its next start"
-                        ))).await;
-                        Ok(())
-                    }
-                    SessionCommand::SetModel(m) => {
-                        d.cfg.model = Some(m.clone());
-                        match d.set_option(d.options.model_option.clone(), &m.model).await {
-                            Ok(false) if d.session_id.is_some() => {
-                                let _ = events.send(AgentEvent::Notice(
-                                    "this agent does not offer a model choice".into(),
-                                )).await;
-                                Ok(())
-                            }
-                            other => other.map(|_| ()),
-                        }
-                    }
-                    SessionCommand::SetEffort(e) => {
-                        d.cfg.effort = e.clone();
-                        match e {
-                            Some(e) => d.set_option(d.options.effort_option.clone(), &e).await.map(|_| ()),
-                            None => Ok(()),
-                        }
-                    }
-                    SessionCommand::SetPolicy(p) => {
-                        d.policy = p;
-                        // A process started again (a model or effort chosen
-                        // at spawn) is started for the policy in effect.
-                        d.cfg.policy = p;
-                        d.apply_mode(&events).await
-                    }
-                    SessionCommand::Shutdown => {
-                        shutting_down = true;
-                        let turn_open = d.queued_turn.is_some()
-                            || d.outstanding.values().any(|o| *o == Outstanding::Prompt);
-                        // Mid-turn the agent is killed, with nothing sent first.
-                        if !turn_open && d.close_session().await {
-                            close_by = Some(Instant::now() + CLOSE_WAIT);
-                        } else {
-                            d.proc.end_or_kill(turn_open).await;
-                        }
-                        Ok(())
-                    }
-                };
-                if let Err(e) = res {
-                    let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
-                }
-            }
-            _ = tokio::time::sleep_until(close_by.unwrap_or_else(Instant::now)), if close_by.is_some() => {
-                close_by = None;
-                d.proc.end();
-            }
-            _ = tokio::time::sleep_until(d.cancel_by().unwrap_or_else(Instant::now)), if d.cancel_by().is_some() => {
-                if let Err(e) = d.send_cancel().await {
-                    let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
-                }
-            }
-            raw = d.proc.lines.recv() => {
-                match raw {
-                    // A process ending to be started again says nothing more.
-                    Some(RawLine::Stdout(_) | RawLine::Stderr(_)) if d.spawning.restart.is_some() => {}
-                    Some(RawLine::Exited(_)) if d.spawning.restart.is_some() && !shutting_down => {
-                        let plan = d.spawning.restart.take().unwrap_or_default();
-                        if let Err(e) = d.respawn(plan).await {
-                            let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Error(format!("could not start {harness} again: {e}")),
-                            }).await;
-                            let _ = events.send(AgentEvent::ProcessExited { code: None }).await;
-                            return;
-                        }
-                    }
-                    Some(RawLine::Stdout(line)) => {
-                        if let Err(e) = on_line(&mut d, &line, &events).await {
-                            let _ = events.send(AgentEvent::Error(format!("{harness}: {e}"))).await;
-                        }
-                        // Not signed in: nothing more goes to this process,
-                        // and what it says on the way out is not news.
-                        if d.signed_out && !shutting_down {
-                            shutting_down = true;
-                            close_by = None;
-                            d.proc.end();
-                            continue;
-                        }
-                        if close_by.is_some() && !d.closing() {
-                            close_by = None;
-                            d.proc.end();
-                        }
-                    }
-                    // Agents log freely to stderr; keep the last line for a crash report.
-                    Some(RawLine::Stderr(line)) => {
-                        if !line.trim().is_empty() {
-                            d.last_stderr = Some(line.trim().to_string());
-                        }
-                    }
-                    Some(RawLine::Exited(code)) => {
-                        if !shutting_down && code != Some(0)
-                            && let Some(err) = d.last_stderr.take()
-                        {
-                            let _ = events.send(AgentEvent::Error(err)).await;
-                        }
-                        let _ = events.send(AgentEvent::ProcessExited { code }).await;
-                        return;
-                    }
-                    None => return,
-                }
-            }
+/// The loop's side of the session: what the driver does with each command,
+/// line and exit, and how the agent is ended.
+impl StreamProtocol for Driver {
+    async fn start(&mut self, io: &mut Io<'_>) {
+        if let Err(e) = self
+            .request(
+                io,
+                "initialize",
+                initialize_params(),
+                Outstanding::Initialize,
+            )
+            .await
+        {
+            io.emit(AgentEvent::Error(format!("{}: {e}", self.harness)))
+                .await;
         }
-        d.settle_anchor(&events).await;
+    }
+
+    async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+        // The session is ending: nothing more goes to it.
+        if self.ending {
+            return Encoded::Done;
+        }
+        let harness = self.harness;
+        let res: Result<()> = match cmd {
+            SessionCommand::SendTurn { text, attachments } => {
+                self.queued_turn = Some((text, attachments));
+                self.anchor_owed = self.hooks().rewind_method().is_some();
+                self.flush_turn(io).await
+            }
+            // Sent once the session is there, before the next turn.
+            SessionCommand::Rewind { anchor } if self.hooks().rewind_method().is_some() => {
+                self.queued_rewind = Some(anchor);
+                self.flush_turn(io).await
+            }
+            // Not declared (`AcpHarness::capabilities`), so the loop answers
+            // them before they come here: no subagent is stopped from here,
+            // and ACP has no remote control, steering, compaction on request,
+            // or rewind but an agent's own (`AgentHooks::rewind_method`).
+            SessionCommand::StopSubagent { .. }
+            | SessionCommand::RemoteControl { .. }
+            | SessionCommand::Steer { .. }
+            | SessionCommand::Rewind { .. }
+            | SessionCommand::Compact { .. } => return Encoded::Unsupported,
+            SessionCommand::Interrupt => {
+                // Waiting for the session or its mode: it is never sent.
+                if self.queued_turn.take().is_some() {
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Interrupted,
+                    })
+                    .await;
+                    Ok(())
+                } else {
+                    self.cancel_turn(io).await
+                }
+            }
+            SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {
+                Some(Pending::Elicitation { rpc_id, form, .. }) => {
+                    io.write(&jsonrpc::response(&rpc_id, form.answer(&decision)))
+                        .await
+                }
+                Some(Pending::Permission {
+                    rpc_id,
+                    options,
+                    call,
+                }) => {
+                    let outcome = permission_outcome(&options, &decision);
+                    if matches!(decision, PermissionDecision::Allow { .. })
+                        && outcome.pointer("/outcome/outcome") == Some(&json!("cancelled"))
+                    {
+                        io.emit(AgentEvent::Notice(
+                            "the agent offered no way to allow this just once; the request was cancelled".into(),
+                        ))
+                        .await;
+                    }
+                    let end = RequestEnd::of(&outcome, &options);
+                    let res = io.write(&jsonrpc::response(&rpc_id, outcome)).await;
+                    settle(&self.parser, call.as_ref(), end, io).await;
+                    res
+                }
+                // Withdrawn by the agent while the user answered.
+                None if self.withdrawn.remove(&id) => Ok(()),
+                None => {
+                    io.emit(AgentEvent::Notice(format!(
+                        "no pending permission request {id}"
+                    )))
+                    .await;
+                    Ok(())
+                }
+            },
+            // Chosen at spawn: the TUI starts the session again
+            // (`Capabilities::model_per_process`).
+            SessionCommand::SetModel(m) if self.hooks().chooses_at_spawn() => {
+                self.cfg.model = Some(m);
+                io.emit(AgentEvent::Notice(format!(
+                    "{harness}'s model is chosen when it starts: it applies from its next start"
+                )))
+                .await;
+                Ok(())
+            }
+            SessionCommand::SetEffort(e) if self.hooks().chooses_at_spawn() => {
+                self.cfg.effort = e;
+                io.emit(AgentEvent::Notice(format!(
+                    "{harness}'s effort is chosen when it starts: it applies from its next start"
+                )))
+                .await;
+                Ok(())
+            }
+            SessionCommand::SetModel(m) => {
+                self.cfg.model = Some(m.clone());
+                match self
+                    .set_option(io, self.options.model_option.clone(), &m.model)
+                    .await
+                {
+                    Ok(false) if self.session_id.is_some() => {
+                        io.emit(AgentEvent::Notice(
+                            "this agent does not offer a model choice".into(),
+                        ))
+                        .await;
+                        Ok(())
+                    }
+                    other => other.map(|_| ()),
+                }
+            }
+            SessionCommand::SetEffort(e) => {
+                self.cfg.effort = e.clone();
+                match e {
+                    Some(e) => self
+                        .set_option(io, self.options.effort_option.clone(), &e)
+                        .await
+                        .map(|_| ()),
+                    None => Ok(()),
+                }
+            }
+            SessionCommand::SetPolicy(p) => {
+                self.policy = p;
+                // A process started again (a model or effort chosen
+                // at spawn) is started for the policy in effect.
+                self.cfg.policy = p;
+                self.apply_mode(io).await
+            }
+            // The loop's (`shutdown`).
+            SessionCommand::Shutdown => Ok(()),
+        };
+        if let Err(e) = res {
+            io.emit(AgentEvent::Error(format!("{harness}: {e}"))).await;
+        }
+        self.settle_anchor(io).await;
+        Encoded::Done
+    }
+
+    fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+        vec![AgentEvent::Error(format!("{}: {error}", self.harness))]
+    }
+
+    fn parser(&mut self) -> &mut dyn Parser {
+        &mut self.parser
+    }
+
+    async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        let res = self.on_line(line, io).await;
+        self.after_line(res, io).await;
+        Ok(())
+    }
+
+    async fn on_answer(&mut self, answer: Answer<'_>, io: &mut Io<'_>) -> Result<(), Gone> {
+        let res = self.on_response(answer, io).await;
+        self.after_line(res, io).await;
+        Ok(())
+    }
+
+    /// Agents log freely to stderr; the last line is kept for a crash
+    /// report.
+    fn on_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+        if !line.trim().is_empty() {
+            self.last_stderr = Some(line.trim().to_string());
+        }
+        self.owed_anchor().into_iter().collect()
+    }
+
+    /// An agent that failed by itself: the last thing it said on stderr.
+    fn on_exit(&mut self, code: Option<i32>) -> Vec<AgentEvent> {
+        match self.last_stderr.take() {
+            Some(err) if !self.ending && code != Some(0) => vec![AgentEvent::Error(err)],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Between turns, `session/close` for the session where the agent
+    /// takes it, so that an agent that outlives its stdin, or serves more
+    /// than one session, lets go of it: stdin is closed once it is
+    /// answered, or after [`CLOSE_WAIT`] (vibe-acp 2.26.1 left it
+    /// unanswered when stdin closed right behind it). Mid-turn the agent is
+    /// killed, with nothing sent first.
+    fn shutdown(&mut self) -> Shutdown {
+        // Ended already (signed out): nothing more.
+        if std::mem::replace(&mut self.ending, true) {
+            return Shutdown::EndOrKill { turn_open: false };
+        }
+        let turn_open = self.queued_turn.is_some()
+            || self.outstanding.values().any(|o| *o == Outstanding::Prompt);
+        match &self.session_id {
+            Some(session_id) if !turn_open && self.can_close => Shutdown::Request {
+                method: "session/close".into(),
+                params: json!({"sessionId": session_id}),
+                within: CLOSE_WAIT,
+            },
+            _ => Shutdown::EndOrKill { turn_open },
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.cancel_by()
+    }
+
+    /// The owed `session/cancel` waited for its calls long enough.
+    async fn on_deadline(&mut self, io: &mut Io<'_>) {
+        if let Err(e) = self.send_cancel(io).await {
+            io.emit(AgentEvent::Error(format!("{}: {e}", self.harness)))
+                .await;
+        }
+        self.settle_anchor(io).await;
+    }
+
+    /// The process that was ending for a restart ([`Driver::restart_with`])
+    /// has exited, and the next one has started: its handshake. One that
+    /// could not be started, or sent it, ends the session.
+    async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+        let harness = self.harness;
+        let plan = self.spawning.restart.take().unwrap_or_default();
+        let started = match started {
+            Ok(()) => {
+                self.spawning.plan = plan;
+                self.last_stderr = None;
+                // A new connection: its requests are numbered from the start.
+                self.request(
+                    io,
+                    "initialize",
+                    initialize_params(),
+                    Outstanding::Initialize,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
+        let Err(e) = started else {
+            return true;
+        };
+        io.emit(AgentEvent::Error(format!("{harness}: {e}"))).await;
+        io.emit(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(format!("could not start {harness} again: {e}")),
+        })
+        .await;
+        false
     }
 }
 
-/// Handle one stdout line: driver bookkeeping first, then the parser's events.
-async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) -> Result<()> {
-    let msg = RpcMessage::parse(line);
-    match &msg {
-        Some(RpcMessage::Response { id, result, error }) => {
-            let kind = id.as_u64().and_then(|i| d.outstanding.remove(&i));
-            if kind == Some(Outstanding::Prompt) {
-                d.cancelling = None;
-            }
-            let result = result.clone().unwrap_or(Value::Null);
-            if let Some(e) = error
-                && auth::is_auth_required(e)
-                && matches!(
-                    kind,
-                    Some(
-                        Outstanding::Session { .. }
-                            | Outstanding::Fork { .. }
-                            | Outstanding::ForkSource
-                            | Outstanding::Prompt
-                    )
+impl Driver {
+    /// What follows every line of the agent's: what went wrong handling it
+    /// is told, and the anchor still owed reported. An agent that wants the
+    /// user signed in is ended there: nothing more goes to its process, and
+    /// what it says on the way out is not news (its anchor still owed is
+    /// looked at with the next line).
+    async fn after_line(&mut self, res: Result<()>, io: &mut Io<'_>) {
+        if let Err(e) = res {
+            io.emit(AgentEvent::Error(format!("{}: {e}", self.harness)))
+                .await;
+        }
+        if self.signed_out && !self.ending {
+            self.ending = true;
+            io.end();
+            return;
+        }
+        self.settle_anchor(io).await;
+    }
+
+    /// The answer to a request of the driver's: bookkeeping first, then the
+    /// parser's events.
+    async fn on_response(&mut self, answer: Answer<'_>, io: &mut Io<'_>) -> Result<()> {
+        let Answer {
+            id,
+            result,
+            error,
+            line,
+        } = answer;
+        let kind = match id {
+            RequestId::Number(id) => self.outstanding.remove(&id),
+            RequestId::Name(_) => None,
+        };
+        if kind == Some(Outstanding::Prompt) {
+            self.cancelling = None;
+        }
+        let result = result.unwrap_or(Value::Null);
+        if let Some(e) = &error
+            && auth::is_auth_required(e)
+            && matches!(
+                kind,
+                Some(
+                    Outstanding::Session { .. }
+                        | Outstanding::Fork { .. }
+                        | Outstanding::ForkSource
+                        | Outstanding::Prompt
                 )
-            {
-                d.not_signed_in(e, events).await;
-                return Ok(());
+            )
+        {
+            self.not_signed_in(e, io).await;
+            return Ok(());
+        }
+        match (kind, &error) {
+            (Some(Outstanding::Initialize), None) => {
+                self.auth_methods = auth::auth_methods(&result);
+                let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
+                self.can_close = can_close(caps);
+                self.reattach_via = if can_resume(caps) {
+                    Some("session/resume")
+                } else if can_load(caps) {
+                    Some("session/load")
+                } else {
+                    None
+                };
+                let (servers, dropped) =
+                    mcp_servers_param(&self.cfg.mcp_servers, mcp_http(caps), &self.cfg.cwd);
+                self.mcp_servers = servers;
+                if !dropped.is_empty() {
+                    let warning = mcp::not_http(self.harness.as_str(), &dropped.join(", "));
+                    io.emit(AgentEvent::Notice(warning)).await;
+                }
+                match self.cfg.resume.clone() {
+                    // The stored session is the original's: it is forked,
+                    // never reattached and written to.
+                    Some(id) if self.cfg.fork && can_fork(caps) => {
+                        self.fork(&id, false, io).await?
+                    }
+                    Some(_) if self.cfg.fork => {
+                        self.replaced("this agent cannot fork sessions".into(), io)
+                            .await?;
+                    }
+                    Some(id) if can_resume(caps) || can_load(caps) => {
+                        // `resume` reattaches silently; `load` replays the
+                        // history, which the transcript already has.
+                        let method = if can_resume(caps) {
+                            "session/resume"
+                        } else {
+                            self.parser.set_replaying(true);
+                            "session/load"
+                        };
+                        let params = json!({
+                            "sessionId": id, "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers,
+                        });
+                        self.request(io, method, params, Outstanding::Session { reattach: true })
+                            .await?;
+                    }
+                    Some(_) => {
+                        self.replaced("this agent cannot resume sessions".into(), io)
+                            .await?;
+                    }
+                    None => self.new_session(io).await?,
+                }
             }
-            match (kind, error) {
-                (Some(Outstanding::Initialize), None) => {
-                    d.auth_methods = auth::auth_methods(&result);
-                    let caps = result.get("agentCapabilities").unwrap_or(&Value::Null);
-                    d.can_close = can_close(caps);
-                    d.reattach_via = if can_resume(caps) {
-                        Some("session/resume")
-                    } else if can_load(caps) {
-                        Some("session/load")
-                    } else {
-                        None
-                    };
-                    let (servers, dropped) =
-                        mcp_servers_param(&d.cfg.mcp_servers, mcp_http(caps), &d.cfg.cwd);
-                    d.mcp_servers = servers;
-                    if !dropped.is_empty() {
-                        let warning = mcp::not_http(d.harness.as_str(), &dropped.join(", "));
-                        let _ = events.send(AgentEvent::Notice(warning)).await;
-                    }
-                    match d.cfg.resume.clone() {
-                        // The stored session is the original's: it is forked,
-                        // never reattached and written to.
-                        Some(id) if d.cfg.fork && can_fork(caps) => d.fork(&id, false).await?,
-                        Some(_) if d.cfg.fork => {
-                            d.replaced("this agent cannot fork sessions".into(), events)
-                                .await?;
-                        }
-                        Some(id) if can_resume(caps) || can_load(caps) => {
-                            // `resume` reattaches silently; `load` replays the
-                            // history, which the transcript already has.
-                            let method = if can_resume(caps) {
-                                "session/resume"
-                            } else {
-                                d.parser.set_replaying(true);
-                                "session/load"
-                            };
-                            let params = json!({
-                                "sessionId": id, "cwd": d.cfg.cwd, "mcpServers": d.mcp_servers,
-                            });
-                            d.request(method, params, Outstanding::Session { reattach: true })
-                                .await?;
-                        }
-                        Some(_) => {
-                            d.replaced("this agent cannot resume sessions".into(), events)
-                                .await?;
-                        }
-                        None => d.new_session().await?,
-                    }
-                }
-                (Some(Outstanding::Session { reattach }), None) => {
-                    return d.on_session_answer(line, &result, reattach, events).await;
-                }
-                (Some(Outstanding::Fork { retried }), error) => {
-                    return d
-                        .on_fork_answer(line, &result, error.as_ref(), retried, events)
-                        .await;
-                }
-                // The source is open now: fork it again. Its answer (its
-                // modes, its options) is not this session's.
-                (Some(Outstanding::ForkSource), None) => {
-                    d.parser.set_replaying(false);
-                    let source = d.cfg.resume.clone().unwrap_or_default();
-                    return d.fork(&source, true).await;
-                }
-                (Some(Outstanding::ForkSource), Some(e)) => {
-                    return d.fork_failed(&error_text(e), events).await;
-                }
-                (Some(Outstanding::Session { reattach: true }), Some(e)) => {
-                    let reason = format!("could not resume the session ({})", error_text(e));
-                    return d.replaced(reason, events).await;
-                }
-                // Without a session nothing can run: fail the waiting turn.
-                (Some(Outstanding::Initialize | Outstanding::Session { .. }), Some(e)) => {
-                    d.queued_turn = None;
-                    let _ = events
-                        .send(AgentEvent::TurnCompleted {
-                            stop_reason: StopReason::Error(format!(
-                                "{} (if this is an authentication error, log in with the agent's own CLI first)",
-                                error_text(e)
-                            )),
-                        })
-                        .await;
-                    return Ok(());
-                }
-                (Some(Outstanding::Mode { policy, mode, via }), error) => {
-                    // An error is the driver's to report: the policy is
-                    // refused (or, changed meanwhile, its mode applied again).
-                    if error.is_none() {
-                        forward(d, line, events).await;
-                    }
-                    return d
-                        .on_mode_answer((policy, mode, via), &result, error.as_ref(), events)
-                        .await;
-                }
-                // Either way the turn that waited goes now: after a failed
-                // rewind into the session as it was, which the user is told.
-                (Some(Outstanding::Rewind), error) => {
-                    if let Some(e) = error {
-                        let _ = events
-                            .send(AgentEvent::RewindFailed {
-                                reason: error_text(e),
-                            })
-                            .await;
-                    }
-                    return d.flush_turn(events).await;
-                }
-                (Some(Outstanding::Prompt), Some(e)) => {
-                    let _ = events
-                        .send(AgentEvent::TurnCompleted {
-                            stop_reason: StopReason::Error(error_text(e)),
-                        })
-                        .await;
-                    return Ok(());
-                }
-                // The session is over; an error closing it is not news.
-                (Some(Outstanding::Close), _) => return Ok(()),
-                // A config change answers with the option list as it now stands.
-                (Some(Outstanding::Other), None) => {
-                    if let Some(o) = d.parser.session_options(result.get("configOptions")) {
-                        d.options = o;
-                    }
-                }
-                _ => {}
+            (Some(Outstanding::Session { reattach }), None) => {
+                return self.on_session_answer(line, &result, reattach, io).await;
             }
-        }
-        Some(RpcMessage::Notification { method, params }) if method == "session/update" => {
-            match params
-                .pointer("/update/sessionUpdate")
-                .and_then(Value::as_str)
-            {
-                // Keep the option ids current so model and effort changes go
-                // to the right one, and the mode known.
-                Some("config_option_update") => {
-                    if let Some(o) = d
-                        .parser
-                        .session_options(params.pointer("/update/configOptions"))
-                    {
-                        d.agent_modes.take_options(&o);
-                        d.options = o;
-                        forward(d, line, events).await;
-                        return d.on_mode_report(events).await;
-                    }
-                }
-                // A call an owed `session/cancel` waits for may have ended.
-                Some("tool_call" | "tool_call_update") => {
-                    forward(d, line, events).await;
-                    let update = params.get("update").unwrap_or(&Value::Null);
-                    return d.call_reported(update).await;
-                }
-                Some("current_mode_update") => {
-                    if let Some(mode) = params
-                        .pointer("/update/currentModeId")
-                        .and_then(Value::as_str)
-                    {
-                        d.agent_modes.current = Some(mode.to_string());
-                        forward(d, line, events).await;
-                        return d.on_mode_report(events).await;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Some(RpcMessage::Notification { method, params }) if method == "$/cancel_request" => {
-            return d.withdraw(params, events).await;
-        }
-        Some(RpcMessage::Request { id, method, params }) if method == "elicitation/create" => {
-            return d.on_elicitation(line, id, params, events).await;
-        }
-        Some(RpcMessage::Request { id, method, params }) => {
-            if method != "session/request_permission" {
-                return d
-                    .proc
-                    .write_line(&jsonrpc::error_response(
-                        id,
-                        -32601,
-                        "unsupported by unharness",
-                    ))
+            (Some(Outstanding::Fork { retried }), error) => {
+                return self
+                    .on_fork_answer(line, &result, error.as_ref(), retried, io)
                     .await;
             }
-            let options = params.get("options").cloned().unwrap_or(Value::Null);
-            let (allowed, evs) =
-                screen_permission(&mut d.parser, d.policy, d.cfg.workspace(), line, params);
-            if d.cancelling.is_some() {
-                let pending = Pending::Permission {
-                    rpc_id: id.clone(),
-                    call: requested_call(&evs),
-                    options,
-                };
-                for ev in evs {
-                    if !matches!(ev, AgentEvent::PermissionRequest(_)) {
-                        let _ = events.send(ev).await;
-                    }
-                }
-                return d.refuse_late(pending, events).await;
+            // The source is open now: fork it again. Its answer (its
+            // modes, its options) is not this session's.
+            (Some(Outstanding::ForkSource), None) => {
+                self.parser.set_replaying(false);
+                let source = self.cfg.resume.clone().unwrap_or_default();
+                return self.fork(&source, true, io).await;
             }
-            if allowed {
-                let allow = PermissionDecision::Allow {
-                    updated_input: None,
-                };
-                let answer = permission_outcome(&options, &allow);
-                d.proc
-                    .write_line(&jsonrpc::response(id, answer.clone()))
-                    .await?;
-                for ev in evs {
-                    let _ = events.send(ev).await;
-                }
-                // The question was left out of `evs`: the call is the request's.
-                let call = params
-                    .pointer("/toolCall/toolCallId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-                settle(
-                    &d.parser,
-                    call.as_ref(),
-                    RequestEnd::of(&answer, &options),
-                    events,
-                )
+            (Some(Outstanding::ForkSource), Some(e)) => {
+                return self.fork_failed(&error_text(e), io).await;
+            }
+            (Some(Outstanding::Session { reattach: true }), Some(e)) => {
+                let reason = format!("could not resume the session ({})", error_text(e));
+                return self.replaced(reason, io).await;
+            }
+            // Without a session nothing can run: fail the waiting turn.
+            (Some(Outstanding::Initialize | Outstanding::Session { .. }), Some(e)) => {
+                self.queued_turn = None;
+                io.emit(AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(format!(
+                        "{} (if this is an authentication error, log in with the agent's own CLI first)",
+                        error_text(e)
+                    )),
+                })
                 .await;
                 return Ok(());
             }
-            let rid = request_key(id);
-            d.withdrawn.remove(&rid);
-            d.pending.insert(
-                rid,
-                Pending::Permission {
-                    rpc_id: id.clone(),
-                    call: requested_call(&evs),
-                    options,
-                },
-            );
-            for ev in evs {
-                let _ = events.send(ev).await;
+            (Some(Outstanding::Mode { policy, mode, via }), error) => {
+                // An error is the driver's to report: the policy is
+                // refused (or, changed meanwhile, its mode applied again).
+                if error.is_none() {
+                    self.forward(line, io).await;
+                }
+                return self
+                    .on_mode_answer((policy, mode, via), &result, error.as_ref(), io)
+                    .await;
             }
-            return Ok(());
+            // Either way the turn that waited goes now: after a failed
+            // rewind into the session as it was, which the user is told.
+            (Some(Outstanding::Rewind), error) => {
+                if let Some(e) = error {
+                    io.emit(AgentEvent::RewindFailed {
+                        reason: error_text(e),
+                    })
+                    .await;
+                }
+                return self.flush_turn(io).await;
+            }
+            (Some(Outstanding::Prompt), Some(e)) => {
+                io.emit(AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(error_text(e)),
+                })
+                .await;
+                return Ok(());
+            }
+            // A config change answers with the option list as it now stands.
+            (Some(Outstanding::Other), None) => {
+                if let Some(o) = self.parser.session_options(result.get("configOptions")) {
+                    self.options = o;
+                }
+            }
+            _ => {}
         }
-        _ => {}
+        self.forward(line, io).await;
+        Ok(())
     }
-    forward(d, line, events).await;
-    Ok(())
-}
 
-async fn forward(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) {
-    for mut ev in d.parser.feed(line) {
-        // One anchor per turn sent: a message the agent echoes outside
-        // one is not a turn of ours.
-        if matches!(ev, AgentEvent::TurnAnchor { .. }) && !std::mem::take(&mut d.anchor_owed) {
-            continue;
+    /// Any other line of the agent's (its requests and notifications, and
+    /// an answer to no request of the driver's): bookkeeping first, then the
+    /// parser's events.
+    async fn on_line(&mut self, line: &str, io: &mut Io<'_>) -> Result<()> {
+        let msg = RpcMessage::parse(line);
+        match &msg {
+            Some(RpcMessage::Notification { method, params }) if method == "session/update" => {
+                match params
+                    .pointer("/update/sessionUpdate")
+                    .and_then(Value::as_str)
+                {
+                    // Keep the option ids current so model and effort changes go
+                    // to the right one, and the mode known.
+                    Some("config_option_update") => {
+                        if let Some(o) = self
+                            .parser
+                            .session_options(params.pointer("/update/configOptions"))
+                        {
+                            self.agent_modes.take_options(&o);
+                            self.options = o;
+                            self.forward(line, io).await;
+                            return self.on_mode_report(io).await;
+                        }
+                    }
+                    // A call an owed `session/cancel` waits for may have ended.
+                    Some("tool_call" | "tool_call_update") => {
+                        self.forward(line, io).await;
+                        let update = params.get("update").unwrap_or(&Value::Null);
+                        return self.call_reported(update, io).await;
+                    }
+                    Some("current_mode_update") => {
+                        if let Some(mode) = params
+                            .pointer("/update/currentModeId")
+                            .and_then(Value::as_str)
+                        {
+                            self.agent_modes.current = Some(mode.to_string());
+                            self.forward(line, io).await;
+                            return self.on_mode_report(io).await;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(RpcMessage::Notification { method, params }) if method == "$/cancel_request" => {
+                return self.withdraw(params, io).await;
+            }
+            Some(RpcMessage::Request { id, method, params }) if method == "elicitation/create" => {
+                return self.on_elicitation(line, id, params, io).await;
+            }
+            Some(RpcMessage::Request { id, method, params }) => {
+                if method != "session/request_permission" {
+                    return io
+                        .write(&jsonrpc::error_response(
+                            id,
+                            -32601,
+                            "unsupported by unharness",
+                        ))
+                        .await;
+                }
+                let options = params.get("options").cloned().unwrap_or(Value::Null);
+                let (allowed, evs) = screen_permission(
+                    &mut self.parser,
+                    self.policy,
+                    self.cfg.workspace(),
+                    line,
+                    params,
+                );
+                if self.cancelling.is_some() {
+                    let pending = Pending::Permission {
+                        rpc_id: id.clone(),
+                        call: requested_call(&evs),
+                        options,
+                    };
+                    for ev in evs {
+                        if !matches!(ev, AgentEvent::PermissionRequest(_)) {
+                            io.emit(ev).await;
+                        }
+                    }
+                    return self.refuse_late(pending, io).await;
+                }
+                if allowed {
+                    let allow = PermissionDecision::Allow {
+                        updated_input: None,
+                    };
+                    let answer = permission_outcome(&options, &allow);
+                    io.write(&jsonrpc::response(id, answer.clone())).await?;
+                    for ev in evs {
+                        io.emit(ev).await;
+                    }
+                    // The question was left out of `evs`: the call is the request's.
+                    let call = params
+                        .pointer("/toolCall/toolCallId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    settle(
+                        &self.parser,
+                        call.as_ref(),
+                        RequestEnd::of(&answer, &options),
+                        io,
+                    )
+                    .await;
+                    return Ok(());
+                }
+                let rid = request_key(id);
+                self.withdrawn.remove(&rid);
+                self.pending.insert(
+                    rid,
+                    Pending::Permission {
+                        rpc_id: id.clone(),
+                        call: requested_call(&evs),
+                        options,
+                    },
+                );
+                for ev in evs {
+                    io.emit(ev).await;
+                }
+                return Ok(());
+            }
+            // The loop routes the answers to the driver's requests to
+            // `on_response`: any other is the parser's.
+            _ => {}
         }
-        // On a provider in the agent's environment, only its models.
-        if let AgentEvent::CapabilitiesChanged(update) = &mut ev {
-            d.spawning.plan.restrict(update);
+        self.forward(line, io).await;
+        Ok(())
+    }
+
+    /// The parser's events of `line`, passed on.
+    async fn forward(&mut self, line: &str, io: &mut Io<'_>) {
+        for mut ev in self.parser.feed(line) {
+            // One anchor per turn sent: a message the agent echoes outside
+            // one is not a turn of ours.
+            if matches!(ev, AgentEvent::TurnAnchor { .. }) && !std::mem::take(&mut self.anchor_owed)
+            {
+                continue;
+            }
+            // On a provider in the agent's environment, only its models.
+            if let AgentEvent::CapabilitiesChanged(update) = &mut ev {
+                self.spawning.plan.restrict(update);
+            }
+            io.emit(ev).await;
         }
-        let _ = events.send(ev).await;
     }
 }
 

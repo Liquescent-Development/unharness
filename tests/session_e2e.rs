@@ -1837,6 +1837,83 @@ async fn shut_down(handle: &mut SessionHandle) {
     while !matches!(next_event(handle).await, AgentEvent::ProcessExited { .. }) {}
 }
 
+/// What an ACP agent does not offer (`AcpHarness::capabilities`) never
+/// reaches it: each is answered with one notice, in order with what it
+/// takes.
+#[tokio::test]
+async fn acp_answers_a_command_it_cannot_carry_out_with_one_notice() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = fake._tmp.path().join("handshake.jsonl");
+    std::fs::write(
+        &fixture,
+        [
+            r#">> {"method": "initialize"}"#,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#,
+            r#">> {"method": "session/new"}"#,
+            r#"{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1"}}"#,
+        ]
+        .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Bypass, true);
+    cfg.model = None;
+    let mut handle = acp_harness().start_session(cfg).unwrap();
+    events_until(&mut handle, |e| {
+        matches!(e, AgentEvent::SessionStarted { .. })
+    })
+    .await;
+    for cmd in [
+        SessionCommand::Steer {
+            text: "x".into(),
+            attachments: Vec::new(),
+        },
+        SessionCommand::Compact { instructions: None },
+        SessionCommand::Rewind { anchor: "a".into() },
+        SessionCommand::StopSubagent { id: "s".into() },
+        SessionCommand::RemoteControl {
+            enabled: true,
+            name: None,
+        },
+        // Taken: the driver says what it makes of it.
+        SessionCommand::RespondPermission {
+            id: "none".into(),
+            decision: PermissionDecision::Deny {
+                reason: String::new(),
+            },
+        },
+    ] {
+        handle.send(cmd).await.unwrap();
+    }
+    let notices: Vec<String> = events_until(
+        &mut handle,
+        |e| matches!(e, AgentEvent::Notice(n) if n.starts_with("no pending")),
+    )
+    .await
+    .into_iter()
+    .filter_map(|e| match e {
+        AgentEvent::Notice(n) => Some(n),
+        _ => None,
+    })
+    .collect();
+    assert_eq!(
+        notices,
+        [
+            "fake-acp cannot steer a running turn",
+            "fake-acp cannot compact its context on request",
+            "fake-acp cannot rewind its session",
+            "fake-acp cannot stop a subagent",
+            "fake-acp cannot go on remote control",
+            "no pending permission request none",
+        ]
+    );
+    assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);
+    shut_down(&mut handle).await;
+}
+
 /// As recorded on claude-agent-acp 0.85.1: a PermissionRequest hook denies
 /// the Write while the request waits for the user, and the agent withdraws
 /// the request with `$/cancel_request`. The modal is closed, the request
@@ -3613,7 +3690,7 @@ fn sent_modes(fake: &Fake) -> Vec<String> {
 
 /// Events until the driver has handled every command sent before: it
 /// takes them in order, and answers `RemoteControl` (which no ACP agent
-/// has) with an event at once.
+/// has) with a notice at once.
 async fn barrier(handle: &mut SessionHandle) -> Vec<AgentEvent> {
     handle
         .send(SessionCommand::RemoteControl {
@@ -3622,9 +3699,10 @@ async fn barrier(handle: &mut SessionHandle) -> Vec<AgentEvent> {
         })
         .await
         .unwrap();
-    events_until(handle, |e| {
-        matches!(e, AgentEvent::RemoteControl(RemoteControl::Failed { .. }))
-    })
+    events_until(
+        handle,
+        |e| matches!(e, AgentEvent::Notice(n) if n.ends_with("cannot go on remote control")),
+    )
     .await
 }
 

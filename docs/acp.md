@@ -30,13 +30,14 @@ MCP servers and what vibe may write are in [Mistral Vibe](vibe.md).
 
 Inside, unharness drives vibe with the same ACP client as any agent on
 this page, and builds in what it knows about `vibe-acp` that the protocol
-does not say. For any agent a table can say three such things,
-`asks_permission`, `modes` and `sign_in`; everything else is done the
-protocol's way. For vibe unharness also knows its reasoning option
-(`thinking`), that a relative path in one of its edits is in the
-session's directory, and where it does what the protocol does not say:
-its model and level chosen when it starts (below), its subagents and its
-rewind ([Mistral Vibe](vibe.md#rewind)).
+does not say. A table that defines an agent (and vibe's) can say three
+such things, `asks_permission`, `modes` and `sign_in` (a preset's table
+without `protocol = "acp"` takes none of them, see [Presets](#presets));
+everything else is done the protocol's way. For vibe, unharness also
+knows its reasoning option (`thinking`), that a relative path in one of
+its edits is in the session's directory, and where it does what the
+protocol does not say: its model and level chosen when it starts
+(below), its subagents and its rewind ([Mistral Vibe](vibe.md#rewind)).
 
 Its model and reasoning level (`/model`, `/effort`, `default_model`,
 `default_effort`) are never set over ACP, because vibe 2.26.1 writes a
