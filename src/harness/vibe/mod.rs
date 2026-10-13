@@ -1,8 +1,9 @@
 //! Mistral Vibe (`vibe-acp`, PyPI `mistral-vibe`), driven over the Agent
-//! Client Protocol by [`AcpHarness`] with what unharness knows about it:
-//! the session modes that back each policy, its reasoning level as the
-//! option `thinking`, and its model and level chosen by environment when
-//! it starts.
+//! Client Protocol by [`AcpHarness`] with what unharness knows about it
+//! (its `AcpProfile`, built in `acp_profile`, with `VibeHooks`): the
+//! session modes that back each policy, its reasoning level as the option
+//! `thinking`, and its model and level chosen by environment when it
+//! starts.
 //!
 //! Checked on vibe 2.26.1. `session/set_config_option` for `model` or
 //! `thinking` writes the choice into the user's `config.toml`

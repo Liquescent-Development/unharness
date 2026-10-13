@@ -2,12 +2,15 @@
 
 Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
 `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
-name, `asks_permission` and modes), with `ask` → `unharness-ask` and
+name, `asks_permission` and modes) with a profile of its own
+(`acp_profile`: an `AcpProfile` whose hooks are `VibeHooks`, #271),
+with `ask` → `unharness-ask` and
 `accept-edits` → `unharness-accept-edits` (unharness's own profiles,
 #196, below), `auto` →
 `smart-approve` (#174, below) and `bypass` → `auto-approve`, `thinking`
 its effort option, and its model and level
-chosen at spawn (`AcpHarness::choosing_at_spawn`, `acp/spawn.rs`), never
+chosen at spawn (`AgentHooks::chooses_at_spawn` and `spawn_plan`,
+`acp/spawn.rs`), never
 with `session/set_config_option`: on vibe 2.26.1 that writes the choice
 into `~/.vibe/config.toml` (`set_config_option` in `vibe/acp/agent.py`).
 The process gets `VIBE_ACTIVE_MODEL=<alias>` and, for a level, a whole
@@ -17,8 +20,9 @@ fails the session, and merges the given fields over the model's own
 (`vibe/core/config/layers/environment.py`, `exclude_unset`). The name is
 the model option's `description`, so a run's first process that has a
 level and does not know it yet is started again once its session has
-answered, before anything is sent (the second process is numbered from
-id 1 again); the provider is read, never written, from the user's
+answered (`AgentHooks::learn` and `respawn`), before anything is sent
+(the second process is numbered from id 1 again); the provider is
+read, never written, from the user's
 `config.toml` entry for the alias, else `mistral`. With a level and no
 model chosen, the model the last session ran is pinned with it: in a
 scratch `VIBE_HOME` the first process ran `mistral-medium-3.5` and the
@@ -103,7 +107,7 @@ caches, `vibehistory`, `worktrees/`, `plans/`. Three `--print` sessions
 in a scratch home said nothing, and one under `bypass` whose command
 appended to `trusted_folders.toml` was reported. A relative path in an
 edit's `diff` (the model's `filePath`) is taken as in the session's
-directory (`AcpHarness::resolving_relative_edits`, vibe only): with
+directory (`AcpProfile::relative_edits`, vibe only): with
 `vibe-acp` started in another directory than the `cwd` of `session/new`
 the write landed in the session's, while `locations` named the
 process's (`Path(...).resolve()` in `acp/session_updates.py`, a
@@ -252,8 +256,9 @@ provided"), vibe's trust prompt, macOS.
 ## Subagents
 
 Subagents (#170, `vibe/subagents.rs`, an `acp::parse::MetaReader` the
-vibe harness gives the ACP parser, since only vibe's own `_meta` says
-what such a call is): under vibe 2.26.1's Unified runtime the model
+vibe harness gives the ACP parser, `AgentHooks::meta_reader`, since
+only vibe's own `_meta` says what such a call is): under vibe 2.26.1's
+Unified runtime the model
 spawns a generic child or a custom one (`agents/<name>.toml` with
 `agent_type = "subagent"`; the built-in `explore` is not offered) with
 its runtime's `subagent.spawn`, which vibe sends as one call (kind
@@ -315,7 +320,7 @@ process exit, a custom subagent from a trusted project, macOS.
 
 ## Rewind
 
-Rewind (#167, `vibe::REWIND_METHOD`, `AcpHarness::rewinding_with`):
+Rewind (#167, `vibe::REWIND_METHOD`, `AgentHooks::rewind_method`):
 vibe-acp 2.26.1 has the extension requests `_rewind/to` and
 `_rewind/preview` (`_rewind_extension`, `vibe/acp/agent.py`; the `_`
 is stripped by its router), not advertised at `initialize`, so the

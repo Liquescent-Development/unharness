@@ -28,6 +28,16 @@ place of the built-in ones; the rest stays. When vibe is not signed in,
 unharness says to run `vibe --setup` ([Sign-in](#sign-in)). Allow rules,
 MCP servers and what vibe may write are in [Mistral Vibe](vibe.md).
 
+Inside, vibe is the same ACP client as any agent on this page, with a
+profile: what unharness knows about `vibe-acp` that the protocol does not
+say. A table sets three parts of an agent's profile, `asks_permission`,
+`modes` and `sign_in`, and the rest is the protocol's way. vibe's
+built-in profile also names its reasoning option (`thinking`), reads a
+relative path in an edit as one in the session's directory, and has hooks
+the client calls where vibe does what the protocol does not say: its
+model and level chosen when it starts (below), its subagents and its
+rewind ([Mistral Vibe](vibe.md#rewind)).
+
 Its model and reasoning level (`/model`, `/effort`, `default_model`,
 `default_effort`) are never set over ACP, because vibe 2.26.1 writes a
 choice made that way into your `~/.vibe/config.toml`. unharness starts
