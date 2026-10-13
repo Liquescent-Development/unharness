@@ -3,20 +3,18 @@
 //! stdin per turn (agy 1.2.17 names the `event` field when it is missing and
 //! ignores every event but `user`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 use super::brain;
 use super::parse::AgyParser;
-use crate::core::process::{LineProcess, RawLine};
-use crate::core::session::ProcessSlot;
+use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, HarnessId, Parser, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand,
-    SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, HarnessId, Parser, PermissionPolicy, RemoteControl, SessionCommand, SessionConfig,
+    SessionHandle, StopReason,
 };
 
 pub fn policy_args(policy: PermissionPolicy) -> Vec<&'static str> {
@@ -102,189 +100,196 @@ fn subagent_ends(
 }
 
 pub fn start_stream(cfg: SessionConfig) -> Result<SessionHandle> {
-    let proc = spawn_stream(&cfg)?;
-    let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::AGY,
-        process_model: ProcessModel::LongLived,
-    });
-    let slot = handle.process_slot();
-    slot.set(&proc);
-    tokio::spawn(drive(proc, slot, cfg, events_tx, cmd_rx));
-    Ok(handle)
+    let command = stream_command(&cfg);
+    let sandbox = cfg.sandbox.clone();
+    driver::start(HarnessId::AGY, command, &sandbox, Agy::new(cfg))
 }
 
-fn spawn_stream(cfg: &SessionConfig) -> Result<LineProcess> {
+fn stream_command(cfg: &SessionConfig) -> Command {
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(stream_args(cfg)).current_dir(&cfg.cwd);
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    LineProcess::spawn(cmd, &cfg.sandbox)
+    cmd
 }
 
-async fn drive(
-    mut proc: LineProcess,
-    slot: ProcessSlot,
-    mut cfg: SessionConfig,
-    events: mpsc::Sender<AgentEvent>,
-    mut cmds: mpsc::Receiver<SessionCommand>,
-) {
-    let resume = cfg.resume.clone();
-    let mut parser = AgyParser::new(resume.clone());
-    let mut turn_open = false;
-    let mut shutting_down = false;
-    // Model/effort/policy are process flags; a change restarts the process
-    // on the next turn, resuming the conversation by id.
-    let mut restart_needed = false;
-    let mut session_id = resume.clone();
-    let default_brain = brain::default_dir();
-    // Messages looked at, also in an earlier process of the conversation;
-    // one from a subagent of that process is passed over all the same.
-    let mut inbox = brain::Inbox::default();
-    if let Some(id) = resume {
-        let _ = events
-            .send(AgentEvent::SessionStarted {
+/// What the driver does with agy's stream-json.
+struct Agy {
+    /// What the next process is started with.
+    cfg: SessionConfig,
+    parser: AgyParser,
+    turn_open: bool,
+    /// Model/effort/policy are process flags; a change restarts the process
+    /// on the next turn, resuming the conversation by id.
+    restart_needed: bool,
+    session_id: Option<String>,
+    default_brain: Option<PathBuf>,
+    /// Messages looked at, also in an earlier process of the conversation;
+    /// one from a subagent of that process is passed over all the same.
+    inbox: brain::Inbox,
+}
+
+impl Agy {
+    fn new(cfg: SessionConfig) -> Self {
+        let resume = cfg.resume.clone();
+        Agy {
+            parser: AgyParser::new(resume.clone()),
+            turn_open: false,
+            restart_needed: false,
+            session_id: resume,
+            default_brain: brain::default_dir(),
+            inbox: brain::Inbox::default(),
+            cfg,
+        }
+    }
+}
+
+impl StreamProtocol for Agy {
+    async fn start(&mut self, io: &mut Io<'_>) {
+        if let Some(id) = self.cfg.resume.clone() {
+            io.emit(AgentEvent::SessionStarted {
                 session_id: id,
                 model: None,
             })
             .await;
-    }
-
-    loop {
-        tokio::select! {
-            cmd = cmds.recv() => {
-                let Some(cmd) = cmd else { break };
-                match cmd {
-                    // agy takes no event on stdin that would stop one.
-                    SessionCommand::StopSubagent { .. } => {}
-                    SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "agy has no remote control".into(),
-                        })).await;
-                    }
-                    SessionCommand::Steer { .. }
-                    | SessionCommand::Compact { .. }
-                    | SessionCommand::Rewind { .. } => {
-                        let _ = events.send(AgentEvent::Error(
-                            "agy cannot steer, compact or rewind a session".into(),
-                        )).await;
-                    }
-                    SessionCommand::SendTurn { text, .. } => {
-                        if restart_needed {
-                            restart_needed = false;
-                            proc.kill().await;
-                            cfg.resume = session_id.clone();
-                            match spawn_stream(&cfg) {
-                                Ok(p) => {
-                                    proc = p;
-                                    slot.set(&proc);
-                                    parser = AgyParser::new(session_id.clone());
-                                    let _ = events.send(AgentEvent::Notice(
-                                        "agy restarted with the new settings".into(),
-                                    )).await;
-                                }
-                                Err(e) => {
-                                    let _ = events.send(AgentEvent::TurnCompleted {
-                                        stop_reason: StopReason::Error(format!("agy restart failed: {e}")),
-                                    }).await;
-                                    continue;
-                                }
-                            }
-                        }
-                        turn_open = true;
-                        if let Err(e) = proc.write_line(&encode_turn(&text)).await {
-                            turn_open = false;
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Error(format!("agy: {e}")),
-                            }).await;
-                        }
-                    }
-                    SessionCommand::Interrupt => {
-                        // There is no interrupt event; ending the process ends
-                        // the turn, and the conversation resumes by id. agy
-                        // leaves a command it started running after SIGINT;
-                        // the kill takes it (checked on 1.2.17).
-                        let _ = events.send(AgentEvent::Notice(
-                            "agy has no interrupt: its process is stopped with what it started; the next turn resumes the conversation".into(),
-                        )).await;
-                        proc.kill().await;
-                    }
-                    SessionCommand::RespondPermission { .. } => {
-                        let _ = events.send(AgentEvent::Error(
-                            "agy cannot answer permission prompts in headless mode".into(),
-                        )).await;
-                    }
-                    SessionCommand::SetModel(m) => {
-                        cfg.model = Some(m);
-                        restart_needed = true;
-                    }
-                    SessionCommand::SetEffort(e) => {
-                        cfg.effort = e;
-                        restart_needed = true;
-                    }
-                    SessionCommand::SetPolicy(p) => {
-                        cfg.policy = p;
-                        restart_needed = true;
-                    }
-                    SessionCommand::Shutdown => {
-                        shutting_down = true;
-                        proc.end_or_kill(turn_open).await;
-                    }
-                }
-            }
-            raw = proc.lines.recv() => {
-                match raw {
-                    Some(RawLine::Stdout(line)) => {
-                        let mut evs = Vec::new();
-                        let brain_dir = parser.brain_dir().map(Path::to_path_buf).or_else(|| default_brain.clone());
-                        if let (Some(dir), Ok(v)) = (brain_dir, serde_json::from_str::<Value>(&line)) {
-                            evs = subagent_ends(&mut parser, &dir, &v, &mut inbox);
-                        }
-                        evs.extend(parser.feed(&line));
-                        for ev in evs {
-                            match &ev {
-                                AgentEvent::TurnCompleted { .. } => turn_open = false,
-                                AgentEvent::SessionStarted { session_id: id, .. } => {
-                                    session_id = Some(id.clone());
-                                }
-                                _ => {}
-                            }
-                            if events.send(ev).await.is_err() {
-                                if !shutting_down {
-                                    if shutdown_queued(&mut cmds) {
-                                        proc.end_or_kill(turn_open).await;
-                                    } else {
-                                        proc.kill().await;
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                    }
-                    Some(RawLine::Stderr(line)) => {
-                        for ev in parser.feed_stderr(&line) {
-                            let _ = events.send(ev).await;
-                        }
-                    }
-                    Some(RawLine::Exited(code)) => {
-                        if turn_open {
-                            let stop_reason = match code {
-                                Some(0) | None => StopReason::Interrupted,
-                                Some(c) => StopReason::Error(format!("agy exited with code {c}")),
-                            };
-                            let _ = events.send(AgentEvent::TurnCompleted { stop_reason }).await;
-                        }
-                        let _ = events.send(AgentEvent::ProcessExited { code }).await;
-                        break;
-                    }
-                    None => break,
-                }
-            }
         }
     }
 
-    if !shutting_down {
-        proc.kill().await;
+    async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+        match cmd {
+            // agy takes no event on stdin that would stop one.
+            SessionCommand::StopSubagent { .. } => Encoded::Done,
+            SessionCommand::RemoteControl { .. } => {
+                io.emit(AgentEvent::RemoteControl(RemoteControl::Failed {
+                    reason: "agy has no remote control".into(),
+                }))
+                .await;
+                Encoded::Done
+            }
+            SessionCommand::Steer { .. }
+            | SessionCommand::Compact { .. }
+            | SessionCommand::Rewind { .. } => {
+                io.emit(AgentEvent::Error(
+                    "agy cannot steer, compact or rewind a session".into(),
+                ))
+                .await;
+                Encoded::Done
+            }
+            SessionCommand::SendTurn { text, attachments } if self.restart_needed => {
+                self.restart_needed = false;
+                self.cfg.resume = self.session_id.clone();
+                Encoded::Restart {
+                    command: Box::new(stream_command(&self.cfg)),
+                    then: SessionCommand::SendTurn { text, attachments },
+                }
+            }
+            SessionCommand::SendTurn { text, .. } => {
+                self.turn_open = true;
+                Encoded::Write(encode_turn(&text))
+            }
+            SessionCommand::Interrupt => {
+                // There is no interrupt event; ending the process ends
+                // the turn, and the conversation resumes by id. agy
+                // leaves a command it started running after SIGINT;
+                // the kill takes it (checked on 1.2.17).
+                io.emit(AgentEvent::Notice(
+                    "agy has no interrupt: its process is stopped with what it started; the next turn resumes the conversation".into(),
+                ))
+                .await;
+                Encoded::Kill
+            }
+            SessionCommand::RespondPermission { .. } => {
+                io.emit(AgentEvent::Error(
+                    "agy cannot answer permission prompts in headless mode".into(),
+                ))
+                .await;
+                Encoded::Done
+            }
+            SessionCommand::SetModel(m) => {
+                self.cfg.model = Some(m);
+                self.restart_needed = true;
+                Encoded::Done
+            }
+            SessionCommand::SetEffort(e) => {
+                self.cfg.effort = e;
+                self.restart_needed = true;
+                Encoded::Done
+            }
+            SessionCommand::SetPolicy(p) => {
+                self.cfg.policy = p;
+                self.restart_needed = true;
+                Encoded::Done
+            }
+            // The driver's (`shutdown`).
+            SessionCommand::Shutdown => Encoded::Done,
+        }
+    }
+
+    fn restarted(&mut self, result: Result<()>) -> Vec<AgentEvent> {
+        match result {
+            Ok(()) => {
+                self.parser = AgyParser::new(self.session_id.clone());
+                vec![AgentEvent::Notice(
+                    "agy restarted with the new settings".into(),
+                )]
+            }
+            Err(e) => vec![AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(format!("agy restart failed: {e}")),
+            }],
+        }
+    }
+
+    fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+        self.turn_open = false;
+        vec![AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(format!("agy: {error}")),
+        }]
+    }
+
+    fn parser(&mut self) -> &mut dyn Parser {
+        &mut self.parser
+    }
+
+    async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        let mut evs = Vec::new();
+        let brain_dir = self
+            .parser
+            .brain_dir()
+            .map(Path::to_path_buf)
+            .or_else(|| self.default_brain.clone());
+        if let (Some(dir), Ok(v)) = (brain_dir, serde_json::from_str::<Value>(line)) {
+            evs = subagent_ends(&mut self.parser, &dir, &v, &mut self.inbox);
+        }
+        evs.extend(self.parser.feed(line));
+        for ev in evs {
+            match &ev {
+                AgentEvent::TurnCompleted { .. } => self.turn_open = false,
+                AgentEvent::SessionStarted { session_id: id, .. } => {
+                    self.session_id = Some(id.clone());
+                }
+                _ => {}
+            }
+            io.forward(ev).await?;
+        }
+        Ok(())
+    }
+
+    fn on_exit(&mut self, code: Option<i32>) -> Vec<AgentEvent> {
+        if !self.turn_open {
+            return Vec::new();
+        }
+        let stop_reason = match code {
+            Some(0) | None => StopReason::Interrupted,
+            Some(c) => StopReason::Error(format!("agy exited with code {c}")),
+        };
+        vec![AgentEvent::TurnCompleted { stop_reason }]
+    }
+
+    fn shutdown(&mut self) -> Shutdown {
+        Shutdown::EndOrKill {
+            turn_open: self.turn_open,
+        }
     }
 }
 
