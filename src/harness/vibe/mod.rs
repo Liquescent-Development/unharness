@@ -35,7 +35,7 @@ use super::{
     AuthInfo, DoctorNote, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
     probe_version_of, resolve_binary,
 };
-use crate::config::{HarnessSettings, ProviderSettings};
+use crate::config::HarnessSettings;
 use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
@@ -322,6 +322,33 @@ fn mode_map() -> ModeMap {
     ])
 }
 
+/// What a `[harnesses.vibe]` table takes besides the keys every harness
+/// takes (of which vibe reads `command` and `display_name`): an ACP
+/// agent's, and providers.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Own {
+    /// Whether vibe asks before it acts, which `ask` stands on. Default: on.
+    asks_permission: Option<bool>,
+    /// Which of vibe's session modes backs each policy, in place of
+    /// unharness's map ([`mode_map`]); see the ACP agent's.
+    #[serde(default)]
+    modes: BTreeMap<String, String>,
+    /// The command that signs vibe in, in place of `vibe --setup`.
+    sign_in: Option<String>,
+    /// Providers by name, each with its models, offered beside vibe's own
+    /// configuration (`--provider`, `/provider`). Handed to vibe in its
+    /// environment when one is chosen, never written to its configuration
+    /// ([`providers`]).
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderSettings>,
+}
+
+/// Mistral Vibe from its `[harnesses.vibe]` table.
+pub fn build(_name: &str, table: &HarnessSettings) -> Result<Box<dyn Harness>> {
+    Ok(Box::new(VibeHarness::from_settings(table)?))
+}
+
 pub struct VibeHarness {
     acp: AcpHarness,
     /// The providers `[harnesses.vibe.providers]` defines.
@@ -349,32 +376,44 @@ impl VibeHarness {
     /// The built-in harness with what a `[harnesses.vibe]` table sets in
     /// its place: the command, the name shown, `asks_permission` and the
     /// mode map. The model and effort are chosen at spawn whatever it says.
+    /// A mode map that does not parse and a provider that is not whole are
+    /// both reported ([`crate::config::TableErrors`]).
     pub fn from_settings(settings: &HarnessSettings) -> Result<Self> {
+        let own: Own = settings.own(HarnessId::VIBE.as_str())?;
         let command = if settings.command.is_empty() {
             vec![COMMAND.to_string()]
         } else {
             settings.command.clone()
         };
-        let modes = if settings.modes.is_empty() {
-            mode_map()
+        let modes = if own.modes.is_empty() {
+            Ok(mode_map())
         } else {
-            ModeMap::from_config(&settings.modes).map_err(anyhow::Error::msg)?
+            ModeMap::from_config(&own.modes)
+                .map_err(|e| format!("[harnesses.{}]: {e}", HarnessId::VIBE))
+        };
+        let (modes, providers) = match (modes, providers(&own.providers)) {
+            (Ok(modes), Ok(providers)) => (modes, providers),
+            (modes, providers) => {
+                let providers = providers.err().map(|e| format!("{e:#}"));
+                let wrong = modes.err().into_iter().chain(providers).collect();
+                return Err(crate::config::TableErrors(wrong).into());
+            }
         };
         let vibe = Self::build(
             &command,
             settings.display_name.as_deref(),
-            settings.asks_permission.unwrap_or(true),
+            own.asks_permission.unwrap_or(true),
             modes,
         );
         // `sign_in` in the table replaces vibe's own command.
-        let vibe = match settings.sign_in.as_deref() {
+        let vibe = match own.sign_in.as_deref() {
             Some(command) => VibeHarness {
                 acp: vibe.acp.signing_in_with(Some(command)),
                 ..vibe
             },
             None => vibe,
         };
-        Ok(vibe.with_providers(providers(&settings.providers)?))
+        Ok(vibe.with_providers(providers))
     }
 
     /// Offer `providers` beside vibe's own configuration: one chosen for a
@@ -799,6 +838,28 @@ pub const API_STYLES: [&str; 4] = ["openai", "reasoning", "openai-responses", "a
 /// vibe's backends (`Backend`, `vibe/core/types.py`); its default for a
 /// provider is `generic`.
 pub const BACKENDS: [&str; 2] = ["generic", "mistral"];
+
+/// A provider in `[harnesses.vibe.providers.<name>]`: where vibe sends the
+/// model's requests, in which form, and the models there. The API key is
+/// only named, by the variable that holds it, never written here. Checked
+/// when unharness starts ([`providers`]).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSettings {
+    /// The API's base URL, e.g. `http://127.0.0.1:8080/v1`.
+    pub api_base: String,
+    /// openai (the default), reasoning, openai-responses or anthropic.
+    pub api_style: Option<String>,
+    /// generic (the default) or mistral.
+    pub backend: Option<String>,
+    /// The environment variable that holds the API key; none is sent
+    /// without one.
+    pub api_key_env_var: Option<String>,
+    /// The model names the server knows, the first being the one used
+    /// when none is chosen.
+    #[serde(default)]
+    pub models: Vec<String>,
+}
 
 /// A provider of `[harnesses.vibe.providers.<id>]`, checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1313,7 +1374,7 @@ mod tests {
         let h = VibeHarness::from_settings(&HarnessSettings::default()).unwrap();
         assert_eq!(sign_in(&h).as_deref(), Some("vibe --setup"));
         let table = HarnessSettings {
-            sign_in: Some("vibe-acp --setup".into()),
+            rest: toml::toml! { sign_in = "vibe-acp --setup" },
             ..Default::default()
         };
         let h = VibeHarness::from_settings(&table).unwrap();
@@ -1676,7 +1737,7 @@ provider = "mine"
         let settings = HarnessSettings {
             command: vec!["/opt/vibe/bin/vibe-acp".into()],
             display_name: Some("Vibe (mine)".into()),
-            asks_permission: Some(false),
+            rest: toml::toml! { asks_permission = false },
             ..Default::default()
         };
         let h = VibeHarness::from_settings(&settings).unwrap();
@@ -1686,7 +1747,7 @@ provider = "mine"
         assert!(caps.model_per_process);
         assert!(caps.supports_policy(PermissionPolicy::Ask).is_none());
         let bad = HarnessSettings {
-            modes: [("sometimes".to_string(), "ask".to_string())].into(),
+            rest: toml::toml! { modes = { sometimes = "ask" } },
             ..Default::default()
         };
         assert!(VibeHarness::from_settings(&bad).is_err());
@@ -1981,15 +2042,11 @@ provider = "mine"
     fn the_cli_runs_on_a_configured_provider() {
         let (dir, cfg) = cli_setup();
         let settings = HarnessSettings {
-            providers: [(
-                "lan".to_string(),
-                ProviderSettings {
-                    api_base: "http://127.0.0.1:8080/v1".into(),
-                    models: vec!["qwen3-coder".into()],
-                    ..Default::default()
-                },
-            )]
-            .into(),
+            rest: toml::toml! {
+                [providers.lan]
+                api_base = "http://127.0.0.1:8080/v1"
+                models = ["qwen3-coder"]
+            },
             ..Default::default()
         };
         let vibe = VibeHarness::from_settings(&settings).unwrap();
@@ -2069,7 +2126,7 @@ provider = "mine"
             );
         }
         let h = VibeHarness::from_settings(&HarnessSettings {
-            asks_permission: Some(false),
+            rest: toml::toml! { asks_permission = false },
             ..Default::default()
         })
         .unwrap();
@@ -2331,11 +2388,14 @@ api_base = "https://LOCAL-LLM/v1"
 models = ["qwen3.8-q5kxl-x2", "gemma-4"]
 "#;
 
+    /// The providers a `[harnesses.vibe]` table defines, checked.
+    fn providers_of(table: &HarnessSettings) -> Result<Vec<Provider>> {
+        providers(&table.own::<Own>("vibe")?.providers)
+    }
+
     fn lan() -> Provider {
         let cfg: crate::config::Config = toml::from_str(LAN).unwrap();
-        providers(&cfg.harnesses["vibe"].providers)
-            .unwrap()
-            .remove(0)
+        providers_of(&cfg.harnesses["vibe"]).unwrap().remove(0)
     }
 
     fn json_var(plan: &SpawnPlan, key: &str) -> serde_json::Value {
@@ -2572,7 +2632,7 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
     fn provider_tables_that_are_wrong() {
         let parse = |toml_text: &str| -> Result<Vec<Provider>> {
             let cfg: crate::config::Config = toml::from_str(toml_text)?;
-            providers(&cfg.harnesses["vibe"].providers)
+            providers_of(&cfg.harnesses["vibe"])
         };
         let table = |body: &str| format!("[harnesses.vibe.providers.lan]\n{body}\n");
         let err = |body: &str| format!("{:#}", parse(&table(body)).unwrap_err());
@@ -2591,7 +2651,8 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
         assert_eq!(full[0].api_key_env_var.as_deref(), Some("LAN_KEY"));
         assert_eq!(full[0].backend, "mistral");
 
-        // Unknown keys and a missing api_base do not parse.
+        // A provider with an unknown key or without api_base is kept in
+        // `rest`, and refused when vibe reads its table (`own`).
         assert!(
             parse(&table(
                 "api_base = \"http://h\"\nmodels = [\"m\"]\napi_key = \"x\""
@@ -2628,29 +2689,16 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
         assert!(!e.contains(secret), "the value is never repeated: {e}");
 
         for name in ["agent", "a b", "lan/x"] {
-            let cfg = crate::config::Config {
-                harnesses: [(
-                    "vibe".to_string(),
-                    HarnessSettings {
-                        providers: [(
-                            name.to_string(),
-                            ProviderSettings {
-                                api_base: "http://h".into(),
-                                models: vec!["m".into()],
-                                ..Default::default()
-                            },
-                        )]
-                        .into(),
-                        ..Default::default()
-                    },
-                )]
-                .into(),
-                ..Default::default()
-            };
-            assert!(
-                providers(&cfg.harnesses["vibe"].providers).is_err(),
-                "{name}"
-            );
+            let table: BTreeMap<String, ProviderSettings> = [(
+                name.to_string(),
+                ProviderSettings {
+                    api_base: "http://h".into(),
+                    models: vec!["m".into()],
+                    ..Default::default()
+                },
+            )]
+            .into();
+            assert!(providers(&table).is_err(), "{name}");
         }
         // From the table, the harness is not built either.
         let cfg: crate::config::Config = toml::from_str(&table("api_base = \"http://h\"")).unwrap();

@@ -27,6 +27,12 @@ use crate::core::{
 #[derive(Default)]
 pub struct AgyHarness;
 
+/// agy from its `[harnesses.agy]` table, which has no keys of agy's own.
+pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
+    table.own::<crate::config::NoOwnKeys>(name)?;
+    Ok(Box::new(AgyHarness))
+}
+
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::AGY,
     display_name: "Antigravity (agy)",
