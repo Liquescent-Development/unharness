@@ -248,13 +248,12 @@ its `src/harness/<name>/NOTES.md`, and what crosses harnesses is in
 | ACP presets (gemini, opencode, goose, copilot, cursor, qwen, kiro) | [`src/harness/acp/NOTES.md`](src/harness/acp/NOTES.md) | not installed when added | unverified until recorded |
 | Mistral Vibe | [`src/harness/vibe/NOTES.md`](src/harness/vibe/NOTES.md) | 2.26.1 | plan (#166), macOS (#175) |
 
-`ask` per harness (Codex app-server's `untrusted`, pi's gate) is in pi's
-note.
-
 Across harnesses:
 
 - [Sandbox](docs/dev/sandbox.md): Landlock, what each CLI writes, Codex's
   own sandbox where ours does not run.
+- [`ask` per harness](docs/dev/ask.md): Codex app-server's `untrusted`,
+  pi's gate, agy's own interface.
 - [Allow rules](docs/dev/allow-rules.md): one rule answering several
   harnesses, and the action read off each request.
 - [Plan mode](docs/dev/plan-mode.md): driven on Claude only.
