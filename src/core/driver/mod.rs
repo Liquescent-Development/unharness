@@ -9,6 +9,11 @@
 //! is sent first, stdin closed, killed after `END_GRACE`, or killed at
 //! once mid-turn), reading its output until it has exited, and what
 //! happens when the TUI drops the handle.
+//!
+//! A harness whose CLI runs once per turn (Codex `exec`) implements
+//! [`per_turn::PerTurnProtocol`] instead, the per-turn flavour.
+
+pub mod per_turn;
 
 use std::future::Future;
 
@@ -297,6 +302,18 @@ impl<P: StreamProtocol> Loop<P> {
             self.proc.kill().await;
         }
     }
+}
+
+/// Wait until `proc` has exited, what is left of its output unread: once
+/// it was ended or killed, it is gone (reaped, its pipes drained or
+/// closed) when this returns.
+async fn exited(proc: &mut LineProcess) -> Option<i32> {
+    while let Some(line) = proc.lines.recv().await {
+        if let RawLine::Exited(code) = line {
+            return code;
+        }
+    }
+    None
 }
 
 /// End `proc` as `how` says. `Exited` follows on its lines.
