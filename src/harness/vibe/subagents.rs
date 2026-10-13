@@ -38,7 +38,7 @@ pub struct Subagents {
     reports: HashMap<String, Option<String>>,
 }
 
-/// A reader for a new session (`AcpHarness::reading_meta_with`).
+/// A reader for a new session (`AgentHooks::meta_reader`).
 pub fn reader() -> Box<dyn MetaReader> {
     Box::<Subagents>::default()
 }

@@ -288,6 +288,7 @@ fn fork_branches_an_acp_session_once_the_agent_says_it_can() {
                     acp.as_str(),
                     None,
                     &["acp-fork-test".to_string()],
+                    crate::harness::acp::AcpProfile::default(),
                 )
                 .unwrap(),
             )),
