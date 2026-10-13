@@ -750,6 +750,55 @@ mod tests {
         assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
     }
 
+    // The same, with no `Shutdown` behind the event: killed at once.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_handle_dropped_while_an_event_is_told_kills_the_cli() {
+        let capacity = crate::core::session::EVENT_CHANNEL_CAPACITY;
+        let script = format!(
+            "echo $$; i=0; while [ $i -lt {} ]; do echo x; i=$((i+1)); done; \
+             trap '' TERM; while :; do sleep 1; done",
+            capacity + 100
+        );
+        let mut h = run(&script, Toy::new());
+        let cli = pid(&mut h).await;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while h.events.len() < capacity {
+            assert!(Instant::now() < deadline, "the events never filled");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(h);
+        assert!(gone_within(cli, END_GRACE / 2).await);
+    }
+
+    // Ended and let go, it writes far more than its pipe and the line
+    // channel hold: its output is still read to the end, so it finishes
+    // within its grace instead of blocking on a full pipe until killed.
+    #[tokio::test]
+    async fn an_ended_cli_is_read_to_the_end_after_the_handle_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let done = dir.path().join("done");
+        let line = "0123456789".repeat(4);
+        let script = format!(
+            "cat >/dev/null; i=0; while [ $i -lt 20000 ]; do echo {line}; i=$((i+1)); done; \
+             touch {}",
+            done.display()
+        );
+        let h = run(&script, Toy::new());
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        drop(h);
+        // Killed when its grace is up, it would never write the file: the
+        // wait can be long without weakening what it shows.
+        let deadline = Instant::now() + END_GRACE + Duration::from_secs(10);
+        while !done.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "cut short: its output was not read"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     // The session's process is the new one: killed through the slot, it
     // goes, and the one it replaced went with the restart.
     #[tokio::test]
