@@ -1,4 +1,6 @@
 //! Claude Code harness.
+//!
+//! Status notes: `NOTES.md` beside this file.
 
 pub mod parse;
 pub mod transport;

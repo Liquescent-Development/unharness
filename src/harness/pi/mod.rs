@@ -1,4 +1,6 @@
 //! pi harness: a multi-provider coding agent with a JSONL RPC mode.
+//!
+//! Status notes: `NOTES.md` beside this file.
 
 pub mod gate;
 pub mod parse;

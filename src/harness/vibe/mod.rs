@@ -16,6 +16,8 @@
 //! A provider defined in unharness's config (`[harnesses.vibe.providers]`)
 //! goes the same way when it is chosen: `VIBE_PROVIDERS`, its models in
 //! `VIBE_MODELS` and the one to run in `VIBE_ACTIVE_MODEL`.
+//!
+//! Status notes: `NOTES.md` beside this file.
 
 mod dotenv;
 pub mod profiles;

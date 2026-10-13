@@ -6,6 +6,8 @@
 //! `@agentclientprotocol/codex-acp` 2.1.1 (see `fixtures/`). What an agent
 //! can do is mostly learned at the handshake, so the static capabilities are
 //! the protocol's baseline and the session reports the rest.
+//!
+//! Status notes: `NOTES.md` beside this file.
 
 pub mod auth;
 pub mod elicitation;
