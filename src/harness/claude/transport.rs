@@ -12,14 +12,14 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::parse::ClaudeParser;
-use crate::core::process::{LineProcess, RawLine};
+use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
     AgentEvent, Attachment, HarnessId, McpServer, McpTransport, Parser, PermissionDecision,
-    PermissionKind, PermissionPolicy, ProcessModel, ProviderId, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    PermissionKind, PermissionPolicy, ProviderId, SessionCommand, SessionConfig, SessionHandle,
+    StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -348,227 +348,237 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
             };
         }
     }
-
-    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
-    let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::CLAUDE,
-        process_model: ProcessModel::LongLived,
-    });
-    handle.process_slot().set(&proc);
-
-    tokio::spawn(drive(proc, events_tx, cmd_rx, cfg.provider));
-    Ok(handle)
+    driver::start(
+        HarnessId::CLAUDE,
+        cmd,
+        &cfg.sandbox,
+        Claude::new(cfg.provider),
+    )
 }
 
-/// `provider` is the one the user chose, if any.
-async fn drive(
-    mut proc: LineProcess,
-    events: mpsc::Sender<AgentEvent>,
-    mut cmds: mpsc::Receiver<SessionCommand>,
+/// How long the answer to `initialize` is waited for before the session
+/// goes on without it.
+const INIT_WAIT: Duration = Duration::from_secs(5);
+
+/// What the driver does with Claude's stream-json.
+struct Claude {
+    parser: ClaudeParser,
+    pending: HashMap<String, PendingPermission>,
+    /// Our `remote_control` requests: whether each turns it on.
+    remote_requests: HashMap<String, bool>,
+    /// The one the user chose, if any.
     provider: Option<ProviderId>,
-) {
-    let mut parser = ClaudeParser::new();
-    let mut pending: HashMap<String, PendingPermission> = HashMap::new();
-    // Our `remote_control` requests: whether each turns it on.
-    let mut remote_requests: HashMap<String, bool> = HashMap::new();
-    let mut shutting_down = false;
+    /// Our `initialize` request while it is not answered, and until when
+    /// that is waited for.
+    awaiting_init: Option<(String, Instant)>,
+}
 
-    // Handshake. The CLI answers with its command/model catalog; we only need
-    // the ack. Not required for turns to work, so failure is a notice.
-    let (init_id, init_line) = control_request("initialize", json!({}));
-    if let Err(e) = proc.write_line(&init_line).await {
-        let _ = events.send(AgentEvent::Error(format!("claude: {e}"))).await;
+impl Claude {
+    fn new(provider: Option<ProviderId>) -> Self {
+        Claude {
+            parser: ClaudeParser::new(),
+            pending: HashMap::new(),
+            remote_requests: HashMap::new(),
+            provider,
+            awaiting_init: None,
+        }
     }
-    let mut awaiting_init = Some(init_id);
-    let init_deadline = tokio::time::sleep(Duration::from_secs(5));
-    tokio::pin!(init_deadline);
+}
 
-    loop {
-        tokio::select! {
-            _ = &mut init_deadline, if awaiting_init.is_some() => {
-                awaiting_init = None;
-                let _ = events.send(AgentEvent::Notice("claude: no initialize ack; continuing".into())).await;
-            }
-            cmd = cmds.recv() => {
-                // TUI dropped the handle.
-                let Some(cmd) = cmd else { break };
-                let line = match cmd {
-                    // Each turn carries a uuid of ours, so it can be rewound to later.
-                    SessionCommand::SendTurn { text, attachments } => match anchored_turn(&text, &attachments) {
-                        Ok((anchor, line)) => {
-                            let _ = events.send(AgentEvent::TurnAnchor { id: anchor }).await;
-                            Some(line)
-                        }
-                        Err(e) => {
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Error(e.to_string()),
-                            }).await;
-                            None
-                        }
-                    },
-                    SessionCommand::Steer { text, attachments } => match steer_turn(&text, &attachments) {
-                        Ok(line) => Some(line),
-                        Err(e) => {
-                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
-                            None
-                        }
-                    },
-                    SessionCommand::Rewind { anchor } => Some(
-                        control_request("rewind_conversation", json!({"target_message_uuid": anchor})).1,
-                    ),
-                    // `-p` mode accepts the slash command as a message; it ends
-                    // with a `result`, like a turn.
-                    SessionCommand::Compact { instructions } => Some(user_message(
-                        format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
-                    )),
-                    SessionCommand::Interrupt => Some(control_request("interrupt", json!({})).1),
-                    // Claude then tells of the stop in a turn of its own.
-                    SessionCommand::StopSubagent { id } => match parser.task_of(&id) {
-                        Some(task) => Some(control_request("stop_task", json!({"task_id": task})).1),
-                        None => {
-                            let _ = events.send(AgentEvent::Notice("that subagent is no longer running".into())).await;
-                            None
-                        }
-                    },
-                    SessionCommand::RespondPermission { id, decision } => {
-                        match pending.remove(&id) {
-                            Some(p) => Some(control_response(&id, encode_decision(&p, &decision))),
-                            None => {
-                                let _ = events.send(AgentEvent::Notice(format!("no pending permission request {id}"))).await;
-                                None
-                            }
-                        }
+impl StreamProtocol for Claude {
+    /// Handshake. The CLI answers with its command/model catalog; we only
+    /// need the ack. Not required for turns to work, so failure is a notice.
+    async fn start(&mut self, io: &mut Io<'_>) {
+        let (init_id, init_line) = control_request("initialize", json!({}));
+        if let Err(e) = io.write(&init_line).await {
+            io.emit(AgentEvent::Error(format!("claude: {e}"))).await;
+        }
+        self.awaiting_init = Some((init_id, Instant::now() + INIT_WAIT));
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.awaiting_init.as_ref().map(|(_, by)| *by)
+    }
+
+    async fn on_deadline(&mut self, io: &mut Io<'_>) {
+        self.awaiting_init = None;
+        io.emit(AgentEvent::Notice(
+            "claude: no initialize ack; continuing".into(),
+        ))
+        .await;
+    }
+
+    async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+        match cmd {
+            // Each turn carries a uuid of ours, so it can be rewound to later.
+            SessionCommand::SendTurn { text, attachments } => {
+                match anchored_turn(&text, &attachments) {
+                    Ok((anchor, line)) => {
+                        io.emit(AgentEvent::TurnAnchor { id: anchor }).await;
+                        Encoded::Write(line)
                     }
-                    SessionCommand::SetModel(m) => Some(control_request("set_model", json!({"model": m.model})).1),
-                    SessionCommand::SetEffort(e) => {
-                        // `-p` mode accepts the slash command as a message.
-                        Some(user_message(&format!("/effort {}", e.unwrap_or_else(|| "high".into()))))
+                    Err(e) => {
+                        io.emit(AgentEvent::TurnCompleted {
+                            stop_reason: StopReason::Error(e.to_string()),
+                        })
+                        .await;
+                        Encoded::Done
                     }
-                    SessionCommand::SetPolicy(p) => Some(
-                        control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
-                    ),
-                    SessionCommand::RemoteControl { enabled, name } => {
-                        let mut extra = json!({"enabled": enabled});
-                        if let Some(name) = name.filter(|_| enabled) {
-                            extra["name"] = json!(name);
-                        }
-                        let (id, line) = control_request("remote_control", extra);
-                        remote_requests.insert(id, enabled);
-                        Some(line)
-                    }
-                    SessionCommand::Shutdown => {
-                        shutting_down = true;
-                        shut_down(&mut proc).await;
-                        None
-                    }
-                };
-                if let Some(line) = line
-                    && let Err(e) = proc.write_line(&line).await
-                {
-                    let _ = events.send(AgentEvent::Error(format!("claude: {e}"))).await;
                 }
             }
-            raw = proc.lines.recv() => {
-                match raw {
-                    Some(RawLine::Stdout(line)) => {
-                        // The answer to one of our `remote_control` requests,
-                        // which the parser would take for a generic one.
-                        let mut remote_answer = None;
-                        // Driver-level bookkeeping before the pure parser sees it.
-                        if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                            match v.get("type").and_then(Value::as_str) {
-                                Some("control_response") => {
-                                    let rid = v.pointer("/response/request_id").and_then(Value::as_str);
-                                    if rid.is_some() && rid == awaiting_init.as_deref() {
-                                        awaiting_init = None;
-                                    }
-                                    if let Some(enabled) = rid.and_then(|r| remote_requests.remove(r)) {
-                                        remote_answer = Some(AgentEvent::RemoteControl(
-                                            ClaudeParser::remote_control_answer(
-                                                enabled,
-                                                v.get("response").unwrap_or(&Value::Null),
-                                            ),
-                                        ));
-                                    }
-                                    // Only the answer to `initialize` names the account.
-                                    if let Some(why) = v
-                                        .pointer("/response/response")
-                                        .and_then(|answer| super::provider_mismatch(provider.as_ref(), answer))
-                                    {
-                                        let _ = events.send(AgentEvent::Error(why)).await;
-                                    }
-                                }
-                                Some("control_cancel_request") => {
-                                    if let Some(rid) = v.get("request_id").and_then(Value::as_str) {
-                                        pending.remove(rid);
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        let evs = match remote_answer {
-                            Some(ev) => vec![ev],
-                            None => parser.feed(&line),
-                        };
-                        for ev in evs {
-                            if let AgentEvent::PermissionRequest(req) = &ev {
-                                let (input, kind) = match &req.kind {
-                                    PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
-                                    PermissionKind::Question { .. } => (Value::Null, PendingKind::Question),
-                                    PermissionKind::PlanApproval { .. } => (Value::Null, PendingKind::Plan),
-                                    _ => (Value::Null, PendingKind::Tool),
-                                };
-                                // For questions and plans we need the original input to echo back.
-                                let input = if kind == PendingKind::Tool {
-                                    input
-                                } else {
-                                    serde_json::from_str::<Value>(&line)
-                                        .ok()
-                                        .and_then(|v| v.pointer("/request/input").cloned())
-                                        .unwrap_or(Value::Null)
-                                };
-                                pending.insert(req.id.clone(), PendingPermission { input, kind });
-                            }
-                            if events.send(ev).await.is_err() {
-                                if !shutting_down {
-                                    if shutdown_queued(&mut cmds) {
-                                        shut_down(&mut proc).await;
-                                    } else {
-                                        proc.kill().await;
-                                    }
-                                }
-                                return;
-                            }
-                        }
+            SessionCommand::Steer { text, attachments } => match steer_turn(&text, &attachments) {
+                Ok(line) => Encoded::Write(line),
+                Err(e) => {
+                    io.emit(AgentEvent::Error(e.to_string())).await;
+                    Encoded::Done
+                }
+            },
+            SessionCommand::Rewind { anchor } => Encoded::Write(
+                control_request(
+                    "rewind_conversation",
+                    json!({"target_message_uuid": anchor}),
+                )
+                .1,
+            ),
+            // `-p` mode accepts the slash command as a message; it ends
+            // with a `result`, like a turn.
+            SessionCommand::Compact { instructions } => Encoded::Write(user_message(
+                format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
+            )),
+            SessionCommand::Interrupt => Encoded::Write(control_request("interrupt", json!({})).1),
+            // Claude then tells of the stop in a turn of its own.
+            SessionCommand::StopSubagent { id } => {
+                match self.parser.task_of(&id).map(str::to_string) {
+                    Some(task) => {
+                        Encoded::Write(control_request("stop_task", json!({"task_id": task})).1)
                     }
-                    Some(RawLine::Stderr(line)) => {
-                        for ev in parser.feed_stderr(&line) {
-                            let _ = events.send(ev).await;
-                        }
+                    None => {
+                        io.emit(AgentEvent::Notice(
+                            "that subagent is no longer running".into(),
+                        ))
+                        .await;
+                        Encoded::Done
                     }
-                    Some(RawLine::Exited(code)) => {
-                        let _ = events.send(AgentEvent::ProcessExited { code }).await;
-                        break;
-                    }
-                    None => break,
                 }
             }
+            SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {
+                Some(p) => Encoded::Write(control_response(&id, encode_decision(&p, &decision))),
+                None => {
+                    io.emit(AgentEvent::Notice(format!(
+                        "no pending permission request {id}"
+                    )))
+                    .await;
+                    Encoded::Done
+                }
+            },
+            SessionCommand::SetModel(m) => {
+                Encoded::Write(control_request("set_model", json!({"model": m.model})).1)
+            }
+            // `-p` mode accepts the slash command as a message.
+            SessionCommand::SetEffort(e) => Encoded::Write(user_message(&format!(
+                "/effort {}",
+                e.unwrap_or_else(|| "high".into())
+            ))),
+            SessionCommand::SetPolicy(p) => Encoded::Write(
+                control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
+            ),
+            SessionCommand::RemoteControl { enabled, name } => {
+                let mut extra = json!({"enabled": enabled});
+                if let Some(name) = name.filter(|_| enabled) {
+                    extra["name"] = json!(name);
+                }
+                let (id, line) = control_request("remote_control", extra);
+                self.remote_requests.insert(id, enabled);
+                Encoded::Write(line)
+            }
+            // The driver's (`shutdown`).
+            SessionCommand::Shutdown => Encoded::Done,
         }
     }
 
-    if !shutting_down {
-        proc.kill().await;
+    fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+        vec![AgentEvent::Error(format!("claude: {error}"))]
     }
-}
 
-/// With only its stdin closed Claude waits for its background tasks (a
-/// Monitor for as long as it was given); `interrupt` stops them, also
-/// between turns, and it then exits (2.1.292).
-async fn shut_down(proc: &mut LineProcess) {
-    let _ = proc
-        .write_line(&control_request("interrupt", json!({})).1)
-        .await;
-    proc.end();
+    fn parser(&mut self) -> &mut dyn Parser {
+        &mut self.parser
+    }
+
+    async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        // The answer to one of our `remote_control` requests, which the
+        // parser would take for a generic one.
+        let mut remote_answer = None;
+        // Driver-level bookkeeping before the pure parser sees it.
+        if let Ok(v) = serde_json::from_str::<Value>(line) {
+            match v.get("type").and_then(Value::as_str) {
+                Some("control_response") => {
+                    let rid = v.pointer("/response/request_id").and_then(Value::as_str);
+                    if rid.is_some()
+                        && rid == self.awaiting_init.as_ref().map(|(id, _)| id.as_str())
+                    {
+                        self.awaiting_init = None;
+                    }
+                    if let Some(enabled) = rid.and_then(|r| self.remote_requests.remove(r)) {
+                        remote_answer = Some(AgentEvent::RemoteControl(
+                            ClaudeParser::remote_control_answer(
+                                enabled,
+                                v.get("response").unwrap_or(&Value::Null),
+                            ),
+                        ));
+                    }
+                    // Only the answer to `initialize` names the account.
+                    if let Some(why) = v
+                        .pointer("/response/response")
+                        .and_then(|answer| super::provider_mismatch(self.provider.as_ref(), answer))
+                    {
+                        io.emit(AgentEvent::Error(why)).await;
+                    }
+                }
+                Some("control_cancel_request") => {
+                    if let Some(rid) = v.get("request_id").and_then(Value::as_str) {
+                        self.pending.remove(rid);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let evs = match remote_answer {
+            Some(ev) => vec![ev],
+            None => self.parser.feed(line),
+        };
+        for ev in evs {
+            if let AgentEvent::PermissionRequest(req) = &ev {
+                let (input, kind) = match &req.kind {
+                    PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
+                    PermissionKind::Question { .. } => (Value::Null, PendingKind::Question),
+                    PermissionKind::PlanApproval { .. } => (Value::Null, PendingKind::Plan),
+                    _ => (Value::Null, PendingKind::Tool),
+                };
+                // For questions and plans we need the original input to echo back.
+                let input = if kind == PendingKind::Tool {
+                    input
+                } else {
+                    serde_json::from_str::<Value>(line)
+                        .ok()
+                        .and_then(|v| v.pointer("/request/input").cloned())
+                        .unwrap_or(Value::Null)
+                };
+                self.pending
+                    .insert(req.id.clone(), PendingPermission { input, kind });
+            }
+            io.forward(ev).await?;
+        }
+        Ok(())
+    }
+
+    /// With only its stdin closed Claude waits for its background tasks (a
+    /// Monitor for as long as it was given); `interrupt` stops them, also
+    /// between turns, and it then exits (2.1.292).
+    fn shutdown(&mut self) -> Shutdown {
+        Shutdown::End {
+            first: vec![control_request("interrupt", json!({})).1],
+        }
+    }
 }
 
 #[cfg(test)]
