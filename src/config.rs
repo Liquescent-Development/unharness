@@ -130,6 +130,11 @@ impl HarnessSettings {
     /// deriving `Deserialize` with `deny_unknown_fields`, read from
     /// [`rest`](Self::rest). A key `T` does not take is an error naming the
     /// table and the key, as a value it cannot take is.
+    ///
+    /// `T` is a plain struct, without `#[serde(flatten)]`: its keys are the
+    /// field names its derived `Deserialize` hands `deserialize_struct`,
+    /// which a struct with a flattened field does not call, and then every
+    /// key is refused.
     pub fn own<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
         let takes = keys_of::<T>();
         if let Some(key) = self.rest.keys().find(|k| !takes.contains(&k.as_str())) {

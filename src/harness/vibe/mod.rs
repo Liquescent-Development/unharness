@@ -2651,7 +2651,8 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
         assert_eq!(full[0].api_key_env_var.as_deref(), Some("LAN_KEY"));
         assert_eq!(full[0].backend, "mistral");
 
-        // Unknown keys and a missing api_base do not parse.
+        // A provider with an unknown key or without api_base is kept in
+        // `rest`, and refused when vibe reads its table (`own`).
         assert!(
             parse(&table(
                 "api_base = \"http://h\"\nmodels = [\"m\"]\napi_key = \"x\""

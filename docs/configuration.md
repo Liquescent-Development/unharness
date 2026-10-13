@@ -13,11 +13,12 @@ doctor` prints the path, and `unharness init` creates the file.
 > line. unharness never falls back to defaults, which would run without your
 > sandbox and policy settings. A harness table that is wrong (an unknown
 > policy or Codex `transport`, a `modes` map or a provider that is not
-> whole, an ACP agent without a command, a key its harness does not take)
-> stops a run, `unharness switch` and `unharness models` too, and is never
-> replaced by the built-in or preset of its name; `unharness doctor` names
-> what is wrong, leaves out a harness it cannot build, shows the rest, and
-> exits 1.
+> whole, an ACP agent without a command, a key its harness does not take,
+> a value of the wrong type in a key only its harness takes) stops a run,
+> `unharness switch` and `unharness models` too, and is never replaced by
+> the built-in or preset of its name. Such an error names the table and
+> the key, not the file; `unharness doctor` shows it, leaves out a harness
+> it cannot build, shows the rest, and exits 1.
 
 ## Example
 
