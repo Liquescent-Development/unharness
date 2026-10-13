@@ -440,8 +440,7 @@ impl<P: StreamProtocol> Loop<P> {
 
     /// Tell the TUI the harness cannot `what`.
     async fn cannot(&mut self, what: &str) {
-        let notice = format!("{} cannot {what}", self.harness);
-        let _ = self.events.send(AgentEvent::Notice(notice)).await;
+        let _ = self.events.send(cannot(self.harness, what)).await;
     }
 
     /// The TUI dropped the handle while it was told something. It sends
@@ -458,6 +457,12 @@ impl<P: StreamProtocol> Loop<P> {
             self.proc.kill().await;
         }
     }
+}
+
+/// The notice that `harness` cannot `what` ([`asks`]), from either flavour
+/// of the driver.
+fn cannot(harness: HarnessId, what: &str) -> AgentEvent {
+    AgentEvent::Notice(format!("{harness} cannot {what}"))
 }
 
 /// What `cmd` asks of the harness, as the notice that it cannot says it,

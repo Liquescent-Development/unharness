@@ -496,10 +496,14 @@ impl Harness for CodexHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        match self.effective_transport(&cfg.binary) {
-            CodexTransport::Exec => {
-                crate::core::driver::per_turn::start(cfg, Arc::new(exec::CodexExec))
-            }
+        let transport = self.effective_transport(&cfg.binary);
+        match transport {
+            // What `exec` can do, also where `auto` came to it only now.
+            CodexTransport::Exec => crate::core::driver::per_turn::start(
+                cfg,
+                &CodexHarness::new(transport).capabilities(),
+                Arc::new(exec::CodexExec),
+            ),
             _ => app_server::start(cfg),
         }
     }

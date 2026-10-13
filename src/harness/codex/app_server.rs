@@ -15,8 +15,8 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, Parser,
-    PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel, RemoteControl,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel, SessionCommand,
+    SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -470,10 +470,11 @@ async fn drive(
                         d.effort = e;
                         Ok(())
                     }
+                    // As `core::driver` answers what a harness does not offer.
                     SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "Codex has no remote control".into(),
-                        })).await;
+                        let _ = events.send(AgentEvent::Notice(format!(
+                            "{} cannot go on remote control", HarnessId::CODEX
+                        ))).await;
                         Ok(())
                     }
                     SessionCommand::SetPolicy(p) => {
