@@ -28,7 +28,8 @@ to lay out the transcript, to render and to draw.
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess,
                per-turn driver, JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints, allow rules (rules.rs), the sandbox
+               file checkpoints, allow rules (rules.rs), who answers a
+               permission request (permissions.rs), the sandbox
                (sandbox/: levels, profile, Landlock and Seatbelt backends)
                and the watch on vendor config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,

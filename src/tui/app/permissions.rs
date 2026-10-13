@@ -1,4 +1,7 @@
-//! Permission requests: allow rules, the modal and the ones waiting behind it.
+//! Permission requests in the TUI: the notice for what `core::permissions`
+//! answers (an allow rule, or a handoff summary being written), the modal
+//! for what it leaves to the user and the ones waiting behind it, and
+//! "allow always".
 
 use super::{Action, App};
 use crate::core::permissions::{HandoffTo, Route, Router, Why};
