@@ -6279,7 +6279,7 @@ fn rate_limit_summary(r: &RateLimitInfo) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::core::{PermissionKind, Question, QuestionOption, ToolAction};
+    use crate::core::{Parser, PermissionKind, Question, QuestionOption, ToolAction};
     use crate::harness::agy::AgyHarness;
     use crate::harness::claude::ClaudeHarness;
     use crossterm::event::KeyEventKind;

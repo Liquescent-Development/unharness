@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::brain;
-use crate::core::{AgentEvent, StopReason, SubagentStatus, Usage};
+use crate::core::{AgentEvent, Parser, StopReason, SubagentStatus, Usage};
 
 #[derive(Debug, Default)]
 pub struct AgyParser {
@@ -60,13 +60,6 @@ impl AgyParser {
             session_id,
             ..Default::default()
         }
-    }
-
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return vec![AgentEvent::Notice(line.to_string())];
-        };
-        self.feed_value(&v)
     }
 
     /// The conversation agy reported, which owns the subagents' reports.
@@ -133,8 +126,17 @@ impl AgyParser {
             result: (!result.is_empty()).then(|| result.to_string()),
         }]
     }
+}
 
-    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for AgyParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return vec![AgentEvent::Notice(line.to_string())];
+        };
+        self.feed_value(&v)
+    }
+
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() || t.starts_with("Debugger") {
             return vec![];
@@ -170,7 +172,9 @@ impl AgyParser {
         }
         vec![AgentEvent::Notice(format!("agy: {t}"))]
     }
+}
 
+impl AgyParser {
     pub fn feed_value(&mut self, v: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match str_of(v, "event") {
@@ -374,16 +378,7 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
-
-    impl LineParser for AgyParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            AgyParser::feed(self, line)
-        }
-        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-            AgyParser::feed_stderr(self, line)
-        }
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir};
 
     #[test]
     fn fixture_auth_required() {

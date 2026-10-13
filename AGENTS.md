@@ -41,7 +41,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   itself: allowed by a rule, denied otherwise (`src/headless.rs`). Declaring it needs a
   recording or a live run that shows the asking. The policy never chooses
   a sandbox level.
-- **Parsers are pure and fixture-tested.** `parse::feed(line) -> Vec<AgentEvent>`
+- **Parsers are pure and fixture-tested.** `Parser::feed(line) -> Vec<AgentEvent>`
   has no I/O. Every protocol change needs a recording made with the matching
   `scripts/record-*.py` and a committed `fixtures/<case>.jsonl` + `.events`.
   Fixtures are redacted (`/WORKSPACE`, `/HOME`, no emails or account ids);

@@ -17,9 +17,9 @@ use tokio::sync::mpsc;
 use super::parse::ClaudeParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, PermissionDecision, PermissionKind,
-    PermissionPolicy, ProcessModel, ProviderId, SessionCommand, SessionConfig, SessionHandle,
-    SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, Parser, PermissionDecision,
+    PermissionKind, PermissionPolicy, ProcessModel, ProviderId, SessionCommand, SessionConfig,
+    SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with

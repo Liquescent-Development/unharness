@@ -14,9 +14,9 @@ use crate::core::jsonrpc::{self, RpcMessage};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, PermissionDecision,
-    PermissionKind, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig,
-    SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, Parser,
+    PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel, RemoteControl,
+    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
