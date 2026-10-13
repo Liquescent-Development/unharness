@@ -150,9 +150,6 @@ pub trait MetaReader: std::fmt::Debug + Send + Sync {
     fn tool_update(&mut self, call: ToolView<'_>, update: &Value) -> Vec<AgentEvent>;
 }
 
-/// Makes a [`MetaReader`] for each session.
-pub type MetaReaderFactory = fn() -> Box<dyn MetaReader>;
-
 /// A tool call as merged from every update so far.
 #[derive(Debug, Clone, Copy)]
 pub struct ToolView<'a> {

@@ -1,18 +1,23 @@
 //! What a harness knows about its ACP agent that the protocol does not
-//! say ([`AcpProfile`]), given to [`AcpHarness::new`](super::AcpHarness::new).
+//! say ([`AcpProfile`]), given to [`AcpHarness::new`](super::AcpHarness::new),
+//! and what the driver calls back into it for ([`AgentHooks`]).
 //!
 //! A config-defined agent or a preset has the default profile plus what
 //! its `[harnesses.<name>]` table says (`asks_permission`, `modes`,
-//! `sign_in`); Mistral Vibe's harness builds its own (`harness/vibe/`).
+//! `sign_in`), and no hooks; Mistral Vibe's harness builds its own
+//! (`harness/vibe/`).
+
+use std::sync::Arc;
 
 use super::modes::ModeMap;
-use super::parse::MetaReaderFactory;
-use super::spawn::SpawnEnv;
+use super::parse::{MetaReader, SessionOptions};
+use super::spawn::SpawnPlan;
+use crate::core::SessionConfig;
 
 /// What unharness knows about an ACP agent beyond the protocol. The
 /// default is an agent that is not known to ask, has no mode map, and
-/// does everything the protocol's way.
-#[derive(Clone, Default)]
+/// does everything the protocol's way ([`AgentHooks`]' defaults).
+#[derive(Clone)]
 pub struct AcpProfile {
     /// The agent is known to ask before it writes, runs a command or
     /// reaches out, which is what the `ask` policy stands on
@@ -23,7 +28,9 @@ pub struct AcpProfile {
     /// is not under the spec's `thought_level`. For a harness that knows
     /// what setting the option does: unharness then sends
     /// `session/set_config_option` for it on `/effort` and for a
-    /// configured effort. Nothing declares one from config.
+    /// configured effort, unless the hooks choose it at spawn
+    /// ([`AgentHooks::chooses_at_spawn`]), when it is read for its levels
+    /// only. Nothing declares one from config.
     pub effort_option: Option<String>,
     /// Which of the agent's own session modes backs each policy (see
     /// [`ModeMap`]): from `[harnesses.<name>] modes`, or declared by a
@@ -43,6 +50,82 @@ pub struct AcpProfile {
     /// write it there and to name it in `locations` (Mistral Vibe 2.26.1);
     /// for any other a relative path stays unknown.
     pub relative_edits: bool,
+    /// What the driver calls back into the harness for; [`NoHooks`] by
+    /// default.
+    pub hooks: Arc<dyn AgentHooks>,
+}
+
+impl Default for AcpProfile {
+    fn default() -> Self {
+        AcpProfile {
+            asks: false,
+            effort_option: None,
+            modes: ModeMap::default(),
+            sign_in: None,
+            relative_edits: false,
+            hooks: Arc::new(NoHooks),
+        }
+    }
+}
+
+/// What the ACP driver (`transport.rs`) and [`AcpHarness`](super::AcpHarness)
+/// call back into a harness for, at each point where its agent does what
+/// the protocol does not say. Every method has a default that is the
+/// protocol's own way (nothing chosen at spawn, added to the environment,
+/// read from `_meta` or rewound), so an agent without a quirk needs none,
+/// and the driver calls them all for every agent. One per harness, shared
+/// by its sessions.
+pub trait AgentHooks: Send + Sync {
+    /// The agent's model and effort are chosen when its process starts,
+    /// in the environment [`Self::spawn_plan`] gives it, and never with
+    /// `session/set_config_option`: for an agent that writes a model or
+    /// effort set over the protocol into its own configuration (Mistral
+    /// Vibe, whose sessions also keep the ones they last ran). A change of
+    /// either starts a new process, and a new session once the old one was
+    /// prompted (`Capabilities::model_per_process`); the session's answer
+    /// is compared with the choice, since an agent may run another model
+    /// or level without an error.
+    fn chooses_at_spawn(&self) -> bool {
+        false
+    }
+
+    /// What the agent's process for `cfg` is started with: variables for
+    /// its environment, and what the driver holds its sessions to
+    /// ([`SpawnPlan`]). Called for every process, also one started again
+    /// ([`Self::respawn`]); nothing by default. Pure but for reading the
+    /// agent's own configuration (never writing it) and writing what the
+    /// harness keeps in unharness's own state directory (vibe's
+    /// profiles).
+    fn spawn_plan(&self, cfg: &SessionConfig) -> SpawnPlan {
+        let _ = cfg;
+        SpawnPlan::default()
+    }
+
+    /// A session answered (new, reattached or forked) in a process
+    /// started with `running`, with `options`: keep what it says for the
+    /// processes started after it (vibe's model names, `KnownModels`).
+    fn learn(&self, running: &SpawnPlan, options: &SessionOptions, cfg: &SessionConfig) {
+        let _ = (running, options, cfg);
+    }
+
+    /// After [`Self::learn`], before anything went to the session: the
+    /// plan to start the process `running` again with, when what it was
+    /// started with lacked what only the session could tell (vibe's level
+    /// goes in a model entry that needs the model's name), or `None` to go
+    /// on. The session's answer is then not passed on: the next process
+    /// answers again. Asked once per session at most.
+    fn respawn(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
+        let _ = (running, cfg);
+        None
+    }
+
+    /// A reader of what the agent says in a tool call's fields of its own
+    /// (`_meta`), one per session ([`MetaReader`]): for a harness that
+    /// knows its agent (Mistral Vibe's subagents).
+    fn meta_reader(&self) -> Option<Box<dyn MetaReader>> {
+        None
+    }
+
     /// The extension method that rewinds the session, which takes
     /// `sessionId`, `messageId` (the id the agent's `user_message_chunk`
     /// gave the turn's message, reported as its `TurnAnchor`) and
@@ -50,19 +133,12 @@ pub struct AcpProfile {
     /// in place, and answers an unknown id with an error (Mistral Vibe's
     /// `_rewind/to`, 2.26.1). Not the spec: only for an agent known to
     /// have it. Files are restored by unharness from its checkpoints.
-    pub rewind_method: Option<&'static str>,
-    /// Choose the agent's model and effort when its process starts, with
-    /// the environment this builds, and never with
-    /// `session/set_config_option`: for an agent that writes a model or
-    /// effort set over the protocol into its own configuration (Mistral
-    /// Vibe, whose sessions also keep the ones they last ran). A change of
-    /// either starts a new process, and a new session once the old one was
-    /// prompted (`Capabilities::model_per_process`). The effort option is
-    /// still [`Self::effort_option`], read for its levels only.
-    pub spawn_env: Option<SpawnEnv>,
-    /// Read each tool call's fields of the agent's own with a reader from
-    /// this, one per session (`parse::MetaReader`): for a harness that
-    /// knows its agent (Mistral Vibe's subagents). Nothing declares one
-    /// from config.
-    pub meta_reader: Option<MetaReaderFactory>,
+    fn rewind_method(&self) -> Option<&'static str> {
+        None
+    }
 }
+
+/// The hooks of an agent that does everything the protocol's way.
+pub struct NoHooks;
+
+impl AgentHooks for NoHooks {}

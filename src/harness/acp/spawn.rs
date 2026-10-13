@@ -4,19 +4,21 @@
 //! Mistral Vibe 2.26.1 writes a model or thinking level set over ACP into
 //! the user's `~/.vibe/config.toml`, where the next plain vibe run starts
 //! from it; set in its environment they apply to that process alone. A
-//! harness that knows this about its agent declares a [`SpawnEnv`]
-//! (`AcpProfile::spawn_env`): the transport then never sends the
-//! model or effort option, puts what the builder returns in the agent's
-//! environment, and a change of either starts a new process, and a new
-//! session once the old one was prompted (`Capabilities::model_per_process`):
-//! vibe pins a session's model and level at every turn, and the pins
-//! outrank its environment when the session is loaded.
+//! harness that knows this about its agent says so in its hooks
+//! (`AgentHooks::chooses_at_spawn`): the transport then never sends the
+//! model or effort option, puts the environment of the hooks' plan
+//! ([`SpawnPlan`], `AgentHooks::spawn_plan`) in the agent's process, and a
+//! change of either starts a new process, and a new session once the old
+//! one was prompted (`Capabilities::model_per_process`): vibe pins a
+//! session's model and level at every turn, and the pins outrank its
+//! environment when the session is loaded.
 //!
 //! What the environment has to say can depend on what only a session
 //! tells (vibe's thinking level goes in a whole model entry, which needs
 //! the model's name): [`KnownModels`] keeps that across the agent's
-//! processes in a run, and a process started before it was known is
-//! started again once its session has said it (`transport.rs`).
+//! processes in a run (`AgentHooks::learn`), and a process started before
+//! it was known is started again once its session has said it
+//! (`AgentHooks::respawn`, `transport.rs`).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use super::modes::OwnModes;
 use super::parse::SessionOptions;
-use crate::core::{CapsUpdate, PermissionPolicy, ProviderId};
+use crate::core::{CapsUpdate, PermissionPolicy, ProviderId, SessionConfig};
 
 /// What the agent's sessions have said about its models, kept for the
 /// processes started after them in this run.
@@ -61,7 +63,7 @@ impl KnownModels {
     }
 }
 
-/// What a process is to run, for the builder.
+/// What a process is to run, for the hooks' plan.
 #[derive(Debug, Clone, Copy)]
 pub struct SpawnChoice<'a> {
     /// The chosen model's value, as the session's model option lists it.
@@ -80,7 +82,24 @@ pub struct SpawnChoice<'a> {
     pub cwd: &'a Path,
 }
 
-/// What the builder made of a [`SpawnChoice`].
+impl<'a> SpawnChoice<'a> {
+    /// What `cfg` chooses for the agent's process, with what `known` says
+    /// of its models.
+    pub fn of(cfg: &'a SessionConfig, known: &'a KnownModels) -> Self {
+        SpawnChoice {
+            model: cfg.model.as_ref().map(|m| m.model.as_str()),
+            effort: cfg.effort.as_deref(),
+            policy: cfg.policy,
+            known,
+            env: &cfg.env,
+            provider: cfg.provider.as_ref().map(|p| p.as_str()),
+            cwd: &cfg.cwd,
+        }
+    }
+}
+
+/// What a harness's hooks made of a [`SpawnChoice`] for a process
+/// (`AgentHooks::spawn_plan`); the default is nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpawnPlan {
     /// Variables to set on the agent's process.
@@ -126,12 +145,6 @@ impl SpawnPlan {
         }
     }
 }
-
-/// Builds the agent's environment for a model and effort. Pure but for
-/// reading the agent's own configuration (never writing it) and writing
-/// what the harness keeps in unharness's own state directory (vibe's
-/// profiles).
-pub type SpawnEnv = Arc<dyn Fn(&SpawnChoice<'_>) -> SpawnPlan + Send + Sync>;
 
 #[cfg(test)]
 mod tests {

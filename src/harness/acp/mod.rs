@@ -20,8 +20,8 @@ pub mod transport;
 use std::path::{Path, PathBuf};
 
 pub use modes::{ModeMap, OwnModes};
-pub use profile::AcpProfile;
-pub use spawn::{KnownModels, ProviderModels, SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
+pub use profile::{AcpProfile, AgentHooks};
+pub use spawn::{KnownModels, ProviderModels, SharedModels, SpawnChoice, SpawnPlan};
 
 use anyhow::{Result, bail};
 
@@ -82,10 +82,9 @@ pub struct AcpHarness {
     args: Vec<String>,
     /// Came from [`PRESETS`] rather than the user's config.
     preset: bool,
-    /// What unharness knows about the agent that the protocol does not say.
+    /// What unharness knows about the agent that the protocol does not
+    /// say, and its hooks.
     profile: AcpProfile,
-    /// What the agent's sessions said about its models, this run.
-    known: SharedModels,
 }
 
 impl AcpHarness {
@@ -124,7 +123,6 @@ impl AcpHarness {
             args: args.to_vec(),
             preset: false,
             profile: AcpProfile { sign_in, ..profile },
-            known: SharedModels::default(),
         })
     }
 
@@ -267,7 +265,7 @@ impl Harness for AcpHarness {
             provider_per_process: false,
             // Form elicitation is declared at `initialize`; whether the
             // agent asks is reported once it sends one.
-            model_per_process: self.profile.spawn_env.is_some(),
+            model_per_process: self.profile.hooks.chooses_at_spawn(),
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -281,7 +279,7 @@ impl Harness for AcpHarness {
             rate_limits: false,
             // Not in the spec; an agent known to have one declares it.
             rewind: RewindSupport {
-                conversation: self.profile.rewind_method.is_some(),
+                conversation: self.profile.hooks.rewind_method().is_some(),
                 // A forked session's inherited messages have ids of its
                 // own (vibe 2.26.1 numbers them by position).
                 anchors_survive_fork: false,
@@ -348,16 +346,7 @@ impl Harness for AcpHarness {
         transport::start(
             self.descriptor.id,
             self.args.clone(),
-            transport::AgentSpec {
-                effort_option: self.profile.effort_option.clone(),
-                modes: self.profile.modes.clone(),
-                spawn_env: self.profile.spawn_env.clone(),
-                known: self.known.clone(),
-                sign_in: self.profile.sign_in.clone(),
-                relative_edits: self.profile.relative_edits,
-                meta_reader: self.profile.meta_reader,
-                rewind: self.profile.rewind_method,
-            },
+            self.profile.clone(),
             cfg,
         )
     }
@@ -399,8 +388,14 @@ mod tests {
         assert!(caps.interactive_permissions && caps.plan_updates && !caps.steer);
         // Rewind is not in the spec: only an agent known to have it does.
         assert!(!caps.rewind.conversation);
+        struct Rewinds;
+        impl AgentHooks for Rewinds {
+            fn rewind_method(&self) -> Option<&'static str> {
+                Some("_rewind/to")
+            }
+        }
         let rewinds = with(AcpProfile {
-            rewind_method: Some("_rewind/to"),
+            hooks: std::sync::Arc::new(Rewinds),
             ..AcpProfile::default()
         });
         assert!(rewinds.capabilities().rewind.conversation);

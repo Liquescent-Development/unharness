@@ -5850,12 +5850,21 @@ async fn vibe_refuses_ask_when_its_config_lists_another_unharness_ask() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// vibe's hooks' rewind alone: its `_rewind/to`.
+struct Rewinding;
+
+impl unharness::harness::acp::AgentHooks for Rewinding {
+    fn rewind_method(&self) -> Option<&'static str> {
+        Some(unharness::harness::vibe::REWIND_METHOD)
+    }
+}
+
 /// The fake ACP agent as vibe-acp, which rewinds with its `_rewind/to`.
 fn vibe_rewinding(fake: &Fake, fixture: &Path) -> SessionHandle {
     let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
     cfg.model = None;
     fake_acp(unharness::harness::acp::AcpProfile {
-        rewind_method: Some(unharness::harness::vibe::REWIND_METHOD),
+        hooks: std::sync::Arc::new(Rewinding),
         ..asking()
     })
     .start_session(cfg)
