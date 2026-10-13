@@ -1559,21 +1559,29 @@ mod tests {
     // again and its process the session's.
     #[tokio::test]
     async fn a_cli_respawned_from_a_line_is_ended_and_started_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let ended = dir.path().join("ended");
         let rpc = Rpc {
+            // The old one is sent requests of its own.
+            at_start: true,
             respawn: Some(|| {
                 sh(r#"echo $$; read -r l; printf '%s\n' "$l"
                       echo '{"jsonrpc":"2.0","id":1,"result":"hi"}'; cat >/dev/null"#)
             }),
             ..Rpc::new()
         };
-        // Says goodbye once its input closes, and takes a while to go.
-        let mut h = run(
-            "echo $$; echo respawn; cat >/dev/null; echo bye; sleep 0.2",
-            rpc,
+        // Deaf to SIGTERM; once its input closes it says goodbye and takes
+        // a while to finish, which only a CLI given its grace does.
+        let script = format!(
+            "trap '' TERM; echo $$; echo respawn; cat >/dev/null; echo bye; sleep 0.3; touch {}",
+            ended.display()
         );
+        let mut h = run(&script, rpc);
         let _old = pid(&mut h).await;
         assert_eq!(next(&mut h).await, said("respawn"));
         let _new = pid(&mut h).await;
+        // Started once the old one had finished by itself.
+        assert!(ended.exists(), "the old CLI was not given its grace");
         assert_eq!(
             line(&mut h).await,
             json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"k": "hello"}})
@@ -1705,6 +1713,32 @@ mod tests {
         assert_eq!(
             until_exited(&mut h).await,
             [AgentEvent::ProcessExited { code: Some(0) }]
+        );
+    }
+
+    // A request to end with that cannot be written leaves nothing to wait
+    // for: stdin closes at once, and the CLI is given its grace.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cli_whose_request_to_end_cannot_be_written_is_ended_at_once() {
+        let rpc = Rpc {
+            close: Some(Duration::from_secs(30)),
+            ..Rpc::new()
+        };
+        // Closes its input (and gives a reaper time to let go of it), and
+        // never ends by itself.
+        let mut h = run(
+            "exec 0<&-; sleep 0.2; echo $$; trap '' TERM; while :; do sleep 1; done",
+            rpc,
+        );
+        let cli = pid(&mut h).await;
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: None }]
         );
     }
 
