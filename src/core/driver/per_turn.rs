@@ -2,7 +2,9 @@
 //!
 //! For harnesses whose CLI has no long-lived stdin protocol (codex
 //! `exec`), every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
-//! as the long-lived transports.
+//! as the long-lived transports, and answers a command it cannot carry out
+//! as the long-lived loop does: one `Notice`, worded from the harness's
+//! [`Capabilities`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,9 +13,9 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::exited;
-use crate::core::caps::PermissionPolicy;
-use crate::core::event::{AgentEvent, RemoteControl, StopReason};
+use super::{asks, cannot, exited};
+use crate::core::caps::{Capabilities, PermissionPolicy};
+use crate::core::event::{AgentEvent, StopReason};
 use crate::core::ids::{HarnessId, ModelRef, ProviderId};
 use crate::core::mcp::McpServer;
 use crate::core::parser::Parser;
@@ -61,7 +63,13 @@ pub trait PerTurnProtocol: Send + Sync {
     fn new_parser(&self) -> Box<dyn Parser>;
 }
 
-pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<SessionHandle> {
+/// Drive `protocol` for the session whose handle this returns. `caps` is
+/// what its harness declares.
+pub fn start(
+    cfg: SessionConfig,
+    caps: &Capabilities,
+    protocol: Arc<dyn PerTurnProtocol>,
+) -> Result<SessionHandle> {
     let state = TurnState {
         binary: cfg.binary,
         cwd: cfg.cwd,
@@ -81,12 +89,20 @@ pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<S
         process_model: ProcessModel::PerTurn,
     });
     let slot = handle.process_slot();
-    tokio::spawn(drive(state, protocol, slot, events_tx, cmd_rx));
+    tokio::spawn(drive(
+        state,
+        caps.clone(),
+        protocol,
+        slot,
+        events_tx,
+        cmd_rx,
+    ));
     Ok(handle)
 }
 
 async fn drive(
     mut state: TurnState,
+    caps: Capabilities,
     protocol: Arc<dyn PerTurnProtocol>,
     slot: ProcessSlot,
     events: mpsc::Sender<AgentEvent>,
@@ -113,20 +129,21 @@ async fn drive(
                     if let Some(mut p) = current.take() { p.kill().await; }
                     return;
                 };
+                let (what, offered) = asks(&cmd, &caps);
+                if !offered {
+                    let _ = events.send(cannot(protocol.harness(), what)).await;
+                    continue;
+                }
                 match cmd {
-                    // No subagents are reported here, so none can be running.
-                    SessionCommand::StopSubagent { .. } => {}
-                    SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "this harness has no remote control".into(),
-                        })).await;
-                    }
-                    SessionCommand::Steer { .. }
+                    // What a CLI run once per turn cannot do, whatever its
+                    // harness declares.
+                    SessionCommand::StopSubagent { .. }
+                    | SessionCommand::RemoteControl { .. }
+                    | SessionCommand::Steer { .. }
                     | SessionCommand::Compact { .. }
-                    | SessionCommand::Rewind { .. } => {
-                        let _ = events.send(AgentEvent::Error(
-                            "this harness cannot steer, compact or rewind a session".into(),
-                        )).await;
+                    | SessionCommand::Rewind { .. }
+                    | SessionCommand::RespondPermission { .. } => {
+                        let _ = events.send(cannot(protocol.harness(), what)).await;
                     }
                     SessionCommand::SendTurn { text, attachments } => {
                         if current.is_some() {
@@ -175,11 +192,6 @@ async fn drive(
                             p.kill().await;
                             // Exited arrives on the line channel and finishes the turn.
                         }
-                    }
-                    SessionCommand::RespondPermission { .. } => {
-                        let _ = events.send(AgentEvent::Error(
-                            "this harness cannot answer permission prompts interactively".into(),
-                        )).await;
                     }
                     SessionCommand::SetModel(m) => state.model = Some(m),
                     SessionCommand::SetEffort(e) => state.effort = e,
@@ -322,7 +334,7 @@ mod tests {
     // that does not read; the session's process can still be killed.
     #[tokio::test]
     async fn a_turn_stuck_on_its_prompt_can_be_killed_through_the_session() {
-        let mut h = start(cfg(), Arc::new(Deaf)).unwrap();
+        let mut h = start(cfg(), &caps(), Arc::new(Deaf)).unwrap();
         h.send(SessionCommand::turn("x".repeat(1 << 20)))
             .await
             .unwrap();
@@ -330,6 +342,14 @@ mod tests {
         h.process_slot().kill();
         // The write fails, and the turn ends with its process.
         collect_turn(&mut h).await;
+    }
+
+    /// What a harness run once per turn can offer: an interrupt.
+    fn caps() -> Capabilities {
+        Capabilities {
+            interrupt: true,
+            ..Default::default()
+        }
     }
 
     fn cfg() -> SessionConfig {
@@ -366,9 +386,76 @@ mod tests {
         out
     }
 
+    // What a CLI run once per turn cannot do is answered as the long-lived
+    // loop answers it, also where the harness declares it, and so is what
+    // the harness does not declare: one notice each, and nothing runs.
+    #[tokio::test]
+    async fn a_command_it_cannot_carry_out_is_answered_with_one_notice() {
+        let mut every_but_interrupt = Capabilities {
+            steer: true,
+            compaction: true,
+            interactive_permissions: true,
+            remote_control: true,
+            ..Default::default()
+        };
+        every_but_interrupt.rewind.conversation = true;
+        every_but_interrupt.subagents.stop = true;
+        let mut h = start(cfg(), &every_but_interrupt, Arc::new(Echo)).unwrap();
+        for cmd in [
+            SessionCommand::Steer {
+                text: "x".into(),
+                attachments: Vec::new(),
+            },
+            SessionCommand::Rewind { anchor: "a".into() },
+            SessionCommand::Interrupt,
+            SessionCommand::StopSubagent { id: "s".into() },
+            SessionCommand::RespondPermission {
+                id: "r".into(),
+                decision: crate::core::PermissionDecision::Deny {
+                    reason: "no".into(),
+                },
+            },
+            SessionCommand::RemoteControl {
+                enabled: true,
+                name: None,
+            },
+            SessionCommand::Compact { instructions: None },
+            SessionCommand::turn("after"),
+        ] {
+            h.send(cmd).await.unwrap();
+        }
+        let turn = collect_turn(&mut h).await;
+        let said: Vec<&AgentEvent> = turn
+            .iter()
+            .take_while(|ev| **ev != AgentEvent::TurnStarted)
+            .collect();
+        let notice = |what: &str| AgentEvent::Notice(format!("codex cannot {what}"));
+        assert_eq!(
+            said,
+            [
+                &notice("steer a running turn"),
+                &notice("rewind its session"),
+                &notice("interrupt a turn"),
+                &notice("stop a subagent"),
+                &notice("take an answer to a permission request"),
+                &notice("go on remote control"),
+                &notice("compact its context on request"),
+            ]
+        );
+        // Nothing reached a CLI before the turn: the first is the turn's.
+        assert!(
+            turn.contains(&AgentEvent::SessionStarted {
+                session_id: "s1".into(),
+                model: None
+            }),
+            "{turn:?}"
+        );
+        assert!(turn.contains(&AgentEvent::TextDelta("after".into())));
+    }
+
     #[tokio::test]
     async fn two_turns_resume_by_captured_session_id() {
-        let mut h = start(cfg(), Arc::new(Echo)).unwrap();
+        let mut h = start(cfg(), &caps(), Arc::new(Echo)).unwrap();
         h.send(SessionCommand::turn("one")).await.unwrap();
         let t1 = collect_turn(&mut h).await;
         assert_eq!(t1[0], AgentEvent::TurnStarted);
@@ -413,7 +500,7 @@ mod tests {
                 Box::new(EchoParser)
             }
         }
-        let mut h = start(cfg(), Arc::new(Pid)).unwrap();
+        let mut h = start(cfg(), &caps(), Arc::new(Pid)).unwrap();
         h.send(SessionCommand::turn("x")).await.unwrap();
         let pid = loop {
             let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
@@ -452,7 +539,7 @@ mod tests {
                 Box::new(EchoParser)
             }
         }
-        let mut h = start(cfg(), Arc::new(Sleeper)).unwrap();
+        let mut h = start(cfg(), &caps(), Arc::new(Sleeper)).unwrap();
         h.send(SessionCommand::turn("x")).await.unwrap();
         assert_eq!(h.events.recv().await.unwrap(), AgentEvent::TurnStarted);
         h.send(SessionCommand::Interrupt).await.unwrap();

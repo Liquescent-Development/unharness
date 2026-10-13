@@ -1,4 +1,4 @@
-//! Minimal JSON-RPC 2.0 framing for stdio protocols (codex app-server).
+//! Minimal JSON-RPC 2.0 framing for stdio protocols (Codex app-server, ACP).
 
 use serde_json::{Value, json};
 
@@ -50,7 +50,38 @@ impl RpcMessage {
     }
 }
 
-pub fn request(id: u64, method: &str, params: Value) -> String {
+/// The id a client request of ours went under: numbered, or a name of its
+/// own (Codex's `skills/list`, so that the numbered ones keep theirs).
+/// JSON-RPC tells `1` and `"1"` apart, and so does this.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RequestId {
+    Number(u64),
+    Name(String),
+}
+
+impl RequestId {
+    /// The id of an answer, if it is one a request of ours can have had.
+    pub fn of(id: &Value) -> Option<RequestId> {
+        match id {
+            Value::Number(n) => n.as_u64().map(RequestId::Number),
+            Value::String(s) => Some(RequestId::Name(s.clone())),
+            _ => None,
+        }
+    }
+}
+
+impl From<&RequestId> for Value {
+    fn from(id: &RequestId) -> Value {
+        match id {
+            RequestId::Number(n) => Value::from(*n),
+            RequestId::Name(s) => Value::from(s.as_str()),
+        }
+    }
+}
+
+/// A request under `id`: a number, or a name (`"skills"`).
+pub fn request(id: impl Into<Value>, method: &str, params: Value) -> String {
+    let id: Value = id.into();
     let mut m = json!({"jsonrpc":"2.0","id":id,"method":method});
     if !params.is_null() {
         m["params"] = params;
@@ -114,6 +145,8 @@ mod tests {
             v,
             json!({"jsonrpc":"2.0","id":7,"method":"m","params":{"k":"v"}})
         );
+        let v: Value = serde_json::from_str(&request("skills", "skills/list", json!({}))).unwrap();
+        assert_eq!(v["id"], "skills");
         let v: Value = serde_json::from_str(&notification("initialized", Value::Null)).unwrap();
         assert_eq!(v, json!({"jsonrpc":"2.0","method":"initialized"}));
         let v: Value =
@@ -121,5 +154,20 @@ mod tests {
         assert_eq!(v["id"], 0);
         let v: Value = serde_json::from_str(&error_response(&json!("x"), -32601, "nope")).unwrap();
         assert_eq!(v["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn request_ids() {
+        assert_eq!(RequestId::of(&json!(3)), Some(RequestId::Number(3)));
+        assert_eq!(
+            RequestId::of(&json!("3")),
+            Some(RequestId::Name("3".into()))
+        );
+        for never_ours in [json!(-1), json!(1.5), Value::Null, json!([1])] {
+            assert_eq!(RequestId::of(&never_ours), None, "{never_ours}");
+        }
+        for id in [RequestId::Number(3), RequestId::Name("skills".into())] {
+            assert_eq!(RequestId::of(&Value::from(&id)), Some(id));
+        }
     }
 }
