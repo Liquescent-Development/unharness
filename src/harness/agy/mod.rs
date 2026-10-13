@@ -1,5 +1,5 @@
 //! Antigravity (`agy`) harness, checked against agy 1.2.17 with an account
-//! (see the status notes in `AGENTS.md`).
+//! (see the status notes in `NOTES.md` beside this file).
 
 mod brain;
 pub mod parse;

@@ -47,6 +47,8 @@ src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
                them for tests/session_e2e.rs
+docs/dev/      status notes that cross harnesses; each harness's own is its
+               src/harness/<name>/NOTES.md
 ```
 
 Each vendor CLI's streaming protocol is parsed into one event model
@@ -83,7 +85,8 @@ If the agent speaks ACP, a config table is enough; see
 1. Add a module under `src/harness/<name>/` implementing `Harness`, with
    honest `Capabilities` and its `sandbox_paths`.
 2. Record a fixture with a `scripts/record-<name>.py` and generate its
-   `.events`.
+   `.events`. Write `src/harness/<name>/NOTES.md`: what was recorded and
+   checked live, on which version, and what is unverified.
 3. Give it a `build` that parses what its `[harnesses.<name>]` table takes
    besides the keys every harness takes, and add that to `BUILTIN` in
    `src/core/registry.rs`.

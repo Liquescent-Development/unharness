@@ -1,5 +1,7 @@
 //! OpenAI Codex harness with two transports: `app-server` (long-lived JSON-RPC,
 //! interactive approvals) and `exec --json` (one child per turn, no prompts).
+//!
+//! Status notes: `NOTES.md` beside this file.
 
 pub mod app_server;
 pub mod app_server_parse;
