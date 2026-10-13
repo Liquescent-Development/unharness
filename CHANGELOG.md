@@ -2,6 +2,38 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.9.0 - 2026-10-13
+
+### Added
+
+- Mistral Vibe is a built-in harness: `unharness -H vibe` drives `vibe-acp` over the Agent Client Protocol, with its model and thinking level chosen as the session starts (never written into `~/.vibe/config.toml`), `--print --native` and `--no-tui` through vibe's own CLI, providers from `[harnesses.vibe.providers.<name>]`, and `doctor` showing its version, sign-in and whether vibe trusts the folder. See [Mistral Vibe](https://github.com/Liquescent-Development/unharness/blob/main/docs/vibe.md).
+- `ask` and `accept-edits` on vibe are agent profiles of unharness's own (`unharness-ask`, `unharness-accept-edits`), so a tool that vibe's configuration lets through is still asked about; `auto` is vibe's smart-approve classifier and `bypass` its auto-approve.
+- Vibe's subagents are listed as they are spawned and end with their report when vibe waits for one, and `/rewind` on vibe rewinds its session in place through its rewind extension.
+- ACP agents are held to the session mode their policy maps to (`[harnesses.<name>] modes`); a mode the agent moves into by itself is set back, and an agent with modes and no map offers only `bypass`. See [Modes](https://github.com/Liquescent-Development/unharness/blob/main/docs/acp.md#modes).
+- ACP agents: questions arrive as dialogs through form elicitation (vibe's ask_user_question, claude-agent-acp's AskUserQuestion), `/fork` branches the agent's session where it advertises `session/fork`, a session is closed with `session/close` before its process ends, and a request the agent withdraws closes its dialog.
+- An ACP agent that is not signed in says which sign-in methods it offers and what to run (`[harnesses.<name>] sign_in`), and starts no session in place of the one it could not open.
+- An ACP agent's effort can come from an option the harness declares, and select options sent in groups are read.
+- Copying from the transcript takes the text without the drawing around it: a drag copies what was selected, and a right click copies a whole block, or a code block's code.
+
+### Changed
+
+- `doctor`, `switch` and `models` stop on a wrong harness table as a run does, instead of showing the built-in harness in its place; `doctor` names the table and exits 1.
+- `--print --resume` of a session the agent no longer has (pi, ACP agents) fails with exit 1 instead of answering from a new session.
+- Under `accept-edits` an ACP agent's edit is answered without asking only when it stays inside the workspace; an edit outside is asked about.
+- A policy an ACP session refuses is offered again once that session ends.
+- A session an agent starts in place of one it could not resume or fork is told the conversation so far.
+- An interrupt answers the open permission requests before `session/cancel`, which keeps vibe's session usable afterwards.
+
+### Fixed
+
+- A policy changed while an ACP agent was still setting its mode could leave the agent in the earlier, wider mode; mode requests now go one at a time and a late answer sets the mode again.
+- A `VIBE_TOOLS` setting in `$VIBE_HOME/.env` is covered by unharness's profiles, and a `.env` unharness cannot read refuses `ask` and `accept-edits` rather than trusting it.
+- An ACP `execute` request carrying fields no recording had (such as `args`) is asked about instead of being matched by an allow rule.
+- A permission request that names its tool call by id alone is read with that call's kind and input, and a call known only from its request ends when the request is answered.
+- A vibe subagent whose end is never reported no longer holds back `/clear`, `/model`, `/effort` or a provider change.
+- A right click after a bare diff hunk with tab-indented lines copies the code block it was on.
+- A shell command of several lines is shown whole.
+
 ## 0.8.0 - 2026-10-10
 
 ### Added
