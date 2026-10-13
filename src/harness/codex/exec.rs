@@ -5,9 +5,9 @@ use tokio::process::Command;
 
 use super::OwnSandbox;
 use super::exec_parse::CodexExecParser;
-use crate::core::per_turn::{PerTurnProtocol, TurnParser, TurnSpec, TurnState};
+use crate::core::per_turn::{PerTurnProtocol, TurnSpec, TurnState};
 use crate::core::sandbox::SandboxLevel;
-use crate::core::{AgentEvent, Attachment, HarnessId, PermissionPolicy};
+use crate::core::{Attachment, HarnessId, Parser, PermissionPolicy};
 
 pub struct CodexExec;
 
@@ -129,19 +129,8 @@ impl PerTurnProtocol for CodexExec {
         })
     }
 
-    fn new_parser(&self) -> Box<dyn TurnParser> {
-        Box::new(ExecTurnParser(CodexExecParser::new()))
-    }
-}
-
-struct ExecTurnParser(CodexExecParser);
-
-impl TurnParser for ExecTurnParser {
-    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-        self.0.feed(line)
-    }
-    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-        self.0.feed_stderr(line)
+    fn new_parser(&self) -> Box<dyn Parser> {
+        Box::new(CodexExecParser::new())
     }
 }
 

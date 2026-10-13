@@ -32,6 +32,12 @@ pub struct PiHarness {
     pub gate_dir: Option<PathBuf>,
 }
 
+/// pi from its `[harnesses.pi]` table, which has no keys of pi's own.
+pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
+    table.own::<crate::config::NoOwnKeys>(name)?;
+    Ok(Box::new(PiHarness::default()))
+}
+
 impl PiHarness {
     fn install_gate(&self) -> Result<PathBuf> {
         match &self.gate_dir {

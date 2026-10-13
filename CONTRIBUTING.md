@@ -40,6 +40,9 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   agy/         stream-json transport
   acp/         generic Agent Client Protocol client: one instance per configured agent
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
+  app/         App: its struct, types, `new` and `on_event` in mod.rs, the rest
+               one file per concern (session, policy, switch, rewind, ...),
+               and their tests the same way under tests/
 src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
@@ -49,7 +52,7 @@ docs/dev/      status notes that cross harnesses; each harness's own is its
 ```
 
 Each vendor CLI's streaming protocol is parsed into one event model
-(`AgentEvent`) by a pure parser, `parse::feed(line) -> Vec<AgentEvent>`,
+(`AgentEvent`) by a pure parser, `Parser::feed(line) -> Vec<AgentEvent>`,
 that is tested against recorded sessions. The TUI reads only events and
 declared `Capabilities`, so it never builds a vendor command line or
 assumes what a harness can do.
@@ -84,7 +87,9 @@ If the agent speaks ACP, a config table is enough; see
 2. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events`. Write `src/harness/<name>/NOTES.md`: what was recorded and
    checked live, on which version, and what is unverified.
-3. Register it in `Registry::from_config`.
+3. Give it a `build` that parses what its `[harnesses.<name>]` table takes
+   besides the keys every harness takes, and add that to `BUILTIN` in
+   `src/core/registry.rs`.
 4. Add an e2e test if the transport has a handshake or a permission
    channel.
 

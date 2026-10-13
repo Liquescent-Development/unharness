@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, ContextUsage, HookOutcome, PermissionKind, PermissionRequest, PlanEntry,
+    AgentEvent, ContextUsage, HookOutcome, Parser, PermissionKind, PermissionRequest, PlanEntry,
     PlanStatus, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
     SubagentStatus, ToolAction, Usage,
 };
@@ -122,8 +122,10 @@ impl CodexAppServerParser {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for CodexAppServerParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
             Some(RpcMessage::Notification { method, params }) => match self.child_parent(&params) {
                 // A sub-agent's turns are its life, not the main agent's.
@@ -156,17 +158,9 @@ impl CodexAppServerParser {
         }
     }
 
-    /// The thread of the sub-agent that the item `id` spawned.
-    pub fn child_thread(&self, id: &str) -> Option<&str> {
-        self.children
-            .iter()
-            .find(|(_, spawn)| *spawn == id)
-            .map(|(thread, _)| thread.as_str())
-    }
-
     /// Codex logs tracing lines (`2026-… ERROR module: msg`) to stderr. Only
     /// WARN/ERROR are surfaced, without the timestamp and module path.
-    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() {
             return vec![];
@@ -189,6 +183,16 @@ impl CodexAppServerParser {
             };
         }
         vec![AgentEvent::Notice(format!("codex: {t}"))]
+    }
+}
+
+impl CodexAppServerParser {
+    /// The thread of the sub-agent that the item `id` spawned.
+    pub fn child_thread(&self, id: &str) -> Option<&str> {
+        self.children
+            .iter()
+            .find(|(_, spawn)| *spawn == id)
+            .map(|(thread, _)| thread.as_str())
     }
 
     /// The spawning item's id when `params` belong to a sub-agent thread.
@@ -853,16 +857,7 @@ fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
-
-    impl LineParser for CodexAppServerParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            CodexAppServerParser::feed(self, line)
-        }
-        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-            CodexAppServerParser::feed_stderr(self, line)
-        }
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir};
 
     #[test]
     fn fixture_app_server_mcp_server() {

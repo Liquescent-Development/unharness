@@ -1,0 +1,299 @@
+//! The active harness's session: started, committed, replaced and ended.
+
+use super::{Action, App};
+use crate::core::conversations::ShellStatus;
+use crate::core::guard::{self, Watch};
+use crate::core::mcp::{self, McpServer};
+use crate::core::{AgentEvent, HarnessId, StopReason};
+
+impl App {
+    /// The configured MCP servers the active harness takes for a session.
+    /// The ones it does not take are named once per harness.
+    pub fn session_mcp_servers(&mut self) -> Vec<McpServer> {
+        let (servers, warnings) = mcp::for_harness(
+            &self.config.mcp_servers().0,
+            self.caps().mcp,
+            self.short_name(),
+            &self.harness().own_mcp_servers(),
+        );
+        if !warnings.is_empty() && self.mcp_warned.insert(self.active) {
+            for w in warnings {
+                self.transcript.push_notice(w);
+            }
+        }
+        servers
+    }
+
+    /// Show what the active harness says about running in this folder
+    /// ([`Harness::session_notice`]), once per harness in a run: a session
+    /// starts again on every model, policy or sandbox change.
+    ///
+    /// [`Harness::session_notice`]: crate::harness::Harness::session_notice
+    pub fn show_session_notice(&mut self) {
+        if self.session_noticed.contains(&self.active) {
+            return;
+        }
+        if let Some(notice) = self.harness().session_notice(&self.cwd) {
+            self.session_noticed.insert(self.active);
+            self.transcript.push_notice(notice);
+        }
+    }
+
+    /// Start watching the active harness's configuration files, before its
+    /// process starts.
+    pub fn arm_guard(&mut self) {
+        self.guard = Some(Watch::begin(
+            &self
+                .harness()
+                .guarded(self.workspace_root.as_deref().unwrap_or(&self.cwd)),
+            dirs::home_dir().as_deref(),
+        ));
+    }
+
+    /// Tell the user about configuration files that changed since the last
+    /// check.
+    pub(super) fn check_guard(&mut self) {
+        let name = self.display_name();
+        let Some(watch) = self.guard.as_mut() else {
+            return;
+        };
+        for change in watch.changes(&guard::default_keep_dir()) {
+            self.transcript.push_error(change.describe(name));
+        }
+    }
+
+    /// A session for the active harness, unless it has one or one is on
+    /// its way.
+    pub(super) fn ensure_session(&mut self) {
+        if !self.session_alive && !self.start_pending() {
+            let resume = self.session_ids.get(&self.active).cloned();
+            self.actions.push_back(Action::StartSession { resume });
+        }
+    }
+
+    /// Start the active harness's session before anything is sent to it,
+    /// so that what it reports (its commands above all) is there before the
+    /// first prompt. The event loop calls this before it runs the actions;
+    /// nothing starts while a policy is still to be chosen, during a turn,
+    /// or after a session ended by itself or failed to start.
+    pub fn start_when_idle(&mut self) {
+        if self.should_quit
+            || self.session_alive
+            || self.start_pending()
+            || self.is_generating
+            || self.handoff.is_some()
+            || self.idle_start_paused
+            || self.effective_policy().is_none()
+        {
+            return;
+        }
+        if !self.caps().start_unprompted {
+            self.list_commands();
+            return;
+        }
+        let resume = self.session_ids.get(&self.active).cloned();
+        self.actions.push_back(Action::StartSession { resume });
+        self.session_blank = true;
+    }
+
+    /// The session could not be started. The next prompt tries again.
+    pub fn start_failed(&mut self, why: String) {
+        self.session_blank = false;
+        self.blank_session = None;
+        self.idle_start_paused = true;
+        if self.is_generating {
+            self.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(why),
+            });
+        } else {
+            self.transcript.push_error(why);
+        }
+    }
+
+    /// The session's driver stopped taking commands.
+    pub fn driver_gone(&mut self) {
+        self.transcript.push_error("session driver is gone");
+        self.session_alive = false;
+        self.forget_refusals();
+        self.session_blank = false;
+        self.blank_session = None;
+        self.idle_start_paused = true;
+    }
+
+    /// A start is queued, or held until the CLI before it is gone.
+    fn start_pending(&self) -> bool {
+        self.start_held
+            || self
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::StartSession { .. }))
+    }
+
+    /// Whether the live session has been sent something: one started
+    /// early has seen nothing of the conversation.
+    pub(super) fn session_seen(&self) -> bool {
+        self.session_alive && !self.session_blank
+    }
+
+    /// Something goes to the session: from here on it is the
+    /// conversation's.
+    pub(super) fn mark_prompted(&mut self) {
+        self.session_blank = false;
+        if let Some((id, model)) = self.blank_session.take() {
+            self.commit_session(id, model);
+        }
+    }
+
+    /// `id` is the active harness's session in this conversation.
+    pub(super) fn commit_session(&mut self, session_id: String, model: Option<String>) {
+        let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+        // A branch of the forked-from session now exists under its own id.
+        if is_new {
+            self.fork_pending.remove(&self.active);
+        }
+        self.session_ids.insert(self.active, session_id.clone());
+        self.persist();
+        if is_new {
+            self.transcript.push_notice(format!(
+                "session {} ({})",
+                session_id,
+                model.unwrap_or_else(|| "default model".into())
+            ));
+        }
+    }
+
+    /// The active harness could not resume or fork its session and runs a
+    /// new one, which knows nothing of the conversation
+    /// (`AgentEvent::SessionReplaced`). It is taken as a session started
+    /// for a harness switched to: the next prompt tells it the
+    /// conversation so far (within the bridge's budget), and the
+    /// conversation keeps its id once a prompt has gone to it. What
+    /// pointed into the old session (rewind anchors, a pending fork) goes.
+    pub(super) fn session_replaced(&mut self, reason: &str) {
+        let harness = self.active;
+        let name = self.short_name().to_string();
+        self.fork_pending.remove(&harness);
+        self.anchors.retain(|a| a.harness != harness);
+        if self.session_blank {
+            // The new session's id waits in `blank_session` for the first
+            // prompt; the old one is not this conversation's any more.
+            self.session_ids.remove(&harness);
+            self.last_active_index.remove(&harness);
+            self.transcript.push_notice(format!(
+                "{reason}: {name} starts a new session, and your next prompt tells it the conversation so far"
+            ));
+            return;
+        }
+        // A prompt went with the start, without the conversation: the
+        // next one tells it all of it. The session's id is committed by
+        // its `SessionStarted`, before or after this.
+        self.last_active_index.insert(harness, 0);
+        if let Some(handoff) = self.handoff.as_mut() {
+            handoff.blind = true;
+            self.transcript.push_notice(format!(
+                "{reason}: {name} runs a new session, which has no conversation to summarize"
+            ));
+        } else {
+            self.transcript.push_notice(format!(
+                "{reason}: {name} runs a new session without the conversation so far; your next prompt tells it"
+            ));
+        }
+    }
+
+    /// Stop using `harness`'s vendor session: its next turn starts a fresh
+    /// one and gets the conversation so far as context.
+    pub(super) fn forget_session(&mut self, harness: HarnessId) {
+        if harness == self.active {
+            self.end_remote_control();
+        }
+        if harness == self.active && self.session_alive {
+            self.shutdown_session();
+        }
+        self.session_ids.remove(&harness);
+        self.last_active_index.remove(&harness);
+        self.fork_pending.remove(&harness);
+        self.anchors.retain(|a| a.harness != harness);
+    }
+
+    /// True, with an error shown, while the session's start is held.
+    pub(super) fn refused_while_start_held(&mut self) -> bool {
+        if self.start_held {
+            self.transcript.push_error(format!(
+                "the previous {} is still exiting; try again in a moment",
+                self.short_name()
+            ));
+        }
+        self.start_held
+    }
+
+    /// The session's process is gone, or going: what it was running and
+    /// would have reported on will not be.
+    pub(super) fn process_gone(&mut self) {
+        self.transcript.end_running_hooks();
+        // The next process takes the messages so far as its baseline, so
+        // the anchors still owed would land on later turns (pi).
+        self.anchor_pending.clear();
+        self.drop_prompts();
+    }
+
+    /// End the active harness's session. It is not alive from here on: a
+    /// prompt handled before the loop runs the shutdown starts the next.
+    pub(super) fn shutdown_session(&mut self) {
+        // What it changed since the last turn ended, or since it started
+        // when it never had one, is told before the next process is watched.
+        if self.session_alive {
+            self.check_guard();
+        }
+        self.session_alive = false;
+        self.session_blank = false;
+        self.blank_session = None;
+        self.policies_sent.clear();
+        self.idle_start_paused = false;
+        self.drop_subagents();
+        self.drop_prompts();
+        // The next session reports where it runs.
+        self.running_providers.remove(&self.active);
+        self.forget_refusals();
+        self.actions.push_back(Action::Shutdown);
+    }
+
+    /// Leave the active harness's session for a new one that runs
+    /// `choice`: its sessions keep the model and effort they last ran
+    /// (Mistral Vibe 2.26.1 pins them, and setting them in the session
+    /// would rewrite its own configuration). The new session is told the
+    /// conversation so far with the next prompt, as a harness switched to
+    /// is, and the one left writes a handoff summary first when the
+    /// conversation does not fit in that bridge.
+    pub(super) fn renew_session(&mut self, choice: &str) {
+        let name = self.display_name();
+        self.transcript.push_notice(format!(
+            "{name} starts a new session for {choice}: its sessions keep the model and effort they last ran, and changing them in one would rewrite its own settings. Your next prompt tells it the conversation so far."
+        ));
+        if self.handoff_wanted_for(0, self.bridge_budget(self.active)) {
+            self.ask_handoff(self.active, true);
+        } else {
+            self.renew_now();
+        }
+    }
+
+    /// Forget the active harness's session: the next one starts new, with
+    /// the conversation in its first prompt's bridge.
+    pub(super) fn renew_now(&mut self) {
+        self.forget_session(self.active);
+        self.idle_start_paused = false;
+        self.persist();
+    }
+
+    pub fn quit(&mut self) {
+        self.end_remote_control();
+        if self.session_alive {
+            self.shutdown_session();
+        }
+        // The event loop kills it on the way out.
+        if self.shell.take().is_some() {
+            self.transcript.shell_ended(ShellStatus::Killed);
+        }
+        self.persist();
+        self.should_quit = true;
+    }
+}

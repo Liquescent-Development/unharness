@@ -7,8 +7,8 @@ use serde_json::Value;
 use super::gate;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, PermissionKind, PermissionRequest,
-    StopReason, Usage,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
+    PermissionRequest, StopReason, Usage,
 };
 
 #[derive(Debug, Default)]
@@ -48,15 +48,17 @@ impl PiParser {
         self.fork_messages_seen = None;
         self.resumed_unlisted = true;
     }
+}
 
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for PiParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             return vec![AgentEvent::Notice(line.to_string())];
         };
         self.feed_value(&val)
     }
 
-    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() {
             return vec![];
@@ -74,7 +76,9 @@ impl PiParser {
         }
         vec![AgentEvent::Notice(format!("pi: {t}"))]
     }
+}
 
+impl PiParser {
     pub fn feed_value(&mut self, v: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match s(v, "type") {
@@ -493,16 +497,7 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
-
-    impl LineParser for PiParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            PiParser::feed(self, line)
-        }
-        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-            PiParser::feed_stderr(self, line)
-        }
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir};
 
     #[test]
     fn fixture_gate() {

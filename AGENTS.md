@@ -43,7 +43,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   itself: allowed by a rule, denied otherwise (`src/headless.rs`). Declaring it needs a
   recording or a live run that shows the asking. The policy never chooses
   a sandbox level.
-- **Parsers are pure and fixture-tested.** `parse::feed(line) -> Vec<AgentEvent>`
+- **Parsers are pure and fixture-tested.** `Parser::feed(line) -> Vec<AgentEvent>`
   has no I/O. Every protocol change needs a recording made with the matching
   `scripts/record-*.py` and a committed `fixtures/<case>.jsonl` + `.events`.
   Fixtures are redacted (`/WORKSPACE`, `/HOME`, no emails or account ids);
@@ -81,12 +81,12 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   workspace: an in-tree `unharness.toml` is not read by anything. The config and state
   directories are never writable in the sandbox. A config file that does
   not parse is an error, never a silent fall back to defaults, and so is
-  a harness table that is wrong (an unknown policy, a mode map or a
-  provider that is not whole, an ACP agent without a command,
-  `registry::config_errors`): a run, `switch` and `models` stop on it in
-  `Registry::from_config`, and `doctor` names it, leaves out the harness
-  it could not build (no built-in or preset takes its name) and exits 1
-  (#217).
+  a harness table that is wrong (an unknown policy or Codex transport, a
+  mode map or a provider that is not whole, an ACP agent without a
+  command, a key its harness does not take, `registry::config_errors`):
+  a run, `switch` and `models` stop on it in `Registry::from_config`, and
+  `doctor` names it, leaves out the harness it could not build (no
+  built-in or preset takes its name) and exits 1 (#217).
 - **"Allow always" is an unharness rule.** A harness is only ever told
   "allow" or "deny": what it offers to remember (Claude's
   `updatedPermissions`, Codex's `acceptForSession`, an ACP `allow_always`
@@ -228,7 +228,9 @@ recorded ones. For anything else:
    `src/harness/<name>/NOTES.md`: what was recorded and checked live, on
    which version, and what is unverified. Name it in the module's doc
    comment and add the harness to the table under Status notes.
-4. Register it in `Registry::from_config`.
+4. Give it a `build` that parses what its `[harnesses.<name>]` table takes
+   besides the keys every harness takes (`HarnessSettings::own`), and add
+   that to `BUILTIN` in `core/registry.rs`.
 5. Add an e2e test if the transport has a handshake or permission channel.
 
 ## Status notes
