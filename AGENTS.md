@@ -122,7 +122,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   copied to `~/.claude/.claude.json` once, with a notice, and the original
   is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
-  LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
+  LineProcess` (kill-on-drop, bounded drain) or the per-turn driver
+  (`core::driver`, whose loop ends, kills and drains them); never a
   bare `tokio::process::Command::spawn` in a transport. Each leads a
   session of its own (`setsid`), and is killed with its process group and,
   on Linux, every process descended from it (stopped first, read from
