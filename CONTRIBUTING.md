@@ -50,7 +50,7 @@ scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
 ```
 
 Each vendor CLI's streaming protocol is parsed into one event model
-(`AgentEvent`) by a pure parser, `parse::feed(line) -> Vec<AgentEvent>`,
+(`AgentEvent`) by a pure parser, `Parser::feed(line) -> Vec<AgentEvent>`,
 that is tested against recorded sessions. The TUI reads only events and
 declared `Capabilities`, so it never builds a vendor command line or
 assumes what a harness can do.

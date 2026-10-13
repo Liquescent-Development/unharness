@@ -1,6 +1,8 @@
 use super::*;
 use crate::core::rules::Scope;
-use crate::core::{PermissionDecision, PermissionKind, Question, QuestionOption, Rule, ToolAction};
+use crate::core::{
+    Parser, PermissionDecision, PermissionKind, Question, QuestionOption, Rule, ToolAction,
+};
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};

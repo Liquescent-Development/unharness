@@ -15,6 +15,7 @@ use super::caps::PermissionPolicy;
 use super::event::{AgentEvent, RemoteControl, StopReason};
 use super::ids::{HarnessId, ModelRef, ProviderId};
 use super::mcp::McpServer;
+use super::parser::Parser;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
 use super::session::{
@@ -48,14 +49,6 @@ pub struct TurnSpec {
     pub stdin: Option<String>,
 }
 
-/// Parses one child's output lines into events.
-pub trait TurnParser: Send {
-    fn feed(&mut self, line: &str) -> Vec<AgentEvent>;
-    fn feed_stderr(&mut self, _line: &str) -> Vec<AgentEvent> {
-        Vec::new()
-    }
-}
-
 pub trait PerTurnProtocol: Send + Sync {
     fn harness(&self) -> HarnessId;
     fn build_turn(
@@ -64,7 +57,7 @@ pub trait PerTurnProtocol: Send + Sync {
         text: &str,
         attachments: &[Attachment],
     ) -> Result<TurnSpec>;
-    fn new_parser(&self) -> Box<dyn TurnParser>;
+    fn new_parser(&self) -> Box<dyn Parser>;
 }
 
 pub fn start(cfg: SessionConfig, protocol: Arc<dyn PerTurnProtocol>) -> Result<SessionHandle> {
@@ -109,7 +102,7 @@ async fn drive(
     }
 
     let mut current: Option<LineProcess> = None;
-    let mut parser: Option<Box<dyn TurnParser>> = None;
+    let mut parser: Option<Box<dyn Parser>> = None;
     let mut turn_completed = false;
 
     loop {
@@ -263,7 +256,7 @@ mod tests {
     /// TextDelta; a line starting with `SID:` is a SessionStarted.
     struct Echo;
     struct EchoParser;
-    impl TurnParser for EchoParser {
+    impl Parser for EchoParser {
         fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
             if let Some(id) = line.strip_prefix("SID:") {
                 vec![AgentEvent::SessionStarted {
@@ -299,7 +292,7 @@ mod tests {
                 stdin: Some(text.to_string()),
             })
         }
-        fn new_parser(&self) -> Box<dyn TurnParser> {
+        fn new_parser(&self) -> Box<dyn Parser> {
             Box::new(EchoParser)
         }
     }
@@ -323,7 +316,7 @@ mod tests {
                 stdin: Some(text.to_string()),
             })
         }
-        fn new_parser(&self) -> Box<dyn TurnParser> {
+        fn new_parser(&self) -> Box<dyn Parser> {
             Box::new(EchoParser)
         }
     }
@@ -419,7 +412,7 @@ mod tests {
                     stdin: None,
                 })
             }
-            fn new_parser(&self) -> Box<dyn TurnParser> {
+            fn new_parser(&self) -> Box<dyn Parser> {
                 Box::new(EchoParser)
             }
         }
@@ -458,7 +451,7 @@ mod tests {
                     stdin: None,
                 })
             }
-            fn new_parser(&self) -> Box<dyn TurnParser> {
+            fn new_parser(&self) -> Box<dyn Parser> {
                 Box::new(EchoParser)
             }
         }

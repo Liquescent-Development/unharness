@@ -17,7 +17,7 @@ use super::elicitation::Form;
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, ModelInfo, ModelRef,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, ModelInfo, ModelRef, Parser,
     PermissionKind, PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
 };
 use crate::harness::claude::parse::tool_action as claude_tool_action;
@@ -362,8 +362,10 @@ impl AcpParser {
             is_error,
         })
     }
+}
 
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for AcpParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
             Some(RpcMessage::Notification { method, params }) if method == "session/update" => {
                 if self.replaying {
@@ -398,7 +400,10 @@ impl AcpParser {
             },
         }
     }
+    // Agents log freely to stderr; it is not part of the protocol.
+}
 
+impl AcpParser {
     fn on_result(&mut self, result: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         if result.get("protocolVersion").is_some() {
@@ -1012,14 +1017,7 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
-
-    impl LineParser for AcpParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            AcpParser::feed(self, line)
-        }
-        // Agents log freely to stderr; it is not part of the protocol.
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir};
 
     /// The action of a permission request for this tool call.
     fn requested(tool_call: Value) -> ToolAction {

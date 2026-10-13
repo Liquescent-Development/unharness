@@ -12,9 +12,9 @@ use super::gate;
 use super::parse::PiParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, PermissionDecision, PermissionKind, PermissionPolicy,
-    ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle, SessionInfo,
-    StopReason, shutdown_queued,
+    AgentEvent, Attachment, HarnessId, Parser, PermissionDecision, PermissionKind,
+    PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
+    SessionInfo, StopReason, shutdown_queued,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.

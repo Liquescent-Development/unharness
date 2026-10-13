@@ -11,22 +11,14 @@ use std::path::Path;
 
 use super::event::AgentEvent;
 use super::mcp::{McpServer, McpTransport};
-
-/// Anything that turns one raw stdout line into zero or more events.
-pub trait LineParser {
-    fn feed(&mut self, line: &str) -> Vec<AgentEvent>;
-    /// Called for stderr lines; most parsers map these to `Notice`/`Error`.
-    fn feed_stderr(&mut self, _line: &str) -> Vec<AgentEvent> {
-        Vec::new()
-    }
-}
+use super::parser::Parser;
 
 /// Lines in a fixture that are protocol input rather than output.
 pub fn is_sent_line(line: &str) -> bool {
     line.starts_with(">>")
 }
 
-pub fn replay<P: LineParser>(parser: &mut P, fixture: &str) -> Vec<AgentEvent> {
+pub fn replay<P: Parser>(parser: &mut P, fixture: &str) -> Vec<AgentEvent> {
     let mut events = Vec::new();
     for raw in fixture.lines() {
         let line = raw.trim_end_matches('\r');
@@ -45,7 +37,7 @@ pub fn replay<P: LineParser>(parser: &mut P, fixture: &str) -> Vec<AgentEvent> {
 /// Replay `<dir>/<case>.jsonl` and compare against `<dir>/<case>.events`.
 /// Panics with a line diff on mismatch. Set `UNHARNESS_UPDATE_FIXTURES=1` to
 /// rewrite the `.events` file from the current parser output instead.
-pub fn assert_fixture<P: LineParser>(parser: &mut P, dir: &Path, case: &str) {
+pub fn assert_fixture<P: Parser>(parser: &mut P, dir: &Path, case: &str) {
     let jsonl_path = dir.join(format!("{case}.jsonl"));
     let events_path = dir.join(format!("{case}.events"));
     let fixture = std::fs::read_to_string(&jsonl_path)
@@ -129,7 +121,7 @@ mod tests {
     use super::*;
 
     struct Echo;
-    impl LineParser for Echo {
+    impl Parser for Echo {
         fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
             vec![AgentEvent::TextDelta(line.to_string())]
         }

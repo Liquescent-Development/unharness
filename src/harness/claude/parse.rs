@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
-    ModelRef, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
+    ModelRef, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
     ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, RemoteControl,
     StopReason, SubagentStatus, ToolAction, Usage,
 };
@@ -309,8 +309,10 @@ impl ClaudeParser {
             },
         }
     }
+}
 
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for ClaudeParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             // Claude never prints non-JSON on stdout in stream-json mode; surface it.
             return vec![AgentEvent::Notice(line.to_string())];
@@ -318,14 +320,16 @@ impl ClaudeParser {
         self.feed_value(&val)
     }
 
-    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() {
             return vec![];
         }
         vec![AgentEvent::Error(t.to_string())]
     }
+}
 
+impl ClaudeParser {
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.settle_requests(val, &mut out);
@@ -1241,16 +1245,7 @@ fn rate_limit_windows(info: &Value) -> Vec<RateLimitWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir, replay};
-
-    impl LineParser for ClaudeParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            ClaudeParser::feed(self, line)
-        }
-        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-            ClaudeParser::feed_stderr(self, line)
-        }
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir, replay};
 
     fn fixture(case: &str) {
         assert_fixture(&mut ClaudeParser::new(), &fixtures_dir(file!()), case);
