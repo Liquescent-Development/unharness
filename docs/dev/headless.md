@@ -25,13 +25,13 @@ and one the model stopped (`TaskStop`) brought no turn. A subagent's
 subagent counts only when it ends after its parent (the only case
 recorded). A subagent whose end never comes holds the run until
 `Ctrl+C`. With `--resume`, a `SessionReplaced` (pi, an ACP agent; see
-Bridging) fails the run at once (#214): exit 1, the reason on stderr
+[Bridging](bridging.md)) fails the run at once (#214): exit 1, the reason on stderr
 for `text` and in the result's `error`, a `session_replaced` line in
 `stream-json` and nothing of the new session after it, `session_id`
 `null`, and the session is shut down before the new one answers, as
 Claude and Codex exit 1 on a session they do not have; without
 `--resume` it is a notice. pi is never sent the prompt (the hold in
-Bridging). Run only against `fake-harness.py` (`vibe_acp_load_missing`,
+[Bridging](bridging.md)). Run only against `fake-harness.py` (`vibe_acp_load_missing`,
 pi's `resume_missing`): there the ACP driver had not sent the prompt
 either (it waits for the new session's mode), which is a race the
 tests do not hold it to. `--native` and `--no-tui` are not covered.

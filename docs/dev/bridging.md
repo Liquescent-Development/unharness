@@ -28,8 +28,8 @@ conversation) the next prompt bridges from the start, the last turn
 included. Rewind anchors and a pending fork of the harness go. A
 handoff summary asked of such a session is not used: the switch goes
 on without one, and the session left is forgotten. A `--print
---resume` run fails on it instead (see Headless). Sent by the ACP
-driver (above) and by pi's parser: pi 1.1.0 given a `--session-id` it
+--resume` run fails on it instead (see [Headless](headless.md)). Sent by the ACP
+driver (see [the ACP note](../../src/harness/acp/NOTES.md#sessions-in-place-of-one-not-resumed-or-forked)) and by pi's parser: pi 1.1.0 given a `--session-id` it
 has no session for warns on stderr and creates an empty one under that
 id, so a resumed session whose first `get_fork_messages` lists no user
 message is one (`fixtures/resume_missing.jsonl`, `record-pi.py

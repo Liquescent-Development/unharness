@@ -362,8 +362,8 @@ auth-required answer starts none (#162). vibe-acp 2.26.1 answers
 -32602 "Session not found" (`record-acp.py --fallback-new`,
 `fixtures/vibe_acp_{load,fork}_missing.jsonl`). The TUI
 (`App::session_replaced`) takes the new session as one started for a
-harness switched to (see Bridging); `--print --resume` fails on it
-(see Headless). Checked in the TUI (tmux, Landlock,
+harness switched to (see [Bridging](../../../docs/dev/bridging.md)); `--print --resume` fails on it
+(see [Headless](../../../docs/dev/headless.md)). Checked in the TUI (tmux, Landlock,
 scratch `VIBE_HOME`, built-in vibe, `--policy ask`): a turn given a code
 word, `/quit`, the session's directory removed from
 `logs/session/unified/`, then `--resume`: the notice named "Session not

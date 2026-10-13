@@ -49,4 +49,4 @@ Still declared, not driven (`Capabilities::plan_mode`):
   one, codex-acp 2.1.1 does not).
 
 pi plans only through an extension, and agy's `--mode plan` does not
-wait (see above).
+wait (see [agy's note](../../src/harness/agy/NOTES.md)).
