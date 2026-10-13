@@ -44,7 +44,8 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
                (per_turn) + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/
   agy/         stream-json transport
-  acp/         generic Agent Client Protocol client: one instance per configured agent
+  acp/         generic Agent Client Protocol client (on the driver's loop):
+               one instance per configured agent
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
   app/         App: its struct, types, `new` and `on_event` in mod.rs, the rest
                one file per concern (session, policy, switch, rewind, ...),
