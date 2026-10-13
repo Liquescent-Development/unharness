@@ -156,6 +156,21 @@ impl HarnessSettings {
 #[serde(deny_unknown_fields)]
 pub struct NoOwnKeys {}
 
+/// Everything wrong with a harness table that a builder could check
+/// independently (an ACP agent's missing command and its mode map), each
+/// naming the table, in the order found. The registry reports each one
+/// (`core::registry`); anywhere else they read as one, joined.
+#[derive(Debug)]
+pub struct TableErrors(pub Vec<String>);
+
+impl std::fmt::Display for TableErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0.join("; "))
+    }
+}
+
+impl std::error::Error for TableErrors {}
+
 /// The keys a struct deriving `Deserialize` takes: the field names it hands
 /// `deserialize_struct`, read by a deserializer that has nothing else.
 fn keys_of<T: DeserializeOwned>() -> &'static [&'static str] {

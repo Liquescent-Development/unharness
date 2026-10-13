@@ -269,7 +269,9 @@ struct Own {
 
 /// An ACP agent from its `[harnesses.<name>]` table: one the table defines
 /// (`protocol = "acp"` and its `command`), or else the preset of that
-/// name, whose table takes only the keys every harness takes.
+/// name, whose table takes only the keys every harness takes. A missing
+/// command and a mode map that does not parse are both reported
+/// ([`crate::config::TableErrors`]).
 pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
     let defined = table.protocol.as_deref() == Some("acp");
     if let Some((name, display, command)) = PRESETS.iter().find(|(n, ..)| *n == name && !defined) {
@@ -287,11 +289,16 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
         }));
     }
     let own: Own = table.own(name)?;
-    if table.command.is_empty() {
-        bail!("[harnesses.{name}] protocol = \"acp\" but no command");
-    }
-    let modes =
-        ModeMap::from_config(&own.modes).map_err(|e| anyhow::anyhow!("[harnesses.{name}]: {e}"))?;
+    let modes = match (ModeMap::from_config(&own.modes), table.command.is_empty()) {
+        (Ok(modes), false) => modes,
+        (modes, no_command) => {
+            let no_command =
+                no_command.then(|| format!("[harnesses.{name}] protocol = \"acp\" but no command"));
+            let modes = modes.err().map(|e| format!("[harnesses.{name}]: {e}"));
+            let wrong = no_command.into_iter().chain(modes).collect();
+            return Err(crate::config::TableErrors(wrong).into());
+        }
+    };
     let agent = AcpHarness::new(name, table.display_name.as_deref(), &table.command)?;
     Ok(Box::new(
         agent

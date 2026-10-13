@@ -376,6 +376,8 @@ impl VibeHarness {
     /// The built-in harness with what a `[harnesses.vibe]` table sets in
     /// its place: the command, the name shown, `asks_permission` and the
     /// mode map. The model and effort are chosen at spawn whatever it says.
+    /// A mode map that does not parse and a provider that is not whole are
+    /// both reported ([`crate::config::TableErrors`]).
     pub fn from_settings(settings: &HarnessSettings) -> Result<Self> {
         let own: Own = settings.own(HarnessId::VIBE.as_str())?;
         let command = if settings.command.is_empty() {
@@ -384,10 +386,18 @@ impl VibeHarness {
             settings.command.clone()
         };
         let modes = if own.modes.is_empty() {
-            mode_map()
+            Ok(mode_map())
         } else {
             ModeMap::from_config(&own.modes)
-                .map_err(|e| anyhow::anyhow!("[harnesses.{}]: {e}", HarnessId::VIBE))?
+                .map_err(|e| format!("[harnesses.{}]: {e}", HarnessId::VIBE))
+        };
+        let (modes, providers) = match (modes, providers(&own.providers)) {
+            (Ok(modes), Ok(providers)) => (modes, providers),
+            (modes, providers) => {
+                let providers = providers.err().map(|e| format!("{e:#}"));
+                let wrong = modes.err().into_iter().chain(providers).collect();
+                return Err(crate::config::TableErrors(wrong).into());
+            }
         };
         let vibe = Self::build(
             &command,
@@ -403,7 +413,7 @@ impl VibeHarness {
             },
             None => vibe,
         };
-        Ok(vibe.with_providers(providers(&own.providers)?))
+        Ok(vibe.with_providers(providers))
     }
 
     /// Offer `providers` beside vibe's own configuration: one chosen for a

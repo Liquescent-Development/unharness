@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::ids::HarnessId;
-use crate::config::{Config, HarnessSettings};
+use crate::config::{Config, HarnessSettings, TableErrors};
 use crate::harness::{Harness, Probe, acp, agy, claude, codex, pi, resolve_binary, vibe};
 
 /// Builds a harness from its `[harnesses.<name>]` table, an empty one when
@@ -274,15 +274,21 @@ struct Built {
 }
 
 impl Built {
-    /// What `name`'s builder made, kept when it is `offered`, or its error.
+    /// What `name`'s builder made, kept when it is `offered`, or its
+    /// errors, each of [`TableErrors`] on its own.
     fn add(&mut self, name: &str, harness: Result<Box<dyn Harness>>, offered: bool) {
         self.read.push(name.to_string());
         match harness {
             Ok(h) if offered => self.harnesses.push(h),
             Ok(_) => {}
             Err(e) => {
-                self.errors
-                    .push(ConfigError::new(Some(name), format!("{e:#}")));
+                let messages = match e.downcast::<TableErrors>() {
+                    Ok(TableErrors(all)) => all,
+                    Err(e) => vec![format!("{e:#}")],
+                };
+                for message in messages {
+                    self.errors.push(ConfigError::new(Some(name), message));
+                }
                 self.left_out.push(name.to_string());
             }
         }
@@ -707,6 +713,39 @@ mod tests {
             let table = parse(&format!("[harnesses.codex]\ntransport = \"{good}\"\n"));
             assert!(config_errors(&table).is_empty(), "{good}");
         }
+    }
+
+    /// What is wrong with a table independently is all said, in order:
+    /// its policy, then an ACP agent's missing command and its mode map,
+    /// or vibe's mode map and its providers. The first stops a run.
+    #[test]
+    fn every_independent_error_of_a_table_is_said() {
+        let acp = "[harnesses.myagent]\nprotocol = \"acp\"\ndefault_policy = \"nah\"\n\
+                   modes = { always = \"x\" }\n";
+        let e = config_errors(&parse(acp));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert!(said[0].starts_with("[harnesses.myagent] default_policy: unknown policy 'nah'"));
+        assert_eq!(
+            said[1],
+            "[harnesses.myagent] protocol = \"acp\" but no command"
+        );
+        assert!(said[2].starts_with("[harnesses.myagent]: unknown policy 'always' in modes"));
+        assert!(
+            e.iter()
+                .all(|e| e.left_out && e.table.as_deref() == Some("myagent"))
+        );
+        let first = Registry::from_config(&parse(acp)).err().unwrap();
+        assert_eq!(first.to_string(), said[0]);
+
+        let vibe = "[harnesses.vibe]\nmodes = { always = \"x\" }\n\
+                    [harnesses.vibe.providers.lan]\napi_base = \"http://h\"\nmodels = []\n";
+        let e = config_errors(&parse(vibe));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("[harnesses.vibe]: unknown policy 'always' in modes"));
+        assert!(said[1].starts_with("[harnesses.vibe.providers.lan]: models lists none"));
+        assert!(e.iter().all(|e| e.left_out));
     }
 
     /// A table that cannot be built is an error, and is never the built-in
