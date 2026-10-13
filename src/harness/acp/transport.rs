@@ -59,8 +59,8 @@ use crate::core::mcp;
 use crate::core::rules::{self, ToolAction};
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
-    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, RemoteControl,
-    SessionCommand, SessionConfig, SessionHandle, StopReason,
+    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, SessionCommand,
+    SessionConfig, SessionHandle, StopReason,
 };
 use crate::harness::which;
 
@@ -351,12 +351,15 @@ fn agent_command(args: &[String], cfg: &SessionConfig, extra: &[(String, String)
 
 /// Start a session of the agent `harness` runs with `args`, as its
 /// `profile` says: what unharness knows about it that the protocol does
-/// not say, and its hooks, which the driver calls for every agent.
+/// not say, and its hooks, which the driver calls for every agent. `caps`
+/// is what the harness declares: the loop answers a command they do not
+/// offer.
 pub fn start(
     harness: HarnessId,
     args: Vec<String>,
     profile: AcpProfile,
     cfg: SessionConfig,
+    caps: &Capabilities,
 ) -> Result<SessionHandle> {
     let plan = profile.hooks.spawn_plan(&cfg);
     let command = agent_command(&args, &cfg, &plan.env);
@@ -377,23 +380,7 @@ pub fn start(
         },
         cfg,
     );
-    driver::start(harness, &every_command(), command, &sandbox, driver)
-}
-
-/// What the loop lets through to the driver: every command, since the
-/// driver answers those the agent cannot carry out itself.
-fn every_command() -> Capabilities {
-    let mut caps = Capabilities {
-        steer: true,
-        compaction: true,
-        interrupt: true,
-        interactive_permissions: true,
-        remote_control: true,
-        ..Capabilities::default()
-    };
-    caps.rewind.conversation = true;
-    caps.subagents.stop = true;
-    caps
+    driver::start(harness, caps, command, &sandbox, driver)
 }
 
 /// How the driver starts the agent's process, and starts it again for an
@@ -1325,34 +1312,20 @@ impl StreamProtocol for Driver {
                 self.anchor_owed = self.hooks().rewind_method().is_some();
                 self.flush_turn(io).await
             }
-            // No subagents are reported here, so none can be running.
-            SessionCommand::StopSubagent { .. } => Ok(()),
-            SessionCommand::RemoteControl { .. } => {
-                io.emit(AgentEvent::RemoteControl(RemoteControl::Failed {
-                    reason: "this agent has no remote control".into(),
-                }))
-                .await;
-                Ok(())
-            }
             // Sent once the session is there, before the next turn.
             SessionCommand::Rewind { anchor } if self.hooks().rewind_method().is_some() => {
                 self.queued_rewind = Some(anchor);
                 self.flush_turn(io).await
             }
-            SessionCommand::Steer { .. } | SessionCommand::Rewind { .. } => {
-                io.emit(AgentEvent::Error(
-                    "this agent cannot be steered or rewound".into(),
-                ))
-                .await;
-                Ok(())
-            }
-            SessionCommand::Compact { .. } => {
-                io.emit(AgentEvent::TurnCompleted {
-                    stop_reason: StopReason::Error("this agent cannot compact on request".into()),
-                })
-                .await;
-                Ok(())
-            }
+            // Not declared (`AcpHarness::capabilities`), so the loop answers
+            // them before they come here: no subagent is stopped from here,
+            // and ACP has no remote control, steering, compaction on request,
+            // or rewind but an agent's own (`AgentHooks::rewind_method`).
+            SessionCommand::StopSubagent { .. }
+            | SessionCommand::RemoteControl { .. }
+            | SessionCommand::Steer { .. }
+            | SessionCommand::Rewind { .. }
+            | SessionCommand::Compact { .. } => return Encoded::Unsupported,
             SessionCommand::Interrupt => {
                 // Waiting for the session or its mode: it is never sent.
                 if self.queued_turn.take().is_some() {

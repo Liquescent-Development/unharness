@@ -1371,7 +1371,7 @@ impl Harness for VibeHarness {
             cfg.provider.as_ref(),
             cfg.model.as_ref().map(|m| m.model.as_str()),
         )?;
-        self.acp.start_session(cfg)
+        self.acp.start_session_with(cfg, &self.capabilities())
     }
 
     /// `vibe -p` (`--print --native`) or `vibe` in its own interface
