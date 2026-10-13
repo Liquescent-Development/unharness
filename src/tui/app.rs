@@ -1500,10 +1500,49 @@ impl App {
         "Working".to_string()
     }
 
-    /// A turn is running, subagents are still at work after one, or a `!`
-    /// command runs.
+    /// A turn is running, subagents whose end will be told are still at
+    /// work after one (`awaited_subagents`), or a `!` command runs.
     pub fn is_busy(&self) -> bool {
-        self.is_generating || !self.subagents.is_empty() || self.shell.is_some()
+        self.is_generating || self.awaited_subagents() > 0 || self.shell.is_some()
+    }
+
+    /// The subagents at work whose end the harness reports. Only these
+    /// keep the status rule and herdr at work, hold back what would end
+    /// the session (`refused_for_subagents`) and a handoff summary. One
+    /// whose end may never be told (Mistral Vibe's, until its agent waits
+    /// for it) would hold them until the session ends: it stays listed
+    /// at work with its note, and goes with the session.
+    fn awaited_subagents(&self) -> usize {
+        if self.subagents.is_empty() || self.caps().subagents.unreported_ends {
+            0
+        } else {
+            self.subagents.len()
+        }
+    }
+
+    /// Any subagent is listed at work, whether or not its end will be
+    /// told: its row's spinner and time go on.
+    pub fn has_running_subagents(&self) -> bool {
+        !self.subagents.is_empty()
+    }
+
+    /// Whether subagents at work keep the session from being ended for
+    /// `doing` (they would end with it); if so the user is told, and
+    /// pointed at stopping them only where the harness can.
+    fn refused_for_subagents(&mut self, doing: &str) -> bool {
+        let n = self.awaited_subagents();
+        if n == 0 {
+            return false;
+        }
+        let stop = if self.caps().subagents.stop {
+            " or stop them (Ctrl+S)"
+        } else {
+            ""
+        };
+        self.transcript.push_error(format!(
+            "{n} subagent(s) still at work would be stopped; wait for them{stop} before {doing}"
+        ));
+        true
     }
 
     /// What herdr is told about this session: blocked while a harness
@@ -1527,9 +1566,9 @@ impl App {
         super::herdr::Report::of(self.is_busy(), waiting)
     }
 
-    /// "2 subagents running", when any are.
+    /// "2 subagents running", when any are whose end will be told.
     pub fn subagents_label(&self) -> Option<String> {
-        match self.subagents.len() {
+        match self.awaited_subagents() {
             0 => None,
             1 => Some("1 subagent running".to_string()),
             n => Some(format!("{n} subagents running")),
@@ -1538,6 +1577,9 @@ impl App {
 
     /// How long the longest-running subagent has been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
+        if self.awaited_subagents() == 0 {
+            return 0.0;
+        }
         self.subagents
             .iter()
             .map(|a| a.started.elapsed().as_secs_f32())
@@ -2319,11 +2361,7 @@ impl App {
             return;
         }
         // They would end with the session, and report into the new one.
-        if !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before clearing",
-                self.subagents.len()
-            ));
+        if self.refused_for_subagents("clearing") {
             return;
         }
         if self.shell.is_some() {
@@ -2737,7 +2775,14 @@ impl App {
             return;
         };
         if rows[at].status.is_none() {
-            self.flash("Still running: open it and press s to stop it");
+            if self.caps().subagents.stop {
+                self.flash("Still running: open it and press s to stop it");
+            } else {
+                self.flash(format!(
+                    "Still running; {} cannot stop a subagent from here",
+                    self.short_name()
+                ));
+            }
             return;
         }
         if let Some(run) = self.transcript.agent_mut(&rows[at].id) {
@@ -3631,7 +3676,9 @@ impl App {
     /// the harness being left can say what it was about: it has a session,
     /// live or one it can resume (a fresh one would summarize nothing), and
     /// that session saw the whole transcript. Not while its subagents are
-    /// at work: what they ask or report would land in the summary's turn.
+    /// at work: what they ask or report would land in the summary's turn
+    /// (one whose end may never be told does not count: it would hold the
+    /// summary until the session ends).
     ///
     /// `from` is where the bridge to the next session starts and `budget`
     /// its length.
@@ -3639,7 +3686,7 @@ impl App {
         self.bridge_summary == BridgeSummary::Auto
             && (self.session_seen()
                 || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
-            && self.subagents.is_empty()
+            && self.awaited_subagents() == 0
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
             && self.shell.is_none()
             && self.effective_policy().is_some()
@@ -4017,11 +4064,7 @@ impl App {
             return;
         }
         // They would end with the process.
-        if restart && !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the provider",
-                self.subagents.len()
-            ));
+        if restart && self.refused_for_subagents("changing the provider") {
             return;
         }
         if changed {
@@ -4110,11 +4153,7 @@ impl App {
             return false;
         }
         // They would end with the process.
-        if !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the {what}",
-                self.subagents.len()
-            ));
+        if self.refused_for_subagents(&format!("changing the {what}")) {
             return false;
         }
         true
@@ -5226,7 +5265,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it where the agent can, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -12124,12 +12163,8 @@ pub(crate) mod tests {
         assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
     }
 
-    /// With a provider in `[harnesses.vibe.providers]` vibe has more than
-    /// one, chosen when it starts as its model is: before the first prompt
-    /// a change starts the session again, after one it starts a new
-    /// session told the conversation, and never mid-turn.
-    #[test]
-    fn a_vibe_provider_goes_with_the_model() {
+    /// An app on vibe with a provider `lan` in `[harnesses.vibe.providers]`.
+    fn vibe_app_with_provider() -> (App, tempfile::TempDir) {
         let cwd = tempfile::tempdir().unwrap();
         let settings = crate::config::HarnessSettings {
             providers: [(
@@ -12145,7 +12180,7 @@ pub(crate) mod tests {
         };
         let vibe = crate::harness::vibe::VibeHarness::from_settings(&settings).unwrap();
         let registry = Arc::new(Registry::empty().with(Box::new(vibe)));
-        let mut app = test_app_with(
+        let app = test_app_with(
             cwd.path().to_path_buf(),
             HarnessId::VIBE,
             None,
@@ -12153,6 +12188,16 @@ pub(crate) mod tests {
             Config::default(),
             registry,
         );
+        (app, cwd)
+    }
+
+    /// With a provider in `[harnesses.vibe.providers]` vibe has more than
+    /// one, chosen when it starts as its model is: before the first prompt
+    /// a change starts the session again, after one it starts a new
+    /// session told the conversation, and never mid-turn.
+    #[test]
+    fn a_vibe_provider_goes_with_the_model() {
+        let (mut app, _cwd) = vibe_app_with_provider();
         assert!(app.caps().multi_provider && app.caps().provider_per_process);
 
         blank_session(&mut app);
@@ -12211,6 +12256,183 @@ pub(crate) mod tests {
             b,
             super::super::transcript::Block::Handoff { to, .. } if to == "a new Mistral Vibe session"
         )));
+    }
+
+    /// A vibe session after a turn that spawned a subagent the agent did
+    /// not wait for: vibe never tells its end (#215).
+    fn vibe_with_unseen_child(app: &mut App) {
+        use crate::harness::vibe::subagents::UNSEEN_END;
+        prompted_vibe(app);
+        spawn(app, "s1", "scribe", Some("scribe"));
+        app.on_event(AgentEvent::SubagentProgress {
+            id: "s1".into(),
+            activity: UNSEEN_END.into(),
+        });
+        app.on_event(AgentEvent::TextDelta("started scribe".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+    }
+
+    /// A subagent whose end may never be told (`unreported_ends`) stays
+    /// listed at work with its note, but keeps nothing busy and holds back
+    /// nothing that would end the session; it goes with the session.
+    #[test]
+    fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
+        use crate::core::SubagentStatus;
+        use crate::harness::vibe::subagents::UNSEEN_END;
+        let (mut app, _cwd) = vibe_app();
+        assert!(app.caps().subagents.unreported_ends && !app.caps().subagents.stop);
+        vibe_with_unseen_child(&mut app);
+        let rows = app.subagent_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].status.is_none());
+        assert_eq!(rows[0].activity.as_deref(), Some(UNSEEN_END));
+        // The status rule says ready, and herdr idle; the row's spinner
+        // and time still run.
+        assert!(!app.is_busy());
+        assert_eq!(app.subagents_label(), None);
+        assert!(app.has_running_subagents());
+        // Delete on it names no key that would stop it.
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        let flash = app.flash_text().unwrap_or_default().to_string();
+        assert!(flash.contains("Mistral Vibe cannot stop"), "{flash}");
+        assert!(!flash.contains("press s"), "{flash}");
+        app.subagent_list_up();
+
+        // An effort change starts a new session, and the subagent goes
+        // with the old one.
+        app.set_effort("off".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_effort(), Some("off"));
+        assert!(app.subagents.is_empty());
+        assert_eq!(
+            spawn_block(&app, "s1").status,
+            Some(SubagentStatus::Cancelled)
+        );
+        assert!(!notices(&app).iter().any(|n| n.contains("subagent(s)")));
+
+        // So does a model change.
+        let (mut app, _cwd) = vibe_app();
+        vibe_with_unseen_child(&mut app);
+        app.set_model("glm-5-3".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_model().unwrap().model, "glm-5-3");
+
+        // And /clear.
+        let (mut app, _cwd) = vibe_app();
+        vibe_with_unseen_child(&mut app);
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_ne!(app.conversation.id, id);
+        assert!(app.subagents.is_empty() && app.subagent_rows().is_empty());
+
+        // And a provider change.
+        let (mut app, _cwd) = vibe_app_with_provider();
+        vibe_with_unseen_child(&mut app);
+        app.set_provider("lan".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.chosen_provider(), Some(&"lan".into()));
+
+        // A conversation over the new session's budget is summarized
+        // first.
+        let (mut app, _cwd) = vibe_app();
+        app.bridge_max_chars = Some(300);
+        vibe_with_unseen_child(&mut app);
+        app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.set_effort("off".into());
+        let ask = sent_turn(&mut app);
+        assert!(ask.contains("new session of yours"), "{ask}");
+    }
+
+    /// Claude's subagents tell their end and can be stopped: one at work
+    /// keeps the session busy and holds back what would end it, pointing
+    /// at stopping it; a harness that cannot stop one says only to wait.
+    #[test]
+    fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.sandbox = SandboxSetup::null(None);
+        assert!(app.caps().subagents.stop && !app.caps().subagents.unreported_ends);
+        app.bridge_max_chars = Some(300);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        spawn(&mut app, "s1", "look around", None);
+        app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        assert!(app.is_busy());
+        assert_eq!(app.subagents_label().as_deref(), Some("1 subagent running"));
+
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .ends_with("wait for them or stop them (Ctrl+S) before clearing")
+        );
+        app.set_provider("bedrock".into());
+        assert_eq!(app.chosen_provider(), None);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .ends_with("wait for them or stop them (Ctrl+S) before changing the provider")
+        );
+        assert!(app.take_actions().is_empty());
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        assert_eq!(
+            app.flash_text(),
+            Some("Still running: open it and press s to stop it")
+        );
+        app.subagent_list_up();
+        // A switch asks no summary while it works.
+        app.switch_harness(HarnessId::CODEX);
+        assert!(!app.is_generating);
+        assert_eq!(app.active, HarnessId::CODEX);
+
+        // Antigravity tells the end but cannot stop one: the user is only
+        // told to wait.
+        let mut app = test_app(HarnessId::AGY);
+        assert!(app.caps().subagents.reported && !app.caps().subagents.unreported_ends);
+        assert!(!app.caps().subagents.stop);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        app.session_alive = true;
+        spawn(&mut app, "s1", "look around", None);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        let refused = notices(&app).last().unwrap().clone();
+        assert!(
+            refused.ends_with("wait for them before clearing") && !refused.contains("Ctrl+S"),
+            "{refused}"
+        );
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        let flash = app.flash_text().unwrap_or_default();
+        assert!(
+            flash.contains("cannot stop") && !flash.contains("press s"),
+            "{flash}"
+        );
     }
 
     #[test]

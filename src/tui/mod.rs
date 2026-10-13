@@ -274,7 +274,9 @@ async fn event_loop(
 
         tokio::select! {
             _ = ticker.tick() => {
-                if app.is_busy() {
+                // A subagent row whose end may never be told is not busy,
+                // but its spinner and time still run.
+                if app.is_busy() || app.has_running_subagents() {
                     app.tick_spinner();
                     needs_redraw = true;
                 }
