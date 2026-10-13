@@ -632,7 +632,8 @@ recorded ones. For anything else:
   -32602 "Session not found" (`record-acp.py --fallback-new`,
   `fixtures/vibe_acp_{load,fork}_missing.jsonl`). The TUI
   (`App::session_replaced`) takes the new session as one started for a
-  harness switched to (see Bridging). Checked in the TUI (tmux, Landlock,
+  harness switched to (see Bridging); `--print --resume` fails on it
+  (see Headless). Checked in the TUI (tmux, Landlock,
   scratch `VIBE_HOME`, built-in vibe, `--policy ask`): a turn given a code
   word, `/quit`, the session's directory removed from
   `logs/session/unified/`, then `--resume`: the notice named "Session not
@@ -1740,7 +1741,18 @@ recorded ones. For anything else:
   and one the model stopped (`TaskStop`) brought no turn. A subagent's
   subagent counts only when it ends after its parent (the only case
   recorded). A subagent whose end never comes holds the run until
-  `Ctrl+C`. Not persisted as a conversation.
+  `Ctrl+C`. With `--resume`, a `SessionReplaced` (pi, an ACP agent; see
+  Bridging) fails the run at once (#214): exit 1, the reason on stderr
+  for `text` and in the result's `error`, a `session_replaced` line in
+  `stream-json` and nothing of the new session after it, `session_id`
+  `null`, and the session is shut down before the new one answers, as
+  Claude and Codex exit 1 on a session they do not have; without
+  `--resume` it is a notice. pi is never sent the prompt (the hold in
+  Bridging). Run only against `fake-harness.py` (`vibe_acp_load_missing`,
+  pi's `resume_missing`): there the ACP driver had not sent the prompt
+  either (it waits for the new session's mode), which is a race the
+  tests do not hold it to. `--native` and `--no-tui` are not covered.
+  Not persisted as a conversation.
 - Hooks (`HookStarted`/`HookEnded`, `Block::Hook`): Claude Code 2.1.292
   sends `system` `hook_started` and `hook_response` for every hook under
   `--include-hook-events` (`SessionStart` also without it), keyed by
@@ -1965,13 +1977,24 @@ recorded ones. For anything else:
   conversation) the next prompt bridges from the start, the last turn
   included. Rewind anchors and a pending fork of the harness go. A
   handoff summary asked of such a session is not used: the switch goes
-  on without one, and the session left is forgotten. Sent by the ACP
+  on without one, and the session left is forgotten. A `--print
+  --resume` run fails on it instead (see Headless). Sent by the ACP
   driver (above) and by pi's parser: pi 1.1.0 given a `--session-id` it
   has no session for warns on stderr and creates an empty one under that
   id, so a resumed session whose first `get_fork_messages` lists no user
   message is one (`fixtures/resume_missing.jsonl`, `record-pi.py
-  --resume`; `--fork` of a missing session exits 1). The others fail
-  instead of starting fresh, so they report nothing: Claude Code 2.1.296
+  --resume`; `--fork` of a missing session exits 1). pi saves a prompt
+  into that session at once (`SessionManager._persist`, read in 1.1.0,
+  and seen in a scratch run: killed as soon as the empty listing was
+  read, pi had written the session file with the user message, and a
+  second pi given the id listed it), after which the id resumes as if it
+  were the conversation's. So the pi transport holds a turn sent to a
+  resumed session until that first listing answers; when it shows a
+  replacement the turn ends with an error unsent, else it goes. In the
+  TUI a turn is held only when a prompt starts the resume, since it
+  starts sessions unprompted; sent again, the prompt goes with the
+  bridge. The others fail instead of starting fresh, so they report
+  nothing: Claude Code 2.1.296
   `--resume` of an unknown id ("No conversation found with session ID",
   exit 1) and Codex 0.157.0 `exec resume` ("thread/resume failed: no
   rollout found", exit 1; the app-server driver fails the turn on a

@@ -95,7 +95,8 @@ since. A harness that cannot resume or fork its session (an ACP agent
 that no longer has it or cannot fork, a pi session whose file is gone)
 starts a new one, says so, and is told the conversation with your next
 prompt, as a harness switched to is; the conversation then keeps the
-new session.
+new session. A `--print --resume` run fails there instead
+([headless](headless.md#result)).
 
 When the conversation will not fit, the harness you are leaving is first
 asked for a handoff summary (one more turn, shown as "handoff summary

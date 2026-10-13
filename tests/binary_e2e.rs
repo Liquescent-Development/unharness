@@ -802,6 +802,74 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     assert!(out.stdout.is_empty());
 }
 
+/// `--print --resume <id>` with the built-in vibe, whose `vibe-acp`
+/// (2.26.1's recording, played by the fake) has no such session and answers
+/// `session/load` with "Session not found": the run fails with exit 1 and
+/// the reason, on stderr for `text` and in the result for `json`, rather
+/// than answer from the new session the driver starts in its place (#214).
+/// The recording was made in vibe's own `ask` mode, which the `modes`
+/// table maps `ask` to, so that without the fix the run would go on to
+/// the prompt and exit 0; what is checked is the exact reason.
+#[test]
+fn print_resume_of_a_session_the_agent_no_longer_has_fails() {
+    if !python_available() {
+        return;
+    }
+    let missing = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f60";
+    let why = format!(
+        "Mistral Vibe: could not resume the session (Session not found: {missing}); \
+         stopped, since the session started in its place knows nothing of {missing}"
+    );
+    for format in ["text", "json"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for dir in ["home", "config/unharness", "state", "data", "cache", "ws"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("config/unharness/config.toml"),
+            format!(
+                "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\nmodes = {{ ask = \"ask\" }}\n",
+                repo().join("scripts/fake-harness.py").display()
+            ),
+        )
+        .unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+            .args(["-H", "vibe", "--sandbox", "off", "--policy", "ask"])
+            .arg(format!("--resume={missing}"))
+            .args(["--print", "--format", format])
+            .arg("Reply with the single word: pong")
+            .current_dir(root.join("ws"))
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env(
+                "UNHARNESS_FAKE_FIXTURE",
+                repo().join("src/harness/acp/fixtures/vibe_acp_load_missing.jsonl"),
+            )
+            .env("UNHARNESS_FAKE_HANG", "1")
+            .env_remove("VIBE_HOME")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{format}: {stderr}");
+        if format == "text" {
+            assert!(stderr.contains(&why), "{stderr}");
+            assert!(stdout.is_empty(), "{stdout}");
+        } else {
+            let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(result["status"], "error", "{stdout}");
+            assert_eq!(result["session_id"], serde_json::Value::Null);
+            assert_eq!(result["error"], why.as_str());
+            assert_eq!(result["text"], "");
+        }
+    }
+}
+
 /// `--print --native` and `--no-tui` with the built-in vibe: the `vibe`
 /// beside the configured `vibe-acp` (a stand-in that writes down what it
 /// was given) runs with the policy's agent and the model by environment,

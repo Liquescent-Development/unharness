@@ -1881,7 +1881,7 @@ impl App {
             ));
         } else {
             self.transcript.push_notice(format!(
-                "{reason}: {name} runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+                "{reason}: {name} runs a new session without the conversation so far; your next prompt tells it"
             ));
         }
     }
@@ -8241,7 +8241,7 @@ pub(crate) mod tests {
         });
         assert!(has_notice(
             &app,
-            "this agent cannot resume sessions: Claude runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+            "this agent cannot resume sessions: Claude runs a new session without the conversation so far; your next prompt tells it"
         ));
         app.on_event(AgentEvent::TextDelta("hi".into()));
         app.on_event(AgentEvent::TurnCompleted {
@@ -8263,6 +8263,56 @@ pub(crate) mod tests {
         });
         app.submit_prompt("Thanks".into());
         assert_eq!(sent_turn(&mut app), "Thanks");
+    }
+
+    /// pi does not send a prompt that started a resume of a session it no
+    /// longer has (#214): the turn fails, and the prompt sent again goes
+    /// with the conversation.
+    #[test]
+    fn a_prompt_a_replaced_session_was_not_sent_goes_again_with_the_conversation() {
+        let mut app = test_app(HarnessId::PI);
+        app.submit_prompt("The code word is pineapple. Reply with: ok".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "pi-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("ok".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        app.take_actions();
+        app.submit_prompt("Say hi".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "pi-1"
+        ));
+        app.session_alive = true;
+        // pi names the id it made an empty session under, then lists it.
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "pi-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::SessionReplaced {
+            reason:
+                "could not resume the session (pi has none under its id, and started an empty one)"
+                    .into(),
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(
+                "pi: the session to resume is gone, so this prompt was not sent; send it again to have the new session told the conversation".into(),
+            ),
+        });
+        app.submit_prompt("Say hi".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.starts_with("[Context: earlier conversation")
+                && sent.contains("pineapple")
+                && sent.ends_with("Say hi"),
+            "{sent}"
+        );
     }
 
     /// A handoff asked of a session that could not be resumed is written by

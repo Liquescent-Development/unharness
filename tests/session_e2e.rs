@@ -588,6 +588,130 @@ fn pi_harness() -> unharness::harness::pi::PiHarness {
     }
 }
 
+/// A turn sent to a resumed pi waits for the first `get_fork_messages`
+/// answer (#214): pi saves a prompt under the id it was given, so one sent
+/// to the empty session pi made for a missing id
+/// (`fixtures/resume_missing.jsonl`) would make that id resume next time.
+/// There the turn fails unsent; where the listing shows the session, it
+/// goes once the listing is in, and until then an interrupt drops it
+/// without anything reaching pi.
+#[tokio::test]
+async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62".into());
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionReplaced { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(e) })
+                if e.contains("this prompt was not sent")
+        ),
+        "{events:?}"
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert!(
+        !fake.sent_lines().iter().any(|v| v["type"] == "prompt"),
+        "{:?}",
+        fake.sent_lines()
+    );
+
+    // The session is there: the turn goes after the listing.
+    let fake = Fake::new();
+    let fixture = fake._tmp.path().join("resumed.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+            ">> {\"type\": \"prompt\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let sent = fake.sent_lines_eventually(4).await;
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages", "prompt"],
+    );
+    assert_eq!(sent[3]["message"], "hi");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+
+    // Before the listing answers the turn is still held: an interrupt
+    // ends it at once, and neither it nor an `abort` reaches pi (the fake
+    // logs what it reads, so it reads everything once the gate opens).
+    let fake = Fake::new();
+    let gate = fake._tmp.path().join("gate");
+    let fixture = fake._tmp.path().join("resumed_gated.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "# gate\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    cfg.env.push((
+        "UNHARNESS_FAKE_GATE".into(),
+        gate.to_string_lossy().into_owned(),
+    ));
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    fake.sent_lines_eventually(3).await;
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            })
+        ),
+        "{events:?}"
+    );
+    std::fs::write(&gate, "").unwrap();
+    // The listing comes, and nothing more is sent.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fake.sent_lines()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn pi_gate_asks_before_a_tool_acts() {
     if !python_available() {
@@ -3762,6 +3886,7 @@ fn headless_run_with(
         policy: "ask".into(),
         sandbox: "off".into(),
         cwd: fake._tmp.path().to_path_buf(),
+        resume: None,
     });
     run
 }
@@ -3834,6 +3959,106 @@ async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
     let err = String::from_utf8_lossy(&run.err);
     assert!(
         err.contains("not waiting for 1 subagent(s): fake tells a subagent's end only when"),
+        "{err}"
+    );
+}
+
+/// `--print --resume <id>` of a session the agent no longer has: pi 1.1.0
+/// creates an empty one under the id (`fixtures/resume_missing.jsonl`),
+/// vibe-acp 2.26.1 answers `session/load` with "Session not found" and the
+/// driver starts a new one (`vibe_acp_load_missing.jsonl`). Either fails
+/// the run with the reason rather than answer from the new session, and
+/// pi is never sent the prompt (#214).
+#[tokio::test]
+async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
+    if !python_available() {
+        return;
+    }
+    let resuming = |fake: &Fake, format, id: &str| {
+        let rules = unharness::core::Rules::load_in(
+            &fake._tmp.path().join("config"),
+            Some(fake._tmp.path()),
+        )
+        .unwrap();
+        let mut run = unharness::headless::Headless::new(
+            format,
+            rules,
+            fake._tmp.path().to_path_buf(),
+            "fake",
+            Default::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        run.begin(&unharness::headless::RunInfo {
+            harness: "fake".into(),
+            policy: "ask".into(),
+            sandbox: "off".into(),
+            cwd: fake._tmp.path().to_path_buf(),
+            resume: Some(id.into()),
+        });
+        run
+    };
+
+    let pi_missing = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62";
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(pi_missing.into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Json, pi_missing);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "pong?".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(
+        result["error"],
+        format!(
+            "fake: could not resume the session (pi has none under its id, and started an \
+             empty one); stopped, since the session started in its place knows nothing of \
+             {pi_missing}"
+        )
+    );
+    // pi made an empty session under the id: it is not handed out.
+    assert_eq!(result["session_id"], Value::Null);
+    // The prompt waited for pi's listing and was never sent: pi saves a
+    // prompt under the id it was given, which would make the next resume
+    // of that id pass for one.
+    let sent = fake.sent_lines();
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+        "{sent:?}"
+    );
+
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_load_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(MISSING_SESSION.into());
+    let handle = vibe_acp().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Text, MISSING_SESSION);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "Reply with the single word: pong".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    assert!(run.out.is_empty(), "{}", String::from_utf8_lossy(&run.out));
+    let err = String::from_utf8_lossy(&run.err);
+    assert!(
+        err.contains(&format!(
+            "fake: could not resume the session (Session not found: {MISSING_SESSION}); \
+             stopped, since the session started in its place knows nothing of {MISSING_SESSION}"
+        )),
         "{err}"
     );
 }
