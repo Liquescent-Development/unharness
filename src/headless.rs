@@ -472,21 +472,46 @@ impl<O: Write, E: Write> Headless<O, E> {
             handoff: None,
         }
         .route(req);
-        let (decision, line) = match (route, &req.kind) {
-            (
-                Route::Answered {
-                    decision,
-                    why: Why::Rules(rules),
-                },
-                PermissionKind::ToolUse { tool, .. },
-            ) => {
+        let (decision, line) = match route {
+            Route::Answered {
+                decision,
+                why: Why::Rules(rules),
+            } => {
+                // A rule answers only a tool call; were it anything else, it
+                // is still said.
+                let tool = match &req.kind {
+                    PermissionKind::ToolUse { tool, .. } => format!("{tool} "),
+                    _ => String::new(),
+                };
                 self.note(&format!(
-                    "allowed {tool} by your rule for {}",
+                    "allowed {tool}by your rule for {}",
                     rules.join(", and for ")
                 ));
                 (decision, json!({"decision": "allow", "rules": rules}))
             }
-            (Route::Ask, PermissionKind::ToolUse { tool, action, .. }) => {
+            // A headless run writes no handoff summary (`handoff: None`
+            // above); were one written, what it refuses is refused as with
+            // nobody to ask, and said so.
+            Route::Answered {
+                why: Why::Handoff, ..
+            }
+            | Route::Ask => self.nobody_to_ask(req),
+        };
+        let mut line = line;
+        line["type"] = json!("permission_answered");
+        line["id"] = json!(req.id);
+        self.line(&line);
+        SessionCommand::RespondPermission {
+            id: req.id.clone(),
+            decision,
+        }
+    }
+
+    /// Deny or dismiss a request only the user could answer, and say so on
+    /// stderr and in `warnings` (a tool call also in `denied`).
+    fn nobody_to_ask(&mut self, req: &PermissionRequest) -> (PermissionDecision, Value) {
+        match &req.kind {
+            PermissionKind::ToolUse { tool, action, .. } => {
                 self.warn(format!(
                     "denied {tool}{}: nobody can be asked without the TUI (an allow rule or --policy would let it run)",
                     action_text(action)
@@ -505,7 +530,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             // The agent can enter plan mode by itself (Claude's
             // `EnterPlanMode`); its plan is never approved here.
-            (Route::Ask, PermissionKind::PlanApproval { .. }) => {
+            PermissionKind::PlanApproval { .. } => {
                 self.warn(format!(
                     "kept {} planning: nobody can approve a plan without the TUI",
                     self.name
@@ -519,7 +544,7 @@ impl<O: Write, E: Write> Headless<O, E> {
                     json!({"decision": "deny"}),
                 )
             }
-            (Route::Ask, _) => {
+            _ => {
                 self.warn(format!(
                     "dismissed a question from {}: nobody can answer it without the TUI",
                     self.name
@@ -529,24 +554,6 @@ impl<O: Write, E: Write> Headless<O, E> {
                     json!({"decision": "dismiss"}),
                 )
             }
-            // Only a rule answers here, since a headless run writes no
-            // handoff summary; anything else is said as what it decided.
-            (Route::Answered { decision, .. }, _) => {
-                let word = match decision {
-                    PermissionDecision::Allow { .. } => "allow",
-                    PermissionDecision::Deny { .. } => "deny",
-                    PermissionDecision::Answer(_) => "dismiss",
-                };
-                (decision, json!({"decision": word}))
-            }
-        };
-        let mut line = line;
-        line["type"] = json!("permission_answered");
-        line["id"] = json!(req.id);
-        self.line(&line);
-        SessionCommand::RespondPermission {
-            id: req.id.clone(),
-            decision,
         }
     }
 
