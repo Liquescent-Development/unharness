@@ -1,9 +1,8 @@
 //! Permission requests: allow rules, the modal and the ones waiting behind it.
 
-use serde_json::Value;
-
 use super::{Action, App};
-use crate::core::rules::{Scope, rule_may_answer};
+use crate::core::permissions::{HandoffTo, Route, Router, Why};
+use crate::core::rules::Scope;
 use crate::core::{
     PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Rule, SessionCommand,
 };
@@ -18,66 +17,42 @@ impl App {
         self.pending_prompts.clear();
     }
 
-    /// The allow rules that answer a request, if the user has them for it
-    /// and it may be answered by one (`rule_may_answer`).
-    fn allowing_rules(&self, req: &PermissionRequest, planning: bool) -> Option<Vec<&Rule>> {
-        match &req.kind {
-            PermissionKind::ToolUse { tool, action, .. } if rule_may_answer(planning, action) => {
-                self.rules.allows(tool, action, &self.cwd)
-            }
-            _ => None,
-        }
-    }
-
     pub(super) fn on_permission_request(&mut self, req: PermissionRequest) {
         let planning = self.asked_planning.remove(&req.id)
             || self.effective_policy() == Some(PermissionPolicy::Plan);
-        if let Some(handoff) = self.handoff {
-            let moving = if handoff.renew {
-                "The user is moving this conversation to a new session."
-            } else {
-                "The user is switching to another agent."
-            };
-            let decision = match &req.kind {
-                PermissionKind::ToolUse { tool, .. } => {
-                    self.transcript
-                        .push_notice(format!("denied {tool}: a handoff summary uses no tools"));
-                    PermissionDecision::Deny {
-                        reason: format!(
-                            "{moving} Write the handoff summary from what you already know, \
-                             without tools."
-                        ),
-                    }
+        let router = Router {
+            rules: &self.rules,
+            cwd: &self.cwd,
+            planning,
+            handoff: self.handoff.map(|h| {
+                if h.renew {
+                    HandoffTo::NewSession
+                } else {
+                    HandoffTo::AnotherAgent
                 }
-                // Never approved unseen.
-                PermissionKind::PlanApproval { .. } => PermissionDecision::Deny {
-                    reason: format!(
-                        "{moving} Do not carry out the plan; write the handoff summary."
-                    ),
-                },
-                _ => PermissionDecision::Answer(Value::Null),
-            };
+            }),
+        };
+        if let Route::Answered { decision, why } = router.route(&req) {
+            match (why, &req.kind) {
+                (Why::Handoff, PermissionKind::ToolUse { tool, .. }) => self
+                    .transcript
+                    .push_notice(format!("denied {tool}: a handoff summary uses no tools")),
+                (Why::Handoff, _) => {}
+                // Said every time: what runs unasked should not also run unseen.
+                (Why::Rules(rules), _) => {
+                    let notice = match rules.as_slice() {
+                        [rule] => format!("allowed by your rule for {rule}"),
+                        rules => {
+                            format!("allowed by your rules for {}", rules.join(", and for "))
+                        }
+                    };
+                    self.transcript.push_notice(notice);
+                }
+            }
             self.actions
                 .push_back(Action::Command(SessionCommand::RespondPermission {
                     id: req.id,
                     decision,
-                }));
-            return;
-        }
-        if let Some(rules) = self.allowing_rules(&req, planning) {
-            // Said every time: what runs unasked should not also run unseen.
-            let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
-            let notice = match rules.as_slice() {
-                [rule] => format!("allowed by your rule for {rule}"),
-                rules => format!("allowed by your rules for {}", rules.join(", and for ")),
-            };
-            self.transcript.push_notice(notice);
-            self.actions
-                .push_back(Action::Command(SessionCommand::RespondPermission {
-                    id: req.id,
-                    decision: PermissionDecision::Allow {
-                        updated_input: None,
-                    },
                 }));
             return;
         }
