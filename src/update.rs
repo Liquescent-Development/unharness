@@ -19,7 +19,7 @@ use colored::*;
 const APP: &str = "unharness";
 const OWNER: &str = "Liquescent-Development";
 const REPO: &str = "unharness";
-const INSTALLER: &str = "curl -fsSL https://github.com/Liquescent-Development/unharness/releases/latest/download/unharness-installer.sh | sh";
+const INSTALLER: &str = "curl -fsSL https://unharness.app/install.sh | sh";
 const CARGO_INSTALL: &str =
     "cargo install --locked --force --git https://github.com/Liquescent-Development/unharness";
 const BREW_UPGRADE: &str = "brew upgrade unharness";

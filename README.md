@@ -47,7 +47,7 @@ mid-conversation without losing context.
 
 ```bash
 # Shell installer (Linux, macOS)
-curl -fsSL https://github.com/Liquescent-Development/unharness/releases/latest/download/unharness-installer.sh | sh
+curl -fsSL https://unharness.app/install.sh | sh
 
 # Homebrew
 brew install Liquescent-Development/tap/unharness
