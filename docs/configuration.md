@@ -12,11 +12,12 @@ doctor` prints the path, and `unharness init` creates the file.
 > A config file that does not parse stops unharness and names the file and
 > line. unharness never falls back to defaults, which would run without your
 > sandbox and policy settings. A harness table that is wrong (an unknown
-> policy, a `modes` map or a provider that is not whole, an ACP agent
-> without a command, a key its harness does not take) stops a run,
-> `unharness switch` and `unharness models` too, and is never replaced by
-> the built-in or preset of its name; `unharness doctor` names what is
-> wrong, leaves out a harness it cannot build, shows the rest, and exits 1.
+> policy or Codex `transport`, a `modes` map or a provider that is not
+> whole, an ACP agent without a command, a key its harness does not take)
+> stops a run, `unharness switch` and `unharness models` too, and is never
+> replaced by the built-in or preset of its name; `unharness doctor` names
+> what is wrong, leaves out a harness it cannot build, shows the rest, and
+> exits 1.
 
 ## Example
 
@@ -83,7 +84,7 @@ headers = { Authorization = "Bearer …" }
 | `[sandbox]` | | See [Sandbox](sandbox.md) |
 | `[harnesses.<id>]` | | Per-harness `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args`, `sandbox_writable`; any other key is one only its harness takes (below), and one it does not take is an error naming it |
 | `[harnesses.claude] relocate_config` | `true` | See [Sandbox](sandbox.md#things-to-know) |
-| `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental). Under `exec` every turn is a process of its own, and what it left running ends with the turn (on Linux; elsewhere what it left in its process group) |
+| `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental); any other value is an error. Under `exec` every turn is a process of its own, and what it left running ends with the turn (on Linux; elsewhere what it left in its process group) |
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[harnesses.<name>] modes` | none | ACP only: which of the agent's own session modes backs each policy, e.g. `{ ask = "ask", bypass = "auto-approve" }`; see [Modes](acp.md#modes). An agent with modes and no map gets only `bypass`. A workspace's table replaces the global one whole |
 | `[harnesses.<name>] sign_in` | none (`vibe --setup` for `vibe`) | ACP only: the command that signs the agent in, shown when a session fails for want of sign-in; unharness never runs it. See [Sign-in](acp.md#sign-in) |

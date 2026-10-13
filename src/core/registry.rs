@@ -689,6 +689,26 @@ mod tests {
         );
     }
 
+    /// A transport Codex does not have is an error naming the table and
+    /// the ones it has, never app-server in its place (#254).
+    #[test]
+    fn an_unknown_codex_transport_is_an_error() {
+        let typo = parse("[harnesses.codex]\ntransport = \"exce\"\n");
+        let errors = config_errors(&typo);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].message,
+            "[harnesses.codex] transport: unknown transport 'exce' (app-server, exec, auto)"
+        );
+        assert!(errors[0].left_out);
+        assert!(Registry::from_config(&typo).is_err());
+        assert!(Registry::checked(&typo).0.get(HarnessId::CODEX).is_none());
+        for good in ["auto", "app-server", "exec", "app_server"] {
+            let table = parse(&format!("[harnesses.codex]\ntransport = \"{good}\"\n"));
+            assert!(config_errors(&table).is_empty(), "{good}");
+        }
+    }
+
     /// A table that cannot be built is an error, and is never the built-in
     /// in its place: `from_config` fails, `checked` leaves the harness out
     /// and says so (#217).

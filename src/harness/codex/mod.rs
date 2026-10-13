@@ -91,14 +91,18 @@ struct Own {
     transport: Option<String>,
 }
 
-/// Codex from its `[harnesses.codex]` table.
+/// Codex from its `[harnesses.codex]` table. A transport it does not have
+/// is an error, never app-server in its place.
 pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
     let own: Own = table.own(name)?;
-    let transport = own
-        .transport
-        .as_deref()
-        .and_then(CodexTransport::parse)
-        .unwrap_or_default();
+    let transport = match own.transport.as_deref() {
+        None => CodexTransport::default(),
+        Some(t) => CodexTransport::parse(t).with_context(|| {
+            format!(
+                "[harnesses.{name}] transport: unknown transport '{t}' (app-server, exec, auto)"
+            )
+        })?,
+    };
     Ok(Box::new(CodexHarness::new(transport)))
 }
 
