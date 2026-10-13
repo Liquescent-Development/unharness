@@ -1402,11 +1402,13 @@ recorded ones. For anything else:
   command and output, a written file with its tabs, a response's
   markdown), and on a code block in a response that block's code
   (`markdown::code_blocks`, matched by order to the rows `Rows::code`
-  marks). Checked live (tmux, Claude Code haiku, a stand-in `wl-copy`):
-  drags over a wrapped Bash call and its output, its label alone, a
-  Write, a list and a code block; right clicks on a collapsed call, a
-  Write (its tab kept), a code block and prose; a real right click
-  through a tmux with `mouse on` reached unharness, not tmux's menu.
+  marks; it parses the sanitized text the rows are drawn from and puts
+  back each tab whose spaces the code holds whole, #218). Checked live
+  (tmux, Claude Code haiku, a stand-in `wl-copy`): drags over a wrapped
+  Bash call and its output, its label alone, a Write, a list and a code
+  block; right clicks on a collapsed call, a Write (its tab kept), a
+  code block and prose; a real right click through a tmux with `mouse
+  on` reached unharness, not tmux's menu.
   Unverified: herdr, other terminals' right button, macOS.
 - MCP servers (`core/mcp.rs`, `[mcp_servers.<name>]`), each run with a stdio
   and an http server defined only in unharness's config, which the model
