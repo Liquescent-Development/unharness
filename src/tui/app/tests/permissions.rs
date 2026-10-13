@@ -82,6 +82,84 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
 }
 
+/// While a handoff summary is written nothing runs, not even what a rule
+/// covers, and the agent is told why; a tool call refused is noted. Once
+/// it is written the rule answers again, and says so.
+#[test]
+fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
+    use crate::tui::transcript::Block;
+    let notices = |app: &App| -> Vec<String> {
+        app.transcript
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Notice(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.session_alive = true;
+    app.rules
+        .append(Scope::Workspace, &[Rule::shell("cargo test")])
+        .unwrap();
+    for (renew, moving) in [
+        (false, "The user is switching to another agent."),
+        (
+            true,
+            "The user is moving this conversation to a new session.",
+        ),
+    ] {
+        app.handoff = Some(Handoff {
+            to: HarnessId::CODEX,
+            start: 0,
+            held: false,
+            renew,
+            blind: false,
+        });
+        let before = notices(&app).len();
+        app.on_event(cargo_test_requests("cargo test").remove(0));
+        app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
+            id: "confirm".into(),
+            kind: PermissionKind::Confirm {
+                title: "Go on?".into(),
+                message: None,
+            },
+            tool_call_id: None,
+        }));
+        assert!(app.modal.is_none());
+        assert_eq!(
+            app.take_actions(),
+            vec![
+                Action::Command(SessionCommand::RespondPermission {
+                    id: "claude".into(),
+                    decision: PermissionDecision::Deny {
+                        reason: format!(
+                            "{moving} Write the handoff summary from what you already know, without tools."
+                        ),
+                    },
+                }),
+                Action::Command(SessionCommand::RespondPermission {
+                    id: "confirm".into(),
+                    decision: PermissionDecision::Answer(serde_json::Value::Null),
+                }),
+            ]
+        );
+        assert_eq!(
+            notices(&app)[before..],
+            ["denied Bash: a handoff summary uses no tools"]
+        );
+    }
+
+    app.handoff = None;
+    app.on_event(cargo_test_requests("cargo test").remove(0));
+    assert_eq!(app.take_actions(), vec![allowed("claude")]);
+    assert_eq!(
+        notices(&app).last().map(String::as_str),
+        Some("allowed by your rule for shell commands starting with `cargo test`")
+    );
+}
+
 fn type_keys(app: &mut App, text: &str) {
     for c in text.chars() {
         app.handle_modal_key(key(KeyCode::Char(c)));
