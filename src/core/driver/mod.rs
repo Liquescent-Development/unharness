@@ -1547,6 +1547,7 @@ mod tests {
     }
 
     /// Wait until `path` exists: what a CLI does once its input closes.
+    #[cfg(target_os = "linux")]
     async fn input_closed(path: &std::path::Path) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !path.exists() {
