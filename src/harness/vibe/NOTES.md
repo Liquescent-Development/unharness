@@ -2,17 +2,17 @@
 
 Mistral Vibe (`src/harness/vibe/`, #164): a built-in harness around
 `AcpHarness` (`vibe-acp`; a `[harnesses.vibe]` table sets its command,
-name, `asks_permission` and modes) with a profile of its own
-(`acp_profile`: an `AcpProfile` whose hooks are `VibeHooks`, #271),
-with `ask` → `unharness-ask` and
-`accept-edits` → `unharness-accept-edits` (unharness's own profiles,
-#196, below), `auto` →
-`smart-approve` (#174, below) and `bypass` → `auto-approve`, `thinking`
-its effort option, and its model and level
-chosen at spawn (`AgentHooks::chooses_at_spawn` and `spawn_plan`,
-`acp/spawn.rs`), never
-with `session/set_config_option`: on vibe 2.26.1 that writes the choice
-into `~/.vibe/config.toml` (`set_config_option` in `vibe/acp/agent.py`).
+name, `asks_permission` and modes; `acp_profile` builds its
+`AcpProfile`, with `VibeHooks` as its hooks, #271: unharness's
+description of the agent, not one of vibe's agent profiles), with
+`ask` → `unharness-ask` and `accept-edits` → `unharness-accept-edits`
+(unharness's own profiles, #196, below), `auto` → `smart-approve`
+(#174, below) and `bypass` → `auto-approve`, `thinking` its effort
+option, and its model and level chosen at spawn
+(`AgentHooks::chooses_at_spawn` and `spawn_plan`, `acp/spawn.rs`),
+never with `session/set_config_option`: on vibe 2.26.1 that writes the
+choice into `~/.vibe/config.toml` (`set_config_option` in
+`vibe/acp/agent.py`).
 The process gets `VIBE_ACTIVE_MODEL=<alias>` and, for a level, a whole
 entry `VIBE_MODELS='[{"alias","name","provider","thinking"}]'`: the
 environment layer validates each entry as a full model, so a sparse one
@@ -20,14 +20,14 @@ fails the session, and merges the given fields over the model's own
 (`vibe/core/config/layers/environment.py`, `exclude_unset`). The name is
 the model option's `description`, so a run's first process that has a
 level and does not know it yet is started again once its session has
-answered (`AgentHooks::learn` and `respawn_plan`), before anything is sent
-(the second process is numbered from id 1 again); the provider is
-read, never written, from the user's
-`config.toml` entry for the alias, else `mistral`. With a level and no
-model chosen, the model the last session ran is pinned with it: in a
-scratch `VIBE_HOME` the first process ran `mistral-medium-3.5` and the
-next `glm-5-3`, the experiment's choice having arrived meanwhile. A
-level outside `off, low, medium, high, max` is never put in the entry.
+answered (`AgentHooks::learn` and `respawn_plan`), before anything is
+sent (the second process is numbered from id 1 again); the provider is
+read, never written, from the user's `config.toml` entry for the alias,
+else `mistral`. With a level and no model chosen, the model the last
+session ran is pinned with it: in a scratch `VIBE_HOME` the first
+process ran `mistral-medium-3.5` and the next `glm-5-3`, the
+experiment's choice having arrived meanwhile. A level outside
+`off, low, medium, high, max` is never put in the entry.
 A session pins its model and level before every turn
 (`_pin_session_model_choice`, `vibe/app_server/
 _unified_harness_backend_adapter.py:6400-6460`) and a loaded or forked

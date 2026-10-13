@@ -42,23 +42,25 @@ edit rule matches it.
 ## Profile and hooks
 
 What unharness knows about an agent beyond the protocol is its
-`AcpProfile` (#271, `profile.rs`), the one thing `AcpHarness::new`
-takes besides the command: whether it asks (`asks`), its effort option,
+`AcpProfile` (#271, `profile.rs`), the one thing `AcpHarness::new` takes
+besides the command. It is unharness's description of the agent, not a
+vibe agent profile such as `unharness-ask` (the vibe note's own
+profiles). It says whether the agent asks (`asks`), its effort option,
 its mode map, its sign-in command, whether a relative path in an edit's
 `diff` is in the session's directory, and its `AgentHooks`. A
 config-defined agent or a preset has `AcpProfile::default()` plus its
 table's `asks_permission`, `modes` and `sign_in`, and no hooks
-(`NoHooks`). The hooks are what the driver calls back into a harness
-for where its agent does what the protocol does not say: its model and
+(`NoHooks`). The hooks are what the driver calls back into a harness for
+where its agent does what the protocol does not say: its model and
 effort chosen at spawn (`chooses_at_spawn`, `spawn_plan`, `learn`, and
-`respawn_plan`, the restart for a model's name), a reader of its own `_meta`
-(`meta_reader`) and a rewind extension (`rewind_method`). Each defaults
-to the protocol's way, and the driver calls them for every agent; the
-running process's `SpawnPlan` is empty for an agent whose hooks add
-nothing. Only Mistral Vibe has hooks of its own (`VibeHooks`, its note).
-The profile replaced eight builder methods with the same behaviour:
-every ACP and vibe fixture and e2e test passed unchanged, and nothing
-was recorded or run live for it.
+`respawn_plan`, the restart for a model's name), a reader of its own
+`_meta` (`meta_reader`) and a rewind extension (`rewind_method`). Each
+defaults to the protocol's way, and the driver calls them for every
+agent; the running process's `SpawnPlan` is empty for an agent whose
+hooks add nothing. Only Mistral Vibe has hooks of its own (`VibeHooks`,
+its note). The profile replaced eight builder methods with the same
+behaviour: every ACP and vibe fixture and e2e test passed unchanged, and
+nothing was recorded or run live for it.
 
 ## Under `accept-edits`
 
@@ -114,9 +116,8 @@ in `accept-edits`, which wrote a file under `ask` with no request, and a
 session loaded in a new process comes back in the mode it was left in
 (`auto-approve` in `fixtures/vibe_acp_mode_load.jsonl`). So a harness
 holds its agent to a mode per policy (`ModeMap`: declared in its
-profile, `AcpProfile::modes`, or `[harnesses.<name>] modes`; a policy
-without an entry takes the nearest less permissive one's). After every
-session
+`AcpProfile::modes`, or `[harnesses.<name>] modes`; a policy without
+an entry takes the nearest less permissive one's). After every session
 answer and policy change the driver sets the mode and holds the prompt
 until it is read back: through the option of category `mode` when the
 session offers it (vibe's `session/set_config_option` answers with the
