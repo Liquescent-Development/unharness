@@ -254,7 +254,17 @@ pub fn parse(text: &str) -> Vec<Binding> {
 /// the next `}`, and the next `}` or `:`, is from each byte is found in
 /// one pass from the end, so a `${` that starts no variable costs no scan
 /// to the end of a value the sandbox can write.
-fn interpolate(value: &str, lookup: impl Fn(&str) -> Option<Option<String>>) -> String {
+fn interpolate<'a>(
+    value: &str,
+    lookup: impl Fn(&str) -> Option<Option<&'a str>>,
+    budget: &mut usize,
+) -> Result<String, ExpandsTooFar> {
+    // Every byte that goes out is taken from `budget` first.
+    let mut push = |out: &mut String, text: &str| {
+        *budget = budget.checked_sub(text.len()).ok_or(ExpandsTooFar)?;
+        out.push_str(text);
+        Ok(())
+    };
     let bytes = value.as_bytes();
     let len = bytes.len();
     // `next_close[i]`: the first `}` at or after `i`; `next_stop[i]`: the
@@ -296,32 +306,61 @@ fn interpolate(value: &str, lookup: impl Fn(&str) -> Option<Option<String>>) -> 
             from = at + 1;
             continue;
         };
-        out.push_str(&value[copied..at]);
+        push(&mut out, &value[copied..at])?;
         let resolved = match lookup(&value[name_start..stop]) {
             Some(found) => found.unwrap_or_default(),
-            None => default.unwrap_or_default().to_string(),
+            None => default.unwrap_or_default(),
         };
-        out.push_str(&resolved);
+        push(&mut out, resolved)?;
         copied = end;
         from = end;
     }
-    out.push_str(&value[copied..]);
-    out
+    push(&mut out, &value[copied..])?;
+    Ok(out)
 }
+
+/// The most the values of a file may come to once expanded, all of them
+/// together: as much as a config file may hold ([`super::profiles`]).
+pub const EXPANSION_LIMIT: usize = 1 << 20;
+
+/// The values of a file came to more than [`EXPANSION_LIMIT`] once
+/// expanded: each line can name the ones before it twice, so 26 lines of
+/// `V<n+1>=${V<n>}${V<n>}` make 512 MiB. python-dotenv expands them all,
+/// so vibe would run out of memory there too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpandsTooFar;
+
+impl std::fmt::Display for ExpandsTooFar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "a value expands past {} MiB", EXPANSION_LIMIT >> 20)
+    }
+}
+
+impl std::error::Error for ExpandsTooFar {}
 
 /// What `dotenv_values` gives for the text: each key once, at its first
 /// place, with its last value, every value's `${…}` taken from the
-/// bindings before it, else from `environ`.
-pub fn values(text: &str, environ: &HashMap<String, String>) -> Vec<Binding> {
+/// bindings before it, else from `environ`. Expansion stops with an error
+/// once the values would come to more than [`EXPANSION_LIMIT`].
+pub fn values(
+    text: &str,
+    environ: &HashMap<String, String>,
+) -> Result<Vec<Binding>, ExpandsTooFar> {
     let mut out: Vec<Binding> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
+    let mut budget = EXPANSION_LIMIT;
     for (key, value) in parse(text) {
-        let value = value.map(|v| {
-            interpolate(&v, |name| match at.get(name) {
-                Some(&i) => Some(out[i].1.clone()),
-                None => environ.get(name).map(|v| Some(v.clone())),
-            })
-        });
+        let value = match value {
+            None => None,
+            Some(v) => Some(interpolate(
+                &v,
+                |name| match at.get(name) {
+                    Some(&i) => Some(out[i].1.as_deref()),
+                    None => environ.get(name).map(|v| Some(v.as_str())),
+                },
+                &mut budget,
+            )?),
+        };
         match at.get(&key) {
             Some(&i) => out[i].1 = value,
             None => {
@@ -330,18 +369,21 @@ pub fn values(text: &str, environ: &HashMap<String, String>) -> Vec<Binding> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// What vibe adds to its environment `environ` from the text
 /// (`load_dotenv_values`): each value that is not empty, for a key
 /// `environ` does not give a value that is not empty.
-pub fn loaded(text: &str, environ: &HashMap<String, String>) -> Vec<(String, String)> {
-    values(text, environ)
+pub fn loaded(
+    text: &str,
+    environ: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, ExpandsTooFar> {
+    Ok(values(text, environ)?
         .into_iter()
         .filter_map(|(key, value)| Some((key, value.filter(|v| !v.is_empty())?)))
         .filter(|(key, _)| environ.get(key).is_none_or(String::is_empty))
-        .collect()
+        .collect())
 }
 
 /// Runs `during` with a FIFO at `path` that a writer waits on, and checks
@@ -439,7 +481,7 @@ mod tests {
         let text = "A=1\nB=${A}-${HOME_DIR}\nC='${NONE:-d}${EMPTY:-e}'\nA=2\nD=$A ${ \
                     ${X:y} ${A\nE\nF=${E:-f}";
         assert_eq!(
-            values(text, &environ),
+            values(text, &environ).unwrap(),
             vec![
                 b("A", Some("2")),
                 b("B", Some("1-/h")),
@@ -463,7 +505,8 @@ mod tests {
         for unit in ["${", "${a:", "${a:-", "${${a:x"] {
             let value = unit.repeat(mib / unit.len());
             let started = std::time::Instant::now();
-            let got = interpolate(&value, |_| None);
+            let mut budget = usize::MAX;
+            let got = interpolate(&value, |_| None, &mut budget).unwrap();
             assert!(
                 started.elapsed() < BOUND,
                 "{unit:?}: {:?}",
@@ -473,8 +516,34 @@ mod tests {
         }
         let text = "A='${\\'\n".repeat(mib / 8) + &"B=\"${:x\n".repeat(mib / 8);
         let started = std::time::Instant::now();
-        let _ = values(&text, &HashMap::new());
+        values(&text, &HashMap::new()).unwrap();
         assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+    }
+
+    /// Lines that each name the one before twice double it: expansion
+    /// stops at the limit with an error that shows no value, at once,
+    /// instead of running out of memory (#212). The whole file counts, and
+    /// a file that stays under it is read.
+    #[test]
+    fn a_doubling_chain_stops_at_the_limit() {
+        let mut text = "V0=secret12\n".to_string();
+        for n in 1..40 {
+            text.push_str(&format!("V{n}=${{V{}}}${{V{}}}\n", n - 1, n - 1));
+        }
+        let started = std::time::Instant::now();
+        let err = values(&text, &HashMap::new()).unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(err.to_string(), "a value expands past 1 MiB");
+        assert_eq!(loaded(&text, &HashMap::new()), Err(ExpandsTooFar));
+        // From the environment too, and over many values.
+        let big = "x".repeat(EXPANSION_LIMIT / 4);
+        let environ = env(&[("BIG", big.as_str())]);
+        assert!(values("A=${BIG}\nB=${BIG}\nC=${BIG}", &environ).is_ok());
+        assert!(values("A=${BIG}\nB=${BIG}\nC=${BIG}\nD=${BIG}\nE=1", &environ).is_err());
+        // 16 doublings of 8 bytes, the last 512 KiB and just under 1 MiB in
+        // all: read.
+        let short: String = text.lines().take(17).map(|l| format!("{l}\n")).collect();
+        assert_eq!(values(&short, &HashMap::new()).unwrap().len(), 17);
     }
 
     /// `load_dotenv_values`: what the environment gives a value keeps it,
@@ -484,7 +553,7 @@ mod tests {
         let environ = env(&[("SET", "env"), ("BLANK", "")]);
         let text = "SET=file\nBLANK=file\nNEW=file\nEMPTY=\nNONE\nset=lower";
         assert_eq!(
-            loaded(text, &environ),
+            loaded(text, &environ).unwrap(),
             vec![
                 ("BLANK".to_string(), "file".to_string()),
                 ("NEW".to_string(), "file".to_string()),

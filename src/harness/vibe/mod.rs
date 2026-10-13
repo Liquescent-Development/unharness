@@ -580,13 +580,17 @@ fn api_key_at(env_value: Option<&std::ffi::OsStr>, home: &Path) -> Option<KeyAt>
 
 /// Whether a dotenv file gives `key` a value, read as python-dotenv does
 /// for vibe ([`dotenv::values`]: the last assignment, quotes, comments,
-/// `${…}` from `environ`); empty is no value (vibe's `_has_value`).
+/// `${…}` from `environ`); empty is no value (vibe's `_has_value`), and
+/// so is everything in a file whose values expand past
+/// [`dotenv::EXPANSION_LIMIT`].
 fn dotenv_has_value(
     text: &str,
     key: &str,
     environ: &std::collections::HashMap<String, String>,
 ) -> bool {
+    // Values that expand past the limit are not read: not known.
     dotenv::values(text, environ)
+        .unwrap_or_default()
         .into_iter()
         .any(|(k, v)| k == key && v.is_some_and(|v| !v.is_empty()))
 }
@@ -2247,6 +2251,12 @@ provider = "mine"
         // gives nothing.
         assert!(has("MISTRAL_API_KEY='a\nb'"));
         assert!(!has("MISTRAL_API_KEY='abc' junk"));
+        // Values that expand past the limit: none read.
+        let mut chain = "MISTRAL_API_KEY=abc\nV0=12345678\n".to_string();
+        for n in 1..40 {
+            chain.push_str(&format!("V{n}=${{V{}}}${{V{}}}\n", n - 1, n - 1));
+        }
+        assert!(!has(&chain));
     }
 
     #[test]

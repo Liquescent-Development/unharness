@@ -110,11 +110,12 @@ vibe applies above all of those:
   always started with `VIBE_HOME` set, so a `VIBE_HOME` in `.env` does
   not move it to a configuration unharness has not read. A `config.toml`
   or `.env` that unharness cannot read (not UTF-8, over 1 MiB, not
-  valid) refuses `ask` and `accept-edits` with the reason, and so does a
-  `.env` that is a FIFO, as a 1Password local env file is: unharness does
-  not open it, since that would take what it serves. Use `auto` or
-  `bypass` there, or make `.env` a regular file. A `.env` that is neither
-  a file nor a FIFO vibe skips, and so does unharness.
+  valid, or with values that expand past 1 MiB) refuses `ask` and
+  `accept-edits` with the reason, and so does a `.env` that is a FIFO, as
+  a 1Password local env file is: unharness does not open it, since that
+  would take what it serves. Use `auto` or `bypass` there, or make `.env`
+  a regular file. A `.env` that is neither a file nor a FIFO vibe skips,
+  and so does unharness.
 - Read-only commands still run without asking: the profile lists vibe
   2.26.1's own read-only commands (`ls`, `cat`, `grep`, `git diff`, …,
   without `git status`, which rewrites `.git/index`), and vibe still asks

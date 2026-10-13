@@ -346,7 +346,8 @@ fn dotenv_tool_vars(
     };
     let environ: std::collections::HashMap<String, String> =
         inherited.iter().chain(env).cloned().collect();
-    let loaded = super::dotenv::loaded(&text, &environ);
+    let loaded = super::dotenv::loaded(&text, &environ)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     if loaded.iter().any(|(k, _)| k == "VIBE_HOME") {
         bail!(
             "{} sets VIBE_HOME, which would move vibe to a configuration unharness has not read",
@@ -1015,6 +1016,18 @@ mod tests {
             err,
             format!("reading {}: VIBE_TOOLS is not JSON", dotenv.display())
         );
+        // Values that expand past the limit: refused, with no value shown.
+        let mut chain = "V0=sk-secret-value\n".to_string();
+        for n in 1..40 {
+            chain.push_str(&format!("V{n}=${{V{}}}${{V{}}}\n", n - 1, n - 1));
+        }
+        std::fs::write(&dotenv, &chain).unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert_eq!(
+            err,
+            format!("{}: a value expands past 1 MiB", dotenv.display())
+        );
+        std::fs::write(&dotenv, "VIBE_TOOLS={sk-secret-value\n").unwrap();
         // Set in the environment, the file's is not read.
         assert!(read_tool_keys(&home, &cwd, &[], &[var("VIBE_TOOLS", "{}")]).is_ok());
         // Not a regular file, or not UTF-8: an error.

@@ -1134,9 +1134,13 @@ recorded ones. For anything else:
   python-dotenv's own output, not a live vibe; looked at before it is
   opened: neither a file nor a FIFO is no `.env`, as for vibe, and a FIFO
   is refused unopened, since opening a 1Password local env file has it
-  serve its content), `never` kept where any of them says it; bash gets vibe 2.26.1's default allowlist
-  (`_get_default_allowlist`, `builtins/bash.py`) without `git status`
-  (which rewrites `.git/index`), written into the file with that comment.
+  serve its content; values that expand past 1 MiB in all, as lines
+  that each name the one before twice do, refuse both policies and read
+  as no key for sign-in, where python-dotenv, and so vibe, would run out
+  of memory), `never` kept where any of them says it; bash gets vibe
+  2.26.1's default allowlist (`_get_default_allowlist`,
+  `builtins/bash.py`) without `git status` (which rewrites
+  `.git/index`), written into the file with that comment.
   An entry runs a part unasked only when vibe's guardrails pass: no
   redirect, `$()` or `sudo`, no path outside the workdir, none of the
   writing options `_shell_command_policy.py` gates (`sort -o`, `find
