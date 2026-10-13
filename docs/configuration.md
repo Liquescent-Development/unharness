@@ -21,7 +21,7 @@ doctor` prints the path, and `unharness init` creates the file.
 ## Example
 
 ```toml
-default_harness  = "claude"      # agy | claude | codex | pi
+default_harness  = "claude"      # agy | claude | codex | pi | vibe | an ACP agent's table name
 default_policy   = "ask"
 mouse            = true          # wheel, scrollbar, jump-to-bottom, drag to select and copy; false leaves the mouse to the terminal
 herdr            = true          # report working/blocked/idle to herdr when run in one of its panes

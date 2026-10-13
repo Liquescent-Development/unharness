@@ -139,17 +139,17 @@ you asked for, unharness falls back to the nearest **less** permissive
 policy, never a more permissive one. If there is none, it asks you which
 to use.
 
-| Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity |
-|---|---|---|---|---|---|
-| `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available |
-| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn |
-| `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* |
-| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` |
+| Policy | Claude Code | Codex (app-server) | Codex (exec) | pi | Antigravity | Mistral Vibe |
+|---|---|---|---|---|---|---|
+| `ask` | default mode, prompts in the TUI | `untrusted`, prompts in the TUI | not available | every tool call but a read prompts in the TUI | not available | unharness's own `unharness-ask` profile, prompts in the TUI |
+| `accept-edits` | `acceptEdits` | `on-request` | no prompts | falls back to ask* | `--mode accept-edits`: edits run, a shell command is refused and ends the turn | unharness's own `unharness-accept-edits` profile: edits in the workspace run, commands prompt |
+| `auto` | `auto` (classifier) | `on-request` | `--approve-for-me` | falls back to ask* | falls back to accept-edits* | `smart-approve` (classifier) |
+| `bypass` | `bypassPermissions` | `never` + full access | `--dangerously-bypass-approvals-and-sandbox` | nothing is asked, your extensions' dialogs are auto-accepted* | `--dangerously-skip-permissions` | `auto-approve` |
 
 `*` shown as a warning in the header.
 
-Mistral Vibe and the other ACP agents are in [ACP agents](docs/acp.md#permissions)
-and [Mistral Vibe](docs/vibe.md#policies).
+What each policy means for Mistral Vibe and the other ACP agents is in
+[ACP agents](docs/acp.md#permissions) and [Mistral Vibe](docs/vibe.md#policies).
 
 The sandbox is a separate setting. No policy changes it, not even
 `bypass`:

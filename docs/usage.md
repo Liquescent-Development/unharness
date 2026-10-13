@@ -24,7 +24,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 
 | Flag | Meaning |
 |---|---|
-| `-H, --harness <id>` | Harness to use: `claude`, `codex`, `pi`, `agy`, or a configured [ACP agent](acp.md). Also `UNHARNESS_HARNESS` |
+| `-H, --harness <id>` | Harness to use: `claude`, `codex`, `pi`, `agy`, `vibe` ([Mistral Vibe](vibe.md)), or a configured [ACP agent](acp.md). Also `UNHARNESS_HARNESS` |
 | `-m, --model <model>` | Model for the session |
 | `--provider <provider>` | Provider within the harness: `bedrock`, `vertex` or `foundry` for Claude Code, a built-in or configured one for Codex, one of pi's many. Without it the harness's own configuration decides. See [Providers](configuration.md#providers) |
 | `-e, --effort <level>` | Reasoning effort; the levels come from the harness |
