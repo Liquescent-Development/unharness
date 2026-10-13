@@ -11,14 +11,22 @@
 //! when the TUI drops the handle, and the answer to a command the harness
 //! cannot carry out: one `Notice`, worded from its [`Capabilities`].
 //!
+//! A protocol over JSON-RPC (Codex app-server, ACP) sends its requests
+//! through the loop ([`Io::request`]), which numbers and frames them and
+//! routes each answer back to [`StreamProtocol::on_answer`] by its id, where
+//! its line falls in the CLI's output. What a request was for, and which are
+//! still open, stays the protocol's; the loop only routes.
+//!
 //! A harness whose CLI runs once per turn (Codex `exec`) implements
 //! [`per_turn::PerTurnProtocol`] instead, the per-turn flavour.
 
 pub mod per_turn;
 
+use std::collections::HashSet;
 use std::future::Future;
 
 use anyhow::Result;
+use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -26,6 +34,7 @@ use tokio::time::Instant;
 use super::caps::Capabilities;
 use super::event::AgentEvent;
 use super::ids::HarnessId;
+use super::jsonrpc::{self, RequestId, RpcMessage};
 use super::parser::Parser;
 use super::process::{LineProcess, RawLine};
 use super::sandbox::Sandbox;
@@ -33,10 +42,12 @@ use super::session::{
     ProcessModel, ProcessSlot, SessionCommand, SessionHandle, SessionInfo, shutdown_queued,
 };
 
-/// What a protocol acts through: the CLI's stdin and the TUI's events.
+/// What a protocol acts through: the CLI's stdin, the TUI's events, and the
+/// ids of its JSON-RPC requests.
 pub struct Io<'a> {
     proc: &'a mut LineProcess,
     events: &'a mpsc::Sender<AgentEvent>,
+    requests: &'a mut Requests,
 }
 
 /// The TUI dropped the session's handle while it was being told
@@ -45,13 +56,46 @@ pub struct Io<'a> {
 pub struct Gone;
 
 impl<'a> Io<'a> {
-    fn new(proc: &'a mut LineProcess, events: &'a mpsc::Sender<AgentEvent>) -> Self {
-        Io { proc, events }
+    fn new(
+        proc: &'a mut LineProcess,
+        events: &'a mpsc::Sender<AgentEvent>,
+        requests: &'a mut Requests,
+    ) -> Self {
+        Io {
+            proc,
+            events,
+            requests,
+        }
     }
 
     /// Write `line` to the CLI's stdin.
     pub async fn write(&mut self, line: &str) -> Result<()> {
         self.proc.write_line(line).await
+    }
+
+    /// Send the JSON-RPC request `method` (with `params`, none if `Null`)
+    /// under the next number: the first a CLI is sent is 1. Its answer
+    /// comes to [`StreamProtocol::on_answer`] under that id, which this
+    /// returns with how the write went: the id is taken also when the line
+    /// could not be written, and the next request is numbered after it.
+    pub async fn request(&mut self, method: &str, params: Value) -> (u64, Result<()>) {
+        let id = self.requests.next();
+        let sent = self
+            .proc
+            .write_line(&jsonrpc::request(id, method, params))
+            .await;
+        (id, sent)
+    }
+
+    /// Send the JSON-RPC request `method` under the id `name` instead of a
+    /// number, so that the numbered ones keep theirs (Codex's
+    /// `skills/list`). Every answer under that name comes to
+    /// [`StreamProtocol::on_answer`].
+    pub async fn request_named(&mut self, name: &str, method: &str, params: Value) -> Result<()> {
+        self.requests.names.insert(name.to_string());
+        self.proc
+            .write_line(&jsonrpc::request(name, method, params))
+            .await
     }
 
     /// Tell the TUI `event`. If it has gone, nothing more: the next event
@@ -64,6 +108,59 @@ impl<'a> Io<'a> {
     /// dropped the handle.
     pub async fn forward(&self, event: AgentEvent) -> Result<(), Gone> {
         self.events.send(event).await.map_err(|_| Gone)
+    }
+}
+
+/// The answer to a JSON-RPC request the protocol sent through [`Io`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Answer<'a> {
+    /// The id the request went under.
+    pub id: RequestId,
+    pub result: Option<Value>,
+    pub error: Option<Value>,
+    /// The line it came on, for the parser.
+    pub line: &'a str,
+}
+
+/// The ids the protocol's JSON-RPC requests went under on this CLI, so
+/// that their answers are routed back. Which are still open, and what each
+/// was for, is the protocol's to know.
+#[derive(Debug, Default)]
+struct Requests {
+    /// The number the last request took (none yet: 0).
+    last: u64,
+    /// The names requests went under ([`Io::request_named`]).
+    names: HashSet<String>,
+}
+
+impl Requests {
+    fn next(&mut self) -> u64 {
+        self.last += 1;
+        self.last
+    }
+
+    /// `line` as the answer to a request sent under an id of ours, if it is
+    /// one. Any other line, a request of the CLI's under a number of ours
+    /// included, is not; nor is a line before the first request, which is
+    /// not looked at.
+    fn answer<'l>(&self, line: &'l str) -> Option<Answer<'l>> {
+        if self.last == 0 && self.names.is_empty() {
+            return None;
+        }
+        let Some(RpcMessage::Response { id, result, error }) = RpcMessage::parse(line) else {
+            return None;
+        };
+        let id = RequestId::of(&id)?;
+        let ours = match &id {
+            RequestId::Number(n) => (1..=self.last).contains(n),
+            RequestId::Name(name) => self.names.contains(name),
+        };
+        ours.then_some(Answer {
+            id,
+            result,
+            error,
+            line,
+        })
     }
 }
 
@@ -83,7 +180,9 @@ pub enum Encoded {
     Kill,
     /// Kill the CLI and start `command` in its place, in the session's
     /// sandbox, then take `then` (agy, whose model and policy are flags).
-    /// [`StreamProtocol::restarted`] is told how that went.
+    /// [`StreamProtocol::restarted`] is told how that went. The new CLI is
+    /// a new connection: its requests are numbered from 1 again, and no
+    /// answer is routed for a request the old one was sent.
     Restart {
         command: Box<Command>,
         then: SessionCommand,
@@ -126,12 +225,29 @@ pub trait StreamProtocol: Send + 'static {
     fn parser(&mut self) -> &mut dyn Parser;
 
     /// One line on the CLI's stdout: parsed, kept books on, and passed on
-    /// with [`Io::forward`], stopping at `Err(Gone)`.
+    /// with [`Io::forward`], stopping at `Err(Gone)`. The answer to a
+    /// request of the protocol's goes to [`on_answer`](Self::on_answer)
+    /// instead.
     fn on_stdout(
         &mut self,
         line: &str,
         io: &mut Io<'_>,
     ) -> impl Future<Output = Result<(), Gone>> + Send;
+
+    /// The answer to a JSON-RPC request sent through [`Io::request`] or
+    /// [`Io::request_named`], told when its line comes, among the others
+    /// in the order they came: the CLI may answer requests in any order.
+    /// The protocol knows by `answer.id` what the request was for, and
+    /// whether it still waits for this (an id answered twice comes twice).
+    /// Passed on as in [`on_stdout`](Self::on_stdout), where it goes
+    /// unless the protocol takes it here.
+    fn on_answer(
+        &mut self,
+        answer: Answer<'_>,
+        io: &mut Io<'_>,
+    ) -> impl Future<Output = Result<(), Gone>> + Send {
+        async move { self.on_stdout(answer.line, io).await }
+    }
 
     /// What the TUI is told of a line on the CLI's stderr.
     fn on_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
@@ -194,6 +310,7 @@ pub fn start<P: StreamProtocol>(
         slot,
         events,
         cmds,
+        requests: Requests::default(),
         shutting_down: false,
     };
     tokio::spawn(session.run());
@@ -208,6 +325,8 @@ struct Loop<P> {
     caps: Capabilities,
     protocol: P,
     proc: LineProcess,
+    /// The JSON-RPC requests `proc` was sent through [`Io`].
+    requests: Requests,
     /// What a restarted CLI is confined by: the session's.
     sandbox: Sandbox,
     slot: ProcessSlot,
@@ -220,13 +339,18 @@ struct Loop<P> {
 impl<P: StreamProtocol> Loop<P> {
     async fn run(mut self) {
         self.protocol
-            .start(&mut Io::new(&mut self.proc, &self.events))
+            .start(&mut Io::new(
+                &mut self.proc,
+                &self.events,
+                &mut self.requests,
+            ))
             .await;
         loop {
             let deadline = self.protocol.deadline();
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
-                    self.protocol.on_deadline(&mut Io::new(&mut self.proc, &self.events)).await;
+                    let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+                    self.protocol.on_deadline(&mut io).await;
                 }
                 cmd = self.cmds.recv() => {
                     // The TUI dropped the handle.
@@ -235,8 +359,13 @@ impl<P: StreamProtocol> Loop<P> {
                 }
                 raw = self.proc.lines.recv() => match raw {
                     Some(RawLine::Stdout(line)) => {
-                        let mut io = Io::new(&mut self.proc, &self.events);
-                        if self.protocol.on_stdout(&line, &mut io).await.is_err() {
+                        let answer = self.requests.answer(&line);
+                        let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+                        let told = match answer {
+                            Some(answer) => self.protocol.on_answer(answer, &mut io).await,
+                            None => self.protocol.on_stdout(&line, &mut io).await,
+                        };
+                        if told.is_err() {
                             self.gone().await;
                             return;
                         }
@@ -276,10 +405,8 @@ impl<P: StreamProtocol> Loop<P> {
                 self.cannot(what).await;
                 continue;
             }
-            let encoded = self
-                .protocol
-                .encode(cmd, &mut Io::new(&mut self.proc, &self.events))
-                .await;
+            let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests);
+            let encoded = self.protocol.encode(cmd, &mut io).await;
             match encoded {
                 Encoded::Write(line) => {
                     if let Err(e) = self.proc.write_line(&line).await {
@@ -297,6 +424,7 @@ impl<P: StreamProtocol> Loop<P> {
                         Ok(proc) => {
                             self.proc = proc;
                             self.slot.set(&self.proc);
+                            self.requests = Requests::default();
                             next = Some(then);
                             Ok(())
                         }
@@ -385,6 +513,8 @@ mod tests {
     use super::*;
     use crate::core::event::StopReason;
     use crate::core::process::END_GRACE;
+    use serde_json::json;
+    use std::collections::HashMap;
     use std::time::Duration;
 
     /// Every line is a `TextDelta`, `done` ends the turn, and a line on
@@ -519,6 +649,108 @@ mod tests {
         }
     }
 
+    /// A protocol of JSON-RPC requests. With `at_start` it sends `a` and
+    /// `b` numbered and `c` under the name `n` first; a turn is a numbered
+    /// request of its text, and `SetModel` restarts the CLI as `restart` and
+    /// sends `again`. An answer is told as `<method> <- <result>` (`?` for
+    /// one it does not wait for), and the one to `a` sends `d`; any other
+    /// line is told as it is.
+    struct Rpc {
+        parser: Echo,
+        /// The protocol's own book: what each open request is for.
+        open: HashMap<RequestId, String>,
+        at_start: bool,
+        restart: Option<fn() -> Command>,
+    }
+
+    impl Rpc {
+        fn new() -> Self {
+            Rpc {
+                parser: Echo,
+                open: HashMap::new(),
+                at_start: false,
+                restart: None,
+            }
+        }
+
+        /// A numbered request of `method`, told as an `Error` with its id
+        /// if it could not be written.
+        async fn send(&mut self, method: &str, io: &mut Io<'_>) {
+            let (id, sent) = io.request(method, json!({"k": method})).await;
+            self.open.insert(RequestId::Number(id), method.to_string());
+            if let Err(e) = sent {
+                io.emit(AgentEvent::Error(format!("{method} ({id}): {e}")))
+                    .await;
+            }
+        }
+    }
+
+    impl StreamProtocol for Rpc {
+        async fn start(&mut self, io: &mut Io<'_>) {
+            if !self.at_start {
+                return;
+            }
+            self.send("a", io).await;
+            self.send("b", io).await;
+            io.request_named("n", "c", Value::Null).await.unwrap();
+            self.open.insert(RequestId::Name("n".into()), "c".into());
+        }
+
+        async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+            match cmd {
+                SessionCommand::SendTurn { text, .. } => {
+                    self.send(&text, io).await;
+                    Encoded::Done
+                }
+                SessionCommand::SetModel(_) => match self.restart {
+                    Some(command) => Encoded::Restart {
+                        command: Box::new(command()),
+                        then: SessionCommand::turn("again"),
+                    },
+                    None => Encoded::Done,
+                },
+                _ => Encoded::Done,
+            }
+        }
+
+        fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+            vec![AgentEvent::Error(error.to_string())]
+        }
+
+        fn parser(&mut self) -> &mut dyn Parser {
+            &mut self.parser
+        }
+
+        async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+            io.forward(AgentEvent::TextDelta(line.to_string())).await
+        }
+
+        async fn on_answer(&mut self, answer: Answer<'_>, io: &mut Io<'_>) -> Result<(), Gone> {
+            let method = self.open.remove(&answer.id).unwrap_or_else(|| "?".into());
+            let said = match (answer.error, answer.result) {
+                (Some(e), _) => format!("error {}", e["message"]),
+                (None, Some(r)) => r.to_string(),
+                (None, None) => "nothing".into(),
+            };
+            io.forward(AgentEvent::TextDelta(format!("{method} <- {said}")))
+                .await?;
+            if method == "a" {
+                self.send("d", io).await;
+            }
+            Ok(())
+        }
+
+        fn shutdown(&mut self) -> Shutdown {
+            Shutdown::EndOrKill { turn_open: false }
+        }
+
+        // The old CLI's requests went with it.
+        fn restarted(&mut self, _result: Result<()>) -> Vec<AgentEvent> {
+            self.open.clear();
+            Vec::new()
+        }
+    }
+
     /// Everything a command can need.
     fn every() -> Capabilities {
         let mut caps = Capabilities {
@@ -534,9 +766,9 @@ mod tests {
         caps
     }
 
-    fn run(script: &str, toy: Toy) -> SessionHandle {
+    fn run<P: StreamProtocol>(script: &str, protocol: P) -> SessionHandle {
         let toy_harness = HarnessId::intern("toy");
-        start(toy_harness, &every(), sh(script), &Sandbox::off(), toy).unwrap()
+        start(toy_harness, &every(), sh(script), &Sandbox::off(), protocol).unwrap()
     }
 
     async fn next(h: &mut SessionHandle) -> AgentEvent {
@@ -910,6 +1142,130 @@ mod tests {
                 "toy cannot take an answer to a permission request",
                 "toy cannot go on remote control",
                 "toy cannot compact its context on request",
+            ]
+        );
+    }
+
+    /// The line the CLI printed next, as JSON.
+    async fn line(h: &mut SessionHandle) -> Value {
+        match next(h).await {
+            AgentEvent::TextDelta(line) => serde_json::from_str(&line).unwrap(),
+            other => panic!("no line: {other:?}"),
+        }
+    }
+
+    fn said(text: &str) -> AgentEvent {
+        AgentEvent::TextDelta(text.into())
+    }
+
+    /// Reads three requests and prints them back, answers them out of
+    /// order between lines that are no answers of ours, then reads one
+    /// more and answers it.
+    const ANSWERS_OUT_OF_ORDER: &str = r#"
+        read -r a; read -r b; read -r n
+        printf '%s\n%s\n%s\n' "$a" "$b" "$n"
+        echo '{"jsonrpc":"2.0","id":"n","result":"third"}'
+        echo '{"jsonrpc":"2.0","id":7,"result":"never asked"}'
+        echo '{"jsonrpc":"2.0","id":1,"method":"ask"}'
+        echo '{"jsonrpc":"2.0","id":2,"error":{"code":-1,"message":"no"}}'
+        echo '{"jsonrpc":"2.0","id":1,"result":"first"}'
+        read -r d; printf '%s\n' "$d"
+        echo '{"jsonrpc":"2.0","id":3,"result":"fourth"}'
+        echo '{"jsonrpc":"2.0","id":1,"result":"again"}'
+        cat >/dev/null
+    "#;
+
+    // Each answer reaches the protocol under the id its request went with,
+    // where its line falls among the others; what is not an answer to a
+    // request of ours is a line like any other.
+    #[tokio::test]
+    async fn answers_are_routed_back_by_id_in_the_order_they_come() {
+        let rpc = Rpc {
+            at_start: true,
+            ..Rpc::new()
+        };
+        let mut h = run(ANSWERS_OUT_OF_ORDER, rpc);
+        // Numbered from 1, and the named one under its name.
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "a", "params": {"k": "a"}})
+        );
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 2, "method": "b", "params": {"k": "b"}})
+        );
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": "n", "method": "c"})
+        );
+        assert_eq!(next(&mut h).await, said(r#"c <- "third""#));
+        // An id never given out, and a request of the CLI's under one that
+        // was: neither is an answer.
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 7, "result": "never asked"})
+        );
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 1, "method": "ask"})
+        );
+        assert_eq!(next(&mut h).await, said(r#"b <- error "no""#));
+        assert_eq!(next(&mut h).await, said(r#"a <- "first""#));
+        // Sent from that answer: numbered after the others.
+        assert_eq!(
+            line(&mut h).await,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "d", "params": {"k": "d"}})
+        );
+        assert_eq!(next(&mut h).await, said(r#"d <- "fourth""#));
+        // Answered twice: the protocol knows it no longer waits for it.
+        assert_eq!(next(&mut h).await, said(r#"? <- "again""#));
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: Some(0) }]
+        );
+    }
+
+    // A restarted CLI is a new connection: its requests are numbered from
+    // 1 again, and an answer is routed for what it was sent.
+    #[tokio::test]
+    async fn a_restarted_cli_numbers_its_requests_from_one_again() {
+        let rpc = Rpc {
+            restart: Some(|| {
+                sh(r#"read -r l; printf '%s\n' "$l"
+                      echo '{"jsonrpc":"2.0","id":1,"result":"x"}'; cat >/dev/null"#)
+            }),
+            ..Rpc::new()
+        };
+        // Prints back what it reads, and answers nothing.
+        let mut h = run(r#"while read -r l; do printf '%s\n' "$l"; done"#, rpc);
+        h.send(SessionCommand::turn("one")).await.unwrap();
+        h.send(SessionCommand::turn("two")).await.unwrap();
+        assert_eq!(line(&mut h).await["id"], 1);
+        assert_eq!(line(&mut h).await["id"], 2);
+        h.send(opus()).await.unwrap();
+        let again = line(&mut h).await;
+        assert_eq!(
+            (&again["id"], &again["method"]),
+            (&json!(1), &json!("again"))
+        );
+        assert_eq!(next(&mut h).await, said(r#"again <- "x""#));
+    }
+
+    // Its line could not be written, and it took its number all the same.
+    #[tokio::test]
+    async fn a_request_that_cannot_be_written_takes_its_number() {
+        let mut h = run("echo $$; cat >/dev/null; sleep 0.3", Rpc::new());
+        pid(&mut h).await;
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        h.send(SessionCommand::turn("late")).await.unwrap();
+        h.send(SessionCommand::turn("later")).await.unwrap();
+        assert_eq!(
+            until_exited(&mut h).await,
+            [
+                AgentEvent::Error("late (1): child stdin is closed".into()),
+                AgentEvent::Error("later (2): child stdin is closed".into()),
+                AgentEvent::ProcessExited { code: Some(0) }
             ]
         );
     }
