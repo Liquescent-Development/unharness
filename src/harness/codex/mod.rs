@@ -504,7 +504,7 @@ impl Harness for CodexHarness {
                 &CodexHarness::new(transport).capabilities(),
                 Arc::new(exec::CodexExec),
             ),
-            _ => app_server::start(cfg),
+            _ => app_server::start(cfg, &self.capabilities()),
         }
     }
 
