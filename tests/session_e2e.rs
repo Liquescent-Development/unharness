@@ -31,6 +31,9 @@ fn python_available() -> bool {
 
 struct Fake {
     _tmp: tempfile::TempDir,
+    /// vibe's home for a session that names none of its own, so that a
+    /// vibe harness never reads the developer's `~/.vibe` (#219).
+    vibe_home: tempfile::TempDir,
     log: PathBuf,
 }
 
@@ -40,7 +43,11 @@ impl Fake {
         unharness::core::reaper::enable_with(PathBuf::from(env!("CARGO_BIN_EXE_unharness")));
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("sent.log");
-        Fake { _tmp: tmp, log }
+        Fake {
+            _tmp: tmp,
+            vibe_home: tempfile::tempdir().unwrap(),
+            log,
+        }
     }
 
     /// Where a vibe harness writes its profiles in a test.
@@ -57,6 +64,10 @@ impl Fake {
             (
                 "UNHARNESS_FAKE_LOG".to_string(),
                 self.log.to_string_lossy().to_string(),
+            ),
+            (
+                "VIBE_HOME".to_string(),
+                self.vibe_home.path().to_string_lossy().to_string(),
             ),
         ];
         if hang {
@@ -4711,7 +4722,8 @@ async fn claude_remote_control_turns_on_withdraws_remote_answers_and_turns_off()
 }
 
 /// The built-in vibe harness, its command the fake, writing its profiles
-/// (#196) in `profiles`, never in the real state directory.
+/// (#196) in `profiles`, never in the real state directory, and taking no
+/// `VIBE_*` variable from the environment the tests run in (#219).
 fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
         command: vec![fake_harness().to_string_lossy().into_owned()],
@@ -4719,6 +4731,7 @@ fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     })
     .unwrap()
     .writing_profiles_in(profiles)
+    .inheriting_env(vec![])
 }
 
 /// The vibe harness for a recording made before #196, with vibe's own
@@ -4739,6 +4752,7 @@ fn vibe_harness_recorded_in_ask(profiles: &Path) -> unharness::harness::vibe::Vi
     })
     .unwrap()
     .writing_profiles_in(profiles)
+    .inheriting_env(vec![])
 }
 
 /// A vibe session for `model` at `effort`, its VIBE_HOME an empty `home`.
@@ -5217,7 +5231,8 @@ async fn vibe_runs_on_a_configured_provider_by_environment() {
     let fake = Fake::new();
     let vibe = unharness::harness::vibe::VibeHarness::from_settings(&settings.harnesses["vibe"])
         .unwrap()
-        .writing_profiles_in(&fake.profiles());
+        .writing_profiles_in(&fake.profiles())
+        .inheriting_env(vec![]);
     let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_provider.jsonl");
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;

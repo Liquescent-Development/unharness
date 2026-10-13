@@ -232,10 +232,15 @@ impl ToolKeys {
 /// that holds vibe's home (`_discover_config_file`,
 /// `vibe/core/config/layers/project.py`). Taken whether or not vibe trusts
 /// it: a tool it names asks under the profile either way, which can only
-/// ask more.
+/// ask more. Both with links resolved ([`resolved`]): vibe walks up from
+/// its working directory, which the system gives it resolved, and is
+/// given its home in `VIBE_HOME`, which it resolves (`get_vibe_home`), so
+/// with `~/.vibe` a link to `~/dotfiles/vibe` it stops at `~/dotfiles`
+/// and a session in `~/proj` reads `~/.vibe/config.toml` as the project's.
 pub fn project_config(home: &Path, cwd: &Path) -> Option<PathBuf> {
+    let home = resolved(home);
     let stop = home.parent();
-    for dir in cwd.ancestors() {
+    for dir in resolved(cwd).ancestors() {
         if Some(dir) == stop {
             break;
         }
@@ -245,6 +250,18 @@ pub fn project_config(home: &Path, cwd: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `path` with its links resolved as far as it exists, the rest joined as
+/// given, as Python's `Path.resolve()` does.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolved(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// A vibe config file's text, read only: a regular file of at most 1 MiB
@@ -264,10 +281,17 @@ fn read_config(path: &Path) -> Result<Option<String>> {
 
 /// The tools named by vibe's configuration for a session in `cwd`, with
 /// vibe's home at `home`: its `config.toml`, the project's
-/// ([`project_config`]), and the `VIBE_*` variables of unharness's
-/// environment and the session's additions (`env`). A file that is there
-/// and cannot be read is an error: what it allows could not be overridden.
-pub fn read_tool_keys(home: &Path, cwd: &Path, env: &[(String, String)]) -> Result<ToolKeys> {
+/// ([`project_config`]), the `VIBE_*` variables of the environment vibe
+/// inherits from unharness (`inherited`; a test passes none) and the
+/// session's additions (`env`), and those `<home>/.env` adds to them
+/// ([`dotenv_tool_vars`]). A file that is there and cannot be read is an
+/// error: what it allows could not be overridden.
+pub fn read_tool_keys(
+    home: &Path,
+    cwd: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<ToolKeys> {
     let mut keys = ToolKeys::default();
     let files = std::iter::once(home.join("config.toml")).chain(project_config(home, cwd));
     for path in files {
@@ -278,14 +302,82 @@ pub fn read_tool_keys(home: &Path, cwd: &Path, env: &[(String, String)]) -> Resu
             );
         }
     }
-    let inherited: Vec<(String, String)> = std::env::vars().collect();
     keys.extend(ToolKeys::from_env(
         inherited
             .iter()
             .chain(env)
             .map(|(k, v)| (k.as_str(), v.as_str())),
     )?);
+    let from_dotenv = dotenv_tool_vars(home, inherited, env)?;
+    let path = home.join(".env");
+    // Only the outermost message: what serde_json says of a value that
+    // does not parse is not shown for a file that holds the API key.
+    let dotenv_keys = ToolKeys::from_env(from_dotenv.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+    keys.extend(dotenv_keys);
     Ok(keys)
+}
+
+/// The `VIBE_TOOLS` and `VIBE_TOOLS__…` variables vibe takes from
+/// `<home>/.env`: vibe-acp loads the file into its environment before any
+/// configuration layer is read (`load_dotenv_values` in
+/// `vibe/core/config/vibe_schema.py`, from `acp/entrypoint.py`), parsed as
+/// python-dotenv does ([`super::dotenv`]), each value that is not empty
+/// for a key the process's environment (`inherited` with `env`, what
+/// unharness and the session set, over it) does not give a value that is
+/// not empty. The file holds the API key: only those variables are taken
+/// from it, and no other value is kept or shown.
+///
+/// Looked at before it is opened, as vibe does: what is neither a file
+/// nor a FIFO, or cannot be looked at, vibe skips, and so does this. A
+/// FIFO (1Password's local env files are one) is refused without being
+/// opened: opening it would have it serve its content, which vibe then
+/// would not get. A file is read as a config file is: one that is not
+/// UTF-8 or is over 1 MiB is an error. So is a `VIBE_HOME` the file would
+/// set, which would move vibe to a configuration unharness did not read
+/// (the processes unharness starts are always given one, so this is only
+/// reached when the session's environment sets it empty).
+fn dotenv_tool_vars(
+    home: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Result<Vec<(String, String)>> {
+    let path = home.join(".env");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(Vec::new());
+    };
+    #[cfg(unix)]
+    if std::os::unix::fs::FileTypeExt::is_fifo(&meta.file_type()) {
+        bail!(
+            "{} is a FIFO (as a 1Password local env file is); unharness cannot read the \
+             VIBE_TOOLS settings vibe takes from it without taking its content, so ask and \
+             accept-edits are refused; use auto or bypass, or make it a regular file",
+            path.display()
+        );
+    }
+    if !meta.is_file() {
+        return Ok(Vec::new());
+    }
+    let Some(text) = read_config(&path)? else {
+        return Ok(Vec::new());
+    };
+    let environ: std::collections::HashMap<String, String> =
+        inherited.iter().chain(env).cloned().collect();
+    let loaded = super::dotenv::loaded(&text, &environ)
+        .map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    if loaded.iter().any(|(k, _)| k == "VIBE_HOME") {
+        bail!(
+            "{} sets VIBE_HOME, which would move vibe to a configuration unharness has not read",
+            path.display()
+        );
+    }
+    Ok(loaded
+        .into_iter()
+        .filter(|(k, _)| {
+            let k = k.to_ascii_lowercase();
+            k == "vibe_tools" || k.starts_with("vibe_tools__")
+        })
+        .collect())
 }
 
 /// The `agent_paths` vibe's config files name for a session in `cwd`:
@@ -543,18 +635,26 @@ pub struct Prepared {
 }
 
 /// [`read_tool_keys`] and [`install`] under `root` (else
-/// [`default_root`]), for a session in `cwd` with vibe's home at `home`;
+/// [`default_root`]), for a session in `cwd` with vibe's home at `home`,
+/// the environment it inherits `inherited` and the session's additions
+/// `env`;
 /// a profile vibe would take from elsewhere first ([`shadowing`]) is
 /// refused with the file named. Read at spawn: a config or profile
 /// written between this and vibe's session open is not seen here (the
 /// nonce check of the session's answer still is).
-pub fn prepare(root: Option<&Path>, home: &Path, cwd: &Path, env: &[(String, String)]) -> Prepared {
+pub fn prepare(
+    root: Option<&Path>,
+    home: &Path,
+    cwd: &Path,
+    inherited: &[(String, String)],
+    env: &[(String, String)],
+) -> Prepared {
     let made = (|| {
         let root = match root {
             Some(r) => r.to_path_buf(),
             None => default_root()?,
         };
-        let keys = read_tool_keys(home, cwd, env)?;
+        let keys = read_tool_keys(home, cwd, inherited, env)?;
         install(&root, &keys)
     })();
     match made {
@@ -829,41 +929,205 @@ mod tests {
             "[tools.bash]\npermission = \"always\"\n",
         )
         .unwrap();
+        // Found with links resolved, as vibe finds it (the temporary
+        // directory is behind one on macOS).
         assert_eq!(
             project_config(&home, &cwd),
-            Some(project.join(".vibe/config.toml"))
+            Some(project.canonicalize().unwrap().join(".vibe/config.toml"))
         );
-        let found = read_tool_keys(&home, &cwd, &[]).unwrap();
+        let found = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(found.names.contains("write_file") && found.names.contains("bash"));
         // A `.vibe` in the directory that holds vibe's home is its home.
         assert_eq!(project_config(&home, root.path()), None);
-        // The session's additions count too.
+        // The session's additions count too, and the environment vibe
+        // inherits, which is only what the caller passes.
         let env = [(
             "VIBE_TOOLS__edit__permission".to_string(),
             "always".to_string(),
         )];
+        let inherited = [(
+            "VIBE_TOOLS__grep__permission".to_string(),
+            "never".to_string(),
+        )];
+        let found = read_tool_keys(&home, &cwd, &inherited, &env).unwrap();
+        assert!(found.names.contains("edit") && found.never.contains("grep"));
         assert!(
-            read_tool_keys(&home, &cwd, &env)
+            !read_tool_keys(&home, &cwd, &[], &env)
                 .unwrap()
                 .names
-                .contains("edit")
+                .contains("grep")
         );
         // Unreadable: not TOML, too large, not a regular file.
         std::fs::write(home.join("config.toml"), "[tools").unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::write(
             home.join("config.toml"),
             vec![b'#'; (CONFIG_LIMIT + 1) as usize],
         )
         .unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::remove_file(home.join("config.toml")).unwrap();
         std::fs::create_dir(home.join("config.toml")).unwrap();
-        assert!(read_tool_keys(&home, &cwd, &[]).is_err());
+        assert!(read_tool_keys(&home, &cwd, &[], &[]).is_err());
         std::fs::remove_dir(home.join("config.toml")).unwrap();
         // None at all is no key.
-        let keys = read_tool_keys(&home, &cwd, &[]).unwrap();
+        let keys = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(keys.names.contains("bash") && !keys.names.contains("write_file"));
+    }
+
+    /// vibe resolves the home it is given, so with `~/.vibe` a link to a
+    /// directory elsewhere it stops looking for project config at that
+    /// directory's parent, not at `~`, and a session in `~/proj` reads
+    /// `~/.vibe/config.toml` as the project's; so does this (#212).
+    #[cfg(unix)]
+    #[test]
+    fn project_config_stops_where_vibe_stops_with_a_linked_home() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("u");
+        let real = user.join("dotfiles/vibe");
+        let proj = user.join("proj");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        std::os::unix::fs::symlink(&real, user.join(".vibe")).unwrap();
+        std::fs::write(real.join("config.toml"), "[tools.grep]\n").unwrap();
+        let home = user.join(".vibe");
+        assert_eq!(
+            project_config(&home, &proj),
+            Some(user.canonicalize().unwrap().join(".vibe/config.toml"))
+        );
+        // Given resolved, the same; below the stop nothing is read.
+        assert_eq!(project_config(&real, &proj), project_config(&home, &proj));
+        assert_eq!(project_config(&home, &real.join("x")), None);
+        // A home that is not there is resolved as far as it goes.
+        let link = user.join("linked");
+        std::os::unix::fs::symlink(user.join("dotfiles"), &link).unwrap();
+        assert_eq!(
+            project_config(&link.join("missing"), &proj),
+            Some(user.canonicalize().unwrap().join(".vibe/config.toml"))
+        );
+    }
+
+    /// `<home>/.env` names tools as vibe loads it into its environment
+    /// (#212): its `VIBE_TOOLS*` variables count unless the environment
+    /// gives the key a value already, nothing else in it is taken, and one
+    /// that cannot be read is an error that shows none of its values.
+    #[test]
+    fn tool_keys_come_from_vibes_dotenv() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join(".vibe");
+        let cwd = root.path().join("proj");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let dotenv = home.join(".env");
+        let var = |k: &str, v: &str| (k.to_string(), v.to_string());
+        std::fs::write(
+            &dotenv,
+            "MISTRAL_API_KEY=sk-secret-value\n\
+             export VIBE_TOOLS__WEB_FETCH__PERMISSION=always\n\
+             VIBE_TOOLS='{\"grep\": {\"permission\": \"never\"}}'\n\
+             vibe_tools__Search__allowlist=\"${UNSET:-x}\"\n\
+             VIBE_TOOLS__EMPTY__PERMISSION=\n\
+             VIBE_TOOLS__TAKEN__PERMISSION=always\n\
+             VIBE_ACTIVE_MODEL=x\n",
+        )
+        .unwrap();
+        let found = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
+        assert_eq!(
+            found,
+            keys(&["grep", "search", "taken", "web_fetch"], &["grep"])
+        );
+        let text = profile_text(Profile::Ask, "n", &found);
+        let profile: toml::Table = text.parse().unwrap();
+        assert_eq!(
+            profile["tools"]["web_fetch"]["permission"].as_str(),
+            Some("ask")
+        );
+        // A key the environment gives a value is the environment's, the
+        // inherited one or the session's; an empty one is not a value.
+        let found = read_tool_keys(
+            &home,
+            &cwd,
+            &[
+                var("VIBE_TOOLS", r#"{"edit": {}}"#),
+                var("VIBE_TOOLS__TAKEN__PERMISSION", ""),
+            ],
+            &[var("VIBE_TOOLS__WEB_FETCH__PERMISSION", "ask")],
+        )
+        .unwrap();
+        assert_eq!(found, keys(&["edit", "search", "taken", "web_fetch"], &[]));
+        // A VIBE_TOOLS in it that vibe could not read: an error naming the
+        // file, without the key or what JSON says of the value.
+        std::fs::write(
+            &dotenv,
+            "MISTRAL_API_KEY=sk-secret-value\nVIBE_TOOLS={sk-secret-value\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert_eq!(
+            err,
+            format!("reading {}: VIBE_TOOLS is not JSON", dotenv.display())
+        );
+        // Values that expand past the limit: refused, with no value shown.
+        let mut chain = "V0=sk-secret-value\n".to_string();
+        for n in 1..40 {
+            chain.push_str(&format!("V{n}=${{V{}}}${{V{}}}\n", n - 1, n - 1));
+        }
+        std::fs::write(&dotenv, &chain).unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert_eq!(
+            err,
+            format!("{}: a value expands past 1 MiB", dotenv.display())
+        );
+        std::fs::write(&dotenv, "VIBE_TOOLS={sk-secret-value\n").unwrap();
+        // Set in the environment, the file's is not read.
+        assert!(read_tool_keys(&home, &cwd, &[], &[var("VIBE_TOOLS", "{}")]).is_ok());
+        // Not a regular file, or not UTF-8: an error.
+        std::fs::write(&dotenv, b"MISTRAL_API_KEY=\xff\n").unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert!(
+            err.contains("is not UTF-8") && !err.contains("MISTRAL"),
+            "{err}"
+        );
+        // A VIBE_HOME it would set (none in the environment) would move
+        // vibe to a configuration that was not read: refused, unless the
+        // environment sets one, as every process unharness starts has.
+        std::fs::write(&dotenv, "VIBE_HOME=/elsewhere\n").unwrap();
+        let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+        assert!(
+            err.contains("sets VIBE_HOME") && !err.contains("/elsewhere"),
+            "{err}"
+        );
+        assert!(read_tool_keys(&home, &cwd, &[var("VIBE_HOME", "/h")], &[]).is_ok());
+        std::fs::remove_file(&dotenv).unwrap();
+        // A FIFO is refused, saying what to do, and never opened.
+        #[cfg(unix)]
+        super::super::dotenv::assert_fifo_unopened(&dotenv, || {
+            let err = format!("{:#}", read_tool_keys(&home, &cwd, &[], &[]).unwrap_err());
+            assert!(
+                err.contains("is a FIFO") && err.contains("use auto or bypass"),
+                "{err}"
+            );
+        });
+        // What is neither a file nor a FIFO vibe skips, and so is it here.
+        std::fs::create_dir(&dotenv).unwrap();
+        assert_eq!(
+            read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+            ToolKeys::default()
+        );
+        std::fs::remove_dir(&dotenv).unwrap();
+        #[cfg(unix)]
+        for target in [Path::new("/dev/null"), &home.join(".env")] {
+            std::os::unix::fs::symlink(target, &dotenv).unwrap();
+            assert_eq!(
+                read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+                ToolKeys::default()
+            );
+            std::fs::remove_file(&dotenv).unwrap();
+        }
+        assert_eq!(
+            read_tool_keys(&home, &cwd, &[], &[]).unwrap(),
+            ToolKeys::default()
+        );
     }
 
     /// A profile of unharness's name in an `agent_paths` directory of the
@@ -878,14 +1142,14 @@ mod tests {
         std::fs::create_dir_all(cwd.join(".vibe/theirs")).unwrap();
         std::fs::write(cwd.join(".vibe/theirs/unharness-ask.toml"), "").unwrap();
         let store = root.path().join("store");
-        let clean = prepare(Some(&store), &home, &cwd, &[]);
+        let clean = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(clean.own[ASK].is_ok() && clean.own[ACCEPT_EDITS].is_ok());
         std::fs::write(
             cwd.join(".vibe/config.toml"),
             "agent_paths = [\".vibe/theirs\"]\n",
         )
         .unwrap();
-        let shadowed = prepare(Some(&store), &home, &cwd, &[]);
+        let shadowed = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(shadowed.dir.is_some());
         let why = shadowed.own[ASK].as_ref().unwrap_err();
         assert!(
@@ -903,7 +1167,7 @@ mod tests {
             format!("agent_paths = [{:?}]\n", theirs.to_string_lossy()),
         )
         .unwrap();
-        let both = prepare(Some(&store), &home, &cwd, &[]);
+        let both = prepare(Some(&store), &home, &cwd, &[], &[]);
         assert!(
             both.own[ACCEPT_EDITS]
                 .as_ref()
@@ -1017,7 +1281,13 @@ mod tests {
         let home = root.path().join(".vibe");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), "[tools").unwrap();
-        let prepared = prepare(Some(&root.path().join("store")), &home, root.path(), &[]);
+        let prepared = prepare(
+            Some(&root.path().join("store")),
+            &home,
+            root.path(),
+            &[],
+            &[],
+        );
         assert_eq!(prepared.dir, None);
         for name in [ASK, ACCEPT_EDITS] {
             let why = prepared.own[name].as_ref().unwrap_err();

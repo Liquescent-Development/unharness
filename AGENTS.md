@@ -761,8 +761,9 @@ recorded ones. For anything else:
   tool comes as kind `other`, named `mcp_<server>.<tool>`, and is asked about,
   `fixtures/vibe_acp_mcp.jsonl`). Sign-in (`quick_auth`, `probe`) is
   `MISTRAL_API_KEY` set in the environment or given a value in
-  `$VIBE_HOME/.env` (parsed as python-dotenv does, presence only, a regular
-  file of at most 64 KiB); otherwise not known, since vibe also takes it
+  `$VIBE_HOME/.env` (parsed as python-dotenv does, `${VAR}` from the
+  environment, presence only, a regular file of at most 64 KiB);
+  otherwise not known, since vibe also takes it
   from the OS keyring (`vibe/setup/auth/auth_state.py`) and a configured
   provider may use another key. `min_version` is 2.26.1, the release
   checked; `vibe-acp --version` prints `vibe-acp 2.26.1`, and creates the
@@ -1160,11 +1161,26 @@ recorded ones. For anything else:
   "ask"`, `allowlist = []` for `write_file`, `edit`, `powershell`,
   `git_bash` and every key the user's `config.toml`, the project's (found
   as vibe finds it, from the session's directory up to the one holding
-  vibe's home, trusted or not: it can only ask more) and `VIBE_TOOLS` /
-  `VIBE_TOOLS__<NAME>__…` in the environment name, `never` kept where any
-  of them says it; bash gets vibe 2.26.1's default allowlist
-  (`_get_default_allowlist`, `builtins/bash.py`) without `git status`
-  (which rewrites `.git/index`), written into the file with that comment.
+  vibe's home, both with links resolved, as vibe resolves the `VIBE_HOME`
+  it is given, so a linked `~/.vibe` moves where the walk stops, trusted
+  or not: it can only ask more) and `VIBE_TOOLS` /
+  `VIBE_TOOLS__<NAME>__…` in the environment or in `$VIBE_HOME/.env` name
+  (#212: vibe-acp loads `.env` into its environment before any
+  configuration layer, `load_dotenv_values`, so unharness parses it as
+  python-dotenv 1.2.2 does, `${VAR}` expanded in linear time from the
+  process's environment as unharness sets it, and takes those variables
+  alone from it, each that is not empty and whose key the environment
+  does not give a value that is not empty; parser checked against
+  python-dotenv's own output, not a live vibe; looked at before it is
+  opened: neither a file nor a FIFO is no `.env`, as for vibe, and a FIFO
+  is refused unopened, since opening a 1Password local env file has it
+  serve its content; values that expand past 1 MiB in all, as lines
+  that each name the one before twice do, refuse both policies and read
+  as no key for sign-in, where python-dotenv, and so vibe, would run out
+  of memory), `never` kept where any of them says it; bash gets vibe
+  2.26.1's default allowlist (`_get_default_allowlist`,
+  `builtins/bash.py`) without `git status` (which rewrites
+  `.git/index`), written into the file with that comment.
   An entry runs a part unasked only when vibe's guardrails pass: no
   redirect, `$()` or `sudo`, no path outside the workdir, none of the
   writing options `_shell_command_policy.py` gates (`sort -o`, `find
@@ -1176,10 +1192,17 @@ recorded ones. For anything else:
   `always`: vibe runs them in its workdir and still asks for a path
   outside it or a sensitive one, which the transport answers as for any
   ACP agent (an edit inside the workspace allowed, #204; else the user).
-  A config file that is there and cannot be read (not regular, over
-  1 MiB, not UTF-8 or TOML, `tools` not a table) or a state directory
-  that cannot be written refuses both policies with the reason
-  (`SpawnPlan::own_modes`), never a degraded profile. Profiles are found
+  A config file or `.env` that is there and cannot be read (not regular,
+  over 1 MiB, not UTF-8 or TOML, `tools` not a table, a `VIBE_TOOLS` that
+  is not a JSON object; a FIFO `.env`, which vibe reads, too) or a state
+  directory that cannot be written refuses both policies with the reason
+  (`SpawnPlan::own_modes`), never a degraded profile. Every vibe process
+  (`vibe-acp` and vibe's CLI) is given `VIBE_HOME`, the home unharness
+  read: vibe resolves its home from the variable on every access, after
+  `load_dotenv_values`, so a `VIBE_HOME` written into `.env` (writable in
+  the sandbox) would otherwise move the next process to a `config.toml`
+  unharness never read; a `.env` that would still set it (the session's
+  environment setting it empty) refuses both policies. Profiles are found
   in `agent_paths` first, then a trusted project's `.vibe/agents/`, then
   `~/.vibe/agents/`, the first of a name kept (`core/agents/
   registry.py`), and `agent_paths` concatenates across layers in order

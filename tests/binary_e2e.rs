@@ -16,6 +16,23 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// unharness without the `VIBE_*` variables of the environment the tests
+/// run in, which vibe reads without regard to case and unharness reads for
+/// its vibe profiles (#219).
+fn unharness_without_vibe_env() -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_unharness"));
+    for (key, _) in std::env::vars_os() {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("VIBE_")
+        {
+            cmd.env_remove(key);
+        }
+    }
+    cmd
+}
+
 fn python_available() -> bool {
     Command::new("python3")
         .arg("--version")
@@ -763,7 +780,15 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
-    for dir in ["home", "config/unharness", "state", "data", "cache", "ws"] {
+    for dir in [
+        "home",
+        "vibe",
+        "config/unharness",
+        "state",
+        "data",
+        "cache",
+        "ws",
+    ] {
         std::fs::create_dir_all(root.join(dir)).unwrap();
     }
     std::fs::write(
@@ -774,11 +799,12 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
         ),
     )
     .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+    let out = unharness_without_vibe_env()
         .args(["-H", "vibe", "--sandbox", "off", "--policy", "bypass"])
         .args(["--print", "say hi"])
         .current_dir(root.join("ws"))
         .env("HOME", root.join("home"))
+        .env("VIBE_HOME", root.join("vibe"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("state"))
         .env("XDG_DATA_HOME", root.join("data"))
@@ -916,7 +942,7 @@ fn native_print_and_no_tui_run_vibes_own_cli() {
     .unwrap();
     let ws = root.join("ws").canonicalize().unwrap();
     let run = |args: &[&str]| {
-        let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+        let out = unharness_without_vibe_env()
             .args(["-H", "vibe", "--sandbox", "off"])
             .args(args)
             .current_dir(&ws)
@@ -926,7 +952,6 @@ fn native_print_and_no_tui_run_vibes_own_cli() {
             .env("XDG_STATE_HOME", root.join("state"))
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_CACHE_HOME", root.join("cache"))
-            .env_remove("VIBE_ACTIVE_MODEL")
             .stdin(Stdio::null())
             .output()
             .unwrap();

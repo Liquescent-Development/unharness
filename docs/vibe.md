@@ -87,7 +87,8 @@ vibe's own `ask` mode runs a tool unasked when vibe's configuration says
 so, and nothing tells unharness: `[tools.<name>] permission = "always"` or
 an `allowlist` entry (what vibe's own "Always allow" writes into
 `config.toml`), `bypass_tool_permissions = true`, the same in a trusted
-project's `.vibe/config.toml` or in a `VIBE_*` variable, or a profile named
+project's `.vibe/config.toml` or in a `VIBE_*` variable (also one set in
+`~/.vibe/.env`, which vibe loads into its environment), or a profile named
 `ask` in `~/.vibe/agents/` that replaces vibe's own. So under `ask` and
 `accept-edits` unharness runs vibe in profiles of its own instead, which
 vibe applies above all of those:
@@ -99,9 +100,22 @@ vibe applies above all of those:
   written.
 - Each turns `bypass_tool_permissions` off and makes `write_file`, `edit`,
   the shells and every other tool your `config.toml`, the project's
-  `.vibe/config.toml` or a `VIBE_TOOLS` variable names ask (a tool you set
-  to `never` stays off). `unharness-accept-edits` lets `write_file` and
-  `edit` run in the session's directory.
+  `.vibe/config.toml` or a `VIBE_TOOLS` variable, in the environment or in
+  `~/.vibe/.env`, names ask (a tool you set to `never` stays off).
+  `unharness-accept-edits` lets `write_file` and `edit` run in the
+  session's directory.
+- From `.env`, which holds your key, unharness takes those variables
+  alone, and only where the environment does not set them to a value that
+  is not empty, as vibe does; nothing of it is copied or shown. vibe is
+  always started with `VIBE_HOME` set, so a `VIBE_HOME` in `.env` does
+  not move it to a configuration unharness has not read. A `config.toml`
+  or `.env` that unharness cannot read (not UTF-8, over 1 MiB, not
+  valid, or with values that expand past 1 MiB) refuses `ask` and
+  `accept-edits` with the reason, and so does a `.env` that is a FIFO, as
+  a 1Password local env file is: unharness does not open it, since that
+  would take what it serves. Use `auto` or `bypass` there, or make `.env`
+  a regular file. A `.env` that is neither a file nor a FIFO vibe skips,
+  and so does unharness.
 - Read-only commands still run without asking: the profile lists vibe
   2.26.1's own read-only commands (`ls`, `cat`, `grep`, `git diff`, …,
   without `git status`, which rewrites `.git/index`), and vibe still asks
