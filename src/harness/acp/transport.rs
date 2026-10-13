@@ -52,9 +52,9 @@ use crate::core::process::{LineProcess, RawLine};
 use crate::core::rules::{self, ToolAction};
 use crate::core::session::ProcessSlot;
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, PermissionDecision,
-    PermissionKind, PermissionPolicy, PermissionRequest, ProcessModel, RemoteControl,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
+    AgentEvent, Attachment, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
+    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, ProcessModel,
+    RemoteControl, SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason,
 };
 use crate::harness::which;
 

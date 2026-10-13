@@ -9,6 +9,7 @@ pub mod guard;
 pub mod ids;
 pub mod jsonrpc;
 pub mod mcp;
+pub mod parser;
 pub mod per_turn;
 pub mod process;
 pub mod reaper;
@@ -29,6 +30,7 @@ pub use event::{
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
 pub use mcp::{McpServer, McpTransport};
+pub use parser::Parser;
 pub use rules::{Rule, Rules, ToolAction};
 pub use sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 pub use session::{

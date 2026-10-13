@@ -15,7 +15,7 @@ use super::parse::AgyParser;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::session::ProcessSlot;
 use crate::core::{
-    AgentEvent, HarnessId, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand,
+    AgentEvent, HarnessId, Parser, PermissionPolicy, ProcessModel, RemoteControl, SessionCommand,
     SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
 };
 

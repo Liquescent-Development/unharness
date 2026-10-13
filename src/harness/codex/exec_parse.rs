@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, PlanEntry, PlanStatus, StopReason, Usage};
+use crate::core::{AgentEvent, Parser, PlanEntry, PlanStatus, StopReason, Usage};
 
 #[derive(Debug, Default)]
 pub struct CodexExecParser {
@@ -13,15 +13,17 @@ impl CodexExecParser {
     pub fn new() -> Self {
         Self::default()
     }
+}
 
-    pub fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+impl Parser for CodexExecParser {
+    fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return vec![AgentEvent::Notice(line.to_string())];
         };
         self.feed_value(&v)
     }
 
-    pub fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
+    fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         let t = line.trim();
         if t.is_empty() {
             vec![]
@@ -29,7 +31,9 @@ impl CodexExecParser {
             vec![AgentEvent::Notice(format!("codex: {t}"))]
         }
     }
+}
 
+impl CodexExecParser {
     pub fn feed_value(&mut self, v: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         match s(v, "type") {
@@ -219,16 +223,7 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{LineParser, assert_fixture, fixtures_dir};
-
-    impl LineParser for CodexExecParser {
-        fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
-            CodexExecParser::feed(self, line)
-        }
-        fn feed_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-            CodexExecParser::feed_stderr(self, line)
-        }
-    }
+    use crate::core::testing::{assert_fixture, fixtures_dir};
 
     #[test]
     fn fixture_exec_basic() {
