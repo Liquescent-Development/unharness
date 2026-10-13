@@ -28,8 +28,10 @@ to lay out the transcript, to render and to draw.
 src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                AgentEvent, SessionHandle/SessionCommand, LineProcess, the
                session driver (driver/: the loop around a StreamProtocol,
-               one process per session; per_turn.rs, one per turn),
-               JSON-RPC framing, Registry, SessionsStore,
+               one process per session, which also sends a protocol's
+               JSON-RPC requests and routes their answers back by id;
+               per_turn.rs, one per turn), JSON-RPC framing (jsonrpc.rs),
+               Registry, SessionsStore,
                file checkpoints, allow rules (rules.rs), who answers a
                permission request (permissions.rs), the sandbox
                (sandbox/: levels, profile, Landlock and Seatbelt backends)
@@ -38,7 +40,8 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
                list_models, start_session, build_print_command, and what
                the sandbox must leave writable and watch for it
   claude/      stream-json transport + parser + fixtures/
-  codex/       app-server + exec transports + parsers + fixtures/
+  codex/       app-server protocol (on the driver's loop) + exec turns
+               (per_turn) + parsers + fixtures/
   pi/          rpc transport + parser + fixtures/
   agy/         stream-json transport
   acp/         generic Agent Client Protocol client: one instance per configured agent

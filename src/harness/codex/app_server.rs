@@ -5,18 +5,17 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 use super::OwnSandbox;
 use super::app_server_parse::CodexAppServerParser;
 use super::app_server_parse::ELICITATION_PREFIX;
-use crate::core::jsonrpc::{self, RpcMessage};
-use crate::core::process::{LineProcess, RawLine};
+use crate::core::driver::{self, Answer, Encoded, Gone, Io, Shutdown, StreamProtocol};
+use crate::core::jsonrpc::{self, RequestId, RpcMessage};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, HarnessCommand, HarnessId, ModelRef, Parser,
-    PermissionDecision, PermissionKind, PermissionPolicy, ProcessModel, RemoteControl,
-    SessionCommand, SessionConfig, SessionHandle, SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelRef, Parser,
+    PermissionDecision, PermissionKind, PermissionPolicy, SessionCommand, SessionConfig,
+    SessionHandle, StopReason,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -174,7 +173,8 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
     }
 }
 
-pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
+/// `caps` is what the harness declares for app-server.
+pub fn start(cfg: SessionConfig, caps: &Capabilities) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
     cmd.arg("app-server").current_dir(&cfg.cwd);
     if cfg.sandbox.is_active() {
@@ -194,14 +194,8 @@ pub fn start(cfg: SessionConfig) -> Result<SessionHandle> {
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
-    let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::CODEX,
-        process_model: ProcessModel::LongLived,
-    });
-    handle.process_slot().set(&proc);
-    tokio::spawn(drive(proc, cfg, events_tx, cmd_rx));
-    Ok(handle)
+    let sandbox = cfg.sandbox.clone();
+    driver::start(HarnessId::CODEX, caps, cmd, &sandbox, AppServer::new(cfg))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,10 +209,13 @@ enum Outstanding {
     Revert,
 }
 
-struct Driver {
-    proc: LineProcess,
+/// What the driver does with Codex's app-server protocol. Its requests go
+/// through the loop ([`Io::request`]), which numbers them and brings their
+/// answers to [`StreamProtocol::on_answer`]; what each was for is kept
+/// here, in `outstanding`.
+struct AppServer {
+    cfg: SessionConfig,
     parser: CodexAppServerParser,
-    next_id: u64,
     outstanding: HashMap<u64, Outstanding>,
     /// Server requests awaiting a decision: our string id → (rpc id, kind).
     pending: HashMap<String, (Value, PermissionKind)>,
@@ -244,26 +241,51 @@ struct Driver {
     skills_pending: bool,
 }
 
-impl Driver {
-    async fn request(&mut self, method: &str, params: Value, kind: Outstanding) -> Result<u64> {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.outstanding.insert(id, kind);
-        self.proc
-            .write_line(&jsonrpc::request(id, method, params))
-            .await?;
-        Ok(id)
+/// A request that could not be written is told as an error.
+async fn report<T>(io: &Io<'_>, res: Result<T>) {
+    if let Err(e) = res {
+        io.emit(AgentEvent::Error(format!("codex: {e}"))).await;
+    }
+}
+
+impl AppServer {
+    fn new(cfg: SessionConfig) -> Self {
+        AppServer {
+            parser: CodexAppServerParser::new(),
+            outstanding: HashMap::new(),
+            pending: HashMap::new(),
+            elicitations: HashSet::new(),
+            thread_id: None,
+            turn_id: None,
+            child_turns: HashMap::new(),
+            model: cfg.model.clone(),
+            effort: cfg.effort.clone(),
+            policy: cfg.policy,
+            own_sandbox: OwnSandbox::for_session(&cfg.sandbox),
+            queued_turn: None,
+            interrupt_wanted: false,
+            skills: Vec::new(),
+            skills_pending: false,
+            cfg,
+        }
     }
 
-    async fn list_skills(&mut self, cwd: &std::path::Path) -> Result<()> {
+    async fn request(
+        &mut self,
+        io: &mut Io<'_>,
+        method: &str,
+        params: Value,
+        kind: Outstanding,
+    ) -> Result<u64> {
+        let (id, sent) = io.request(method, params).await;
+        self.outstanding.insert(id, kind);
+        sent.map(|()| id)
+    }
+
+    async fn list_skills(&mut self, io: &mut Io<'_>) -> Result<()> {
         self.skills_pending = true;
-        let line = json!({
-            "jsonrpc": "2.0",
-            "id": SKILLS_ID,
-            "method": "skills/list",
-            "params": {"cwds": [cwd]},
-        });
-        self.proc.write_line(&line.to_string()).await
+        let params = json!({"cwds": [self.cfg.cwd]});
+        io.request_named(SKILLS_ID, "skills/list", params).await
     }
 
     /// A turn's input items; `/name` for a skill goes as Codex's own
@@ -279,7 +301,12 @@ impl Driver {
         items
     }
 
-    async fn start_turn(&mut self, text: String, attachments: Vec<Attachment>) -> Result<()> {
+    async fn start_turn(
+        &mut self,
+        io: &mut Io<'_>,
+        text: String,
+        attachments: Vec<Attachment>,
+    ) -> Result<()> {
         let thread_id = match self.thread_id.clone() {
             Some(t) if !(self.skills_pending && text.starts_with('/')) => t,
             _ => {
@@ -300,14 +327,14 @@ impl Driver {
         let (approval, _) = policy_params(self.policy, self.own_sandbox);
         params["approvalPolicy"] = json!(approval);
         params["sandboxPolicy"] = sandbox_policy(self.own_sandbox);
-        self.request("turn/start", params, Outstanding::TurnStart)
+        self.request(io, "turn/start", params, Outstanding::TurnStart)
             .await?;
         Ok(())
     }
 
     /// The main thread's turn has an id: interrupt it if that was asked
     /// for before it had one.
-    async fn turn_known(&mut self) -> Result<()> {
+    async fn turn_known(&mut self, io: &mut Io<'_>) -> Result<()> {
         if !std::mem::take(&mut self.interrupt_wanted) {
             return Ok(());
         }
@@ -315,408 +342,461 @@ impl Driver {
             return Ok(());
         };
         let params = json!({"threadId": thread, "turnId": turn});
-        self.request("turn/interrupt", params, Outstanding::Interrupt)
+        self.request(io, "turn/interrupt", params, Outstanding::Interrupt)
             .await
             .map(|_| ())
     }
 
     /// A sub-agent's turn counts as one: it runs on with the main turn over.
-    async fn shut_down(&mut self) {
-        let turn_open = self.turn_id.is_some()
+    fn turn_open(&self) -> bool {
+        self.turn_id.is_some()
             || !self.child_turns.is_empty()
             || self.queued_turn.is_some()
             || self
                 .outstanding
                 .values()
-                .any(|o| *o == Outstanding::TurnStart);
-        self.proc.end_or_kill(turn_open).await;
-    }
-}
-
-async fn drive(
-    proc: LineProcess,
-    cfg: SessionConfig,
-    events: mpsc::Sender<AgentEvent>,
-    mut cmds: mpsc::Receiver<SessionCommand>,
-) {
-    let mut d = Driver {
-        proc,
-        parser: CodexAppServerParser::new(),
-        next_id: 0,
-        outstanding: HashMap::new(),
-        pending: HashMap::new(),
-        elicitations: HashSet::new(),
-        thread_id: None,
-        turn_id: None,
-        child_turns: HashMap::new(),
-        model: cfg.model.clone(),
-        effort: cfg.effort.clone(),
-        policy: cfg.policy,
-        own_sandbox: OwnSandbox::for_session(&cfg.sandbox),
-        queued_turn: None,
-        interrupt_wanted: false,
-        skills: Vec::new(),
-        skills_pending: false,
-    };
-    let mut shutting_down = false;
-
-    if let Err(e) = d
-        .request(
-            "initialize",
-            json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}}),
-            Outstanding::Initialize,
-        )
-        .await
-    {
-        let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                .any(|o| *o == Outstanding::TurnStart)
     }
 
-    loop {
-        tokio::select! {
-            cmd = cmds.recv() => {
-                let Some(cmd) = cmd else { break };
-                let res: Result<()> = match cmd {
-                    SessionCommand::SendTurn { text, attachments } => d.start_turn(text, attachments).await,
-                    SessionCommand::Steer { text, attachments } => {
-                        match (d.thread_id.clone(), d.turn_id.clone()) {
-                            (Some(t), Some(turn)) => {
-                                let params = json!({
-                                    "threadId": t,
-                                    "expectedTurnId": turn,
-                                    "input": d.input(&text, &attachments),
-                                });
-                                d.request("turn/steer", params, Outstanding::Other).await.map(|_| ())
-                            }
-                            // Nothing is running: it is simply the next turn.
-                            _ => d.start_turn(text, attachments).await,
-                        }
-                    }
-                    SessionCommand::Rewind { anchor } => match d.thread_id.clone() {
-                        Some(t) => d
-                            .request("thread/revert", json!({"threadId": t, "beforeTurnId": anchor}), Outstanding::Revert)
-                            .await
-                            .map(|_| ()),
-                        None => Ok(()),
-                    },
-                    SessionCommand::Compact { .. } => match d.thread_id.clone() {
-                        // Runs as a turn of its own (turn/started … turn/completed).
-                        Some(t) => d
-                            .request("thread/compact/start", json!({"threadId": t}), Outstanding::Other)
-                            .await
-                            .map(|_| ()),
-                        None => {
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Error("codex: no thread to compact yet".into()),
-                            }).await;
-                            Ok(())
-                        }
-                    },
-                    SessionCommand::Interrupt => {
-                        match (&d.thread_id, &d.turn_id) {
-                            (Some(t), Some(turn)) => {
-                                let params = json!({"threadId": t, "turnId": turn});
-                                d.request("turn/interrupt", params, Outstanding::Interrupt).await.map(|_| ())
-                            }
-                            // Waiting for the thread: it is never sent.
-                            _ if d.queued_turn.take().is_some() => {
-                                let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
-                                let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Interrupted }).await;
-                                Ok(())
-                            }
-                            // Sent, with no id to interrupt it by yet.
-                            _ if d.outstanding.values().any(|o| *o == Outstanding::TurnStart) => {
-                                d.interrupt_wanted = true;
-                                Ok(())
-                            }
-                            _ => Ok(()),
-                        }
-                    }
-                    SessionCommand::StopSubagent { id } => {
-                        let running = d.parser.child_thread(&id).and_then(|thread| {
-                            d.child_turns.get(thread).map(|turn| (thread.to_string(), turn.clone()))
+    /// Carry out `cmd`; what could not be written is the error.
+    async fn command(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Result<()> {
+        match cmd {
+            SessionCommand::SendTurn { text, attachments } => {
+                self.start_turn(io, text, attachments).await
+            }
+            SessionCommand::Steer { text, attachments } => {
+                match (self.thread_id.clone(), self.turn_id.clone()) {
+                    (Some(t), Some(turn)) => {
+                        let params = json!({
+                            "threadId": t,
+                            "expectedTurnId": turn,
+                            "input": self.input(&text, &attachments),
                         });
-                        match running {
-                            Some((thread, turn)) => {
-                                let params = json!({"threadId": thread, "turnId": turn});
-                                d.request("turn/interrupt", params, Outstanding::Interrupt).await.map(|_| ())
-                            }
-                            None => {
-                                let _ = events.send(AgentEvent::Notice("that sub-agent is no longer running".into())).await;
-                                Ok(())
-                            }
-                        }
+                        self.request(io, "turn/steer", params, Outstanding::Other)
+                            .await
+                            .map(|_| ())
                     }
-                    SessionCommand::RespondPermission { id, decision } => match d.pending.remove(&id) {
-                        Some((rpc_id, kind)) => {
-                            let approval = d.elicitations.remove(&id)
-                                && matches!(kind, PermissionKind::ToolUse { .. });
-                            let answer = if approval {
-                                encode_mcp_approval(&decision)
-                            } else {
-                                encode_decision(&kind, &decision)
-                            };
-                            d.proc.write_line(&jsonrpc::response(&rpc_id, answer)).await
-                        }
-                        None => {
-                            let _ = events.send(AgentEvent::Notice(format!("no pending codex request {id}"))).await;
-                            Ok(())
-                        }
-                    },
-                    SessionCommand::SetModel(m) => {
-                        d.model = Some(m);
-                        Ok(())
-                    }
-                    SessionCommand::SetEffort(e) => {
-                        d.effort = e;
-                        Ok(())
-                    }
-                    SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "Codex has no remote control".into(),
-                        })).await;
-                        Ok(())
-                    }
-                    SessionCommand::SetPolicy(p) => {
-                        // Applied on the next turn/start (approvalPolicy + sandboxPolicy).
-                        d.policy = p;
-                        Ok(())
-                    }
-                    SessionCommand::Shutdown => {
-                        shutting_down = true;
-                        d.shut_down().await;
-                        Ok(())
-                    }
-                };
-                if let Err(e) = res {
-                    let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
+                    // Nothing is running: it is simply the next turn.
+                    _ => self.start_turn(io, text, attachments).await,
                 }
             }
-            raw = d.proc.lines.recv() => {
-                match raw {
-                    Some(RawLine::Stdout(line)) => {
-                        let msg = RpcMessage::parse(&line);
-                        match &msg {
-                            // An older Codex without `skills/list` answers with an
-                            // error, which is not the user's: no skills, and the
-                            // parser does not see it.
-                            Some(RpcMessage::Response { id, result, .. }) if id.as_str() == Some(SKILLS_ID) => {
-                                d.skills_pending = false;
-                                d.skills = result.as_ref().map(listed_skills).unwrap_or_default();
-                                let commands: Vec<HarnessCommand> = d.skills.iter().map(|(c, _)| c.clone()).collect();
-                                let _ = events.send(AgentEvent::CapabilitiesChanged(CapsUpdate {
-                                    slash_commands: Some(!commands.is_empty()),
-                                    commands: Some(commands),
-                                    ..Default::default()
-                                })).await;
-                                if let Some((t, a)) = d.queued_turn.take()
-                                    && let Err(e) = d.start_turn(t, a).await
-                                {
-                                    let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                }
-                                continue;
-                            }
-                            Some(RpcMessage::Response { id, result, error }) => {
-                                let kind = id.as_u64().and_then(|i| d.outstanding.remove(&i));
-                                match kind {
-                                    Some(Outstanding::Initialize) => {
-                                        let _ = d.proc.write_line(&jsonrpc::notification("initialized", Value::Null)).await;
-                                        let (approval, sandbox) = policy_params(cfg.policy, d.own_sandbox);
-                                        let r = match &cfg.resume {
-                                            // A fork answers like a start: with the new thread.
-                                            Some(id) => {
-                                                // A thread keeps the provider it was started on
-                                                // unless told otherwise, and so does a fork of it.
-                                                let mut params = json!({"threadId": id});
-                                                if let Some(p) = &cfg.provider {
-                                                    params["modelProvider"] = json!(p.as_str());
-                                                }
-                                                if cfg.fork {
-                                                    // (`excludeTurns`: codex deprecates returning the whole history here.)
-                                                    params["excludeTurns"] = json!(true);
-                                                    d.request("thread/fork", params, Outstanding::ThreadStart).await
-                                                } else {
-                                                    d.request("thread/resume", params, Outstanding::ThreadStart).await
-                                                }
-                                            }
-                                            None => {
-                                                let mut params = json!({
-                                                    "cwd": cfg.cwd,
-                                                    "approvalPolicy": approval,
-                                                    "sandbox": sandbox,
-                                                });
-                                                if let Some(m) = &cfg.model {
-                                                    params["model"] = json!(m.model);
-                                                }
-                                                d.request("thread/start", params, Outstanding::ThreadStart).await
-                                            }
-                                        };
-                                        if let Err(e) = r {
-                                            let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                        }
-                                    }
-                                    Some(Outstanding::ThreadStart) => {
-                                        if let Some(err) = error {
-                                            let msg = err.get("message").and_then(Value::as_str).unwrap_or("thread start failed");
-                                            // No turn id to rewind to: keep the anchor sequence aligned.
-                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
-                                            let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
-                                        } else {
-                                            d.thread_id = result
-                                                .as_ref()
-                                                .and_then(|r| r.pointer("/thread/id").or_else(|| r.get("threadId")))
-                                                .and_then(Value::as_str)
-                                                .map(str::to_string);
-                                            if let Some(reported) = result.as_ref().and_then(|r| r.get("modelProvider")).and_then(Value::as_str) {
-                                                if let Some(why) = super::provider_mismatch(cfg.provider.as_ref(), reported) {
-                                                    let _ = events.send(AgentEvent::Error(why)).await;
-                                                }
-                                                let _ = events.send(AgentEvent::CapabilitiesChanged(CapsUpdate {
-                                                    provider: Some(reported.into()),
-                                                    ..Default::default()
-                                                })).await;
-                                            }
-                                            if let Err(e) = d.list_skills(&cfg.cwd).await {
-                                                let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                            }
-                                            if let Some((t, a)) = d.queued_turn.take()
-                                                && let Err(e) = d.start_turn(t, a).await
-                                            {
-                                                let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                            }
-                                        }
-                                    }
-                                    Some(Outstanding::Revert) => {
-                                        if let Some(err) = error {
-                                            let reason = err.get("message").and_then(Value::as_str).unwrap_or("revert failed").to_string();
-                                            let _ = events.send(AgentEvent::RewindFailed { reason }).await;
-                                        }
-                                    }
-                                    Some(Outstanding::TurnStart) => {
-                                        if let Some(err) = error {
-                                            d.interrupt_wanted = false;
-                                            let msg = err.get("message").and_then(Value::as_str).unwrap_or("turn start failed");
-                                            // No turn id to rewind to: keep the anchor sequence aligned.
-                                            let _ = events.send(AgentEvent::TurnAnchor { id: String::new() }).await;
-                                            let _ = events.send(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(format!("codex: {msg}")) }).await;
-                                        } else {
-                                            d.turn_id = result
-                                                .as_ref()
-                                                .and_then(|r| r.pointer("/turn/id"))
-                                                .and_then(Value::as_str)
-                                                .map(str::to_string);
-                                            // `thread/revert` takes this id to drop the turn later.
-                                            if let Some(id) = d.turn_id.clone() {
-                                                let _ = events.send(AgentEvent::TurnAnchor { id }).await;
-                                            }
-                                            if let Err(e) = d.turn_known().await {
-                                                let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                            }
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            // Track the running turn: steer and interrupt need its id.
-                            // Sub-agent threads share the stream; only the main thread's turn counts.
-                            Some(RpcMessage::Notification { method, params })
-                                if params.get("threadId").and_then(Value::as_str) == d.thread_id.as_deref() =>
-                            {
-                                match method.as_str() {
-                                    "turn/started" => {
-                                        d.turn_id = params.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
-                                        if let Err(e) = d.turn_known().await {
-                                            let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                        }
-                                    }
-                                    "turn/completed" => {
-                                        d.turn_id = None;
-                                        d.interrupt_wanted = false;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            // Its skill files changed: what it lists now.
-                            Some(RpcMessage::Notification { method, .. }) if method == "skills/changed" => {
-                                if let Err(e) = d.list_skills(&cfg.cwd).await {
-                                    let _ = events.send(AgentEvent::Error(format!("codex: {e}"))).await;
-                                }
-                            }
-                            // A sub-agent's turn is what stopping it interrupts.
-                            Some(RpcMessage::Notification { method, params }) => {
-                                if let Some(thread) = params.get("threadId").and_then(Value::as_str) {
-                                    match method.as_str() {
-                                        "turn/started" => {
-                                            if let Some(turn) = params.pointer("/turn/id").and_then(Value::as_str) {
-                                                d.child_turns.insert(thread.to_string(), turn.to_string());
-                                            }
-                                        }
-                                        "turn/completed" => {
-                                            d.child_turns.remove(thread);
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                            Some(RpcMessage::Request { id, method, .. }) => {
-                                // Remember the rpc id so the decision can be routed back.
-                                let rid = match id {
-                                    Value::String(s) => s.clone(),
-                                    other => other.to_string(),
-                                };
-                                let supported = method.ends_with("requestApproval")
-                                    || method == "item/tool/requestUserInput"
-                                    || method == "mcpServer/elicitation/request";
-                                if !supported {
-                                    let _ = d.proc.write_line(&jsonrpc::error_response(id, -32601, "unsupported by unharness")).await;
-                                } else {
-                                    if method == "mcpServer/elicitation/request" {
-                                        d.elicitations.insert(rid.clone());
-                                    }
-                                    d.pending.insert(rid, (id.clone(), PermissionKind::Confirm { title: String::new(), message: None }));
-                                }
-                            }
-                            _ => {}
-                        }
-                        for ev in d.parser.feed(&line) {
-                            // A sub-agent's request arrives wrapped in `Sub`.
-                            let mut inner = &ev;
-                            while let AgentEvent::Sub { event, .. } = inner {
-                                inner = event;
-                            }
-                            if let AgentEvent::PermissionRequest(req) = inner
-                                && let Some((rpc_id, _)) = d.pending.remove(&req.id)
-                            {
-                                d.pending.insert(req.id.clone(), (rpc_id, req.kind.clone()));
-                            }
-                            if events.send(ev).await.is_err() {
-                                if !shutting_down {
-                                    if shutdown_queued(&mut cmds) {
-                                        d.shut_down().await;
-                                    } else {
-                                        d.proc.kill().await;
-                                    }
-                                }
-                                return;
-                            }
-                        }
+            SessionCommand::Rewind { anchor } => match self.thread_id.clone() {
+                Some(t) => self
+                    .request(
+                        io,
+                        "thread/revert",
+                        json!({"threadId": t, "beforeTurnId": anchor}),
+                        Outstanding::Revert,
+                    )
+                    .await
+                    .map(|_| ()),
+                None => Ok(()),
+            },
+            SessionCommand::Compact { .. } => match self.thread_id.clone() {
+                // Runs as a turn of its own (turn/started … turn/completed).
+                Some(t) => self
+                    .request(
+                        io,
+                        "thread/compact/start",
+                        json!({"threadId": t}),
+                        Outstanding::Other,
+                    )
+                    .await
+                    .map(|_| ()),
+                None => {
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error("codex: no thread to compact yet".into()),
+                    })
+                    .await;
+                    Ok(())
+                }
+            },
+            SessionCommand::Interrupt => {
+                match (&self.thread_id, &self.turn_id) {
+                    (Some(t), Some(turn)) => {
+                        let params = json!({"threadId": t, "turnId": turn});
+                        self.request(io, "turn/interrupt", params, Outstanding::Interrupt)
+                            .await
+                            .map(|_| ())
                     }
-                    Some(RawLine::Stderr(line)) => {
-                        for ev in d.parser.feed_stderr(&line) {
-                            let _ = events.send(ev).await;
-                        }
+                    // Waiting for the thread: it is never sent.
+                    _ if self.queued_turn.take().is_some() => {
+                        io.emit(AgentEvent::TurnAnchor { id: String::new() }).await;
+                        io.emit(AgentEvent::TurnCompleted {
+                            stop_reason: StopReason::Interrupted,
+                        })
+                        .await;
+                        Ok(())
                     }
-                    Some(RawLine::Exited(code)) => {
-                        let _ = events.send(AgentEvent::ProcessExited { code }).await;
-                        break;
+                    // Sent, with no id to interrupt it by yet.
+                    _ if self
+                        .outstanding
+                        .values()
+                        .any(|o| *o == Outstanding::TurnStart) =>
+                    {
+                        self.interrupt_wanted = true;
+                        Ok(())
                     }
-                    None => break,
+                    _ => Ok(()),
                 }
             }
+            SessionCommand::StopSubagent { id } => {
+                let running = self.parser.child_thread(&id).and_then(|thread| {
+                    self.child_turns
+                        .get(thread)
+                        .map(|turn| (thread.to_string(), turn.clone()))
+                });
+                match running {
+                    Some((thread, turn)) => {
+                        let params = json!({"threadId": thread, "turnId": turn});
+                        self.request(io, "turn/interrupt", params, Outstanding::Interrupt)
+                            .await
+                            .map(|_| ())
+                    }
+                    None => {
+                        io.emit(AgentEvent::Notice(
+                            "that sub-agent is no longer running".into(),
+                        ))
+                        .await;
+                        Ok(())
+                    }
+                }
+            }
+            SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {
+                Some((rpc_id, kind)) => {
+                    let approval = self.elicitations.remove(&id)
+                        && matches!(kind, PermissionKind::ToolUse { .. });
+                    let answer = if approval {
+                        encode_mcp_approval(&decision)
+                    } else {
+                        encode_decision(&kind, &decision)
+                    };
+                    io.write(&jsonrpc::response(&rpc_id, answer)).await
+                }
+                None => {
+                    io.emit(AgentEvent::Notice(format!("no pending codex request {id}")))
+                        .await;
+                    Ok(())
+                }
+            },
+            SessionCommand::SetModel(m) => {
+                self.model = Some(m);
+                Ok(())
+            }
+            SessionCommand::SetEffort(e) => {
+                self.effort = e;
+                Ok(())
+            }
+            SessionCommand::SetPolicy(p) => {
+                // Applied on the next turn/start (approvalPolicy + sandboxPolicy).
+                self.policy = p;
+                Ok(())
+            }
+            // Not sent here: `encode`'s and the driver's (`shutdown`).
+            SessionCommand::RemoteControl { .. } | SessionCommand::Shutdown => Ok(()),
         }
     }
 
-    if !shutting_down {
-        d.proc.kill().await;
+    /// The answer to `skills/list`. An older Codex without it answers with
+    /// an error, which is not the user's: no skills, and the parser does
+    /// not see it.
+    async fn skills_listed(&mut self, result: Option<&Value>, io: &mut Io<'_>) {
+        self.skills_pending = false;
+        self.skills = result.map(listed_skills).unwrap_or_default();
+        let commands: Vec<HarnessCommand> = self.skills.iter().map(|(c, _)| c.clone()).collect();
+        io.emit(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            slash_commands: Some(!commands.is_empty()),
+            commands: Some(commands),
+            ..Default::default()
+        }))
+        .await;
+        if let Some((t, a)) = self.queued_turn.take() {
+            let started = self.start_turn(io, t, a).await;
+            report(io, started).await;
+        }
+    }
+
+    /// The answer to a numbered request of ours, which was `kind`.
+    async fn answered(
+        &mut self,
+        kind: Option<Outstanding>,
+        result: Option<Value>,
+        error: Option<Value>,
+        io: &mut Io<'_>,
+    ) {
+        match kind {
+            Some(Outstanding::Initialize) => {
+                let _ = io
+                    .write(&jsonrpc::notification("initialized", Value::Null))
+                    .await;
+                let (approval, sandbox) = policy_params(self.cfg.policy, self.own_sandbox);
+                let r = match self.cfg.resume.clone() {
+                    // A fork answers like a start: with the new thread.
+                    Some(id) => {
+                        // A thread keeps the provider it was started on
+                        // unless told otherwise, and so does a fork of it.
+                        let mut params = json!({"threadId": id});
+                        if let Some(p) = &self.cfg.provider {
+                            params["modelProvider"] = json!(p.as_str());
+                        }
+                        if self.cfg.fork {
+                            // (`excludeTurns`: codex deprecates returning the whole history here.)
+                            params["excludeTurns"] = json!(true);
+                            self.request(io, "thread/fork", params, Outstanding::ThreadStart)
+                                .await
+                        } else {
+                            self.request(io, "thread/resume", params, Outstanding::ThreadStart)
+                                .await
+                        }
+                    }
+                    None => {
+                        let mut params = json!({
+                            "cwd": self.cfg.cwd,
+                            "approvalPolicy": approval,
+                            "sandbox": sandbox,
+                        });
+                        if let Some(m) = &self.cfg.model {
+                            params["model"] = json!(m.model);
+                        }
+                        self.request(io, "thread/start", params, Outstanding::ThreadStart)
+                            .await
+                    }
+                };
+                report(io, r).await;
+            }
+            Some(Outstanding::ThreadStart) => {
+                if let Some(err) = error {
+                    let msg = err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("thread start failed");
+                    // No turn id to rewind to: keep the anchor sequence aligned.
+                    io.emit(AgentEvent::TurnAnchor { id: String::new() }).await;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error(format!("codex: {msg}")),
+                    })
+                    .await;
+                } else {
+                    self.thread_id = result
+                        .as_ref()
+                        .and_then(|r| r.pointer("/thread/id").or_else(|| r.get("threadId")))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    if let Some(reported) = result
+                        .as_ref()
+                        .and_then(|r| r.get("modelProvider"))
+                        .and_then(Value::as_str)
+                    {
+                        if let Some(why) =
+                            super::provider_mismatch(self.cfg.provider.as_ref(), reported)
+                        {
+                            io.emit(AgentEvent::Error(why)).await;
+                        }
+                        io.emit(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                            provider: Some(reported.into()),
+                            ..Default::default()
+                        }))
+                        .await;
+                    }
+                    let listed = self.list_skills(io).await;
+                    report(io, listed).await;
+                    if let Some((t, a)) = self.queued_turn.take() {
+                        let started = self.start_turn(io, t, a).await;
+                        report(io, started).await;
+                    }
+                }
+            }
+            Some(Outstanding::Revert) => {
+                if let Some(err) = error {
+                    let reason = err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("revert failed")
+                        .to_string();
+                    io.emit(AgentEvent::RewindFailed { reason }).await;
+                }
+            }
+            Some(Outstanding::TurnStart) => {
+                if let Some(err) = error {
+                    self.interrupt_wanted = false;
+                    let msg = err
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("turn start failed");
+                    // No turn id to rewind to: keep the anchor sequence aligned.
+                    io.emit(AgentEvent::TurnAnchor { id: String::new() }).await;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error(format!("codex: {msg}")),
+                    })
+                    .await;
+                } else {
+                    self.turn_id = result
+                        .as_ref()
+                        .and_then(|r| r.pointer("/turn/id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    // `thread/revert` takes this id to drop the turn later.
+                    if let Some(id) = self.turn_id.clone() {
+                        io.emit(AgentEvent::TurnAnchor { id }).await;
+                    }
+                    let interrupted = self.turn_known(io).await;
+                    report(io, interrupted).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `line` through the parser, its events passed on.
+    async fn feed(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        for ev in self.parser.feed(line) {
+            // A sub-agent's request arrives wrapped in `Sub`.
+            let mut inner = &ev;
+            while let AgentEvent::Sub { event, .. } = inner {
+                inner = event;
+            }
+            if let AgentEvent::PermissionRequest(req) = inner
+                && let Some((rpc_id, _)) = self.pending.remove(&req.id)
+            {
+                self.pending
+                    .insert(req.id.clone(), (rpc_id, req.kind.clone()));
+            }
+            io.forward(ev).await?;
+        }
+        Ok(())
+    }
+}
+
+impl StreamProtocol for AppServer {
+    async fn start(&mut self, io: &mut Io<'_>) {
+        let params =
+            json!({"clientInfo": {"name": "unharness", "version": env!("CARGO_PKG_VERSION")}});
+        let sent = self
+            .request(io, "initialize", params, Outstanding::Initialize)
+            .await;
+        report(io, sent).await;
+    }
+
+    async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+        // Codex has none, and does not declare it.
+        if matches!(cmd, SessionCommand::RemoteControl { .. }) {
+            return Encoded::Unsupported;
+        }
+        let res = self.command(cmd, io).await;
+        report(io, res).await;
+        Encoded::Done
+    }
+
+    fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+        vec![AgentEvent::Error(format!("codex: {error}"))]
+    }
+
+    fn parser(&mut self) -> &mut dyn Parser {
+        &mut self.parser
+    }
+
+    async fn on_answer(&mut self, answer: Answer<'_>, io: &mut Io<'_>) -> Result<(), Gone> {
+        let kind = match &answer.id {
+            RequestId::Name(name) if name == SKILLS_ID => {
+                self.skills_listed(answer.result.as_ref(), io).await;
+                return Ok(());
+            }
+            RequestId::Number(id) => self.outstanding.remove(id),
+            RequestId::Name(_) => None,
+        };
+        self.answered(kind, answer.result, answer.error, io).await;
+        self.feed(answer.line, io).await
+    }
+
+    async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        match RpcMessage::parse(line) {
+            // Track the running turn: steer and interrupt need its id.
+            // Sub-agent threads share the stream; only the main thread's turn counts.
+            Some(RpcMessage::Notification { method, params })
+                if params.get("threadId").and_then(Value::as_str) == self.thread_id.as_deref() =>
+            {
+                match method.as_str() {
+                    "turn/started" => {
+                        self.turn_id = params
+                            .pointer("/turn/id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        let interrupted = self.turn_known(io).await;
+                        report(io, interrupted).await;
+                    }
+                    "turn/completed" => {
+                        self.turn_id = None;
+                        self.interrupt_wanted = false;
+                    }
+                    _ => {}
+                }
+            }
+            // Its skill files changed: what it lists now.
+            Some(RpcMessage::Notification { method, .. }) if method == "skills/changed" => {
+                let listed = self.list_skills(io).await;
+                report(io, listed).await;
+            }
+            // A sub-agent's turn is what stopping it interrupts.
+            Some(RpcMessage::Notification { method, params }) => {
+                if let Some(thread) = params.get("threadId").and_then(Value::as_str) {
+                    match method.as_str() {
+                        "turn/started" => {
+                            if let Some(turn) = params.pointer("/turn/id").and_then(Value::as_str) {
+                                self.child_turns
+                                    .insert(thread.to_string(), turn.to_string());
+                            }
+                        }
+                        "turn/completed" => {
+                            self.child_turns.remove(thread);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some(RpcMessage::Request { id, method, .. }) => {
+                // Remember the rpc id so the decision can be routed back.
+                let rid = match &id {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let supported = method.ends_with("requestApproval")
+                    || method == "item/tool/requestUserInput"
+                    || method == "mcpServer/elicitation/request";
+                if !supported {
+                    let _ = io
+                        .write(&jsonrpc::error_response(
+                            &id,
+                            -32601,
+                            "unsupported by unharness",
+                        ))
+                        .await;
+                } else {
+                    if method == "mcpServer/elicitation/request" {
+                        self.elicitations.insert(rid.clone());
+                    }
+                    self.pending.insert(
+                        rid,
+                        (
+                            id,
+                            PermissionKind::Confirm {
+                                title: String::new(),
+                                message: None,
+                            },
+                        ),
+                    );
+                }
+            }
+            // The answers to our requests come to `on_answer`: an answer
+            // under any other id is the parser's alone.
+            Some(RpcMessage::Response { .. }) | None => {}
+        }
+        self.feed(line, io).await
+    }
+
+    fn shutdown(&mut self) -> Shutdown {
+        Shutdown::EndOrKill {
+            turn_open: self.turn_open(),
+        }
     }
 }
 
