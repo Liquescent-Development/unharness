@@ -13,10 +13,10 @@ doctor` prints the path, and `unharness init` creates the file.
 > line. unharness never falls back to defaults, which would run without your
 > sandbox and policy settings. A harness table that is wrong (an unknown
 > policy, a `modes` map or a provider that is not whole, an ACP agent
-> without a command) stops a run, `unharness switch` and `unharness models`
-> too, and is never replaced by the built-in or preset of its name;
-> `unharness doctor` names what is wrong, leaves out a harness it cannot
-> build, shows the rest, and exits 1.
+> without a command, a key its harness does not take) stops a run,
+> `unharness switch` and `unharness models` too, and is never replaced by
+> the built-in or preset of its name; `unharness doctor` names what is
+> wrong, leaves out a harness it cannot build, shows the rest, and exits 1.
 
 ## Example
 
@@ -81,7 +81,7 @@ headers = { Authorization = "Bearer …" }
 | `bridge_summary` | `"auto"` | Ask the harness being left for a handoff summary when the conversation is over `bridge_max_chars` (`"never"` to skip it); see [Switching harnesses](usage.md#switching-harnesses) |
 | `file_checkpoints` | `true` | [Checkpoint](tui.md#rewind-and-checkpoints) the working tree before each prompt |
 | `[sandbox]` | | See [Sandbox](sandbox.md) |
-| `[harnesses.<id>]` | | Per-harness `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args`, `sandbox_writable` |
+| `[harnesses.<id>]` | | Per-harness `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args`, `sandbox_writable`; any other key is one only its harness takes (below), and one it does not take is an error naming it |
 | `[harnesses.claude] relocate_config` | `true` | See [Sandbox](sandbox.md#things-to-know) |
 | `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental). Under `exec` every turn is a process of its own, and what it left running ends with the turn (on Linux; elsewhere what it left in its process group) |
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |

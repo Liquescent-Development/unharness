@@ -37,6 +37,26 @@ pub struct ClaudeHarness {
     pub mcp_config_dir: Option<PathBuf>,
 }
 
+/// What a `[harnesses.claude]` table takes besides the keys every harness
+/// takes.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Own {
+    /// Keep `.claude.json` inside `~/.claude` (by setting
+    /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
+    /// existing `~/.claude.json` is copied there once. Default: on.
+    relocate_config: Option<bool>,
+}
+
+/// Claude Code from its `[harnesses.claude]` table.
+pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
+    let own: Own = table.own(name)?;
+    Ok(Box::new(ClaudeHarness {
+        relocate_config: own.relocate_config.unwrap_or(true),
+        mcp_config_dir: None,
+    }))
+}
+
 /// Claude's state directory when `CLAUDE_CONFIG_DIR` does not name another.
 const STATE_DIR: &str = ".claude";
 const CONFIG_FILE: &str = ".claude.json";

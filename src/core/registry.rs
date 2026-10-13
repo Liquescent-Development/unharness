@@ -6,7 +6,24 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::ids::HarnessId;
-use crate::harness::{Harness, Probe, resolve_binary};
+use crate::config::{Config, HarnessSettings};
+use crate::harness::{Harness, Probe, acp, agy, claude, codex, pi, resolve_binary, vibe};
+
+/// Builds a harness from its `[harnesses.<name>]` table, an empty one when
+/// the config has none. The keys every harness takes are read where they
+/// are used; the harness parses its own from the table's `rest`
+/// ([`HarnessSettings::own`]), and an error names the table.
+pub type Builder = fn(&str, &HarnessSettings) -> Result<Box<dyn Harness>>;
+
+/// The built-in harnesses, in default priority order
+/// ([`HarnessId::BUILTIN`]).
+pub static BUILTIN: &[(HarnessId, Builder)] = &[
+    (HarnessId::AGY, agy::build),
+    (HarnessId::CLAUDE, claude::build),
+    (HarnessId::CODEX, codex::build),
+    (HarnessId::PI, pi::build),
+    (HarnessId::VIBE, vibe::build),
+];
 
 pub struct Registry {
     harnesses: Vec<Box<dyn Harness>>,
@@ -16,14 +33,14 @@ impl Registry {
     /// All harnesses in default priority order.
     pub fn new() -> Self {
         // The default config has no table to be wrong.
-        Self::checked(&crate::config::Config::default()).0
+        Self::checked(&Config::default()).0
     }
 
     /// Build the registry, honouring per-harness settings. A table that is
     /// wrong ([`config_errors`]) is an error, never the built-in or preset
     /// of its name in its place: a run, `switch` and `models` go through
     /// here.
-    pub fn from_config(config: &crate::config::Config) -> Result<Self> {
+    pub fn from_config(config: &Config) -> Result<Self> {
         let (registry, errors) = Self::checked(config);
         match errors.into_iter().next() {
             Some(e) => Err(anyhow::anyhow!(e.message)),
@@ -32,55 +49,24 @@ impl Registry {
     }
 
     /// The harnesses the config defines whole, and what is wrong with it
-    /// (`doctor`, which shows the rest). A harness whose table cannot be
-    /// built is left out, no preset takes its name, and its errors say so.
-    pub fn checked(config: &crate::config::Config) -> (Self, Vec<ConfigError>) {
-        use crate::harness::acp::{AcpHarness, ModeMap as AcpModeMap};
-        use crate::harness::agy::AgyHarness;
-        use crate::harness::codex::{CodexHarness, CodexTransport};
-        let mut errors = config_errors(config);
-        let mut left_out: Vec<String> = Vec::new();
-        let codex_transport = config
-            .harness("codex")
-            .and_then(|h| h.transport.as_deref())
-            .and_then(CodexTransport::parse)
-            .unwrap_or_default();
-        let mut harnesses: Vec<Box<dyn Harness>> = vec![
-            Box::new(AgyHarness),
-            Box::new(crate::harness::claude::ClaudeHarness {
-                relocate_config: config
-                    .harness("claude")
-                    .and_then(|h| h.relocate_config)
-                    .unwrap_or(true),
-                mcp_config_dir: None,
-            }),
-            Box::new(CodexHarness::new(codex_transport)),
-            Box::new(crate::harness::pi::PiHarness::default()),
-        ];
-        // A `[harnesses.vibe]` table sets its command, modes and the rest
-        // in place of the built-in's; one that cannot be built (its modes
-        // or providers, both in `config_errors`) leaves vibe out.
-        let vibe = HarnessId::VIBE.as_str();
-        match config.harness(vibe) {
-            None => harnesses.push(Box::new(crate::harness::vibe::VibeHarness::default())),
-            Some(s) => match crate::harness::vibe::VibeHarness::from_settings(s) {
-                Ok(h) => harnesses.push(Box::new(h)),
-                Err(e) => {
-                    if !errors.iter().any(|c| c.table.as_deref() == Some(vibe)) {
-                        errors.push(ConfigError::new(
-                            Some(vibe),
-                            format!("[harnesses.{vibe}]: {e:#}"),
-                        ));
-                    }
-                    left_out.push(vibe.to_string());
-                }
-            },
+    /// (`doctor`, which shows the rest): the policies it names and every
+    /// builder's error, in the order of the tables' names, the global
+    /// policy first. A harness whose table cannot be built is left out, no
+    /// preset takes its name, and its errors say so.
+    pub fn checked(config: &Config) -> (Self, Vec<ConfigError>) {
+        let empty = HarnessSettings::default();
+        let mut built = Built::default();
+        for (id, build) in BUILTIN {
+            let name = id.as_str();
+            built.add(
+                name,
+                build(name, config.harness(name).unwrap_or(&empty)),
+                true,
+            );
         }
-
-        // ACP agents: the ones defined in config (by name, for a stable
-        // order), then the presets found on PATH. Neither may take a
-        // built-in harness's name.
-        let mut defined: Vec<(&String, &crate::config::HarnessSettings)> = config
+        // ACP agents defined in config, by name for a stable order. None
+        // may take a built-in harness's name.
+        let mut defined: Vec<(&String, &HarnessSettings)> = config
             .harnesses
             .iter()
             .filter(|(name, s)| {
@@ -88,33 +74,47 @@ impl Registry {
             })
             .collect();
         defined.sort_by_key(|(name, _)| name.as_str());
-        for (name, settings) in defined {
-            // A definition without a command, or with a map that does not
-            // parse, is in `config_errors`, and leaves the agent out rather
-            // than in a mode of its own.
-            let (Ok(h), Ok(modes)) = (
-                AcpHarness::new(name, settings.display_name.as_deref(), &settings.command),
-                AcpModeMap::from_config(&settings.modes),
-            ) else {
-                left_out.push(name.clone());
-                continue;
-            };
-            harnesses.push(Box::new(
-                h.asking_permission(settings.asks_permission.unwrap_or(false))
-                    .with_modes(modes)
-                    .signing_in_with(settings.sign_in.as_deref()),
-            ));
+        for (name, table) in defined {
+            built.add(name, acp::build(name, table), true);
         }
-        // A table left out keeps its name: no preset takes its place.
-        let mut taken: Vec<HarnessId> = harnesses.iter().map(|h| h.descriptor().id).collect();
-        taken.extend(left_out.iter().map(|name| HarnessId::intern(name)));
-        for preset in AcpHarness::installed_presets(&taken) {
-            harnesses.push(Box::new(preset));
+        // The presets, each built by the same builder from the table of its
+        // name, if any, and offered when its binary is on PATH. A table
+        // left out keeps its name: no preset takes its place.
+        let mut taken: Vec<HarnessId> = built.harnesses.iter().map(|h| h.descriptor().id).collect();
+        taken.extend(built.left_out.iter().map(|name| HarnessId::intern(name)));
+        for (name, installed) in acp::AcpHarness::presets(&taken) {
+            let table = config.harness(name);
+            if installed || table.is_some() {
+                built.add(name, acp::build(name, table.unwrap_or(&empty)), installed);
+            }
         }
+
+        let mut errors = policy_errors(config);
+        // A table no harness was built from has no keys of a harness's own.
+        for (name, table) in &config.harnesses {
+            if let Some(key) = table.rest.keys().next()
+                && !built.read.contains(name)
+            {
+                errors.push(ConfigError::new(
+                    Some(name),
+                    format!(
+                        "[harnesses.{name}] {key}: unknown key; no harness's table is named {name}"
+                    ),
+                ));
+            }
+        }
+        errors.append(&mut built.errors);
+        // Stable: a table's policy before what its harness says.
+        errors.sort_by(|a, b| a.table.cmp(&b.table));
         for e in &mut errors {
-            e.left_out = e.table.as_ref().is_some_and(|t| left_out.contains(t));
+            e.left_out = e.table.as_ref().is_some_and(|t| built.left_out.contains(t));
         }
-        (Registry { harnesses }, errors)
+        (
+            Registry {
+                harnesses: built.harnesses,
+            },
+            errors,
+        )
     }
 
     pub fn empty() -> Self {
@@ -261,14 +261,48 @@ impl ConfigError {
     }
 }
 
-/// What is wrong with the config's harness settings, in a stable order:
-/// the global policy, then per table its policy, an ACP agent without a
-/// command, its mode map and its providers. A policy must be one (the TUI
-/// reads them again when the harness is switched, where an error could no
-/// longer end the run), a mode map must parse (else the agent is left in
-/// a mode of its own choosing), a provider must be whole and Mistral
-/// Vibe's (a session on it would fail, or run somewhere else).
-pub fn config_errors(config: &crate::config::Config) -> Vec<ConfigError> {
+/// What `Registry::checked` has built so far.
+#[derive(Default)]
+struct Built {
+    harnesses: Vec<Box<dyn Harness>>,
+    /// What the builders said.
+    errors: Vec<ConfigError>,
+    /// The tables whose harness could not be built.
+    left_out: Vec<String>,
+    /// The tables a builder has read.
+    read: Vec<String>,
+}
+
+impl Built {
+    /// What `name`'s builder made, kept when it is `offered`, or its error.
+    fn add(&mut self, name: &str, harness: Result<Box<dyn Harness>>, offered: bool) {
+        self.read.push(name.to_string());
+        match harness {
+            Ok(h) if offered => self.harnesses.push(h),
+            Ok(_) => {}
+            Err(e) => {
+                self.errors
+                    .push(ConfigError::new(Some(name), format!("{e:#}")));
+                self.left_out.push(name.to_string());
+            }
+        }
+    }
+}
+
+/// What is wrong with the config's harness settings ([`Registry::checked`]):
+/// a policy that is not one (the TUI reads them again when the harness is
+/// switched, where an error could no longer end the run), and every
+/// builder's error: a key the harness does not take, an ACP agent without
+/// a command, a mode map that does not parse (else the agent is left in a
+/// mode of its own choosing), a provider that is not whole (a session on
+/// it would fail, or run somewhere else).
+pub fn config_errors(config: &Config) -> Vec<ConfigError> {
+    Registry::checked(config).1
+}
+
+/// The policies the config names that are not ones: the global one, then
+/// each table's.
+fn policy_errors(config: &Config) -> Vec<ConfigError> {
     use crate::core::PermissionPolicy;
     const POLICIES: &str = "plan, ask, accept-edits, auto, bypass";
     let mut errors = Vec::new();
@@ -280,43 +314,14 @@ pub fn config_errors(config: &crate::config::Config) -> Vec<ConfigError> {
             format!("unknown policy '{p}' in config ({POLICIES})"),
         ));
     }
-    let mut tables: Vec<(&String, &crate::config::HarnessSettings)> =
-        config.harnesses.iter().collect();
-    tables.sort_by_key(|(name, _)| name.as_str());
-    for (name, h) in tables {
-        let table = Some(name.as_str());
+    for (name, h) in &config.harnesses {
         if let Some(p) = h.default_policy.as_deref()
             && PermissionPolicy::parse(p).is_none()
         {
             errors.push(ConfigError::new(
-                table,
+                Some(name),
                 format!("[harnesses.{name}] default_policy: unknown policy '{p}' ({POLICIES})"),
             ));
-        }
-        if h.protocol.as_deref() == Some("acp")
-            && HarnessId::parse(name).is_none()
-            && h.command.is_empty()
-        {
-            errors.push(ConfigError::new(
-                table,
-                format!("[harnesses.{name}] protocol = \"acp\" but no command"),
-            ));
-        }
-        if let Err(e) = crate::harness::acp::ModeMap::from_config(&h.modes) {
-            errors.push(ConfigError::new(table, format!("[harnesses.{name}]: {e}")));
-        }
-        if h.providers.is_empty() {
-            continue;
-        }
-        if name != HarnessId::VIBE.as_str() {
-            errors.push(ConfigError::new(
-                table,
-                format!(
-                    "[harnesses.{name}] providers: only Mistral Vibe takes providers from unharness's config"
-                ),
-            ));
-        } else if let Err(e) = crate::harness::vibe::providers(&h.providers) {
-            errors.push(ConfigError::new(table, format!("{e:#}")));
         }
     }
     errors
@@ -560,6 +565,128 @@ mod tests {
         );
         let e = config_errors(&parse(&good.replace("vibe", "codex")));
         assert!(e[0].message.contains("[harnesses.codex]"), "{e:?}");
+    }
+
+    /// The built-ins are walked in the order ids give them.
+    #[test]
+    fn the_built_ins_are_built_in_their_order() {
+        let ids: Vec<HarnessId> = BUILTIN.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, HarnessId::BUILTIN);
+        let reg = Registry::new();
+        assert_eq!(&reg.ids()[..BUILTIN.len()], HarnessId::BUILTIN);
+    }
+
+    /// A key no harness takes is an error naming it and its table, in any
+    /// table, and the harness it is in is left out (#241). One in a
+    /// workspace's table is refused the same way once merged.
+    #[test]
+    fn an_unknown_key_is_an_error_naming_it_and_its_table() {
+        let every = "besides the keys every harness takes";
+        for (text, name, said) in [
+            (
+                "[harnesses.claude]\ndefualt_model = \"opus\"\n",
+                "claude",
+                format!(
+                    "[harnesses.claude] defualt_model: unknown key; {every}, claude takes relocate_config"
+                ),
+            ),
+            (
+                "[harnesses.codex]\ntransprt = \"exec\"\n",
+                "codex",
+                format!("[harnesses.codex] transprt: unknown key; {every}, codex takes transport"),
+            ),
+            (
+                "[harnesses.agy]\nrelocate_config = false\n",
+                "agy",
+                "[harnesses.agy] relocate_config: unknown key; agy takes only the keys every \
+                 harness takes"
+                    .to_string(),
+            ),
+            (
+                "[harnesses.pi]\ntransport = \"rpc\"\n",
+                "pi",
+                "[harnesses.pi] transport: unknown key; pi takes only the keys every harness takes"
+                    .to_string(),
+            ),
+            // The ones #241 names.
+            (
+                "[harnesses.vibe]\nmode = { ask = \"ask\" }\n",
+                "vibe",
+                format!(
+                    "[harnesses.vibe] mode: unknown key; {every}, vibe takes asks_permission, \
+                     modes, sign_in, providers"
+                ),
+            ),
+            (
+                "[harnesses.vibe.provider.lan]\napi_base = \"http://h/v1\"\nmodels = [\"m\"]\n",
+                "vibe",
+                format!(
+                    "[harnesses.vibe] provider: unknown key; {every}, vibe takes asks_permission, \
+                     modes, sign_in, providers"
+                ),
+            ),
+            (
+                "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                 sign-in = \"my-agent login\"\n",
+                "myagent",
+                format!(
+                    "[harnesses.myagent] sign-in: unknown key; {every}, myagent takes \
+                     asks_permission, modes, sign_in"
+                ),
+            ),
+        ] {
+            let errors = config_errors(&parse(text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, said);
+            assert!(errors[0].left_out && errors[0].table.as_deref() == Some(name));
+            assert!(Registry::from_config(&parse(text)).is_err(), "{text}");
+            assert!(Registry::checked(&parse(text)).0.parse(name).is_none());
+        }
+
+        // A value of the wrong kind names its key too.
+        let e = config_errors(&parse("[harnesses.claude]\nrelocate_config = \"no\"\n"));
+        assert!(
+            e[0].message.starts_with("[harnesses.claude]: invalid type")
+                && e[0].message.contains("`relocate_config`"),
+            "{e:?}"
+        );
+
+        // A preset's table takes only the keys every harness takes; one
+        // that defines the agent takes the rest.
+        let e = config_errors(&parse("[harnesses.gemini]\nasks_permission = true\n"));
+        assert!(
+            e[0].message.starts_with(
+                "[harnesses.gemini] asks_permission: unknown key; gemini takes only the keys \
+                 every harness takes (a table with protocol = \"acp\" and a command"
+            ) && e[0].left_out,
+            "{e:?}"
+        );
+        assert!(config_errors(&parse("[harnesses.gemini]\ndefault_model = \"m\"\n")).is_empty());
+
+        // A table no harness is built from takes nothing of a harness's
+        // own; it is no harness to leave out.
+        let e = config_errors(&parse("[harnesses.claude-code]\nrelocate_config = false\n"));
+        assert_eq!(
+            e[0].message,
+            "[harnesses.claude-code] relocate_config: unknown key; no harness's table is named \
+             claude-code"
+        );
+        assert!(!e[0].left_out);
+        assert!(config_errors(&parse("[harnesses.claud]\ndefault_model = \"m\"\n")).is_empty());
+
+        // Written in a workspace's table, it is refused once merged.
+        let merged = crate::config::Config::merge(
+            parse("[harnesses.codex]\ntransport = \"exec\"\n"),
+            parse("[harnesses.codex]\ntransprt = \"auto\"\n"),
+        );
+        let e = config_errors(&merged);
+        assert!(
+            e.len() == 1
+                && e[0]
+                    .message
+                    .starts_with("[harnesses.codex] transprt: unknown key"),
+            "{e:?}"
+        );
     }
 
     /// A table that cannot be built is an error, and is never the built-in

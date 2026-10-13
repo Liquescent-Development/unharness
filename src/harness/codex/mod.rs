@@ -82,6 +82,26 @@ pub struct CodexHarness {
     pub transport: CodexTransport,
 }
 
+/// What a `[harnesses.codex]` table takes besides the keys every harness
+/// takes.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Own {
+    /// auto (the default), app-server or exec.
+    transport: Option<String>,
+}
+
+/// Codex from its `[harnesses.codex]` table.
+pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
+    let own: Own = table.own(name)?;
+    let transport = own
+        .transport
+        .as_deref()
+        .and_then(CodexTransport::parse)
+        .unwrap_or_default();
+    Ok(Box::new(CodexHarness::new(transport)))
+}
+
 impl Default for CodexHarness {
     fn default() -> Self {
         CodexHarness {

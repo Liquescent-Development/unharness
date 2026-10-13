@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::core::PermissionPolicy;
@@ -93,6 +94,10 @@ impl SandboxSettings {
     }
 }
 
+/// A `[harnesses.<name>]` table: the keys every harness takes, and in
+/// `rest` the ones only its own harness takes (Codex's `transport`, an ACP
+/// agent's `modes`, …), which the harness's builder parses
+/// ([`HarnessSettings::own`], `core::registry`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct HarnessSettings {
     pub binary: Option<PathBuf>,
@@ -100,8 +105,6 @@ pub struct HarnessSettings {
     pub default_model: Option<String>,
     pub default_effort: Option<String>,
     pub default_policy: Option<String>,
-    /// Harness-specific transport selector (e.g. codex: auto | app-server | exec).
-    pub transport: Option<String>,
     pub persist_sessions: Option<bool>,
     #[serde(default)]
     pub extra_args: Vec<String>,
@@ -113,58 +116,74 @@ pub struct HarnessSettings {
     pub command: Vec<String>,
     /// Name shown in the TUI for a config-defined harness.
     pub display_name: Option<String>,
-    /// ACP only: this agent asks permission before it writes, runs a
-    /// command or reaches out, so the `ask` policy can be offered for it.
-    /// unharness cannot check that; set it for an agent seen to do so.
-    pub asks_permission: Option<bool>,
-    /// ACP only: which of the agent's own session modes backs each policy,
-    /// e.g. `{ ask = "ask", bypass = "auto-approve" }`. unharness sets that
-    /// mode before the first prompt and on every policy change, and holds
-    /// the session when it does not take. A policy without an entry takes
-    /// the nearest less permissive one's. An agent with modes has no `ask`
-    /// without one (`harness::acp::modes`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub modes: BTreeMap<String, String>,
-    /// ACP only: the command that signs the agent in (`vibe --setup`),
-    /// told to the user when a session fails for want of sign-in.
-    /// unharness never runs it.
-    pub sign_in: Option<String>,
-    /// Claude Code only: keep `.claude.json` inside `~/.claude` (by setting
-    /// `CLAUDE_CONFIG_DIR`), where the sandbox lets Claude update it. The
-    /// existing `~/.claude.json` is copied there once. Default: on.
-    pub relocate_config: Option<bool>,
     /// Paths this harness may write inside the sandbox, besides the ones
     /// unharness knows it needs (an ACP agent's state, an MCP server's data).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sandbox_writable: Vec<PathBuf>,
-    /// Mistral Vibe only: providers by name, each with its models, offered
-    /// beside vibe's own configuration (`--provider`, `/provider`). Handed
-    /// to vibe in its environment when one is chosen, never written to its
-    /// configuration (`harness::vibe::providers`).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub providers: BTreeMap<String, ProviderSettings>,
+    /// Every other key of the table, for its harness to parse.
+    #[serde(flatten)]
+    pub rest: toml::Table,
 }
 
-/// A provider in `[harnesses.vibe.providers.<name>]`: where vibe sends the
-/// model's requests, in which form, and the models there. The API key is
-/// only named, by the variable that holds it, never written here. Checked
-/// when unharness starts (`harness::vibe::providers`).
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+impl HarnessSettings {
+    /// What this table sets that only harness `name` takes: `T`, a struct
+    /// deriving `Deserialize` with `deny_unknown_fields`, read from
+    /// [`rest`](Self::rest). A key `T` does not take is an error naming the
+    /// table and the key, as a value it cannot take is.
+    pub fn own<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
+        let takes = keys_of::<T>();
+        if let Some(key) = self.rest.keys().find(|k| !takes.contains(&k.as_str())) {
+            let own = match takes {
+                [] => format!("{name} takes only the keys every harness takes"),
+                keys => format!(
+                    "besides the keys every harness takes, {name} takes {}",
+                    keys.join(", ")
+                ),
+            };
+            anyhow::bail!("[harnesses.{name}] {key}: unknown key; {own}");
+        }
+        T::deserialize(toml::Value::Table(self.rest.clone())).map_err(|e| {
+            // toml says which key on a line of its own.
+            let what = e.to_string();
+            anyhow::anyhow!("[harnesses.{name}]: {}", what.trim_end().replace('\n', " "))
+        })
+    }
+}
+
+/// What a harness that takes only the keys every harness takes has of its
+/// own: nothing.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProviderSettings {
-    /// The API's base URL, e.g. `http://127.0.0.1:8080/v1`.
-    pub api_base: String,
-    /// openai (the default), reasoning, openai-responses or anthropic.
-    pub api_style: Option<String>,
-    /// generic (the default) or mistral.
-    pub backend: Option<String>,
-    /// The environment variable that holds the API key; none is sent
-    /// without one.
-    pub api_key_env_var: Option<String>,
-    /// The model names the server knows, the first being the one used
-    /// when none is chosen.
-    #[serde(default)]
-    pub models: Vec<String>,
+pub struct NoOwnKeys {}
+
+/// The keys a struct deriving `Deserialize` takes: the field names it hands
+/// `deserialize_struct`, read by a deserializer that has nothing else.
+fn keys_of<T: DeserializeOwned>() -> &'static [&'static str] {
+    use serde::de::{self, Visitor};
+    struct Keys<'a>(&'a mut &'static [&'static str]);
+    impl<'de> de::Deserializer<'de> for Keys<'_> {
+        type Error = de::value::Error;
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _name: &'static str,
+            fields: &'static [&'static str],
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(de::Error::custom("read for its keys only"))
+        }
+        fn deserialize_any<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("not a struct"))
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf option unit unit_struct newtype_struct seq tuple
+            tuple_struct map enum identifier ignored_any
+        }
+    }
+    let mut keys: &'static [&'static str] = &[];
+    let _ = T::deserialize(Keys(&mut keys));
+    keys
 }
 
 impl Config {
@@ -422,7 +441,6 @@ impl Config {
             default_model: local.default_model.or(global.default_model),
             default_effort: local.default_effort.or(global.default_effort),
             default_policy: local.default_policy.or(global.default_policy),
-            transport: local.transport.or(global.transport),
             persist_sessions: local.persist_sessions.or(global.persist_sessions),
             extra_args: if !local.extra_args.is_empty() {
                 local.extra_args
@@ -436,24 +454,32 @@ impl Config {
                 global.command
             },
             display_name: local.display_name.or(global.display_name),
-            asks_permission: local.asks_permission.or(global.asks_permission),
-            // Whole, never entry by entry: a mode map is one statement
-            // about the agent.
-            modes: if !local.modes.is_empty() {
-                local.modes
-            } else {
-                global.modes
-            },
-            sign_in: local.sign_in.or(global.sign_in),
-            relocate_config: local.relocate_config.or(global.relocate_config),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
-            // A workspace's provider of the same name replaces the global one.
-            providers: {
-                let mut providers = global.providers;
-                providers.extend(local.providers);
-                providers
-            },
+            rest: Self::merge_rest(global.rest, local.rest),
         }
+    }
+
+    /// A harness's own keys: a workspace's replaces the global one's,
+    /// except a table of tables (vibe's `providers`), whose entries are
+    /// merged by name, a workspace's replacing the global one of that name.
+    /// So a mode map, whose entries are not tables, is replaced whole: it
+    /// is one statement about the agent. An empty table keeps the global
+    /// one's, as an empty list does.
+    fn merge_rest(global: toml::Table, local: toml::Table) -> toml::Table {
+        let mut merged = global;
+        for (key, value) in local {
+            match (merged.get_mut(&key), value) {
+                (Some(toml::Value::Table(global)), toml::Value::Table(local))
+                    if local.values().all(toml::Value::is_table) =>
+                {
+                    global.extend(local)
+                }
+                (_, value) => {
+                    merged.insert(key, value);
+                }
+            }
+        }
+        merged
     }
 }
 
@@ -475,10 +501,10 @@ mod tests {
         )
         .unwrap();
         let merged = Config::merge(global, local);
-        let providers = &merged.harnesses["vibe"].providers;
-        assert_eq!(providers["lan"].api_base, "http://c/v1");
-        assert_eq!(providers["lan"].models, ["o"]);
-        assert_eq!(providers["box"].api_base, "http://b/v1");
+        let providers = &merged.harnesses["vibe"].rest["providers"];
+        assert_eq!(providers["lan"]["api_base"].as_str(), Some("http://c/v1"));
+        assert_eq!(providers["lan"]["models"], toml::Value::from(vec!["o"]));
+        assert_eq!(providers["box"]["api_base"].as_str(), Some("http://b/v1"));
     }
 
     #[test]
@@ -798,15 +824,93 @@ url = "https://example.com/mcp"
              modes = { ask = \"ask\", accept-edits = \"ask\", bypass = \"auto-approve\" }\n",
         )
         .unwrap();
-        let vibe = &global.harnesses["vibe"];
-        assert_eq!(vibe.modes.len(), 3);
-        assert_eq!(vibe.modes["accept-edits"], "ask");
+        let modes = |c: &Config| {
+            c.harnesses["vibe"].rest["modes"]
+                .as_table()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(modes(&global).len(), 3);
+        assert_eq!(modes(&global)["accept-edits"].as_str(), Some("ask"));
         let local: Config =
             toml::from_str("[harnesses.vibe]\nmodes = { ask = \"ask\" }\n").unwrap();
         let merged = Config::merge(global.clone(), local);
-        assert_eq!(merged.harnesses["vibe"].modes.len(), 1);
+        assert_eq!(modes(&merged).len(), 1);
         let merged = Config::merge(global, Config::default());
-        assert_eq!(merged.harnesses["vibe"].modes.len(), 3);
+        assert_eq!(modes(&merged).len(), 3);
+    }
+
+    /// What only one harness takes is kept in `rest`, written back as it
+    /// was read, and read by that harness: a key it does not take, or a
+    /// value it cannot, is an error naming the table and the key (#241).
+    #[test]
+    fn a_harness_s_own_keys_are_its_to_read() {
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Own {
+            transport: Option<String>,
+            #[serde(default)]
+            modes: BTreeMap<String, String>,
+        }
+        let text = "[harnesses.x]\ndefault_model = \"m\"\ntransport = \"exec\"\n\
+                    modes = { ask = \"ask\" }\n[harnesses.x.providers.lan]\nmodels = [\"a\"]\n";
+        let cfg: Config = toml::from_str(text).unwrap();
+        let x = &cfg.harnesses["x"];
+        assert_eq!(x.default_model.as_deref(), Some("m"));
+        assert_eq!(
+            x.rest.keys().collect::<Vec<_>>(),
+            ["modes", "providers", "transport"]
+        );
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let own = |text: &str| {
+            let cfg: Config = toml::from_str(text).unwrap();
+            cfg.harnesses["x"].own::<Own>("x")
+        };
+        let read = own("[harnesses.x]\ntransport = \"exec\"\nmodes = { ask = \"ask\" }\n").unwrap();
+        assert_eq!(read.transport.as_deref(), Some("exec"));
+        assert_eq!(read.modes["ask"], "ask");
+        assert_eq!(
+            own("[harnesses.x]\ntransprt = \"exec\"\n")
+                .unwrap_err()
+                .to_string(),
+            "[harnesses.x] transprt: unknown key; besides the keys every harness takes, \
+             x takes transport, modes"
+        );
+        let e = own("[harnesses.x]\ntransport = 3\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.starts_with("[harnesses.x]: invalid type: integer `3`") && e.contains("`transport`"),
+            "{e}"
+        );
+        let e = cfg.harnesses["x"].own::<NoOwnKeys>("x").unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "[harnesses.x] modes: unknown key; x takes only the keys every harness takes"
+        );
+        assert!(HarnessSettings::default().own::<NoOwnKeys>("x").is_ok());
+    }
+
+    /// A workspace's table of the same name merges its harness's own keys
+    /// as the rest: one by one, a table of tables by name, and nothing
+    /// dropped on the way, so the harness reads what either file says.
+    #[test]
+    fn a_harness_s_own_keys_merge_key_by_key() {
+        let global: Config = toml::from_str(
+            "[harnesses.x]\ntransport = \"exec\"\nmodes = { ask = \"a\", bypass = \"b\" }\n",
+        )
+        .unwrap();
+        let local: Config =
+            toml::from_str("[harnesses.x]\ntransprt = \"auto\"\nmodes = {}\n").unwrap();
+        let merged = Config::merge(global, local);
+        let x = &merged.harnesses["x"].rest;
+        assert_eq!(
+            x.keys().collect::<Vec<_>>(),
+            ["modes", "transport", "transprt"]
+        );
+        assert_eq!(x["modes"].as_table().unwrap().len(), 2);
     }
 
     #[test]
@@ -833,7 +937,7 @@ url = "https://example.com/mcp"
         global.harnesses.insert(
             "codex".into(),
             HarnessSettings {
-                transport: Some("exec".to_string()),
+                rest: toml::toml! { transport = "exec" },
                 ..Default::default()
             },
         );
@@ -899,7 +1003,7 @@ url = "https://example.com/mcp"
         assert_eq!(merged.default_model("agy"), Some("global-model")); // inherited
         assert_eq!(merged.default_effort("agy"), Some("high")); // local
         assert_eq!(
-            merged.harness("codex").unwrap().transport.as_deref(),
+            merged.harness("codex").unwrap().rest["transport"].as_str(),
             Some("exec")
         ); // global only
         assert_eq!(

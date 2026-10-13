@@ -234,20 +234,71 @@ impl AcpHarness {
         }
     }
 
-    /// The presets whose binary is installed and whose name is not taken.
-    pub fn installed_presets(taken: &[HarnessId]) -> Vec<AcpHarness> {
+    /// The presets whose name is not taken, each with whether its binary
+    /// is on PATH.
+    pub fn presets(taken: &[HarnessId]) -> Vec<(&'static str, bool)> {
         PRESETS
             .iter()
-            .filter(|(name, _, command)| {
-                !taken.contains(&HarnessId::intern(name)) && which(command[0]).is_some()
-            })
-            .filter_map(|(name, display, command)| {
-                let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
-                AcpHarness::new(name, Some(display), &command).ok()
-            })
-            .map(|h| AcpHarness { preset: true, ..h })
+            .filter(|(name, _, _)| !taken.contains(&HarnessId::intern(name)))
+            .map(|(name, _, command)| (*name, which(command[0]).is_some()))
             .collect()
     }
+}
+
+/// What an ACP agent's table takes besides the keys every harness takes.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Own {
+    /// This agent asks permission before it writes, runs a command or
+    /// reaches out, so the `ask` policy can be offered for it. unharness
+    /// cannot check that; set it for an agent seen to do so.
+    asks_permission: Option<bool>,
+    /// Which of the agent's own session modes backs each policy, e.g.
+    /// `{ ask = "ask", bypass = "auto-approve" }`. unharness sets that mode
+    /// before the first prompt and on every policy change, and holds the
+    /// session when it does not take. A policy without an entry takes the
+    /// nearest less permissive one's. An agent with modes has no `ask`
+    /// without one (`modes.rs`).
+    #[serde(default)]
+    modes: std::collections::BTreeMap<String, String>,
+    /// The command that signs the agent in (`vibe --setup`), told to the
+    /// user when a session fails for want of sign-in. unharness never runs
+    /// it.
+    sign_in: Option<String>,
+}
+
+/// An ACP agent from its `[harnesses.<name>]` table: one the table defines
+/// (`protocol = "acp"` and its `command`), or else the preset of that
+/// name, whose table takes only the keys every harness takes.
+pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
+    let defined = table.protocol.as_deref() == Some("acp");
+    if let Some((name, display, command)) = PRESETS.iter().find(|(n, ..)| *n == name && !defined) {
+        table.own::<crate::config::NoOwnKeys>(name).map_err(|e| {
+            anyhow::anyhow!(
+                "{e:#} (a table with protocol = \"acp\" and a command defines an agent \
+                 that takes asks_permission, modes and sign_in)"
+            )
+        })?;
+        let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
+        let preset = AcpHarness::new(name, Some(display), &command)?;
+        return Ok(Box::new(AcpHarness {
+            preset: true,
+            ..preset
+        }));
+    }
+    let own: Own = table.own(name)?;
+    if table.command.is_empty() {
+        bail!("[harnesses.{name}] protocol = \"acp\" but no command");
+    }
+    let modes =
+        ModeMap::from_config(&own.modes).map_err(|e| anyhow::anyhow!("[harnesses.{name}]: {e}"))?;
+    let agent = AcpHarness::new(name, table.display_name.as_deref(), &table.command)?;
+    Ok(Box::new(
+        agent
+            .asking_permission(own.asks_permission.unwrap_or(false))
+            .with_modes(modes)
+            .signing_in_with(own.sign_in.as_deref()),
+    ))
 }
 
 impl Harness for AcpHarness {
@@ -498,6 +549,6 @@ mod tests {
             .iter()
             .map(|(n, _, _)| HarnessId::intern(n))
             .collect();
-        assert!(AcpHarness::installed_presets(&taken).is_empty());
+        assert!(AcpHarness::presets(&taken).is_empty());
     }
 }

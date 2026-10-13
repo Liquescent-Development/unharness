@@ -81,7 +81,9 @@ If the agent speaks ACP, a config table is enough; see
    honest `Capabilities` and its `sandbox_paths`.
 2. Record a fixture with a `scripts/record-<name>.py` and generate its
    `.events`.
-3. Register it in `Registry::from_config`.
+3. Give it a `build` that parses what its `[harnesses.<name>]` table takes
+   besides the keys every harness takes, and add that to `BUILTIN` in
+   `src/core/registry.rs`.
 4. Add an e2e test if the transport has a handshake or a permission
    channel.
 

@@ -53,8 +53,9 @@ a model not defined there is `mistral`'s.
 
 Gemini CLI, OpenCode, Goose, GitHub Copilot, Cursor Agent, Qwen Code and
 Kiro are added automatically when their binary is on `PATH`, using the
-launch commands from the ACP registry. A table with the same name
-overrides a preset.
+launch commands from the ACP registry. A table with the same name and
+`protocol = "acp"` replaces a preset; without it, the table sets only the
+keys every harness takes (`binary`, `default_model`, …) for the preset.
 
 > [!NOTE]
 > The presets have not been run with unharness yet, and `unharness doctor`

@@ -12217,15 +12217,11 @@ pub(crate) mod tests {
     fn vibe_app_with_provider() -> (App, tempfile::TempDir) {
         let cwd = tempfile::tempdir().unwrap();
         let settings = crate::config::HarnessSettings {
-            providers: [(
-                "lan".to_string(),
-                crate::config::ProviderSettings {
-                    api_base: "http://127.0.0.1:8080/v1".into(),
-                    models: vec!["qwen3-coder".into()],
-                    ..Default::default()
-                },
-            )]
-            .into(),
+            rest: toml::toml! {
+                [providers.lan]
+                api_base = "http://127.0.0.1:8080/v1"
+                models = ["qwen3-coder"]
+            },
             ..Default::default()
         };
         let vibe = crate::harness::vibe::VibeHarness::from_settings(&settings).unwrap();

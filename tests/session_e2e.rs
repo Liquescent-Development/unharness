@@ -4740,14 +4740,9 @@ fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
 fn vibe_harness_recorded_in_ask(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
         command: vec![fake_harness().to_string_lossy().into_owned()],
-        modes: [
-            ("ask", "ask"),
-            ("auto", "smart-approve"),
-            ("bypass", "auto-approve"),
-        ]
-        .into_iter()
-        .map(|(p, m)| (p.to_string(), m.to_string()))
-        .collect(),
+        rest: toml::toml! {
+            modes = { ask = "ask", auto = "smart-approve", bypass = "auto-approve" }
+        },
         ..Default::default()
     })
     .unwrap()
