@@ -1,8 +1,9 @@
 //! Mistral Vibe (`vibe-acp`, PyPI `mistral-vibe`), driven over the Agent
-//! Client Protocol by [`AcpHarness`] with what unharness knows about it:
-//! the session modes that back each policy, its reasoning level as the
-//! option `thinking`, and its model and level chosen by environment when
-//! it starts.
+//! Client Protocol by [`AcpHarness`] with what unharness knows about it
+//! (its `AcpProfile`, built in `acp_profile`, with `VibeHooks`): the
+//! session modes that back each policy, its reasoning level as the option
+//! `thinking`, and its model and level chosen by environment when it
+//! starts.
 //!
 //! Checked on vibe 2.26.1. `session/set_config_option` for `model` or
 //! `thinking` writes the choice into the user's `config.toml`
@@ -32,7 +33,11 @@ use serde_json::json;
 
 pub mod trust;
 
-use super::acp::{AcpHarness, KnownModels, ModeMap, ProviderModels, SpawnChoice, SpawnPlan};
+use super::acp::parse::{MetaReader, SessionOptions};
+use super::acp::{
+    AcpHarness, AcpProfile, AgentHooks, KnownModels, ModeMap, ProviderModels, SharedModels,
+    SpawnChoice, SpawnPlan,
+};
 use super::{
     AuthInfo, DoctorNote, Harness, HarnessDescriptor, MinVersion, ModelInfo, PrintConfig, Probe,
     probe_version_of, resolve_binary,
@@ -353,6 +358,9 @@ pub fn build(_name: &str, table: &HarnessSettings) -> Result<Box<dyn Harness>> {
 
 pub struct VibeHarness {
     acp: AcpHarness,
+    /// What `acp` is built from besides the three below ([`acp_profile`]),
+    /// kept so that it is built again when one of them changes.
+    agent: Agent,
     /// The providers `[harnesses.vibe.providers]` defines.
     providers: Arc<Vec<Provider>>,
     /// Where unharness's profiles are written; `None` is under its state
@@ -364,6 +372,30 @@ pub struct VibeHarness {
     inherited: Option<Arc<Vec<(String, String)>>>,
 }
 
+/// `vibe-acp` as unharness runs it: the built-in values, or what a
+/// `[harnesses.vibe]` table sets in their place.
+struct Agent {
+    command: Vec<String>,
+    display: Option<String>,
+    /// `asks_permission`.
+    asks: bool,
+    modes: ModeMap,
+    /// Told when vibe is not signed in, never run (`acp/auth.rs`).
+    sign_in: String,
+}
+
+impl Default for Agent {
+    fn default() -> Self {
+        Agent {
+            command: vec![COMMAND.to_string()],
+            display: None,
+            asks: true,
+            modes: mode_map(),
+            sign_in: "vibe --setup".to_string(),
+        }
+    }
+}
+
 impl Default for VibeHarness {
     fn default() -> Self {
         Self::new()
@@ -372,14 +404,15 @@ impl Default for VibeHarness {
 
 impl VibeHarness {
     pub fn new() -> Self {
-        Self::build(&[COMMAND.to_string()], None, true, mode_map())
+        Self::build(Agent::default(), Arc::default(), None, None)
     }
 
     /// The built-in harness with what a `[harnesses.vibe]` table sets in
-    /// its place: the command, the name shown, `asks_permission` and the
-    /// mode map. The model and effort are chosen at spawn whatever it says.
-    /// A mode map that does not parse and a provider that is not whole are
-    /// both reported ([`crate::config::TableErrors`]).
+    /// its place: the command, the name shown, `asks_permission`, the
+    /// mode map and the sign-in command. The model and effort are chosen
+    /// at spawn whatever it says. A mode map that does not parse and a
+    /// provider that is not whole are both reported
+    /// ([`crate::config::TableErrors`]).
     pub fn from_settings(settings: &HarnessSettings) -> Result<Self> {
         let own: Own = settings.own(HarnessId::VIBE.as_str())?;
         let command = if settings.command.is_empty() {
@@ -401,52 +434,39 @@ impl VibeHarness {
                 return Err(crate::config::TableErrors(wrong).into());
             }
         };
-        let vibe = Self::build(
-            &command,
-            settings.display_name.as_deref(),
-            own.asks_permission.unwrap_or(true),
+        let builtin = Agent::default();
+        let agent = Agent {
+            command,
+            display: settings.display_name.clone(),
+            asks: own.asks_permission.unwrap_or(builtin.asks),
             modes,
-        );
-        // `sign_in` in the table replaces vibe's own command.
-        let vibe = match own.sign_in.as_deref() {
-            Some(command) => VibeHarness {
-                acp: vibe.acp.signing_in_with(Some(command)),
-                ..vibe
-            },
-            None => vibe,
+            // `sign_in` in the table replaces vibe's own command.
+            sign_in: own.sign_in.unwrap_or(builtin.sign_in),
         };
-        Ok(vibe.with_providers(providers))
-    }
-
-    /// Offer `providers` beside vibe's own configuration: one chosen for a
-    /// session is handed to vibe in its environment ([`provider_env`]).
-    fn with_providers(self, providers: Vec<Provider>) -> Self {
-        VibeHarness {
-            providers: Arc::new(providers),
-            ..self
-        }
-        .rebuild_spawn()
+        Ok(Self::build(agent, Arc::new(providers), None, None))
     }
 
     /// Write unharness's profiles under `dir` instead of its state
     /// directory (tests, which never write the real one).
     pub fn writing_profiles_in(self, dir: &Path) -> Self {
-        VibeHarness {
-            profile_root: Some(dir.to_path_buf()),
-            ..self
-        }
-        .rebuild_spawn()
+        Self::build(
+            self.agent,
+            self.providers,
+            Some(dir.to_path_buf()),
+            self.inherited,
+        )
     }
 
     /// Take `vars` as the environment vibe inherits from unharness when
     /// its profiles are prepared, instead of unharness's own (tests, which
     /// never read the real one).
     pub fn inheriting_env(self, vars: Vec<(String, String)>) -> Self {
-        VibeHarness {
-            inherited: Some(Arc::new(vars)),
-            ..self
-        }
-        .rebuild_spawn()
+        Self::build(
+            self.agent,
+            self.providers,
+            self.profile_root,
+            Some(Arc::new(vars)),
+        )
     }
 
     /// The environment vibe inherits: [`Self::inheriting_env`]'s, else
@@ -460,27 +480,6 @@ impl VibeHarness {
     /// vibe's home for a process that is given no `VIBE_HOME` of its own.
     fn home(&self) -> PathBuf {
         vibe_home(&self.inherited_env(), &[])
-    }
-
-    /// The environment each vibe process starts with: the providers' or
-    /// vibe's own model choice ([`plan_for`]) and unharness's profiles
-    /// ([`with_profiles`]).
-    fn rebuild_spawn(self) -> Self {
-        let providers = self.providers.clone();
-        let root = self.profile_root.clone();
-        let fixed = self.inherited.clone();
-        let acp = self
-            .acp
-            .choosing_at_spawn(Arc::new(move |choice: &SpawnChoice<'_>| {
-                let inherited = fixed.clone().unwrap_or_else(|| Arc::new(process_env()));
-                with_profiles(
-                    plan_for(&providers, &inherited, choice),
-                    root.as_deref(),
-                    &inherited,
-                    choice,
-                )
-            }));
-        VibeHarness { acp, ..self }
     }
 
     /// The provider a session is to run on, if it is one of
@@ -517,29 +516,113 @@ impl VibeHarness {
         Ok(Some(p))
     }
 
-    fn build(command: &[String], display: Option<&str>, asks: bool, modes: ModeMap) -> Self {
+    /// vibe-acp as `agent` says, offering `providers` beside vibe's own
+    /// configuration (one chosen for a session is handed to vibe in its
+    /// environment, [`provider_env`]), with unharness's profiles under
+    /// `profile_root` and `inherited` taken as its environment.
+    fn build(
+        agent: Agent,
+        providers: Arc<Vec<Provider>>,
+        profile_root: Option<PathBuf>,
+        inherited: Option<Arc<Vec<(String, String)>>>,
+    ) -> Self {
+        let hooks = VibeHooks {
+            providers: providers.clone(),
+            profile_root: profile_root.clone(),
+            inherited: inherited.clone(),
+            known: SharedModels::default(),
+        };
         let acp = AcpHarness::new(
             HarnessId::VIBE.as_str(),
-            Some(display.unwrap_or(DISPLAY_NAME)),
-            command,
+            Some(agent.display.as_deref().unwrap_or(DISPLAY_NAME)),
+            &agent.command,
+            acp_profile(&agent, hooks),
         )
         // The command is never empty here.
-        .expect("a command")
-        .asking_permission(asks)
-        .with_modes(modes)
-        .declaring_effort_option(EFFORT_OPTION)
-        // Told when vibe is not signed in, never run (`acp/auth.rs`).
-        .signing_in_with(Some("vibe --setup"))
-        .resolving_relative_edits()
-        .reading_meta_with(subagents::reader)
-        .rewinding_with(REWIND_METHOD);
+        .expect("a command");
         VibeHarness {
             acp,
-            providers: Arc::default(),
-            profile_root: None,
-            inherited: None,
+            agent,
+            providers,
+            profile_root,
+            inherited,
         }
-        .rebuild_spawn()
+    }
+}
+
+/// What unharness knows about `vibe-acp` beyond the protocol: whether it
+/// asks and its mode map (from `agent`), its level as the option
+/// `thinking`, the command that signs it in, relative edit paths in the
+/// session's directory, and what the driver asks of vibe ([`VibeHooks`]).
+fn acp_profile(agent: &Agent, hooks: VibeHooks) -> AcpProfile {
+    AcpProfile {
+        asks: agent.asks,
+        effort_option: Some(EFFORT_OPTION.to_string()),
+        modes: agent.modes.clone(),
+        sign_in: Some(agent.sign_in.clone()),
+        relative_edits: true,
+        hooks: Arc::new(hooks),
+    }
+}
+
+/// What the ACP driver asks of vibe: its model and level chosen at spawn,
+/// with the environment each process starts with (the providers' or
+/// vibe's own model choice, [`plan_for`], and unharness's profiles,
+/// [`with_profiles`]), its subagents read from its `_meta`
+/// ([`subagents`]) and its rewind ([`REWIND_METHOD`]).
+struct VibeHooks {
+    providers: Arc<Vec<Provider>>,
+    /// Where unharness's profiles are written ([`VibeHarness::profile_root`]).
+    profile_root: Option<PathBuf>,
+    /// The environment vibe inherits ([`VibeHarness::inherited`]).
+    inherited: Option<Arc<Vec<(String, String)>>>,
+    /// What vibe's sessions said about its models, this run: a level goes
+    /// in a whole model entry, which needs the model's name.
+    known: SharedModels,
+}
+
+impl AgentHooks for VibeHooks {
+    fn chooses_at_spawn(&self) -> bool {
+        true
+    }
+
+    fn spawn_plan(&self, cfg: &SessionConfig) -> SpawnPlan {
+        let known = self.known.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let choice = SpawnChoice::of(cfg, &known);
+        let inherited = self
+            .inherited
+            .clone()
+            .unwrap_or_else(|| Arc::new(process_env()));
+        with_profiles(
+            plan_for(&self.providers, &inherited, &choice),
+            self.profile_root.as_deref(),
+            &inherited,
+            &choice,
+        )
+    }
+
+    fn learn(&self, running: &SpawnPlan, options: &SessionOptions, cfg: &SessionConfig) {
+        self.known.lock().unwrap_or_else(|e| e.into_inner()).learn(
+            options,
+            running.overrides.as_deref(),
+            // A plan that replaces a model's entry pins that model too.
+            cfg.model.is_some() || running.overrides.is_some(),
+        );
+    }
+
+    /// A process started with a level for a model whose name it did not
+    /// know yet, once a plan made now, with what its session said, has it.
+    fn respawn_plan(&self, running: &SpawnPlan, cfg: &SessionConfig) -> Option<SpawnPlan> {
+        running.unmet.as_ref()?;
+        Some(self.spawn_plan(cfg)).filter(|next| next.unmet.is_none())
+    }
+
+    fn meta_reader(&self) -> Option<Box<dyn MetaReader>> {
+        Some(subagents::reader())
+    }
+
+    fn rewind_method(&self) -> Option<&'static str> {
+        Some(REWIND_METHOD)
     }
 }
 
