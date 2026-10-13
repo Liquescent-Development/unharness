@@ -40,6 +40,9 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   agy/         stream-json transport
   acp/         generic Agent Client Protocol client: one instance per configured agent
 src/tui/       App state (pure), transcript blocks, modals, rendering, event loop
+  app/         App: its struct, types, `new` and `on_event` in mod.rs, the rest
+               one file per concern (session, policy, switch, rewind, ...),
+               and their tests the same way under tests/
 src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays

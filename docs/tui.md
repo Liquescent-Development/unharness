@@ -221,13 +221,13 @@ works).
 An `@` at the start of a word lists the files under the working
 directory, hidden ones included, leaving out what `.gitignore`, `.ignore`
 and git's exclude files leave out. Typing after the `@` narrows the list
-fuzzily: `@tuiapp` finds `src/tui/app.rs`. The list is rebuilt at each
+fuzzily: `@tuiapp` finds `src/tui/app/mod.rs`. The list is rebuilt at each
 `@`, up to 50,000 files.
 
 `Tab` or `Enter` replaces the word with the path in the form the active
 harness reads:
 
-- **Claude Code** gets `@src/tui/app.rs` and puts the file's content into
+- **Claude Code** gets `@src/tui/app/mod.rs` and puts the file's content into
   the turn itself.
 - **Every other harness** gets the plain path, and its agent opens the
   file with its own tools.
