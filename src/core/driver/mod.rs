@@ -250,8 +250,10 @@ pub enum Shutdown {
     /// more than one session, lets go of it). Its answer is the loop's: the
     /// protocol is not told it, also when it comes after stdin closed. A
     /// request that cannot be written closes stdin at once, and a handle
-    /// dropped meanwhile closes it then. Another `Shutdown` meanwhile
-    /// changes nothing.
+    /// dropped during the wait closes it then. Another `Shutdown` during
+    /// the wait changes nothing; one after it is carried out as any other
+    /// ([`StreamProtocol::shutdown`] asked again, the CLI ended as that
+    /// says), on a CLI whose stdin is already closed.
     Request {
         method: String,
         params: Value,
