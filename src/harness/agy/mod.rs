@@ -211,7 +211,7 @@ impl Harness for AgyHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        transport::start_stream(cfg)
+        transport::start_stream(cfg, &self.capabilities())
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {

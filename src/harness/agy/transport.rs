@@ -13,7 +13,7 @@ use super::brain;
 use super::parse::AgyParser;
 use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, HarnessId, Parser, PermissionPolicy, RemoteControl, SessionCommand, SessionConfig,
+    AgentEvent, Capabilities, HarnessId, Parser, PermissionPolicy, SessionCommand, SessionConfig,
     SessionHandle, StopReason,
 };
 
@@ -99,10 +99,11 @@ fn subagent_ends(
     out
 }
 
-pub fn start_stream(cfg: SessionConfig) -> Result<SessionHandle> {
+/// `caps` is what the harness declares.
+pub fn start_stream(cfg: SessionConfig, caps: &Capabilities) -> Result<SessionHandle> {
     let command = stream_command(&cfg);
     let sandbox = cfg.sandbox.clone();
-    driver::start(HarnessId::AGY, command, &sandbox, Agy::new(cfg))
+    driver::start(HarnessId::AGY, caps, command, &sandbox, Agy::new(cfg))
 }
 
 fn stream_command(cfg: &SessionConfig) -> Command {
@@ -158,24 +159,15 @@ impl StreamProtocol for Agy {
 
     async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
         match cmd {
-            // agy takes no event on stdin that would stop one.
-            SessionCommand::StopSubagent { .. } => Encoded::Done,
-            SessionCommand::RemoteControl { .. } => {
-                io.emit(AgentEvent::RemoteControl(RemoteControl::Failed {
-                    reason: "agy has no remote control".into(),
-                }))
-                .await;
-                Encoded::Done
-            }
-            SessionCommand::Steer { .. }
+            // No event on agy's stdin stops a subagent, steers, compacts
+            // or rewinds, its headless mode asks about nothing, and it has
+            // no remote control.
+            SessionCommand::StopSubagent { .. }
+            | SessionCommand::RemoteControl { .. }
+            | SessionCommand::Steer { .. }
             | SessionCommand::Compact { .. }
-            | SessionCommand::Rewind { .. } => {
-                io.emit(AgentEvent::Error(
-                    "agy cannot steer, compact or rewind a session".into(),
-                ))
-                .await;
-                Encoded::Done
-            }
+            | SessionCommand::Rewind { .. }
+            | SessionCommand::RespondPermission { .. } => Encoded::Unsupported,
             SessionCommand::SendTurn { text, attachments } if self.restart_needed => {
                 self.restart_needed = false;
                 self.cfg.resume = self.session_id.clone();
@@ -198,13 +190,6 @@ impl StreamProtocol for Agy {
                 ))
                 .await;
                 Encoded::Kill
-            }
-            SessionCommand::RespondPermission { .. } => {
-                io.emit(AgentEvent::Error(
-                    "agy cannot answer permission prompts in headless mode".into(),
-                ))
-                .await;
-                Encoded::Done
             }
             SessionCommand::SetModel(m) => {
                 self.cfg.model = Some(m);

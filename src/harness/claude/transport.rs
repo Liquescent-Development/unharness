@@ -17,9 +17,9 @@ use tokio::time::Instant;
 use super::parse::ClaudeParser;
 use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, McpServer, McpTransport, Parser, PermissionDecision,
-    PermissionKind, PermissionPolicy, ProviderId, SessionCommand, SessionConfig, SessionHandle,
-    StopReason,
+    AgentEvent, Attachment, Capabilities, HarnessId, McpServer, McpTransport, Parser,
+    PermissionDecision, PermissionKind, PermissionPolicy, ProviderId, SessionCommand,
+    SessionConfig, SessionHandle, StopReason,
 };
 
 /// Flags for a permission policy. `Ask` maps to Claude's default mode with
@@ -326,8 +326,13 @@ pub const PARENT_SESSION_VARS: [&str; 4] = [
     "CLAUDE_CODE_CHILD_SESSION",
 ];
 
-/// `mcp_config` is the file written by [`mcp_config_file`], if any.
-pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionHandle> {
+/// `mcp_config` is the file written by [`mcp_config_file`], if any; `caps`
+/// is what the harness declares.
+pub fn start(
+    cfg: SessionConfig,
+    mcp_config: Option<PathBuf>,
+    caps: &Capabilities,
+) -> Result<SessionHandle> {
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(session_args(&cfg)).current_dir(&cfg.cwd);
     // Last: the flag takes every word up to the next flag.
@@ -350,6 +355,7 @@ pub fn start(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Result<SessionH
     }
     driver::start(
         HarnessId::CLAUDE,
+        caps,
         cmd,
         &cfg.sandbox,
         Claude::new(cfg.provider),

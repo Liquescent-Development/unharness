@@ -11,8 +11,8 @@ use super::gate;
 use super::parse::PiParser;
 use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, Parser, PermissionDecision, PermissionKind,
-    PermissionPolicy, RemoteControl, SessionCommand, SessionConfig, SessionHandle, StopReason,
+    AgentEvent, Attachment, Capabilities, HarnessId, Parser, PermissionDecision, PermissionKind,
+    PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -127,7 +127,8 @@ pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDeci
     v.to_string()
 }
 
-pub fn start(cfg: SessionConfig, gate: &Path) -> Result<SessionHandle> {
+/// `caps` is what the harness declares.
+pub fn start(cfg: SessionConfig, gate: &Path, caps: &Capabilities) -> Result<SessionHandle> {
     let (args, session_id) = session_args(&cfg, gate);
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(args).current_dir(&cfg.cwd);
@@ -137,6 +138,7 @@ pub fn start(cfg: SessionConfig, gate: &Path) -> Result<SessionHandle> {
     let resumed = cfg.resume.is_some();
     driver::start(
         HarnessId::PI,
+        caps,
         cmd,
         &cfg.sandbox,
         Pi::new(session_id, resumed, cfg.policy),
@@ -258,14 +260,10 @@ impl StreamProtocol for Pi {
                     Some(self.request("abort"))
                 }
             }
-            // No subagents are reported here, so none can be running.
-            SessionCommand::StopSubagent { .. } => None,
-            SessionCommand::RemoteControl { .. } => {
-                io.emit(AgentEvent::RemoteControl(RemoteControl::Failed {
-                    reason: "pi has no remote control".into(),
-                }))
-                .await;
-                None
+            // pi reports no subagents, so none can be running, and has no
+            // remote control.
+            SessionCommand::StopSubagent { .. } | SessionCommand::RemoteControl { .. } => {
+                return Encoded::Unsupported;
             }
             SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {
                 Some(kind) => Some(encode_ui_response(&id, kind, &decision)),

@@ -511,7 +511,7 @@ impl Harness for ClaudeHarness {
     fn start_session(&self, mut cfg: SessionConfig) -> Result<SessionHandle> {
         cfg.env.extend(self.config_env()?);
         let mcp = transport::mcp_config_file(&cfg.mcp_servers, &self.mcp_dir())?;
-        transport::start(cfg, mcp)
+        transport::start(cfg, mcp, &self.capabilities())
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {

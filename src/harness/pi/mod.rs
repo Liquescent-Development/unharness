@@ -232,7 +232,7 @@ impl Harness for PiHarness {
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
-        transport::start(cfg, &self.install_gate()?)
+        transport::start(cfg, &self.install_gate()?, &self.capabilities())
     }
 
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {

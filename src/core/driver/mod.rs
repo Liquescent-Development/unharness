@@ -7,8 +7,9 @@
 //! [`LineProcess`] and the session's [`ProcessSlot`], a restart the
 //! protocol asks for, ending the CLI the way the protocol says (what it
 //! is sent first, stdin closed, killed after `END_GRACE`, or killed at
-//! once mid-turn), reading its output until it has exited, and what
-//! happens when the TUI drops the handle.
+//! once mid-turn), reading its output until it has exited, what happens
+//! when the TUI drops the handle, and the answer to a command the harness
+//! cannot carry out: one `Notice`, worded from its [`Capabilities`].
 //!
 //! A harness whose CLI runs once per turn (Codex `exec`) implements
 //! [`per_turn::PerTurnProtocol`] instead, the per-turn flavour.
@@ -22,6 +23,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+use super::caps::Capabilities;
 use super::event::AgentEvent;
 use super::ids::HarnessId;
 use super::parser::Parser;
@@ -73,6 +75,9 @@ pub enum Encoded {
     /// Nothing more: what the command needed, if anything, was done
     /// through [`Io`].
     Done,
+    /// The harness cannot carry it out: the driver says so, as it does for
+    /// a command its `Capabilities` do not offer.
+    Unsupported,
     /// Kill the CLI now, with what it started (agy, which has no
     /// interrupt).
     Kill,
@@ -105,8 +110,9 @@ pub trait StreamProtocol: Send + 'static {
     /// What is sent and told before the first command: the handshake.
     fn start(&mut self, io: &mut Io<'_>) -> impl Future<Output = ()> + Send;
 
-    /// What a command becomes. `Shutdown` never comes here: the loop ends
-    /// the CLI as [`shutdown`](Self::shutdown) says.
+    /// What a command becomes. `Shutdown` never comes here (the loop ends
+    /// the CLI as [`shutdown`](Self::shutdown) says), nor a command the
+    /// harness's `Capabilities` do not offer (the loop answers it).
     fn encode(
         &mut self,
         cmd: SessionCommand,
@@ -161,9 +167,10 @@ pub trait StreamProtocol: Send + 'static {
 }
 
 /// Spawn `command` in `sandbox` and drive it with `protocol` for the
-/// session whose handle this returns.
+/// session whose handle this returns. `caps` is what `harness` declares.
 pub fn start<P: StreamProtocol>(
     harness: HarnessId,
+    caps: &Capabilities,
     command: Command,
     sandbox: &Sandbox,
     protocol: P,
@@ -176,6 +183,8 @@ pub fn start<P: StreamProtocol>(
     let slot = handle.process_slot();
     slot.set(&proc);
     let session = Loop {
+        harness,
+        caps: caps.clone(),
         protocol,
         proc,
         sandbox: sandbox.clone(),
@@ -190,6 +199,10 @@ pub fn start<P: StreamProtocol>(
 
 /// The driver task's state.
 struct Loop<P> {
+    harness: HarnessId,
+    /// What the harness declares it can do, which decides what is
+    /// unsupported.
+    caps: Capabilities,
     protocol: P,
     proc: LineProcess,
     /// What a restarted CLI is confined by: the session's.
@@ -255,6 +268,11 @@ impl<P: StreamProtocol> Loop<P> {
         }
         let mut next = Some(cmd);
         while let Some(cmd) = next.take() {
+            let (what, offered) = asks(&cmd, &self.caps);
+            if !offered {
+                self.cannot(what).await;
+                continue;
+            }
             let encoded = self
                 .protocol
                 .encode(cmd, &mut Io::new(&mut self.proc, &self.events))
@@ -268,6 +286,7 @@ impl<P: StreamProtocol> Loop<P> {
                     }
                 }
                 Encoded::Done => {}
+                Encoded::Unsupported => self.cannot(what).await,
                 Encoded::Kill => self.proc.kill().await,
                 Encoded::Restart { command, then } => {
                     self.proc.kill().await;
@@ -288,6 +307,12 @@ impl<P: StreamProtocol> Loop<P> {
         }
     }
 
+    /// Tell the TUI the harness cannot `what`.
+    async fn cannot(&mut self, what: &str) {
+        let notice = format!("{} cannot {what}", self.harness);
+        let _ = self.events.send(AgentEvent::Notice(notice)).await;
+    }
+
     /// The TUI dropped the handle while it was told something. It sends
     /// `Shutdown` and then drops the handle, so a `Shutdown` may be queued
     /// behind what was being told: the CLI is then ended as asked, and
@@ -301,6 +326,29 @@ impl<P: StreamProtocol> Loop<P> {
         } else {
             self.proc.kill().await;
         }
+    }
+}
+
+/// What `cmd` asks of the harness, as the notice that it cannot says it,
+/// and whether its `Capabilities` offer that.
+fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (&'static str, bool) {
+    match cmd {
+        SessionCommand::Steer { .. } => ("steer a running turn", caps.steer),
+        SessionCommand::Compact { .. } => ("compact its context on request", caps.compaction),
+        SessionCommand::Rewind { .. } => ("rewind its session", caps.rewind.conversation),
+        SessionCommand::Interrupt => ("interrupt a turn", caps.interrupt),
+        SessionCommand::StopSubagent { .. } => ("stop a subagent", caps.subagents.stop),
+        SessionCommand::RespondPermission { .. } => (
+            "take an answer to a permission request",
+            caps.interactive_permissions,
+        ),
+        SessionCommand::RemoteControl { .. } => ("go on remote control", caps.remote_control),
+        // What every harness takes.
+        SessionCommand::SendTurn { .. } => ("take a turn", true),
+        SessionCommand::SetModel(_) => ("change its model", true),
+        SessionCommand::SetEffort(_) => ("change its effort", true),
+        SessionCommand::SetPolicy(_) => ("change its permission policy", true),
+        SessionCommand::Shutdown => ("shut down", true),
     }
 }
 
@@ -406,6 +454,7 @@ mod tests {
                     None => Encoded::Done,
                 },
                 SessionCommand::Interrupt => Encoded::Kill,
+                SessionCommand::Compact { .. } => Encoded::Unsupported,
                 _ => Encoded::Done,
             }
         }
@@ -467,8 +516,24 @@ mod tests {
         }
     }
 
+    /// Everything a command can need.
+    fn every() -> Capabilities {
+        let mut caps = Capabilities {
+            steer: true,
+            compaction: true,
+            interrupt: true,
+            interactive_permissions: true,
+            remote_control: true,
+            ..Default::default()
+        };
+        caps.rewind.conversation = true;
+        caps.subagents.stop = true;
+        caps
+    }
+
     fn run(script: &str, toy: Toy) -> SessionHandle {
-        start(HarnessId::CLAUDE, sh(script), &Sandbox::off(), toy).unwrap()
+        let toy_harness = HarnessId::intern("toy");
+        start(toy_harness, &every(), sh(script), &Sandbox::off(), toy).unwrap()
     }
 
     async fn next(h: &mut SessionHandle) -> AgentEvent {
@@ -729,6 +794,72 @@ mod tests {
             panic!("the failure was not told");
         };
         assert!(said.starts_with("restart failed: "), "{said}");
+    }
+
+    // What the harness does not offer never reaches its protocol, and
+    // what the protocol refuses is said the same way: one notice each.
+    #[tokio::test]
+    async fn a_command_the_harness_cannot_carry_out_is_answered_with_one_notice() {
+        let caps = Capabilities {
+            compaction: true,
+            ..Default::default()
+        };
+        let mut h = start(
+            HarnessId::intern("toy"),
+            &caps,
+            sh(ECHO),
+            &Sandbox::off(),
+            Toy::new(),
+        )
+        .unwrap();
+        pid(&mut h).await;
+        assert_eq!(next(&mut h).await, AgentEvent::TextDelta("hello".into()));
+        for cmd in [
+            SessionCommand::Steer {
+                text: "x".into(),
+                attachments: Vec::new(),
+            },
+            SessionCommand::Rewind { anchor: "a".into() },
+            SessionCommand::Interrupt,
+            SessionCommand::StopSubagent { id: "s".into() },
+            SessionCommand::RespondPermission {
+                id: "r".into(),
+                decision: crate::core::PermissionDecision::Deny {
+                    reason: "no".into(),
+                },
+            },
+            SessionCommand::RemoteControl {
+                enabled: true,
+                name: None,
+            },
+            SessionCommand::Compact { instructions: None },
+            SessionCommand::turn("after"),
+        ] {
+            h.send(cmd).await.unwrap();
+        }
+        let mut said = Vec::new();
+        loop {
+            match next(&mut h).await {
+                AgentEvent::Notice(n) => said.push(n),
+                // Nothing went to the CLI before the turn: it echoes all.
+                ev => {
+                    assert_eq!(ev, AgentEvent::TextDelta("after".into()));
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            said,
+            [
+                "toy cannot steer a running turn",
+                "toy cannot rewind its session",
+                "toy cannot interrupt a turn",
+                "toy cannot stop a subagent",
+                "toy cannot take an answer to a permission request",
+                "toy cannot go on remote control",
+                "toy cannot compact its context on request",
+            ]
+        );
     }
 
     #[tokio::test]
