@@ -30,7 +30,8 @@ src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                session driver (driver/: the loop around a StreamProtocol,
                one process per session; per_turn.rs, one per turn),
                JSON-RPC framing, Registry, SessionsStore,
-               file checkpoints, allow rules (rules.rs), the sandbox
+               file checkpoints, allow rules (rules.rs), who answers a
+               permission request (permissions.rs), the sandbox
                (sandbox/: levels, profile, Landlock and Seatbelt backends)
                and the watch on vendor config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,

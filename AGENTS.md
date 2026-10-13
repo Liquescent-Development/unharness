@@ -40,7 +40,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   declare `ask` (`Capabilities::permission_policies`, `Harness::
   print_policies` for `--print --native` and `--no-tui`), and there is no
   degraded `ask`. A `--print` run is a session that answers every request
-  itself: allowed by a rule, denied otherwise (`src/headless.rs`). Declaring it needs a
+  itself: allowed by a rule, denied otherwise (`src/headless.rs`; who
+  answers a request is decided in `core/permissions.rs`). Declaring it needs a
   recording or a live run that shows the asking. The policy never chooses
   a sandbox level.
 - **Parsers are pure and fixture-tested.** `Parser::feed(line) -> Vec<AgentEvent>`
