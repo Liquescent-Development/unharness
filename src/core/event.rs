@@ -289,7 +289,8 @@ pub struct CapsUpdate {
     /// Policies the live session cannot hold although the harness declares
     /// them (an ACP agent whose mode for the policy did not take, or that
     /// has modes and no map, below `bypass`): taken out of what is offered, as a
-    /// policy the harness never had is. Each list replaces the last.
+    /// policy the harness never had is. Each list replaces the last, and
+    /// the TUI drops it when the session ends: a refusal is for the session.
     pub refused_policies: Option<Vec<PermissionPolicy>>,
     /// The agent asks the user questions (`Capabilities::ask_user_question`):
     /// an ACP agent is seen to once it sends a form elicitation.

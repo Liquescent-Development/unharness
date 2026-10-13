@@ -1758,6 +1758,7 @@ impl App {
     pub fn driver_gone(&mut self) {
         self.transcript.push_error("session driver is gone");
         self.session_alive = false;
+        self.forget_refusals();
         self.session_blank = false;
         self.blank_session = None;
         self.idle_start_paused = true;
@@ -2341,10 +2342,13 @@ impl App {
         let had_content = self.conversation.has_content();
         // A session started with nothing to resume and sent nothing knows
         // nothing of this conversation, and serves the next. Any other ends,
-        // a blank one resumed on a session of this conversation too.
+        // a blank one resumed on a session of this conversation too, and
+        // one that refused a policy, so that the next is asked for it again
+        // (its process may have been started with what refused it).
         let keep = self.session_alive
             && self.session_blank
-            && !self.session_ids.contains_key(&self.active);
+            && !self.session_ids.contains_key(&self.active)
+            && !self.session_refused();
         self.end_remote_control();
         let said = self.transcript.blocks.len();
         if self.session_alive && !keep {
@@ -3148,6 +3152,7 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                self.forget_refusals();
                 if self.session_blank {
                     self.transcript.push_notice(format!(
                         "{} exited{} before any prompt; your next prompt starts it again",
@@ -3403,7 +3408,50 @@ impl App {
         self.drop_prompts();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
+        self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
+    }
+
+    /// The active harness's session is gone. What it refused was for it
+    /// (`CapsUpdate::refused_policies`: a mode that did not take, a
+    /// profile shadowed): the next session is asked for the wanted policy
+    /// again, and refuses it again if it still cannot hold it. The rest of
+    /// what it reported is the agent's, kept until the next one says.
+    fn forget_refusals(&mut self) {
+        let before = self.effective_policy();
+        let Some(update) = self.live_caps.get_mut(&self.active) else {
+            return;
+        };
+        if update.refused_policies.take().is_none() {
+            return;
+        }
+        // A policy picker open on what the session offered is redone, or,
+        // where it waited for a policy and one is in effect again, closed:
+        // what waited for it is the user's to send.
+        if matches!(&self.modal, Some(Modal::Policy(p)) if p.save.is_none()) {
+            if before.is_none() && self.effective_policy().is_some() {
+                self.modal = None;
+                if let Some(w) = self.policy_warning() {
+                    self.transcript.push_notice(w);
+                }
+                if !self.queued.is_empty() {
+                    self.transcript.push_notice(format!(
+                        "{} queued prompt(s) held; press Enter to send the next",
+                        self.queued.len()
+                    ));
+                }
+            } else {
+                self.open_policy_picker();
+            }
+        }
+    }
+
+    /// The active harness's session refused a policy.
+    fn session_refused(&self) -> bool {
+        self.live_caps
+            .get(&self.active)
+            .and_then(|u| u.refused_policies.as_ref())
+            .is_some_and(|r| !r.is_empty())
     }
 
     /// The allow rules that answer a request, if the user has them for it
@@ -8560,6 +8608,165 @@ pub(crate) mod tests {
         app.submit_prompt("do it".into());
         assert!(app.take_actions().is_empty());
         assert!(!app.is_generating);
+    }
+
+    /// A refusal is for the session that made it (#216): it holds while
+    /// that session lives, and once it ends, by `/clear`, by exiting or by
+    /// a switch away, the policy is offered again and the next session is
+    /// asked for it.
+    #[test]
+    fn a_refused_policy_is_offered_again_once_the_session_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(vec![PermissionPolicy::AcceptEdits]),
+                ..Default::default()
+            }));
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+            assert!(
+                !app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            app.take_actions();
+        };
+        let offered_again = |app: &App| {
+            assert!(
+                app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+            assert!(app.policy_warning().is_none());
+        };
+
+        // Refused by a session nothing was sent to yet (at launch).
+        start(&mut app, "claude-1");
+        refuse(&mut app);
+        // It holds while the session lives, whatever else it reports.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            slash_commands: Some(true),
+            ..Default::default()
+        }));
+        app.open_policy_picker();
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Policy(p)) if p.list.current() == Some(&PermissionPolicy::Ask)
+        ));
+        app.modal = None;
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        // `/clear` ends it (a blank session is otherwise kept), so that the
+        // next one, started by the event loop, is asked again.
+        app.handle_slash_command("/clear");
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_alive);
+        offered_again(&app);
+        // The event loop starts the next one unprompted, under it.
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
+
+        // Refused by a session a turn went to, which then exits.
+        start(&mut app, "claude-2");
+        refuse(&mut app);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(
+            !app.offered_policies()
+                .contains(&PermissionPolicy::AcceptEdits)
+        );
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        offered_again(&app);
+
+        // Refused, then a switch away and back.
+        start(&mut app, "claude-3");
+        refuse(&mut app);
+        app.switch_harness(HarnessId::CODEX);
+        app.switch_harness(HarnessId::CLAUDE);
+        offered_again(&app);
+
+        // Refused, then the driver is gone.
+        start(&mut app, "claude-4");
+        refuse(&mut app);
+        app.driver_gone();
+        offered_again(&app);
+    }
+
+    /// A policy picker opened on what a session refused is not left
+    /// showing it once that session is gone: one that waited for a policy
+    /// closes when the wanted one is in effect again, and the prompts that
+    /// waited are the user's to send; one the user opened is redone.
+    #[test]
+    fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
+        use crate::tui::herdr::State;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App, policies: &[PermissionPolicy]| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(policies.to_vec()),
+                ..Default::default()
+            }));
+        };
+        let disabled = |app: &App, policy: PermissionPolicy| match &app.modal {
+            Some(Modal::Policy(p)) => {
+                let idx = PermissionPolicy::ALL
+                    .iter()
+                    .position(|q| *q == policy)
+                    .unwrap();
+                !p.list.is_enabled(idx)
+            }
+            _ => panic!("no policy picker"),
+        };
+
+        // Nothing left at or below: the picker waits, and so does a prompt.
+        start(&mut app, "claude-1");
+        refuse(&mut app, &PermissionPolicy::ALL);
+        assert_eq!(app.effective_policy(), None);
+        assert!(disabled(&app, PermissionPolicy::Ask));
+        app.submit_prompt("do it".into());
+        assert_eq!(app.queued.len(), 1);
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.herdr_report().state, State::Blocked);
+
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert_ne!(app.herdr_report().state, State::Blocked);
+        assert_eq!(app.queued.len(), 1);
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.starts_with("1 queued prompt(s) held"))
+        );
+        app.queued.clear();
+
+        // Opened by the user on a refusal that left a policy in effect.
+        start(&mut app, "claude-2");
+        refuse(&mut app, &[PermissionPolicy::AcceptEdits]);
+        app.open_policy_picker();
+        assert!(disabled(&app, PermissionPolicy::AcceptEdits));
+        app.driver_gone();
+        assert!(!disabled(&app, PermissionPolicy::AcceptEdits));
     }
 
     #[test]
