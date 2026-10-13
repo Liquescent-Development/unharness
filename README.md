@@ -19,7 +19,7 @@
 ---
 
 <!-- Recorded with `vhs assets/demo.tape`. -->
-<p align="center"><img alt="Claude Code fixes a bug behind a permission prompt, then Codex picks up the same conversation" src="assets/demo.gif" width="900"></p>
+<p align="center"><img alt="Claude Code fixes a bug behind a permission prompt and the answer is saved as a rule, Mistral Vibe writes a test over the Agent Client Protocol, and Codex explains both from the shared conversation" src="assets/demo.gif" width="900"></p>
 
 unharness runs Claude Code, Codex, pi, Antigravity, Mistral Vibe and any
 [Agent Client Protocol](https://agentclientprotocol.com) agent behind one
