@@ -267,6 +267,11 @@ struct Own {
     sign_in: Option<String>,
 }
 
+/// What an unknown key's error adds where a table does not define an ACP
+/// agent: how to define one.
+pub const DEFINING_AN_AGENT: &str = "a table with protocol = \"acp\" and a command defines an \
+                                     agent that takes asks_permission, modes and sign_in";
+
 /// An ACP agent from its `[harnesses.<name>]` table: one the table defines
 /// (`protocol = "acp"` and its `command`), or else the preset of that
 /// name, whose table takes only the keys every harness takes. A missing
@@ -275,12 +280,9 @@ struct Own {
 pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
     let defined = table.protocol.as_deref() == Some("acp");
     if let Some((name, display, command)) = PRESETS.iter().find(|(n, ..)| *n == name && !defined) {
-        table.own::<crate::config::NoOwnKeys>(name).map_err(|e| {
-            anyhow::anyhow!(
-                "{e:#} (a table with protocol = \"acp\" and a command defines an agent \
-                 that takes asks_permission, modes and sign_in)"
-            )
-        })?;
+        table
+            .own::<crate::config::NoOwnKeys>(name)
+            .map_err(|e| anyhow::anyhow!("{e:#} ({DEFINING_AN_AGENT})"))?;
         let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
         let preset = AcpHarness::new(name, Some(display), &command)?;
         return Ok(Box::new(AcpHarness {

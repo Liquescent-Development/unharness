@@ -98,7 +98,9 @@ impl Registry {
                 errors.push(ConfigError::new(
                     Some(name),
                     format!(
-                        "[harnesses.{name}] {key}: unknown key; no harness's table is named {name}"
+                        "[harnesses.{name}] {key}: unknown key; no harness's table is named \
+                         {name} ({})",
+                        acp::DEFINING_AN_AGENT
                     ),
                 ));
             }
@@ -675,10 +677,21 @@ mod tests {
         assert_eq!(
             e[0].message,
             "[harnesses.claude-code] relocate_config: unknown key; no harness's table is named \
-             claude-code"
+             claude-code (a table with protocol = \"acp\" and a command defines an agent that \
+             takes asks_permission, modes and sign_in)"
         );
         assert!(!e[0].left_out);
         assert!(config_errors(&parse("[harnesses.claud]\ndefault_model = \"m\"\n")).is_empty());
+        // A key in a table that defines no agent says how to define one.
+        let e = config_errors(&parse("[harnesses.myagent]\nasks_permission = true\n"));
+        assert_eq!(
+            e[0].message,
+            format!(
+                "[harnesses.myagent] asks_permission: unknown key; no harness's table is named \
+                 myagent ({})",
+                acp::DEFINING_AN_AGENT
+            )
+        );
 
         // Written in a workspace's table, it is refused once merged.
         let merged = crate::config::Config::merge(
