@@ -26,9 +26,11 @@ subagents it did not wait for.
 There is nobody to ask. A tool call that your [allow
 rules](permissions.md#allow-rules) cover is allowed, as in the TUI; every
 other call the harness asks about is denied, and the agent is told why.
-A question from the agent (Claude's AskUserQuestion, a Codex input
-request, an ACP agent's form) is dismissed (an ACP form is declined). Each denial is written to stderr and listed in
-the result's `denied`.
+A plan the agent asks to carry out is not approved, and a question from
+the agent (Claude's AskUserQuestion, a Codex input request, an ACP
+agent's form) is dismissed (an ACP form is declined). Each of these is
+written to stderr and kept in the result's `warnings`; only a denied tool
+call is also listed in its `denied`.
 
 What the policy lets a harness do without asking is not asked about, so
 `--policy accept-edits` lets edits through and `--policy bypass` lets
@@ -165,8 +167,8 @@ The `json` output, and the last `stream-json` line:
   report a subagent.
 - `usage` is summed over the run; `null` when the harness reported none.
 - `warnings` holds what unharness wrote to stderr: a policy fallback, a
-  missing sandbox, MCP servers left out, denials, and changes to the
-  harness's own configuration during the run.
+  missing sandbox, MCP servers left out, denials, dismissed questions,
+  and changes to the harness's own configuration during the run.
 
 `session_id` can be passed to `--resume` to continue the vendor session
 in another `-p` run. When the harness no longer has that session the run
