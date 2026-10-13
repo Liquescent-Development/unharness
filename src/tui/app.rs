@@ -1500,10 +1500,49 @@ impl App {
         "Working".to_string()
     }
 
-    /// A turn is running, subagents are still at work after one, or a `!`
-    /// command runs.
+    /// A turn is running, subagents whose end will be told are still at
+    /// work after one (`awaited_subagents`), or a `!` command runs.
     pub fn is_busy(&self) -> bool {
-        self.is_generating || !self.subagents.is_empty() || self.shell.is_some()
+        self.is_generating || self.awaited_subagents() > 0 || self.shell.is_some()
+    }
+
+    /// The subagents at work whose end the harness reports. Only these
+    /// keep the status rule and herdr at work, hold back what would end
+    /// the session (`refused_for_subagents`) and a handoff summary. One
+    /// whose end may never be told (Mistral Vibe's, until its agent waits
+    /// for it) would hold them until the session ends: it stays listed
+    /// at work with its note, and goes with the session.
+    fn awaited_subagents(&self) -> usize {
+        if self.subagents.is_empty() || self.caps().subagents.unreported_ends {
+            0
+        } else {
+            self.subagents.len()
+        }
+    }
+
+    /// Any subagent is listed at work, whether or not its end will be
+    /// told: its row's spinner and time go on.
+    pub fn has_running_subagents(&self) -> bool {
+        !self.subagents.is_empty()
+    }
+
+    /// Whether subagents at work keep the session from being ended for
+    /// `doing` (they would end with it); if so the user is told, and
+    /// pointed at stopping them only where the harness can.
+    fn refused_for_subagents(&mut self, doing: &str) -> bool {
+        let n = self.awaited_subagents();
+        if n == 0 {
+            return false;
+        }
+        let stop = if self.caps().subagents.stop {
+            " or stop them (Ctrl+S)"
+        } else {
+            ""
+        };
+        self.transcript.push_error(format!(
+            "{n} subagent(s) still at work would be stopped; wait for them{stop} before {doing}"
+        ));
+        true
     }
 
     /// What herdr is told about this session: blocked while a harness
@@ -1527,9 +1566,9 @@ impl App {
         super::herdr::Report::of(self.is_busy(), waiting)
     }
 
-    /// "2 subagents running", when any are.
+    /// "2 subagents running", when any are whose end will be told.
     pub fn subagents_label(&self) -> Option<String> {
-        match self.subagents.len() {
+        match self.awaited_subagents() {
             0 => None,
             1 => Some("1 subagent running".to_string()),
             n => Some(format!("{n} subagents running")),
@@ -1538,6 +1577,9 @@ impl App {
 
     /// How long the longest-running subagent has been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
+        if self.awaited_subagents() == 0 {
+            return 0.0;
+        }
         self.subagents
             .iter()
             .map(|a| a.started.elapsed().as_secs_f32())
@@ -1758,6 +1800,7 @@ impl App {
     pub fn driver_gone(&mut self) {
         self.transcript.push_error("session driver is gone");
         self.session_alive = false;
+        self.forget_refusals();
         self.session_blank = false;
         self.blank_session = None;
         self.idle_start_paused = true;
@@ -1838,7 +1881,7 @@ impl App {
             ));
         } else {
             self.transcript.push_notice(format!(
-                "{reason}: {name} runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+                "{reason}: {name} runs a new session without the conversation so far; your next prompt tells it"
             ));
         }
     }
@@ -2318,11 +2361,7 @@ impl App {
             return;
         }
         // They would end with the session, and report into the new one.
-        if !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before clearing",
-                self.subagents.len()
-            ));
+        if self.refused_for_subagents("clearing") {
             return;
         }
         if self.shell.is_some() {
@@ -2341,10 +2380,13 @@ impl App {
         let had_content = self.conversation.has_content();
         // A session started with nothing to resume and sent nothing knows
         // nothing of this conversation, and serves the next. Any other ends,
-        // a blank one resumed on a session of this conversation too.
+        // a blank one resumed on a session of this conversation too, and
+        // one that refused a policy, so that the next is asked for it again
+        // (its process may have been started with what refused it).
         let keep = self.session_alive
             && self.session_blank
-            && !self.session_ids.contains_key(&self.active);
+            && !self.session_ids.contains_key(&self.active)
+            && !self.session_refused();
         self.end_remote_control();
         let said = self.transcript.blocks.len();
         if self.session_alive && !keep {
@@ -2733,7 +2775,14 @@ impl App {
             return;
         };
         if rows[at].status.is_none() {
-            self.flash("Still running: open it and press s to stop it");
+            if self.caps().subagents.stop {
+                self.flash("Still running: open it and press s to stop it");
+            } else {
+                self.flash(format!(
+                    "Still running; {} cannot stop a subagent from here",
+                    self.short_name()
+                ));
+            }
             return;
         }
         if let Some(run) = self.transcript.agent_mut(&rows[at].id) {
@@ -3148,6 +3197,7 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                self.forget_refusals();
                 if self.session_blank {
                     self.transcript.push_notice(format!(
                         "{} exited{} before any prompt; your next prompt starts it again",
@@ -3403,7 +3453,50 @@ impl App {
         self.drop_prompts();
         // The next session reports where it runs.
         self.running_providers.remove(&self.active);
+        self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
+    }
+
+    /// The active harness's session is gone. What it refused was for it
+    /// (`CapsUpdate::refused_policies`: a mode that did not take, a
+    /// profile shadowed): the next session is asked for the wanted policy
+    /// again, and refuses it again if it still cannot hold it. The rest of
+    /// what it reported is the agent's, kept until the next one says.
+    fn forget_refusals(&mut self) {
+        let before = self.effective_policy();
+        let Some(update) = self.live_caps.get_mut(&self.active) else {
+            return;
+        };
+        if update.refused_policies.take().is_none() {
+            return;
+        }
+        // A policy picker open on what the session offered is redone, or,
+        // where it waited for a policy and one is in effect again, closed:
+        // what waited for it is the user's to send.
+        if matches!(&self.modal, Some(Modal::Policy(p)) if p.save.is_none()) {
+            if before.is_none() && self.effective_policy().is_some() {
+                self.modal = None;
+                if let Some(w) = self.policy_warning() {
+                    self.transcript.push_notice(w);
+                }
+                if !self.queued.is_empty() {
+                    self.transcript.push_notice(format!(
+                        "{} queued prompt(s) held; press Enter to send the next",
+                        self.queued.len()
+                    ));
+                }
+            } else {
+                self.open_policy_picker();
+            }
+        }
+    }
+
+    /// The active harness's session refused a policy.
+    fn session_refused(&self) -> bool {
+        self.live_caps
+            .get(&self.active)
+            .and_then(|u| u.refused_policies.as_ref())
+            .is_some_and(|r| !r.is_empty())
     }
 
     /// The allow rules that answer a request, if the user has them for it
@@ -3583,7 +3676,9 @@ impl App {
     /// the harness being left can say what it was about: it has a session,
     /// live or one it can resume (a fresh one would summarize nothing), and
     /// that session saw the whole transcript. Not while its subagents are
-    /// at work: what they ask or report would land in the summary's turn.
+    /// at work: what they ask or report would land in the summary's turn
+    /// (one whose end may never be told does not count: it would hold the
+    /// summary until the session ends).
     ///
     /// `from` is where the bridge to the next session starts and `budget`
     /// its length.
@@ -3591,7 +3686,7 @@ impl App {
         self.bridge_summary == BridgeSummary::Auto
             && (self.session_seen()
                 || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
-            && self.subagents.is_empty()
+            && self.awaited_subagents() == 0
             && self.bridge_start(self.active) >= self.transcript.blocks.len()
             && self.shell.is_none()
             && self.effective_policy().is_some()
@@ -3969,11 +4064,7 @@ impl App {
             return;
         }
         // They would end with the process.
-        if restart && !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the provider",
-                self.subagents.len()
-            ));
+        if restart && self.refused_for_subagents("changing the provider") {
             return;
         }
         if changed {
@@ -4062,11 +4153,7 @@ impl App {
             return false;
         }
         // They would end with the process.
-        if !self.subagents.is_empty() {
-            self.transcript.push_error(format!(
-                "{} subagent(s) still at work would be stopped; wait for them or stop them (Ctrl+S) before changing the {what}",
-                self.subagents.len()
-            ));
+        if self.refused_for_subagents(&format!("changing the {what}")) {
             return false;
         }
         true
@@ -5178,7 +5265,7 @@ impl App {
                     help.push_str(&format!("  {c:<14} {d}\n"));
                 }
                 help.push_str(
-                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
+                    "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it where the agent can, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
                 self.transcript.push_system(help);
             }
@@ -8154,7 +8241,7 @@ pub(crate) mod tests {
         });
         assert!(has_notice(
             &app,
-            "this agent cannot resume sessions: Claude runs a new session, which gets this prompt without the conversation before it; your next prompt tells it the conversation so far"
+            "this agent cannot resume sessions: Claude runs a new session without the conversation so far; your next prompt tells it"
         ));
         app.on_event(AgentEvent::TextDelta("hi".into()));
         app.on_event(AgentEvent::TurnCompleted {
@@ -8176,6 +8263,56 @@ pub(crate) mod tests {
         });
         app.submit_prompt("Thanks".into());
         assert_eq!(sent_turn(&mut app), "Thanks");
+    }
+
+    /// pi does not send a prompt that started a resume of a session it no
+    /// longer has (#214): the turn fails, and the prompt sent again goes
+    /// with the conversation.
+    #[test]
+    fn a_prompt_a_replaced_session_was_not_sent_goes_again_with_the_conversation() {
+        let mut app = test_app(HarnessId::PI);
+        app.submit_prompt("The code word is pineapple. Reply with: ok".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "pi-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TextDelta("ok".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        app.take_actions();
+        app.submit_prompt("Say hi".into());
+        assert!(matches!(
+            &app.take_actions()[..],
+            [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "pi-1"
+        ));
+        app.session_alive = true;
+        // pi names the id it made an empty session under, then lists it.
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "pi-1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::SessionReplaced {
+            reason:
+                "could not resume the session (pi has none under its id, and started an empty one)"
+                    .into(),
+        });
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(
+                "pi: the session to resume is gone, so this prompt was not sent; send it again to have the new session told the conversation".into(),
+            ),
+        });
+        app.submit_prompt("Say hi".into());
+        let sent = sent_turn(&mut app);
+        assert!(
+            sent.starts_with("[Context: earlier conversation")
+                && sent.contains("pineapple")
+                && sent.ends_with("Say hi"),
+            "{sent}"
+        );
     }
 
     /// A handoff asked of a session that could not be resumed is written by
@@ -8560,6 +8697,165 @@ pub(crate) mod tests {
         app.submit_prompt("do it".into());
         assert!(app.take_actions().is_empty());
         assert!(!app.is_generating);
+    }
+
+    /// A refusal is for the session that made it (#216): it holds while
+    /// that session lives, and once it ends, by `/clear`, by exiting or by
+    /// a switch away, the policy is offered again and the next session is
+    /// asked for it.
+    #[test]
+    fn a_refused_policy_is_offered_again_once_the_session_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(vec![PermissionPolicy::AcceptEdits]),
+                ..Default::default()
+            }));
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+            assert!(
+                !app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            app.take_actions();
+        };
+        let offered_again = |app: &App| {
+            assert!(
+                app.offered_policies()
+                    .contains(&PermissionPolicy::AcceptEdits)
+            );
+            assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
+            assert!(app.policy_warning().is_none());
+        };
+
+        // Refused by a session nothing was sent to yet (at launch).
+        start(&mut app, "claude-1");
+        refuse(&mut app);
+        // It holds while the session lives, whatever else it reports.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+            slash_commands: Some(true),
+            ..Default::default()
+        }));
+        app.open_policy_picker();
+        assert!(matches!(
+            &app.modal,
+            Some(Modal::Policy(p)) if p.list.current() == Some(&PermissionPolicy::Ask)
+        ));
+        app.modal = None;
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        // `/clear` ends it (a blank session is otherwise kept), so that the
+        // next one, started by the event loop, is asked again.
+        app.handle_slash_command("/clear");
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert!(!app.session_alive);
+        offered_again(&app);
+        // The event loop starts the next one unprompted, under it.
+        app.start_when_idle();
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::StartSession { resume: None }]
+        );
+
+        // Refused by a session a turn went to, which then exits.
+        start(&mut app, "claude-2");
+        refuse(&mut app);
+        app.submit_prompt("one".into());
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        assert!(
+            !app.offered_policies()
+                .contains(&PermissionPolicy::AcceptEdits)
+        );
+        app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+        offered_again(&app);
+
+        // Refused, then a switch away and back.
+        start(&mut app, "claude-3");
+        refuse(&mut app);
+        app.switch_harness(HarnessId::CODEX);
+        app.switch_harness(HarnessId::CLAUDE);
+        offered_again(&app);
+
+        // Refused, then the driver is gone.
+        start(&mut app, "claude-4");
+        refuse(&mut app);
+        app.driver_gone();
+        offered_again(&app);
+    }
+
+    /// A policy picker opened on what a session refused is not left
+    /// showing it once that session is gone: one that waited for a policy
+    /// closes when the wanted one is in effect again, and the prompts that
+    /// waited are the user's to send; one the user opened is redone.
+    #[test]
+    fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
+        use crate::tui::herdr::State;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+        let start = |app: &mut App, id: &str| {
+            blank_session(app);
+            app.on_event(AgentEvent::SessionStarted {
+                session_id: id.into(),
+                model: None,
+            });
+            app.take_actions();
+        };
+        let refuse = |app: &mut App, policies: &[PermissionPolicy]| {
+            app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                refused_policies: Some(policies.to_vec()),
+                ..Default::default()
+            }));
+        };
+        let disabled = |app: &App, policy: PermissionPolicy| match &app.modal {
+            Some(Modal::Policy(p)) => {
+                let idx = PermissionPolicy::ALL
+                    .iter()
+                    .position(|q| *q == policy)
+                    .unwrap();
+                !p.list.is_enabled(idx)
+            }
+            _ => panic!("no policy picker"),
+        };
+
+        // Nothing left at or below: the picker waits, and so does a prompt.
+        start(&mut app, "claude-1");
+        refuse(&mut app, &PermissionPolicy::ALL);
+        assert_eq!(app.effective_policy(), None);
+        assert!(disabled(&app, PermissionPolicy::Ask));
+        app.submit_prompt("do it".into());
+        assert_eq!(app.queued.len(), 1);
+        assert!(app.take_actions().is_empty());
+        assert_eq!(app.herdr_report().state, State::Blocked);
+
+        app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+        assert!(app.modal.is_none());
+        assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
+        assert_ne!(app.herdr_report().state, State::Blocked);
+        assert_eq!(app.queued.len(), 1);
+        assert!(
+            notices(&app)
+                .iter()
+                .any(|n| n.starts_with("1 queued prompt(s) held"))
+        );
+        app.queued.clear();
+
+        // Opened by the user on a refusal that left a policy in effect.
+        start(&mut app, "claude-2");
+        refuse(&mut app, &[PermissionPolicy::AcceptEdits]);
+        app.open_policy_picker();
+        assert!(disabled(&app, PermissionPolicy::AcceptEdits));
+        app.driver_gone();
+        assert!(!disabled(&app, PermissionPolicy::AcceptEdits));
     }
 
     #[test]
@@ -9641,9 +9937,13 @@ pub(crate) mod tests {
         let codex = json!({"method": "item/commandExecution/requestApproval", "id": "codex",
             "params": {"itemId": "i1", "cwd": cwd,
                 "command": format!("/usr/bin/zsh -lc '{command}'")}});
+        let mut input = json!({"command": command});
+        if let Some(cwd) = cwd {
+            input["cwd"] = json!(cwd);
+        }
         let acp = json!({"jsonrpc": "2.0", "id": "acp", "method": "session/request_permission",
             "params": {"options": [], "toolCall": {"toolCallId": "t2", "name": "exec_command",
-                "kind": "execute", "rawInput": {"command": command, "cwd": cwd}}}});
+                "kind": "execute", "rawInput": input}}});
         let mut events = ClaudeParser::new().feed(&claude.to_string());
         events.extend(CodexAppServerParser::new().feed(&codex.to_string()));
         events.extend(AcpParser::new(HarnessId::intern("acp-test")).feed(&acp.to_string()));
@@ -11913,12 +12213,8 @@ pub(crate) mod tests {
         assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
     }
 
-    /// With a provider in `[harnesses.vibe.providers]` vibe has more than
-    /// one, chosen when it starts as its model is: before the first prompt
-    /// a change starts the session again, after one it starts a new
-    /// session told the conversation, and never mid-turn.
-    #[test]
-    fn a_vibe_provider_goes_with_the_model() {
+    /// An app on vibe with a provider `lan` in `[harnesses.vibe.providers]`.
+    fn vibe_app_with_provider() -> (App, tempfile::TempDir) {
         let cwd = tempfile::tempdir().unwrap();
         let settings = crate::config::HarnessSettings {
             providers: [(
@@ -11934,7 +12230,7 @@ pub(crate) mod tests {
         };
         let vibe = crate::harness::vibe::VibeHarness::from_settings(&settings).unwrap();
         let registry = Arc::new(Registry::empty().with(Box::new(vibe)));
-        let mut app = test_app_with(
+        let app = test_app_with(
             cwd.path().to_path_buf(),
             HarnessId::VIBE,
             None,
@@ -11942,6 +12238,16 @@ pub(crate) mod tests {
             Config::default(),
             registry,
         );
+        (app, cwd)
+    }
+
+    /// With a provider in `[harnesses.vibe.providers]` vibe has more than
+    /// one, chosen when it starts as its model is: before the first prompt
+    /// a change starts the session again, after one it starts a new
+    /// session told the conversation, and never mid-turn.
+    #[test]
+    fn a_vibe_provider_goes_with_the_model() {
+        let (mut app, _cwd) = vibe_app_with_provider();
         assert!(app.caps().multi_provider && app.caps().provider_per_process);
 
         blank_session(&mut app);
@@ -12000,6 +12306,183 @@ pub(crate) mod tests {
             b,
             super::super::transcript::Block::Handoff { to, .. } if to == "a new Mistral Vibe session"
         )));
+    }
+
+    /// A vibe session after a turn that spawned a subagent the agent did
+    /// not wait for: vibe never tells its end (#215).
+    fn vibe_with_unseen_child(app: &mut App) {
+        use crate::harness::vibe::subagents::UNSEEN_END;
+        prompted_vibe(app);
+        spawn(app, "s1", "scribe", Some("scribe"));
+        app.on_event(AgentEvent::SubagentProgress {
+            id: "s1".into(),
+            activity: UNSEEN_END.into(),
+        });
+        app.on_event(AgentEvent::TextDelta("started scribe".into()));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+    }
+
+    /// A subagent whose end may never be told (`unreported_ends`) stays
+    /// listed at work with its note, but keeps nothing busy and holds back
+    /// nothing that would end the session; it goes with the session.
+    #[test]
+    fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
+        use crate::core::SubagentStatus;
+        use crate::harness::vibe::subagents::UNSEEN_END;
+        let (mut app, _cwd) = vibe_app();
+        assert!(app.caps().subagents.unreported_ends && !app.caps().subagents.stop);
+        vibe_with_unseen_child(&mut app);
+        let rows = app.subagent_rows();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].status.is_none());
+        assert_eq!(rows[0].activity.as_deref(), Some(UNSEEN_END));
+        // The status rule says ready, and herdr idle; the row's spinner
+        // and time still run.
+        assert!(!app.is_busy());
+        assert_eq!(app.subagents_label(), None);
+        assert!(app.has_running_subagents());
+        // Delete on it names no key that would stop it.
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        let flash = app.flash_text().unwrap_or_default().to_string();
+        assert!(flash.contains("Mistral Vibe cannot stop"), "{flash}");
+        assert!(!flash.contains("press s"), "{flash}");
+        app.subagent_list_up();
+
+        // An effort change starts a new session, and the subagent goes
+        // with the old one.
+        app.set_effort("off".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_effort(), Some("off"));
+        assert!(app.subagents.is_empty());
+        assert_eq!(
+            spawn_block(&app, "s1").status,
+            Some(SubagentStatus::Cancelled)
+        );
+        assert!(!notices(&app).iter().any(|n| n.contains("subagent(s)")));
+
+        // So does a model change.
+        let (mut app, _cwd) = vibe_app();
+        vibe_with_unseen_child(&mut app);
+        app.set_model("glm-5-3".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.current_model().unwrap().model, "glm-5-3");
+
+        // And /clear.
+        let (mut app, _cwd) = vibe_app();
+        vibe_with_unseen_child(&mut app);
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_ne!(app.conversation.id, id);
+        assert!(app.subagents.is_empty() && app.subagent_rows().is_empty());
+
+        // And a provider change.
+        let (mut app, _cwd) = vibe_app_with_provider();
+        vibe_with_unseen_child(&mut app);
+        app.set_provider("lan".into());
+        assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+        assert_eq!(app.chosen_provider(), Some(&"lan".into()));
+
+        // A conversation over the new session's budget is summarized
+        // first.
+        let (mut app, _cwd) = vibe_app();
+        app.bridge_max_chars = Some(300);
+        vibe_with_unseen_child(&mut app);
+        app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        app.set_effort("off".into());
+        let ask = sent_turn(&mut app);
+        assert!(ask.contains("new session of yours"), "{ask}");
+    }
+
+    /// Claude's subagents tell their end and can be stopped: one at work
+    /// keeps the session busy and holds back what would end it, pointing
+    /// at stopping it; a harness that cannot stop one says only to wait.
+    #[test]
+    fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.sandbox = SandboxSetup::null(None);
+        assert!(app.caps().subagents.stop && !app.caps().subagents.unreported_ends);
+        app.bridge_max_chars = Some(300);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        app.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "claude-1".into(),
+            model: None,
+        });
+        spawn(&mut app, "s1", "look around", None);
+        app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.take_actions();
+        assert!(app.is_busy());
+        assert_eq!(app.subagents_label().as_deref(), Some("1 subagent running"));
+
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .ends_with("wait for them or stop them (Ctrl+S) before clearing")
+        );
+        app.set_provider("bedrock".into());
+        assert_eq!(app.chosen_provider(), None);
+        assert!(
+            notices(&app)
+                .last()
+                .unwrap()
+                .ends_with("wait for them or stop them (Ctrl+S) before changing the provider")
+        );
+        assert!(app.take_actions().is_empty());
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        assert_eq!(
+            app.flash_text(),
+            Some("Still running: open it and press s to stop it")
+        );
+        app.subagent_list_up();
+        // A switch asks no summary while it works.
+        app.switch_harness(HarnessId::CODEX);
+        assert!(!app.is_generating);
+        assert_eq!(app.active, HarnessId::CODEX);
+
+        // Antigravity tells the end but cannot stop one: the user is only
+        // told to wait.
+        let mut app = test_app(HarnessId::AGY);
+        assert!(app.caps().subagents.reported && !app.caps().subagents.unreported_ends);
+        assert!(!app.caps().subagents.stop);
+        app.submit_prompt("delegate".into());
+        app.take_actions();
+        app.session_alive = true;
+        spawn(&mut app, "s1", "look around", None);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        let id = app.conversation.id.clone();
+        app.handle_slash_command("/clear");
+        assert_eq!(app.conversation.id, id);
+        let refused = notices(&app).last().unwrap().clone();
+        assert!(
+            refused.ends_with("wait for them before clearing") && !refused.contains("Ctrl+S"),
+            "{refused}"
+        );
+        assert!(app.subagent_list_down());
+        app.dismiss_focused_subagent();
+        let flash = app.flash_text().unwrap_or_default();
+        assert!(
+            flash.contains("cannot stop") && !flash.contains("press s"),
+            "{flash}"
+        );
     }
 
     #[test]

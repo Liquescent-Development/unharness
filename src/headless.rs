@@ -57,6 +57,8 @@ pub struct RunInfo {
     pub policy: String,
     pub sandbox: String,
     pub cwd: PathBuf,
+    /// The vendor session `--resume` named, if any.
+    pub resume: Option<String>,
 }
 
 /// One headless run: what it has seen and where its output goes.
@@ -116,6 +118,12 @@ pub struct Headless<O: Write, E: Write> {
     /// The agent went into plan mode by itself (`--print` never starts
     /// one in it): only a read is answered by a rule meanwhile.
     planning: bool,
+    /// The vendor session `--resume` named (`RunInfo::resume`).
+    resume: Option<String>,
+    /// The run failed because the harness replaced that session with a
+    /// new one: nothing the new one sends is written, and the result
+    /// names no session.
+    replaced: bool,
     started: Instant,
 }
 
@@ -158,6 +166,8 @@ impl<O: Write, E: Write> Headless<O, E> {
             stop: None,
             interrupted: false,
             planning: false,
+            resume: None,
+            replaced: false,
             started: Instant::now(),
         }
     }
@@ -165,6 +175,7 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// The run has begun: the prompt is on its way.
     pub fn begin(&mut self, info: &RunInfo) {
         self.harness = info.harness.clone();
+        self.resume = info.resume.clone();
         self.turn_running = true;
         self.owed = 1;
         self.line(&json!({
@@ -262,7 +273,7 @@ impl<O: Write, E: Write> Headless<O, E> {
 
     /// Take one event from the session. Returns what to send back.
     pub fn on_event(&mut self, ev: AgentEvent) -> Vec<SessionCommand> {
-        if self.format == Format::StreamJson {
+        if self.format == Format::StreamJson && !self.replaced {
             self.line(&event_json(&ev));
         }
         let mut commands = Vec::new();
@@ -384,12 +395,27 @@ impl<O: Write, E: Write> Headless<O, E> {
                 let line = format!("{}: {n}", self.name);
                 self.note(&line);
             }
-            // A print run resumes nothing, so this is not expected; said
-            // as a notice should a harness send it.
-            AgentEvent::SessionReplaced { reason } if self.format != Format::StreamJson => {
-                let line = format!("{}: {reason}; a new session runs instead", self.name);
-                self.note(&line);
-            }
+            // The session `--resume` named is gone, and the one the harness
+            // started in its place knows nothing of it (pi, an ACP agent):
+            // an answer from it would pass for one from the resumed
+            // session, so the run fails here, as Claude's and Codex's do
+            // (#214). Without `--resume` (nothing to resume or fork, so
+            // not expected) it is said as a notice.
+            AgentEvent::SessionReplaced { reason } => match &self.resume {
+                Some(id) => {
+                    let why = format!(
+                        "{}: {reason}; stopped, since the session started in its place knows nothing of {id}",
+                        self.name
+                    );
+                    self.record(StopReason::Error(why));
+                    self.replaced = true;
+                }
+                None if self.format != Format::StreamJson => {
+                    let line = format!("{}: {reason}; a new session runs instead", self.name);
+                    self.note(&line);
+                }
+                None => {}
+            },
             AgentEvent::Error(e) if self.format != Format::StreamJson => {
                 let line = format!("{} {}: {e}", "[unharness]".red().bold(), self.name);
                 self.err_line(line);
@@ -535,7 +561,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             "type": "result",
             "schema": SCHEMA_VERSION,
             "harness": self.harness,
-            "session_id": self.session_id,
+            "session_id": self.session_id.as_ref().filter(|_| !self.replaced),
             "model": self.model,
             "status": status,
             "error": error,
@@ -952,10 +978,9 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             }
         },
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
-        AgentEvent::SessionReplaced { reason } => json!({
-            "type": "notice",
-            "message": format!("{reason}; a new session runs instead"),
-        }),
+        AgentEvent::SessionReplaced { reason } => {
+            json!({"type": "session_replaced", "reason": reason})
+        }
         AgentEvent::Error(e) => json!({"type": "error", "message": e}),
         AgentEvent::ProcessExited { code } => json!({"type": "process_exited", "code": code}),
     }
@@ -996,6 +1021,7 @@ mod tests {
             policy: "ask".into(),
             sandbox: "workspace-write".into(),
             cwd: dir.path().to_path_buf(),
+            resume: None,
         });
         (dir, run)
     }
@@ -1076,6 +1102,80 @@ mod tests {
         assert!(run.is_done());
         assert_eq!(run.finish(), 0);
         assert_eq!(String::from_utf8_lossy(&run.out), "Looking now.\n\nDone.\n");
+    }
+
+    fn started(id: &str) -> AgentEvent {
+        AgentEvent::SessionStarted {
+            session_id: id.into(),
+            model: None,
+        }
+    }
+
+    fn replaced() -> AgentEvent {
+        AgentEvent::SessionReplaced {
+            reason: "could not resume the session (Session not found: s1)".into(),
+        }
+    }
+
+    /// A session `--resume` named that the harness replaced with a new one
+    /// fails the run before the new one answers, in every format (#214).
+    #[test]
+    fn a_replaced_resume_fails_the_run() {
+        let why = "claude: could not resume the session (Session not found: s1); \
+                   stopped, since the session started in its place knows nothing of s1";
+        for format in [Format::Text, Format::Json, Format::StreamJson] {
+            let (_dir, mut run) = headless(format, false);
+            run.resume = Some("s1".into());
+            // pi names the id it was given, where it made an empty session.
+            feed(&mut run, vec![started("s1"), replaced()]);
+            assert!(run.is_done(), "{format:?}");
+            // What the new session says once the run is over changes nothing.
+            run.settle();
+            feed(&mut run, vec![started("s2"), text("pong"), done()]);
+            assert_eq!(run.finish(), 1, "{format:?}");
+            let err = String::from_utf8_lossy(&run.err);
+            match format {
+                Format::Text => {
+                    assert!(err.contains(why), "{err}");
+                    assert!(run.out.is_empty());
+                }
+                Format::Json => {
+                    let result: Value = serde_json::from_slice(&run.out).unwrap();
+                    assert_eq!(result["session_id"], Value::Null);
+                    assert_eq!(result["status"], "error");
+                    assert_eq!(result["error"], why);
+                    assert_eq!(result["text"], "");
+                }
+                Format::StreamJson => {
+                    // Nothing from the new session after the replacement.
+                    let lines = lines(&run);
+                    assert_eq!(lines.len(), 4, "{lines:?}");
+                    assert_eq!(lines[1]["session_id"], "s1");
+                    assert_eq!(
+                        lines[2],
+                        json!({"type": "session_replaced",
+                               "reason": "could not resume the session (Session not found: s1)"})
+                    );
+                    let result = &lines[3];
+                    assert_eq!(result["status"], "error");
+                    assert_eq!(result["error"], why);
+                    assert_eq!(result["session_id"], Value::Null);
+                }
+            }
+        }
+    }
+
+    /// Without `--resume` a replacement is only said.
+    #[test]
+    fn a_replacement_without_resume_is_a_notice() {
+        let (_dir, mut run) = headless(Format::Text, false);
+        feed(&mut run, vec![replaced()]);
+        assert!(!run.is_done());
+        feed(&mut run, vec![text("pong"), done()]);
+        assert_eq!(run.finish(), 0);
+        let err = String::from_utf8_lossy(&run.err);
+        assert!(err.contains("a new session runs instead"), "{err}");
+        assert_eq!(String::from_utf8_lossy(&run.out), "pong\n");
     }
 
     #[test]

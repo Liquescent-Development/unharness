@@ -15,7 +15,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::code::{code_lines, diff_lines, sanitize, strip_controls};
+use super::code::{code_lines, diff_lines, sanitize, sanitize_tabs};
 use super::rows::{Part, Rows};
 use super::selection::{Join, RowCopy};
 
@@ -29,8 +29,7 @@ pub fn render_markdown_to_lines(text: &str, max_width: usize, done: bool) -> Vec
 /// the text, a list's markers as markdown writes them, not the margin,
 /// quote bars, code block frames or table rules.
 pub fn render_markdown_rows(text: &str, max_width: usize, done: bool) -> Rows {
-    let (text, code) = close_outdented_fences(sanitize(text));
-    let text = html_as_text(&text, &code);
+    let (text, code) = prepare(sanitize(text));
     let mut lines = Rows::new();
     let chunks = split_bare_diffs(&text, &code);
     for (i, &chunk) in chunks.iter().enumerate() {
@@ -55,25 +54,42 @@ pub fn render_markdown_rows(text: &str, max_width: usize, done: bool) -> Rows {
     lines
 }
 
-/// The text of each code block in `text`, fenced or indented, in the order
-/// [`render_markdown_rows`] marks them ([`Rows::code`]), with its tabs.
-pub fn code_blocks(text: &str) -> Vec<String> {
-    // Tabs are kept: CommonMark reads them at stops of four, as `sanitize`
-    // expands them, so the blocks are the same.
-    let (text, code) = close_outdented_fences(strip_controls(text));
+/// What [`render_markdown_rows`] and [`code_blocks`] parse, from
+/// sanitized text: fences their list item ended closed, tag lines
+/// escaped, and which lines are fenced code. It keeps the lines one to
+/// one, which [`follow_tabs`] needs.
+fn prepare(text: String) -> (String, Vec<bool>) {
+    let (text, code) = close_outdented_fences(text);
     let text = html_as_text(&text, &code);
+    (text, code)
+}
+
+/// The text of each code block in `text`, fenced or indented, in the order
+/// [`render_markdown_rows`] marks them ([`Rows::code`]). It is read from
+/// the text the rows are drawn from, so that the two find the same blocks,
+/// with the tabs the code had in place of the spaces they were drawn as.
+pub fn code_blocks(text: &str) -> Vec<String> {
+    let (clean, tabs) = sanitize_tabs(text);
+    let (text, code) = prepare(clean.clone());
+    let tabs = follow_tabs(&clean, &text, &tabs);
     let mut blocks = Vec::new();
     for chunk in split_bare_diffs(&text, &code) {
         let Chunk::Markdown(md) = chunk else {
             continue;
         };
+        let base = md.as_ptr() as usize - text.as_ptr() as usize;
         let mut block: Option<String> = None;
-        for event in Parser::new_ext(md, OPTIONS) {
+        for (event, range) in Parser::new_ext(md, OPTIONS).into_offset_iter() {
             match event {
                 Event::Start(Tag::CodeBlock(_)) => block = Some(String::new()),
                 Event::Text(t) => {
                     if let Some(b) = &mut block {
-                        b.push_str(&t);
+                        let at = base + range.start..base + range.end;
+                        if text.get(at.clone()) == Some(&*t) {
+                            push_with_tabs(b, &text, at, &tabs);
+                        } else {
+                            b.push_str(&t);
+                        }
                     }
                 }
                 Event::End(TagEnd::CodeBlock) => {
@@ -86,6 +102,54 @@ pub fn code_blocks(text: &str) -> Vec<String> {
         }
     }
     blocks
+}
+
+/// The tabs of `before`, as the spaces each became ([`sanitize_tabs`]),
+/// where they are in `after`: the same lines, each changed in one stretch
+/// at most ([`prepare`]). A tab in a changed stretch is left out.
+fn follow_tabs(before: &str, after: &str, tabs: &[Range<usize>]) -> Vec<Range<usize>> {
+    debug_assert_eq!(before.matches('\n').count(), after.matches('\n').count());
+    let mut out = Vec::with_capacity(tabs.len());
+    let mut tabs = tabs.iter().peekable();
+    let (mut b_at, mut a_at) = (0, 0);
+    for (b, a) in before
+        .split_inclusive('\n')
+        .zip(after.split_inclusive('\n'))
+    {
+        let head = b.bytes().zip(a.bytes()).take_while(|(x, y)| x == y).count();
+        let tail = b
+            .bytes()
+            .rev()
+            .zip(a.bytes().rev())
+            .take_while(|(x, y)| x == y)
+            .count()
+            .min(b.len().min(a.len()) - head);
+        while let Some(t) = tabs.next_if(|t| t.start < b_at + b.len()) {
+            let (start, end) = (t.start - b_at, t.end - b_at);
+            if end <= head {
+                out.push(a_at + start..a_at + end);
+            } else if start >= b.len() - tail {
+                let to_end = b.len() - start;
+                out.push(a_at + a.len() - to_end..a_at + a.len() - to_end + (end - start));
+            }
+        }
+        b_at += b.len();
+        a_at += a.len();
+    }
+    out
+}
+
+/// `text[range]`, each tab whose spaces lie wholly inside it a tab again:
+/// one a container's indentation took part of stays the spaces left.
+fn push_with_tabs(out: &mut String, text: &str, range: Range<usize>, tabs: &[Range<usize>]) {
+    let mut at = range.start;
+    let first = tabs.partition_point(|t| t.start < range.start);
+    for t in tabs[first..].iter().take_while(|t| t.end <= range.end) {
+        out.push_str(&text[at..t.start]);
+        out.push('\t');
+        at = t.end;
+    }
+    out.push_str(&text[at..range.end]);
 }
 
 fn is_blank(line: Option<&Line<'_>>) -> bool {
@@ -1168,6 +1232,60 @@ mod tests {
         assert_eq!(
             code_blocks("```make\nall:\n\tcargo build\n```"),
             ["all:\n\tcargo build"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn a_right_click_after_a_tab_indented_hunk_takes_the_block_under_it() {
+        // A hunk whose context lines are tab-indented, as Go's are, then a
+        // fence: the hunk is one diff, the fence the one code block.
+        let md = "Change:\n\n@@ -1,3 +1,3 @@\n\tctx\n-a\n+b\n\tmore\n\n```sh\nls\n```";
+        let rows = render_markdown_rows(md, 40, true);
+        assert_eq!(rows.code().len(), 1);
+        assert!(line_text(&rows.lines()[rows.code()[0].start]).contains("sh"));
+        assert_eq!(code_blocks(md), ["ls"].map(String::from));
+    }
+
+    #[test]
+    fn code_blocks_keep_the_tabs_of_their_code() {
+        let cases = [
+            ("```make\nall:\n\tcargo build\n```", "all:\n\tcargo build"),
+            ("```\na\tb\n\t\tc\n```", "a\tb\n\t\tc"),
+            ("1. step\n   ```\n   \tx\n   ```", "\tx"),
+            ("    \tindented", "\tindented"),
+            // A tab the indentation of a quote or a list item took part
+            // of is the spaces it leaves, as CommonMark reads it.
+            ("> ```\n>\tx\n> ```", "  x"),
+            ("- ```\n \tx\n  ```", "  x"),
+            // Past a line whose tag was escaped and a fence that was moved.
+            ("<b>\tx\n```\n\ty\n```", "\ty"),
+            ("1. a\n   ```\n   b\n```\n\ntext\n\n```\n\tz\n```", "b\n\tz"),
+        ];
+        for (md, code) in cases {
+            let blocks = code_blocks(md);
+            assert_eq!(
+                render_markdown_rows(md, 40, true).code().len(),
+                blocks.len(),
+                "{md}"
+            );
+            assert_eq!(blocks.join("\n"), code, "{md}");
+        }
+    }
+
+    #[test]
+    fn tabs_follow_their_line_through_a_change() {
+        // Shifted by a change before them, kept before it, dropped inside.
+        assert_eq!(
+            follow_tabs("ab  cd\n  e\n", "aXb  cd\n  e\n", &[2..4, 8..10]),
+            [3..5, 9..11]
+        );
+        assert_eq!(
+            follow_tabs("x  ab\n  \n", "x  b\n  \n", &[1..3, 6..8]),
+            [1..3, 5..7]
+        );
+        assert_eq!(
+            follow_tabs("    x\n  y\n", "  > x\n  y\n", &[0..4, 6..8]),
+            std::slice::from_ref(&(6..8))
         );
     }
 

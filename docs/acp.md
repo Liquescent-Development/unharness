@@ -132,12 +132,16 @@ first prompt goes: through the session's `mode` option where the agent
 offers one (its answer says which mode is in effect), else with
 `session/set_mode`. If the agent does not offer the mode, refuses it, or
 answers with another one, the policy is not available for that session:
-the TUI asks for another one (Ctrl+P) and keeps the prompt, and `--print`
-fails without sending it. A policy changed while a mode is still being set
-has its own mode set once the agent has answered, and the prompt waits for
-that. If the agent goes into another mode by itself, the mapped one is set
-again, and a turn that is running is stopped when the new mode could run
-what the policy asks about.
+the TUI falls back to the nearest less permissive policy or asks for
+another one (Ctrl+P), a prompt that was waiting for the session fails
+without being sent (send it again), and `--print` fails without sending
+it. The next session (after `/clear`, a model or sandbox change, a switch
+away and back, or the next prompt after it exits) is asked for the policy
+again. A policy changed while a mode is still being set has its own mode
+set once the agent has answered, and the prompt waits for that. If the
+agent goes into another mode by itself, the mapped one is set again, and a
+turn that is running is stopped when the new mode could run what the
+policy asks about.
 
 An agent that has session modes and no `modes` map gets no policy below
 `bypass`: not `ask` (even with `asks_permission = true`), not
@@ -213,6 +217,7 @@ itself fails, or a session to resume is not there any more (Mistral Vibe
 answers "Session not found"), unharness starts a new session, says so,
 and your next prompt tells it the conversation so far, as it tells a
 harness you switch to; the conversation then keeps the new session.
+A `--print --resume` run fails there instead ([headless](headless.md#result)).
 
 ## Sign-in
 

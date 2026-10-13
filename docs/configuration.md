@@ -11,7 +11,12 @@ doctor` prints the path, and `unharness init` creates the file.
 > [!IMPORTANT]
 > A config file that does not parse stops unharness and names the file and
 > line. unharness never falls back to defaults, which would run without your
-> sandbox and policy settings.
+> sandbox and policy settings. A harness table that is wrong (an unknown
+> policy, a `modes` map or a provider that is not whole, an ACP agent
+> without a command) stops a run, `unharness switch` and `unharness models`
+> too, and is never replaced by the built-in or preset of its name;
+> `unharness doctor` names what is wrong, leaves out a harness it cannot
+> build, shows the rest, and exits 1.
 
 ## Example
 
@@ -82,7 +87,7 @@ headers = { Authorization = "Bearer …" }
 | `[harnesses.<name>] protocol = "acp"` | | Adds an [ACP agent](acp.md) |
 | `[harnesses.<name>] modes` | none | ACP only: which of the agent's own session modes backs each policy, e.g. `{ ask = "ask", bypass = "auto-approve" }`; see [Modes](acp.md#modes). An agent with modes and no map gets only `bypass`. A workspace's table replaces the global one whole |
 | `[harnesses.<name>] sign_in` | none (`vibe --setup` for `vibe`) | ACP only: the command that signs the agent in, shown when a session fails for want of sign-in; unharness never runs it. See [Sign-in](acp.md#sign-in) |
-| `[harnesses.vibe.providers.<name>]` | none | A provider for Mistral Vibe: `api_base`, `models`, and optionally `api_style`, `backend`, `api_key_env_var`; see [Providers](vibe.md#providers). A workspace's provider of the same name replaces the global one. A table that is wrong stops unharness, and only `vibe` takes providers |
+| `[harnesses.vibe.providers.<name>]` | none | A provider for Mistral Vibe: `api_base`, `models`, and optionally `api_style`, `backend`, `api_key_env_var`; see [Providers](vibe.md#providers). A workspace's provider of the same name replaces the global one. A table that is wrong stops unharness (`doctor` names it), and only `vibe` takes providers |
 | `[mcp_servers.<name>]` | | See [MCP servers](mcp.md) |
 
 ## Providers
@@ -118,7 +123,8 @@ Claude's settings. Two things to know:
   refused while a turn or a subagent is at work. Mistral Vibe's is fixed
   when it starts too, and a session that was prompted keeps the model it
   ran, so there a change starts a new session told the conversation, as a
-  model change does.
+  model change does; a vibe subagent its agent has not waited for does
+  not hold it back.
 
 The model list is Claude's own for that provider, asked of a short-lived
 Claude in the sandbox a session would get (its settings can name

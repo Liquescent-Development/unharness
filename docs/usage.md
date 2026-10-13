@@ -11,7 +11,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 
 | Command | What it does |
 |---|---|
-| `unharness doctor` | Harnesses, sign-in, capabilities, sandbox, MCP servers, skills CLI and allow rules |
+| `unharness doctor` | Harnesses, sign-in, capabilities, sandbox, MCP servers, skills CLI and allow rules; exits 1 when a harness table in the config is wrong |
 | `unharness models [-H <harness>] [--provider <p>]` | Providers and models per harness |
 | `unharness sessions [--clear]` | Saved conversations in this workspace; `--clear` removes them, the prompt history and the checkpoints |
 | `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file |
@@ -95,7 +95,8 @@ since. A harness that cannot resume or fork its session (an ACP agent
 that no longer has it or cannot fork, a pi session whose file is gone)
 starts a new one, says so, and is told the conversation with your next
 prompt, as a harness switched to is; the conversation then keeps the
-new session.
+new session. A `--print --resume` run fails there instead
+([headless](headless.md#result)).
 
 When the conversation will not fit, the harness you are leaving is first
 asked for a handoff summary (one more turn, shown as "handoff summary
@@ -107,7 +108,8 @@ of everything before it, and what came after it turn by turn. Esc while
 it writes switches without one; a prompt sent meanwhile (Alt+Enter too)
 goes to the next harness. `bridge_summary = "never"` turns it off. Only
 a harness whose session saw the whole conversation and is still running
-or can be resumed is asked, and not while its subagents are at work.
+or can be resumed is asked, and not while its subagents are at work
+(a Mistral Vibe subagent its agent has not waited for does not count).
 
 Policy, model and effort changes apply from the next turn on every harness:
 

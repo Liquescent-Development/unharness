@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -24,12 +25,29 @@ use crate::skills_cmd::SkillsCli;
 use crate::skills_import::installed_plugins;
 use crate::sync::find_workspace_root;
 
-pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
+/// Fails (exit 1) when the config has an error that stops unharness,
+/// after showing everything else.
+pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
     println!("{}", "=== unharness doctor ===".bold().cyan());
     println!();
     report_install();
 
-    let registry = Registry::from_config(config);
+    // What would stop every other command is said first, and the rest is
+    // shown without the harnesses whose tables cannot be built.
+    let (registry, config_errors) = Registry::checked(config);
+    if !config_errors.is_empty() {
+        println!(
+            "{} {}",
+            "Config:".bold(),
+            "[!] unharness will not start until this is fixed"
+                .red()
+                .bold()
+        );
+        for e in &config_errors {
+            println!("  {} {}", "↳".dimmed(), e.message.red());
+        }
+        println!();
+    }
     let overrides = binary_overrides(&registry, config);
     // An unknown level in the config is reported by `run`; here it reads as unset.
     let sandbox = SandboxSetup::detect(
@@ -171,19 +189,50 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
             ),
         }
     }
+    let mut left_out: Vec<&str> = config_errors
+        .iter()
+        .filter(|e| e.left_out)
+        .filter_map(|e| e.table.as_deref())
+        .collect();
+    left_out.dedup();
+    for table in left_out {
+        println!(
+            "  {} {} {}",
+            "[!]".red().bold(),
+            format!("[harnesses.{table}]").bold(),
+            "not shown: the table is wrong (see Config above)".red()
+        );
+    }
     println!(
         "      {}",
         "* = supported with caveats (shown in the TUI)".dimmed()
     );
     println!();
 
-    match registry.resolve(None, config.default_harness.as_deref(), &overrides) {
-        Ok((h, bin)) => println!(
-            "Active Default: {} ({})",
-            h.descriptor().display_name.bold().green(),
-            bin.display().to_string().dimmed()
-        ),
-        Err(e) => println!("Active Default: {}", format!("Error: {e}").red()),
+    // A default whose table is left out is not replaced by another one:
+    // unharness would not start.
+    let default_left_out = config.default_harness.as_deref().and_then(|d| {
+        let d = d.trim().to_lowercase();
+        let d = HarnessId::parse(&d).map_or(d, |id| id.as_str().to_string());
+        config_errors
+            .iter()
+            .filter(|e| e.left_out)
+            .find_map(|e| e.table.as_deref().filter(|t| t.to_lowercase() == d))
+    });
+    if let Some(table) = default_left_out {
+        println!(
+            "Active Default: {}",
+            format!("[harnesses.{table}] is wrong (see Config above)").red()
+        );
+    } else {
+        match registry.resolve(None, config.default_harness.as_deref(), &overrides) {
+            Ok((h, bin)) => println!(
+                "Active Default: {} ({})",
+                h.descriptor().display_name.bold().green(),
+                bin.display().to_string().dimmed()
+            ),
+            Err(e) => println!("Active Default: {}", format!("Error: {e}").red()),
+        }
     }
     println!(
         "Default Policy: {}",
@@ -276,14 +325,13 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
                 "Workspace Skills",
                 &discover_skills_in_dir(&workspace_skills_dir(root)),
             );
-            for (k, settings) in &config.harnesses {
-                if settings.protocol.as_deref() == Some("acp") && settings.command.is_empty() {
-                    println!(
-                        "  {} harness '{}' has protocol = \"acp\" but no command in the config",
-                        "[!]".yellow(),
-                        k
-                    );
-                } else if registry.parse(k).is_none() {
+            for k in config.harnesses.keys() {
+                // A table left out is named under Config.
+                if registry.parse(k).is_none()
+                    && !config_errors
+                        .iter()
+                        .any(|e| e.left_out && e.table.as_deref() == Some(k))
+                {
                     println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k);
                 }
             }
@@ -354,11 +402,20 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<()> {
     }
 
     println!();
+    if !config_errors.is_empty() {
+        println!(
+            "{}",
+            "The config has errors (see Config above): fix them before starting unharness."
+                .red()
+                .bold()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
     println!(
         "{}",
         "Run 'unharness \"prompt\"' to start, or 'unharness skills add <source>' to install skills.".green()
     );
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
 /// How long an MCP server gets to answer the handshake.

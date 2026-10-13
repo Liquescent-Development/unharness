@@ -212,7 +212,12 @@ Codex (app-server) and ACP agents: Claude's `Bash`, Codex's `shell` with its
 a rule. Any other tool is matched by name, and names differ between
 harnesses. An `mcp` rule names a server as the harness knows it, so the
 same name in two harnesses' own settings may refer to two different
-servers.
+servers. An ACP agent's `execute` call (other than claude-agent-acp's,
+whose tools are read as Claude's) is a command to a rule only when it gives
+nothing but the command and its directory, and an MCP call it sends as an
+`execute` call only when it gives nothing but the server, the tool and its
+arguments; one that carries more (separate arguments, an environment, …)
+is always asked about, since what it runs may not be what the rule saw.
 
 **Commands.** A command line of several commands (`&&`, `;`, `|`) is
 allowed only when every one of them is covered. These are always asked
