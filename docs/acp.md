@@ -137,9 +137,11 @@ another one (Ctrl+P), a prompt that was waiting for the session fails
 without being sent (send it again), and `--print` fails without sending
 it. The next session (after `/clear`, a model or sandbox change, a switch
 away and back, or the next prompt after it exits) is asked for the policy
-again. If the agent goes into another mode by itself, the mapped one is
-set again, and a turn that is running is stopped when the new mode could
-run what the policy asks about.
+again. A policy changed while a mode is still being set has its own mode
+set once the agent has answered, and the prompt waits for that. If the
+agent goes into another mode by itself, the mapped one is set again, and a
+turn that is running is stopped when the new mode could run what the
+policy asks about.
 
 An agent that has session modes and no `modes` map gets no policy below
 `bypass`: not `ask` (even with `asks_permission = true`), not

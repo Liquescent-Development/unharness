@@ -339,6 +339,22 @@ pub fn read_back(
     }
 }
 
+/// Which mode the agent is in after answering a request to set `mode`,
+/// read when the answer no longer decides what is held (the policy changed
+/// while the request was out, #211): the mode the answer reads back, else
+/// `mode` itself (a `session/set_mode` answer is taken at its word, as is
+/// an option answer that does not say). `None` when the agent refused it:
+/// it stayed in the mode it said it was in before.
+pub fn answered_mode(mode: &str, answer: Result<&SessionOptions, String>) -> Option<String> {
+    let options = answer.ok()?;
+    Some(
+        options
+            .current_mode
+            .clone()
+            .unwrap_or_else(|| mode.to_string()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +674,52 @@ mod tests {
             mode_step("vibe", Bypass, &map, &session(ours), &own),
             ModeStep::Refuse(why) if why.contains("does not offer mode 'auto-approve'")
         ));
+    }
+
+    /// #211: in `ask`, the policy goes to bypass (`auto-approve` asked
+    /// for) and back to ask before the agent answers. The answer says
+    /// which mode the agent is in, and the mode for ask is applied from
+    /// it: set again, and a running turn stopped, since `auto-approve` is
+    /// not within ask.
+    #[test]
+    fn a_late_answer_says_which_mode_the_agent_is_in() {
+        let reads = |current: Option<&str>| SessionOptions {
+            mode_option: Some("mode".into()),
+            current_mode: current.map(str::to_string),
+            ..Default::default()
+        };
+        let took = answered_mode("auto-approve", Ok(&reads(Some("auto-approve"))));
+        assert_eq!(took.as_deref(), Some("auto-approve"));
+        assert!(!vibe_map().within(Ask, "auto-approve"));
+        let (result, options) = vibe_new();
+        let agent = AgentModes {
+            current: took,
+            ..AgentModes::from_session(&result, &options, false)
+        };
+        assert_eq!(
+            mode_step("vibe", Ask, &vibe_map(), &agent, &OwnModes::new()),
+            ModeStep::Set {
+                mode: "ask".into(),
+                via: SetVia::Option("mode".into())
+            }
+        );
+        // The answer reads back another mode: that one.
+        assert_eq!(
+            answered_mode("auto-approve", Ok(&reads(Some("ask")))).as_deref(),
+            Some("ask")
+        );
+        // `session/set_mode` answers `{}`, and an option answer may not
+        // say: the mode asked for.
+        assert_eq!(
+            answered_mode("auto-approve", Ok(&SessionOptions::default())).as_deref(),
+            Some("auto-approve")
+        );
+        assert_eq!(
+            answered_mode("auto-approve", Ok(&reads(None))).as_deref(),
+            Some("auto-approve")
+        );
+        // Refused: it is where it was.
+        assert_eq!(answered_mode("auto-approve", Err("no".into())), None);
     }
 
     #[test]
