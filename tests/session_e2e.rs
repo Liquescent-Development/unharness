@@ -1504,6 +1504,72 @@ async fn agy_stream_session_runs_two_turns() {
     ));
 }
 
+/// agy's model is a flag: the turn after a change goes to a new process,
+/// which the session's process slot names from then on, and the one it
+/// replaced is gone.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/agy/fixtures/turn.jsonl");
+    let pids = fake._tmp.path().join("pids");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
+    cfg.env.push((
+        "UNHARNESS_FAKE_BACKGROUND".into(),
+        format!("group:{}", pids.display()),
+    ));
+    let mut handle = unharness::harness::agy::AgyHarness
+        .start_session(cfg)
+        .unwrap();
+    let (first, _) = background_pids(&pids).await;
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    std::fs::remove_file(&pids).unwrap();
+
+    handle
+        .send(SessionCommand::SetModel(ModelRef::new(
+            HarnessId::AGY,
+            "google",
+            "gemini-3.7-flash-high",
+        )))
+        .await
+        .unwrap();
+    handle.send(SessionCommand::turn("again")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::Notice(n) if n == "agy restarted with the new settings")
+        ),
+        "{events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    let (second, _) = background_pids(&pids).await;
+    assert_ne!(first, second);
+    assert!(gone_within(first, Duration::from_secs(5)).await);
+    let turns: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|l| l["event"] == "user")
+        .map(|l| l["message"]["content"].clone())
+        .collect();
+    assert_eq!(turns, ["echo hi", "again"]);
+
+    handle.process_slot().kill();
+    while !matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ) {}
+    assert!(gone_within(second, Duration::from_secs(5)).await);
+}
+
 #[tokio::test]
 async fn agy_auth_failure_ends_turn_with_error() {
     if !python_available() {
