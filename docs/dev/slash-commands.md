@@ -64,7 +64,7 @@ The TUI starts the active harness's session whenever it is idle with
 none and a policy is chosen (launch, a switch, a resume, a sandbox or
 provider change), not with the first prompt, so that the list is there
 before it (#118). Until a prompt goes to it the session is not the
-conversation's (`App::session_blank`: nothing saved, its id held back,
+conversation's (the field `App::session_blank`: nothing saved, its id held back,
 the bridge sent whole); a model, effort or policy chosen meanwhile
 starts it again with the choice, and one that exits, fails to start or
 fails its handshake waits for the user. Checked in the TUI (pty, Claude
