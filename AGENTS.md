@@ -122,7 +122,8 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   copied to `~/.claude/.claude.json` once, with a notice, and the original
   is never touched.
 - **Processes are reaped.** Child processes go through `core::process::
-  LineProcess` (kill-on-drop, bounded drain) or the per-turn driver; never a
+  LineProcess` (kill-on-drop, bounded drain) or the per-turn driver
+  (`core::driver`, whose loop ends, kills and drains them); never a
   bare `tokio::process::Command::spawn` in a transport. Each leads a
   session of its own (`setsid`), and is killed with its process group and,
   on Linux, every process descended from it (stopped first, read from
@@ -218,7 +219,13 @@ recorded ones. For anything else:
 1. Add a `HarnessId` constant in `src/core/ids.rs` (ids are interned names;
    the constant is only for built-ins).
 2. Create `src/harness/<name>/{mod.rs, transport.rs, parse.rs, fixtures/}`
-   implementing `Harness` and declaring honest `Capabilities`. Override
+   implementing `Harness` and declaring honest `Capabilities`. The
+   transport implements `core::driver::StreamProtocol` (one process for
+   the session: its handshake, what a command becomes, what it makes of a
+   line, how its CLI is ended) and starts with `driver::start`, or
+   `core::driver::per_turn::PerTurnProtocol` (a process per turn); the
+   driver owns the process, ending and reaping it, and the answer to a
+   command the `Capabilities` do not offer. Override
    `quick_auth` only if sign-in can be checked in well under a second; it
    runs at startup to choose the default harness. Declare the CLI's own
    state directories in `sandbox_paths`, and run a turn with the sandbox on.

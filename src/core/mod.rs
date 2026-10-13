@@ -4,13 +4,13 @@
 pub mod caps;
 pub mod checkpoints;
 pub mod conversations;
+pub mod driver;
 pub mod event;
 pub mod guard;
 pub mod ids;
 pub mod jsonrpc;
 pub mod mcp;
 pub mod parser;
-pub mod per_turn;
 pub mod permissions;
 pub mod process;
 pub mod reaper;

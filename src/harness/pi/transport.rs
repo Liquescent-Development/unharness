@@ -6,15 +6,13 @@ use std::path::Path;
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
-use tokio::sync::mpsc;
 
 use super::gate;
 use super::parse::PiParser;
-use crate::core::process::{LineProcess, RawLine};
+use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, Attachment, HarnessId, Parser, PermissionDecision, PermissionKind,
-    PermissionPolicy, ProcessModel, RemoteControl, SessionCommand, SessionConfig, SessionHandle,
-    SessionInfo, StopReason, shutdown_queued,
+    AgentEvent, Attachment, Capabilities, HarnessId, Parser, PermissionDecision, PermissionKind,
+    PermissionPolicy, SessionCommand, SessionConfig, SessionHandle, StopReason,
 };
 
 /// argv after the binary for an interactive session; returns the session id used.
@@ -129,274 +127,289 @@ pub fn encode_ui_response(id: &str, kind: PendingKind, decision: &PermissionDeci
     v.to_string()
 }
 
-pub fn start(cfg: SessionConfig, gate: &Path) -> Result<SessionHandle> {
+/// `caps` is what the harness declares.
+pub fn start(cfg: SessionConfig, gate: &Path, caps: &Capabilities) -> Result<SessionHandle> {
     let (args, session_id) = session_args(&cfg, gate);
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(args).current_dir(&cfg.cwd);
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let proc = LineProcess::spawn(cmd, &cfg.sandbox)?;
-    let (handle, events_tx, cmd_rx) = SessionHandle::channels(SessionInfo {
-        harness: HarnessId::PI,
-        process_model: ProcessModel::LongLived,
-    });
-    handle.process_slot().set(&proc);
     let resumed = cfg.resume.is_some();
-    tokio::spawn(drive(
-        proc, session_id, resumed, cfg.policy, events_tx, cmd_rx,
-    ));
-    Ok(handle)
+    driver::start(
+        HarnessId::PI,
+        caps,
+        cmd,
+        &cfg.sandbox,
+        Pi::new(session_id, resumed, cfg.policy),
+    )
 }
 
-async fn drive(
-    mut proc: LineProcess,
-    session_id: String,
+/// What the driver does with pi's RPC.
+struct Pi {
+    parser: PiParser,
+    pending: HashMap<String, PendingKind>,
+    /// The last of our request ids (`u<n>`).
+    seq: u64,
+    policy: PermissionPolicy,
     resumed: bool,
-    mut policy: PermissionPolicy,
-    events: mpsc::Sender<AgentEvent>,
-    mut cmds: mpsc::Receiver<SessionCommand>,
-) {
-    let mut parser = PiParser::new(Some(session_id));
-    let mut pending: HashMap<String, PendingKind> = HashMap::new();
-    let mut seq = 0u64;
-    let mut next_id = move || {
-        seq += 1;
-        format!("u{seq}")
-    };
-    let mut shutting_down = false;
-    let mut turn_open = false;
-    // `abort` was sent during the open turn. pi ends an aborted turn the way
-    // it ends any other (`agent_settled`), so this is what tells them apart.
-    let mut aborting = false;
-    // A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
-    let mut forking = false;
-    // A resumed session's first listing has not answered: a turn sent
-    // meanwhile is held back too, since pi saves a prompt under the id
-    // it was given (`SessionManager._persist`, 1.1.0) and the listing may
-    // show that the session is gone (`SessionReplaced`). Sent there, the
-    // prompt would make the empty session pi made under the id pass as
-    // the one to resume next time (#214).
-    let mut baseline = resumed;
-    let mut held_turn: Option<String> = None;
+    turn_open: bool,
+    /// `abort` was sent during the open turn. pi ends an aborted turn the way
+    /// it ends any other (`agent_settled`), so this is what tells them apart.
+    aborting: bool,
+    /// A rewind (`fork`) is in flight; a turn sent meanwhile is held back.
+    forking: bool,
+    /// A resumed session's first listing has not answered: a turn sent
+    /// meanwhile is held back too, since pi saves a prompt under the id
+    /// it was given (`SessionManager._persist`, 1.1.0) and the listing may
+    /// show that the session is gone (`SessionReplaced`). Sent there, the
+    /// prompt would make the empty session pi made under the id pass as
+    /// the one to resume next time (#214).
+    baseline: bool,
+    held_turn: Option<String>,
+}
 
-    let _ = proc
-        .write_line(&json!({"id": next_id(), "type":"get_state"}).to_string())
-        .await;
-    let _ = proc
-        .write_line(&json!({"id": next_id(), "type":"get_commands"}).to_string())
-        .await;
-    if resumed {
-        // Learn which user messages predate this run, so later listings
-        // can tell which one is new.
-        parser.expect_fork_baseline();
-        let _ = proc
-            .write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string())
-            .await;
-    }
-
-    loop {
-        tokio::select! {
-            cmd = cmds.recv() => {
-                let Some(cmd) = cmd else { break };
-                let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
-                let line = match cmd {
-                    SessionCommand::SendTurn { text, attachments } => match encode_message("prompt", &next_id(), &text, &attachments) {
-                        Ok(line) => Some(line),
-                        Err(e) => {
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Error(e.to_string()),
-                            }).await;
-                            None
-                        }
-                    },
-                    SessionCommand::Steer { text, attachments } => match encode_message("steer", &next_id(), &text, &attachments) {
-                        Ok(line) => Some(line),
-                        Err(e) => {
-                            let _ = events.send(AgentEvent::Error(e.to_string())).await;
-                            None
-                        }
-                    },
-                    // `fork` branches a new session from before that message. It
-                    // is only in place once it answers, so turns wait for that.
-                    SessionCommand::Rewind { anchor } => {
-                        forking = true;
-                        Some(json!({"id": next_id(), "type":"fork","entryId": anchor}).to_string())
-                    }
-                    SessionCommand::Compact { instructions } => {
-                        let mut cmd = json!({"id": next_id(), "type":"compact"});
-                        if let Some(i) = instructions {
-                            cmd["customInstructions"] = json!(i);
-                        }
-                        Some(cmd.to_string())
-                    }
-                    SessionCommand::Interrupt => {
-                        if held_turn.take().is_some() {
-                            // A turn held for a fork has not reached pi: it
-                            // is dropped, and ends here.
-                            turn_open = false;
-                            let _ = events.send(AgentEvent::TurnCompleted {
-                                stop_reason: StopReason::Interrupted,
-                            }).await;
-                            None
-                        } else {
-                            aborting |= turn_open;
-                            Some(json!({"id": next_id(), "type":"abort"}).to_string())
-                        }
-                    }
-                    // No subagents are reported here, so none can be running.
-                    SessionCommand::StopSubagent { .. } => None,
-                    SessionCommand::RemoteControl { .. } => {
-                        let _ = events.send(AgentEvent::RemoteControl(RemoteControl::Failed {
-                            reason: "pi has no remote control".into(),
-                        })).await;
-                        None
-                    }
-                    SessionCommand::RespondPermission { id, decision } => match pending.remove(&id) {
-                        Some(kind) => Some(encode_ui_response(&id, kind, &decision)),
-                        None => {
-                            let _ = events.send(AgentEvent::Notice(format!("no pending pi dialog {id}"))).await;
-                            None
-                        }
-                    },
-                    SessionCommand::SetModel(m) => {
-                        let _ = proc.write_line(&json!({
-                            "id": next_id(), "type":"set_model",
-                            "provider": m.provider.as_str(), "modelId": m.model
-                        }).to_string()).await;
-                        // The new model may differ in thinking levels, context
-                        // window and image support.
-                        let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
-                        Some(json!({"id": next_id(), "type":"get_available_thinking_levels"}).to_string())
-                    }
-                    SessionCommand::SetEffort(e) => Some(json!({
-                        "id": next_id(), "type":"set_thinking_level",
-                        "level": e.unwrap_or_else(|| "medium".into())
-                    }).to_string()),
-                    SessionCommand::SetPolicy(p) => {
-                        policy = p;
-                        None
-                    }
-                    SessionCommand::Shutdown => {
-                        shutting_down = true;
-                        proc.end_or_kill(turn_open).await;
-                        None
-                    }
-                };
-                turn_open |= is_turn && line.is_some();
-                if (forking || baseline) && is_turn {
-                    held_turn = line;
-                } else if let Some(line) = line
-                    && let Err(e) = proc.write_line(&line).await
-                {
-                    let _ = events.send(AgentEvent::Error(format!("pi: {e}"))).await;
-                }
-            }
-            raw = proc.lines.recv() => {
-                match raw {
-                    Some(RawLine::Stdout(line)) => {
-                        if forking && is_response_to(&line, "fork") {
-                            // The fork is a new session: re-read its id and
-                            // message list, then send what was waiting.
-                            forking = false;
-                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_state"}).to_string()).await;
-                            let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
-                            if !baseline && let Some(turn) = held_turn.take() {
-                                let _ = proc.write_line(&turn).await;
-                            }
-                        }
-                        let baseline_answer = baseline && is_response_to(&line, "get_fork_messages");
-                        let mut replaced = false;
-                        for mut ev in parser.feed(&line) {
-                            replaced |= matches!(ev, AgentEvent::SessionReplaced { .. });
-                            if let AgentEvent::PermissionRequest(req) = &ev {
-                                let kind = match &req.kind {
-                                    PermissionKind::ToolUse { .. } => PendingKind::Gate,
-                                    PermissionKind::Confirm { .. } => PendingKind::Confirm,
-                                    PermissionKind::Select { .. } => PendingKind::Select,
-                                    _ => PendingKind::Input,
-                                };
-                                if policy == PermissionPolicy::Bypass && kind == PendingKind::Gate {
-                                    let allow = PermissionDecision::Allow { updated_input: None };
-                                    let _ = proc.write_line(&encode_ui_response(&req.id, kind, &allow)).await;
-                                    continue;
-                                }
-                                // Under Bypass, confirm dialogs are auto-accepted and
-                                // selects take the first option; text input still asks.
-                                if policy == PermissionPolicy::Bypass && kind != PendingKind::Input {
-                                    let answer = match &req.kind {
-                                        PermissionKind::Select { options, .. } => PermissionDecision::Answer(
-                                            options.first().cloned().map(Value::String).unwrap_or(Value::Null),
-                                        ),
-                                        _ => PermissionDecision::Answer(Value::Bool(true)),
-                                    };
-                                    let _ = proc.write_line(&encode_ui_response(&req.id, kind, &answer)).await;
-                                    let _ = events.send(AgentEvent::Notice("auto-accepted an extension dialog (bypass)".into())).await;
-                                    continue;
-                                }
-                                pending.insert(req.id.clone(), kind);
-                            }
-                            // Context usage is only available on request.
-                            if let AgentEvent::TurnCompleted { stop_reason } = &mut ev {
-                                turn_open = false;
-                                if std::mem::take(&mut aborting) && *stop_reason == StopReason::Done {
-                                    *stop_reason = StopReason::Interrupted;
-                                }
-                                for id in take_gate_dialogs(&mut pending) {
-                                    let _ = events.send(AgentEvent::PermissionWithdrawn { id }).await;
-                                }
-                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_session_stats"}).to_string()).await;
-                                // The turn's user message now has an entry id to rewind to.
-                                let _ = proc.write_line(&json!({"id": next_id(), "type":"get_fork_messages"}).to_string()).await;
-                            }
-                            if events.send(ev).await.is_err() {
-                                if !shutting_down {
-                                    if shutdown_queued(&mut cmds) {
-                                        proc.end_or_kill(turn_open).await;
-                                    } else {
-                                        proc.kill().await;
-                                    }
-                                }
-                                return;
-                            }
-                        }
-                        if baseline_answer {
-                            baseline = false;
-                            match held_turn.take() {
-                                // The session to resume is gone: the prompt
-                                // is not sent to the one pi made in its place.
-                                Some(_) if replaced => {
-                                    turn_open = false;
-                                    let _ = events.send(AgentEvent::TurnCompleted {
-                                        stop_reason: StopReason::Error(
-                                            "pi: the session to resume is gone, so this prompt was not sent; send it again to have the new session told the conversation".into(),
-                                        ),
-                                    }).await;
-                                }
-                                Some(turn) if !forking => {
-                                    let _ = proc.write_line(&turn).await;
-                                }
-                                held => held_turn = held,
-                            }
-                        }
-                    }
-                    Some(RawLine::Stderr(line)) => {
-                        for ev in parser.feed_stderr(&line) {
-                            let _ = events.send(ev).await;
-                        }
-                    }
-                    Some(RawLine::Exited(code)) => {
-                        let _ = events.send(AgentEvent::ProcessExited { code }).await;
-                        break;
-                    }
-                    None => break,
-                }
-            }
+impl Pi {
+    fn new(session_id: String, resumed: bool, policy: PermissionPolicy) -> Self {
+        Pi {
+            parser: PiParser::new(Some(session_id)),
+            pending: HashMap::new(),
+            seq: 0,
+            policy,
+            resumed,
+            turn_open: false,
+            aborting: false,
+            forking: false,
+            baseline: resumed,
+            held_turn: None,
         }
     }
 
-    if !shutting_down {
-        proc.kill().await;
+    fn next_id(&mut self) -> String {
+        self.seq += 1;
+        format!("u{}", self.seq)
+    }
+
+    /// A request of ours that takes nothing but its id.
+    fn request(&mut self, kind: &str) -> String {
+        json!({"id": self.next_id(), "type": kind}).to_string()
+    }
+}
+
+impl StreamProtocol for Pi {
+    async fn start(&mut self, io: &mut Io<'_>) {
+        let _ = io.write(&self.request("get_state")).await;
+        let _ = io.write(&self.request("get_commands")).await;
+        if self.resumed {
+            // Learn which user messages predate this run, so later listings
+            // can tell which one is new.
+            self.parser.expect_fork_baseline();
+            let _ = io.write(&self.request("get_fork_messages")).await;
+        }
+    }
+
+    async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
+        let is_turn = matches!(cmd, SessionCommand::SendTurn { .. });
+        let line = match cmd {
+            SessionCommand::SendTurn { text, attachments } => {
+                match encode_message("prompt", &self.next_id(), &text, &attachments) {
+                    Ok(line) => Some(line),
+                    Err(e) => {
+                        io.emit(AgentEvent::TurnCompleted {
+                            stop_reason: StopReason::Error(e.to_string()),
+                        })
+                        .await;
+                        None
+                    }
+                }
+            }
+            SessionCommand::Steer { text, attachments } => {
+                match encode_message("steer", &self.next_id(), &text, &attachments) {
+                    Ok(line) => Some(line),
+                    Err(e) => {
+                        io.emit(AgentEvent::Error(e.to_string())).await;
+                        None
+                    }
+                }
+            }
+            // `fork` branches a new session from before that message. It
+            // is only in place once it answers, so turns wait for that.
+            SessionCommand::Rewind { anchor } => {
+                self.forking = true;
+                Some(json!({"id": self.next_id(), "type":"fork","entryId": anchor}).to_string())
+            }
+            SessionCommand::Compact { instructions } => {
+                let mut cmd = json!({"id": self.next_id(), "type":"compact"});
+                if let Some(i) = instructions {
+                    cmd["customInstructions"] = json!(i);
+                }
+                Some(cmd.to_string())
+            }
+            SessionCommand::Interrupt => {
+                if self.held_turn.take().is_some() {
+                    // A turn held for a fork has not reached pi: it
+                    // is dropped, and ends here.
+                    self.turn_open = false;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Interrupted,
+                    })
+                    .await;
+                    None
+                } else {
+                    self.aborting |= self.turn_open;
+                    Some(self.request("abort"))
+                }
+            }
+            // pi reports no subagents, so none can be running, and has no
+            // remote control.
+            SessionCommand::StopSubagent { .. } | SessionCommand::RemoteControl { .. } => {
+                return Encoded::Unsupported;
+            }
+            SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {
+                Some(kind) => Some(encode_ui_response(&id, kind, &decision)),
+                None => {
+                    io.emit(AgentEvent::Notice(format!("no pending pi dialog {id}")))
+                        .await;
+                    None
+                }
+            },
+            SessionCommand::SetModel(m) => {
+                let set = json!({
+                    "id": self.next_id(), "type":"set_model",
+                    "provider": m.provider.as_str(), "modelId": m.model
+                });
+                let _ = io.write(&set.to_string()).await;
+                // The new model may differ in thinking levels, context
+                // window and image support.
+                let _ = io.write(&self.request("get_state")).await;
+                Some(self.request("get_available_thinking_levels"))
+            }
+            SessionCommand::SetEffort(e) => Some(
+                json!({
+                    "id": self.next_id(), "type":"set_thinking_level",
+                    "level": e.unwrap_or_else(|| "medium".into())
+                })
+                .to_string(),
+            ),
+            SessionCommand::SetPolicy(p) => {
+                self.policy = p;
+                None
+            }
+            // The driver's (`shutdown`).
+            SessionCommand::Shutdown => None,
+        };
+        self.turn_open |= is_turn && line.is_some();
+        if (self.forking || self.baseline) && is_turn {
+            self.held_turn = line;
+            Encoded::Done
+        } else {
+            line.map_or(Encoded::Done, Encoded::Write)
+        }
+    }
+
+    fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
+        vec![AgentEvent::Error(format!("pi: {error}"))]
+    }
+
+    fn parser(&mut self) -> &mut dyn Parser {
+        &mut self.parser
+    }
+
+    async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
+        if self.forking && is_response_to(line, "fork") {
+            // The fork is a new session: re-read its id and
+            // message list, then send what was waiting.
+            self.forking = false;
+            let _ = io.write(&self.request("get_state")).await;
+            let _ = io.write(&self.request("get_fork_messages")).await;
+            if !self.baseline
+                && let Some(turn) = self.held_turn.take()
+            {
+                let _ = io.write(&turn).await;
+            }
+        }
+        let baseline_answer = self.baseline && is_response_to(line, "get_fork_messages");
+        let mut replaced = false;
+        for mut ev in self.parser.feed(line) {
+            replaced |= matches!(ev, AgentEvent::SessionReplaced { .. });
+            if let AgentEvent::PermissionRequest(req) = &ev {
+                let kind = match &req.kind {
+                    PermissionKind::ToolUse { .. } => PendingKind::Gate,
+                    PermissionKind::Confirm { .. } => PendingKind::Confirm,
+                    PermissionKind::Select { .. } => PendingKind::Select,
+                    _ => PendingKind::Input,
+                };
+                if self.policy == PermissionPolicy::Bypass && kind == PendingKind::Gate {
+                    let allow = PermissionDecision::Allow {
+                        updated_input: None,
+                    };
+                    let _ = io.write(&encode_ui_response(&req.id, kind, &allow)).await;
+                    continue;
+                }
+                // Under Bypass, confirm dialogs are auto-accepted and
+                // selects take the first option; text input still asks.
+                if self.policy == PermissionPolicy::Bypass && kind != PendingKind::Input {
+                    let answer = match &req.kind {
+                        PermissionKind::Select { options, .. } => PermissionDecision::Answer(
+                            options
+                                .first()
+                                .cloned()
+                                .map(Value::String)
+                                .unwrap_or(Value::Null),
+                        ),
+                        _ => PermissionDecision::Answer(Value::Bool(true)),
+                    };
+                    let _ = io.write(&encode_ui_response(&req.id, kind, &answer)).await;
+                    io.emit(AgentEvent::Notice(
+                        "auto-accepted an extension dialog (bypass)".into(),
+                    ))
+                    .await;
+                    continue;
+                }
+                self.pending.insert(req.id.clone(), kind);
+            }
+            // Context usage is only available on request.
+            if let AgentEvent::TurnCompleted { stop_reason } = &mut ev {
+                self.turn_open = false;
+                if std::mem::take(&mut self.aborting) && *stop_reason == StopReason::Done {
+                    *stop_reason = StopReason::Interrupted;
+                }
+                for id in take_gate_dialogs(&mut self.pending) {
+                    io.emit(AgentEvent::PermissionWithdrawn { id }).await;
+                }
+                let _ = io.write(&self.request("get_session_stats")).await;
+                // The turn's user message now has an entry id to rewind to.
+                let _ = io.write(&self.request("get_fork_messages")).await;
+            }
+            io.forward(ev).await?;
+        }
+        if baseline_answer {
+            self.baseline = false;
+            match self.held_turn.take() {
+                // The session to resume is gone: the prompt
+                // is not sent to the one pi made in its place.
+                Some(_) if replaced => {
+                    self.turn_open = false;
+                    io.emit(AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Error(
+                            "pi: the session to resume is gone, so this prompt was not sent; send it again to have the new session told the conversation".into(),
+                        ),
+                    })
+                    .await;
+                }
+                Some(turn) if !self.forking => {
+                    let _ = io.write(&turn).await;
+                }
+                held => self.held_turn = held,
+            }
+        }
+        Ok(())
+    }
+
+    fn shutdown(&mut self) -> Shutdown {
+        Shutdown::EndOrKill {
+            turn_open: self.turn_open,
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Spawn-per-turn session driver.
+//! The per-turn flavour of the driver.
 //!
 //! For harnesses whose CLI has no long-lived stdin protocol (codex
 //! `exec`), every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
@@ -11,14 +11,15 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::caps::PermissionPolicy;
-use super::event::{AgentEvent, RemoteControl, StopReason};
-use super::ids::{HarnessId, ModelRef, ProviderId};
-use super::mcp::McpServer;
-use super::parser::Parser;
-use super::process::{LineProcess, RawLine};
-use super::sandbox::Sandbox;
-use super::session::{
+use super::exited;
+use crate::core::caps::PermissionPolicy;
+use crate::core::event::{AgentEvent, RemoteControl, StopReason};
+use crate::core::ids::{HarnessId, ModelRef, ProviderId};
+use crate::core::mcp::McpServer;
+use crate::core::parser::Parser;
+use crate::core::process::{LineProcess, RawLine};
+use crate::core::sandbox::Sandbox;
+use crate::core::session::{
     Attachment, ProcessModel, ProcessSlot, SessionCommand, SessionConfig, SessionHandle,
     SessionInfo,
 };
@@ -188,11 +189,7 @@ async fn drive(
                             p.kill().await;
                             // Gone before it is said to be: the next
                             // session resumes the thread it was writing.
-                            while let Some(line) = p.lines.recv().await {
-                                if matches!(line, RawLine::Exited(_)) {
-                                    break;
-                                }
-                            }
+                            exited(&mut p).await;
                         }
                         let _ = events.send(AgentEvent::ProcessExited { code: Some(0) }).await;
                         return;
