@@ -232,10 +232,15 @@ impl ToolKeys {
 /// that holds vibe's home (`_discover_config_file`,
 /// `vibe/core/config/layers/project.py`). Taken whether or not vibe trusts
 /// it: a tool it names asks under the profile either way, which can only
-/// ask more.
+/// ask more. Both with links resolved ([`resolved`]): vibe walks up from
+/// its working directory, which the system gives it resolved, and is
+/// given its home in `VIBE_HOME`, which it resolves (`get_vibe_home`), so
+/// with `~/.vibe` a link to `~/dotfiles/vibe` it stops at `~/dotfiles`
+/// and a session in `~/proj` reads `~/.vibe/config.toml` as the project's.
 pub fn project_config(home: &Path, cwd: &Path) -> Option<PathBuf> {
+    let home = resolved(home);
     let stop = home.parent();
-    for dir in cwd.ancestors() {
+    for dir in resolved(cwd).ancestors() {
         if Some(dir) == stop {
             break;
         }
@@ -245,6 +250,18 @@ pub fn project_config(home: &Path, cwd: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// `path` with its links resolved as far as it exists, the rest joined as
+/// given, as Python's `Path.resolve()` does.
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolved(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// A vibe config file's text, read only: a regular file of at most 1 MiB
@@ -912,9 +929,11 @@ mod tests {
             "[tools.bash]\npermission = \"always\"\n",
         )
         .unwrap();
+        // Found with links resolved, as vibe finds it (the temporary
+        // directory is behind one on macOS).
         assert_eq!(
             project_config(&home, &cwd),
-            Some(project.join(".vibe/config.toml"))
+            Some(project.canonicalize().unwrap().join(".vibe/config.toml"))
         );
         let found = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(found.names.contains("write_file") && found.names.contains("bash"));
@@ -954,6 +973,38 @@ mod tests {
         // None at all is no key.
         let keys = read_tool_keys(&home, &cwd, &[], &[]).unwrap();
         assert!(keys.names.contains("bash") && !keys.names.contains("write_file"));
+    }
+
+    /// vibe resolves the home it is given, so with `~/.vibe` a link to a
+    /// directory elsewhere it stops looking for project config at that
+    /// directory's parent, not at `~`, and a session in `~/proj` reads
+    /// `~/.vibe/config.toml` as the project's; so does this (#212).
+    #[cfg(unix)]
+    #[test]
+    fn project_config_stops_where_vibe_stops_with_a_linked_home() {
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("u");
+        let real = user.join("dotfiles/vibe");
+        let proj = user.join("proj");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(&proj).unwrap();
+        std::os::unix::fs::symlink(&real, user.join(".vibe")).unwrap();
+        std::fs::write(real.join("config.toml"), "[tools.grep]\n").unwrap();
+        let home = user.join(".vibe");
+        assert_eq!(
+            project_config(&home, &proj),
+            Some(user.canonicalize().unwrap().join(".vibe/config.toml"))
+        );
+        // Given resolved, the same; below the stop nothing is read.
+        assert_eq!(project_config(&real, &proj), project_config(&home, &proj));
+        assert_eq!(project_config(&home, &real.join("x")), None);
+        // A home that is not there is resolved as far as it goes.
+        let link = user.join("linked");
+        std::os::unix::fs::symlink(user.join("dotfiles"), &link).unwrap();
+        assert_eq!(
+            project_config(&link.join("missing"), &proj),
+            Some(user.canonicalize().unwrap().join(".vibe/config.toml"))
+        );
     }
 
     /// `<home>/.env` names tools as vibe loads it into its environment

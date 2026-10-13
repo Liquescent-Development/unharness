@@ -1123,7 +1123,9 @@ recorded ones. For anything else:
   "ask"`, `allowlist = []` for `write_file`, `edit`, `powershell`,
   `git_bash` and every key the user's `config.toml`, the project's (found
   as vibe finds it, from the session's directory up to the one holding
-  vibe's home, trusted or not: it can only ask more) and `VIBE_TOOLS` /
+  vibe's home, both with links resolved, as vibe resolves the `VIBE_HOME`
+  it is given, so a linked `~/.vibe` moves where the walk stops, trusted
+  or not: it can only ask more) and `VIBE_TOOLS` /
   `VIBE_TOOLS__<NAME>__…` in the environment or in `$VIBE_HOME/.env` name
   (#212: vibe-acp loads `.env` into its environment before any
   configuration layer, `load_dotenv_values`, so unharness parses it as
