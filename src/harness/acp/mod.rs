@@ -13,12 +13,14 @@ pub mod auth;
 pub mod elicitation;
 pub mod modes;
 pub mod parse;
+pub mod profile;
 pub mod spawn;
 pub mod transport;
 
 use std::path::{Path, PathBuf};
 
 pub use modes::{ModeMap, OwnModes};
+pub use profile::AcpProfile;
 pub use spawn::{KnownModels, ProviderModels, SharedModels, SpawnChoice, SpawnEnv, SpawnPlan};
 
 use anyhow::{Result, bail};
@@ -80,33 +82,23 @@ pub struct AcpHarness {
     args: Vec<String>,
     /// Came from [`PRESETS`] rather than the user's config.
     preset: bool,
-    /// The user's config says this agent asks before it acts
-    /// (`asks_permission`).
-    asks: bool,
-    /// The config option that is this agent's reasoning effort, when it is
-    /// not under the spec's `thought_level` category.
-    effort_option: Option<String>,
-    /// Which of the agent's own session modes backs each policy.
-    modes: ModeMap,
-    /// Builds the agent's environment for its model and effort, which are
-    /// then never set over the protocol.
-    spawn_env: Option<SpawnEnv>,
+    /// What unharness knows about the agent that the protocol does not say.
+    profile: AcpProfile,
     /// What the agent's sessions said about its models, this run.
     known: SharedModels,
-    /// The command that signs the agent in, told to the user when a
-    /// session fails for want of sign-in (`auth.rs`). Never run.
-    sign_in: Option<String>,
-    /// A relative path in an edit's `diff` is in the session's directory.
-    relative_edits: bool,
-    /// Reads what the agent says in fields of its own (`_meta`).
-    meta_reader: Option<parse::MetaReaderFactory>,
-    /// The extension method that rewinds a session (`rewinding_with`).
-    rewind: Option<&'static str>,
 }
 
 impl AcpHarness {
-    /// `command` is the full agent command line; its first word is the binary.
-    pub fn new(name: &str, display_name: Option<&str>, command: &[String]) -> Result<Self> {
+    /// `command` is the full agent command line; its first word is the
+    /// binary. `profile` is what is known about the agent beyond the
+    /// protocol: [`AcpProfile::default`] plus what its table says for an
+    /// agent from config or a preset.
+    pub fn new(
+        name: &str,
+        display_name: Option<&str>,
+        command: &[String],
+        profile: AcpProfile,
+    ) -> Result<Self> {
         let Some((binary, args)) = command.split_first() else {
             bail!("harness '{name}' has protocol = \"acp\" but no command");
         };
@@ -121,119 +113,24 @@ impl AcpHarness {
             binary_names: Box::leak(vec![leak(binary)].into_boxed_slice()),
             providers: ProviderSource::Static(PROVIDERS),
         }));
+        let sign_in = profile
+            .sign_in
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(str::to_string);
         Ok(AcpHarness {
             descriptor,
             args: args.to_vec(),
             preset: false,
-            asks: false,
-            effort_option: None,
-            modes: ModeMap::default(),
-            spawn_env: None,
+            profile: AcpProfile { sign_in, ..profile },
             known: SharedModels::default(),
-            sign_in: None,
-            relative_edits: false,
-            meta_reader: None,
-            rewind: None,
         })
-    }
-
-    /// Whether the agent is known to ask before it writes, runs a command
-    /// or reaches out, which is what the `ask` policy stands on.
-    pub fn asking_permission(self, asks: bool) -> Self {
-        AcpHarness { asks, ..self }
-    }
-
-    /// Take the config option with this id as the agent's reasoning effort,
-    /// whatever its category (Mistral Vibe offers its level as `thinking`).
-    /// For a harness that knows what setting the option does: unharness then
-    /// sends `session/set_config_option` for it on `/effort` and for a
-    /// configured effort. Nothing declares one from config.
-    pub fn declaring_effort_option(self, id: &str) -> Self {
-        AcpHarness {
-            effort_option: Some(id.to_string()),
-            ..self
-        }
-    }
-
-    /// Hold the agent to these of its session modes, one per policy (see
-    /// [`ModeMap`]): from `[harnesses.<name>] modes`, or declared by a
-    /// harness that knows its agent. An agent with modes and no map gets no
-    /// policy below `bypass` (`modes::mode_step`).
-    pub fn with_modes(self, modes: ModeMap) -> Self {
-        AcpHarness { modes, ..self }
-    }
-
-    /// Choose the agent's model and effort when its process starts, with
-    /// the environment `build` returns, and never with
-    /// `session/set_config_option`: for an agent that writes a model or
-    /// effort set over the protocol into its own configuration (Mistral
-    /// Vibe, whose sessions also keep the ones they last ran). A change of
-    /// either starts a new process, and a new session once the old one was
-    /// prompted (`Capabilities::model_per_process`). The effort option is
-    /// still the one declared with [`declaring_effort_option`]
-    /// (`Self::declaring_effort_option`), read for its levels only.
-    pub fn choosing_at_spawn(self, build: SpawnEnv) -> Self {
-        AcpHarness {
-            spawn_env: Some(build),
-            ..self
-        }
-    }
-
-    /// The command that signs the agent in (`vibe --setup`), from
-    /// `[harnesses.<name>] sign_in` or declared by a harness that knows
-    /// its agent. It is only told to the user, with the sign-in methods
-    /// the agent offers, when a session fails for want of sign-in; the
-    /// generic text without one points at the agent's own command line.
-    pub fn signing_in_with(self, command: Option<&str>) -> Self {
-        AcpHarness {
-            sign_in: command
-                .map(str::trim)
-                .filter(|c| !c.is_empty())
-                .map(str::to_string),
-            ..self
-        }
     }
 
     /// The command that signs the agent in, if one is known.
     pub fn sign_in(&self) -> Option<&str> {
-        self.sign_in.as_deref()
-    }
-
-    /// Take a relative path in an edit's `diff` content as one in the
-    /// session's directory, for allow rules
-    /// (`AcpParser::resolving_relative_edits`). Only for an agent known to
-    /// write it there and to name it in `locations` (Mistral Vibe 2.26.1);
-    /// for any other a relative path stays unknown.
-    pub fn resolving_relative_edits(self) -> Self {
-        AcpHarness {
-            relative_edits: true,
-            ..self
-        }
-    }
-
-    /// Read each tool call's fields of the agent's own with a reader from
-    /// `make`, one per session (`parse::MetaReader`): for a harness that
-    /// knows its agent (Mistral Vibe's subagents). Nothing declares one
-    /// from config.
-    pub fn reading_meta_with(self, make: parse::MetaReaderFactory) -> Self {
-        AcpHarness {
-            meta_reader: Some(make),
-            ..self
-        }
-    }
-
-    /// Rewind the session with this extension method, which takes
-    /// `sessionId`, `messageId` (the id the agent's `user_message_chunk`
-    /// gave the turn's message, reported as its `TurnAnchor`) and
-    /// `restoreFiles: false`, drops that message and everything after it
-    /// in place, and answers an unknown id with an error (Mistral Vibe's
-    /// `_rewind/to`, 2.26.1). Not the spec: only for an agent known to
-    /// have it. Files are restored by unharness from its checkpoints.
-    pub fn rewinding_with(self, method: &'static str) -> Self {
-        AcpHarness {
-            rewind: Some(method),
-            ..self
-        }
+        self.profile.sign_in.as_deref()
     }
 
     /// The presets whose name is not taken, each with whether its binary
@@ -286,7 +183,7 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
             .own::<crate::config::NoOwnKeys>(name)
             .map_err(|e| anyhow::anyhow!("{e:#} ({DEFINING_AN_AGENT})"))?;
         let command: Vec<String> = command.iter().map(|s| s.to_string()).collect();
-        let preset = AcpHarness::new(name, Some(display), &command)?;
+        let preset = AcpHarness::new(name, Some(display), &command, AcpProfile::default())?;
         return Ok(Box::new(AcpHarness {
             preset: true,
             ..preset
@@ -303,13 +200,18 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
             return Err(crate::config::TableErrors(wrong).into());
         }
     };
-    let agent = AcpHarness::new(name, table.display_name.as_deref(), &table.command)?;
-    Ok(Box::new(
-        agent
-            .asking_permission(own.asks_permission.unwrap_or(false))
-            .with_modes(modes)
-            .signing_in_with(own.sign_in.as_deref()),
-    ))
+    let profile = AcpProfile {
+        asks: own.asks_permission.unwrap_or(false),
+        modes,
+        sign_in: own.sign_in,
+        ..AcpProfile::default()
+    };
+    Ok(Box::new(AcpHarness::new(
+        name,
+        table.display_name.as_deref(),
+        &table.command,
+        profile,
+    )?))
 }
 
 impl Harness for AcpHarness {
@@ -344,12 +246,14 @@ impl Harness for AcpHarness {
             // names a mode for it (vibe's smart-approve); a session that does
             // not offer that mode refuses it.
             permission_policies: self
+                .profile
                 .asks
                 .then_some(PolicySupport::full(PermissionPolicy::Ask))
                 .into_iter()
                 .chain([PolicySupport::full(PermissionPolicy::AcceptEdits)])
                 .chain(
-                    self.modes
+                    self.profile
+                        .modes
                         .names(PermissionPolicy::Auto)
                         .then_some(PolicySupport::full(PermissionPolicy::Auto)),
                 )
@@ -363,7 +267,7 @@ impl Harness for AcpHarness {
             provider_per_process: false,
             // Form elicitation is declared at `initialize`; whether the
             // agent asks is reported once it sends one.
-            model_per_process: self.spawn_env.is_some(),
+            model_per_process: self.profile.spawn_env.is_some(),
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,
@@ -377,7 +281,7 @@ impl Harness for AcpHarness {
             rate_limits: false,
             // Not in the spec; an agent known to have one declares it.
             rewind: RewindSupport {
-                conversation: self.rewind.is_some(),
+                conversation: self.profile.rewind_method.is_some(),
                 // A forked session's inherited messages have ids of its
                 // own (vibe 2.26.1 numbers them by position).
                 anchors_survive_fork: false,
@@ -402,7 +306,7 @@ impl Harness for AcpHarness {
     fn probe(&self, binary_override: Option<&Path>) -> Probe {
         let binary = resolve_binary(self.descriptor, binary_override);
         let version = binary.as_deref().and_then(probe_version);
-        let how = match &self.sign_in {
+        let how = match self.sign_in() {
             Some(command) => format!(" (to sign in, run `{command}`)"),
             None => String::new(),
         };
@@ -445,14 +349,14 @@ impl Harness for AcpHarness {
             self.descriptor.id,
             self.args.clone(),
             transport::AgentSpec {
-                effort_option: self.effort_option.clone(),
-                modes: self.modes.clone(),
-                spawn_env: self.spawn_env.clone(),
+                effort_option: self.profile.effort_option.clone(),
+                modes: self.profile.modes.clone(),
+                spawn_env: self.profile.spawn_env.clone(),
                 known: self.known.clone(),
-                sign_in: self.sign_in.clone(),
-                relative_edits: self.relative_edits,
-                meta_reader: self.meta_reader,
-                rewind: self.rewind,
+                sign_in: self.profile.sign_in.clone(),
+                relative_edits: self.profile.relative_edits,
+                meta_reader: self.profile.meta_reader,
+                rewind: self.profile.rewind_method,
             },
             cfg,
         )
@@ -470,12 +374,18 @@ impl Harness for AcpHarness {
 mod tests {
     use super::*;
 
+    /// An agent `x` with `profile`.
+    fn with(profile: AcpProfile) -> AcpHarness {
+        AcpHarness::new("x", None, &["x".into()], profile).unwrap()
+    }
+
     #[test]
     fn config_defined_agent() {
         let h = AcpHarness::new(
             "My-Agent",
             Some("My Agent"),
             &["my-agent".into(), "--acp".into()],
+            AcpProfile::default(),
         )
         .unwrap();
         let d = h.descriptor();
@@ -483,15 +393,16 @@ mod tests {
         assert_eq!(d.display_name, "My Agent");
         assert_eq!(d.binary_names, ["my-agent"]);
         assert_eq!(h.args, ["--acp"]);
-        assert!(AcpHarness::new("x", None, &[]).is_err());
+        assert!(AcpHarness::new("x", None, &[], AcpProfile::default()).is_err());
 
         let caps = h.capabilities();
         assert!(caps.interactive_permissions && caps.plan_updates && !caps.steer);
         // Rewind is not in the spec: only an agent known to have it does.
         assert!(!caps.rewind.conversation);
-        let rewinds = AcpHarness::new("x", None, &["x".into()])
-            .unwrap()
-            .rewinding_with("_rewind/to");
+        let rewinds = with(AcpProfile {
+            rewind_method: Some("_rewind/to"),
+            ..AcpProfile::default()
+        });
         assert!(rewinds.capabilities().rewind.conversation);
         assert!(!rewinds.capabilities().rewind.anchors_survive_fork);
         assert!(caps.supports_policy(PermissionPolicy::Auto).is_none());
@@ -499,7 +410,11 @@ mod tests {
 
         // `ask` only for an agent the config says asks.
         assert!(caps.supports_policy(PermissionPolicy::Ask).is_none());
-        let h = h.asking_permission(true);
+        let asking = AcpProfile {
+            asks: true,
+            ..AcpProfile::default()
+        };
+        let h = with(asking.clone());
         assert!(
             h.capabilities()
                 .supports_policy(PermissionPolicy::Ask)
@@ -507,19 +422,25 @@ mod tests {
         );
 
         // No effort option is assumed; a harness declares its own.
-        assert_eq!(h.effort_option, None);
-        let h = h.declaring_effort_option("thinking");
-        assert_eq!(h.effort_option.as_deref(), Some("thinking"));
-        assert!(h.asks, "declaring keeps the rest");
+        assert_eq!(h.profile.effort_option, None);
+        let h = with(AcpProfile {
+            effort_option: Some("thinking".into()),
+            ..asking.clone()
+        });
+        assert_eq!(h.profile.effort_option.as_deref(), Some("thinking"));
+        assert!(h.profile.asks, "declaring keeps the rest");
 
         // No mode map is assumed either.
-        assert!(h.modes.is_empty());
-        let h = h.with_modes(ModeMap::new([(PermissionPolicy::Ask, "ask")]));
+        assert!(h.profile.modes.is_empty());
+        let h = with(AcpProfile {
+            modes: ModeMap::new([(PermissionPolicy::Ask, "ask")]),
+            ..h.profile.clone()
+        });
         assert_eq!(
-            h.modes.for_policy(PermissionPolicy::Bypass),
+            h.profile.modes.for_policy(PermissionPolicy::Bypass),
             Some((PermissionPolicy::Ask, "ask"))
         );
-        assert!(h.asks && h.effort_option.is_some());
+        assert!(h.profile.asks && h.profile.effort_option.is_some());
         // A map that names a mode for auto itself declares auto; one that
         // leaves it to ask's entry does not.
         assert!(
@@ -527,12 +448,13 @@ mod tests {
                 .supports_policy(PermissionPolicy::Auto)
                 .is_none()
         );
-        let with_auto = AcpHarness::new("x", None, &["x".into()])
-            .unwrap()
-            .with_modes(ModeMap::new([
+        let with_auto = with(AcpProfile {
+            modes: ModeMap::new([
                 (PermissionPolicy::Ask, "ask"),
                 (PermissionPolicy::Auto, "smart-approve"),
-            ]));
+            ]),
+            ..AcpProfile::default()
+        });
         assert!(
             with_auto
                 .capabilities()
@@ -543,15 +465,21 @@ mod tests {
         // Nor a sign-in command: doctor names one that is declared.
         let auth = |h: &AcpHarness| h.probe(None).auth.details.unwrap();
         assert!(!auth(&h).contains("to sign in"));
-        assert!(h.sign_in.is_none());
-        let h = h.signing_in_with(Some(" vibe --setup "));
-        assert_eq!(h.sign_in.as_deref(), Some("vibe --setup"));
+        assert!(h.sign_in().is_none());
+        let signing_in = |command: &str| {
+            with(AcpProfile {
+                sign_in: Some(command.into()),
+                ..h.profile.clone()
+            })
+        };
+        let h = signing_in(" vibe --setup ");
+        assert_eq!(h.sign_in(), Some("vibe --setup"));
         assert!(
             auth(&h).ends_with("(to sign in, run `vibe --setup`)"),
             "{}",
             auth(&h)
         );
-        assert!(h.signing_in_with(Some("  ")).sign_in.is_none());
+        assert!(signing_in("  ").sign_in().is_none());
     }
 
     #[test]

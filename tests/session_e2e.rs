@@ -1543,21 +1543,40 @@ async fn agy_auth_failure_ends_turn_with_error() {
     );
 }
 
-/// An ACP agent the config says asks, with no mode map.
-fn acp_harness() -> unharness::harness::acp::AcpHarness {
+/// The fake ACP agent with `profile`.
+fn fake_acp(profile: unharness::harness::acp::AcpProfile) -> unharness::harness::acp::AcpHarness {
     unharness::harness::acp::AcpHarness::new(
         "fake-acp",
         None,
         &[fake_harness().to_string_lossy().into_owned()],
+        profile,
     )
     .unwrap()
-    .asking_permission(true)
+}
+
+/// What the config says of an ACP agent that asks, with no mode map.
+fn asking() -> unharness::harness::acp::AcpProfile {
+    unharness::harness::acp::AcpProfile {
+        asks: true,
+        ..Default::default()
+    }
+}
+
+/// An ACP agent the config says asks, with no mode map.
+fn acp_harness() -> unharness::harness::acp::AcpHarness {
+    fake_acp(asking())
+}
+
+/// What the config says of an ACP agent that asks, with `modes`.
+fn asking_with_modes(modes: &[(PermissionPolicy, &str)]) -> unharness::harness::acp::AcpProfile {
+    unharness::harness::acp::AcpProfile {
+        modes: unharness::harness::acp::ModeMap::new(modes.iter().map(|(p, m)| (*p, *m))),
+        ..asking()
+    }
 }
 
 fn acp_with_modes(modes: &[(PermissionPolicy, &str)]) -> unharness::harness::acp::AcpHarness {
-    acp_harness().with_modes(unharness::harness::acp::ModeMap::new(
-        modes.iter().map(|(p, m)| (*p, *m)),
-    ))
+    fake_acp(asking_with_modes(modes))
 }
 
 /// claude-agent-acp 0.85.1, whose `default` mode asks (and which every
@@ -1568,11 +1587,13 @@ fn claude_acp() -> unharness::harness::acp::AcpHarness {
 
 /// vibe-acp 2.26.1: `ask` asks before every write and command; the agent
 /// stays in it under accept-edits too, and unharness answers the edits.
+const VIBE_MODES: &[(PermissionPolicy, &str)] = &[
+    (PermissionPolicy::Ask, "ask"),
+    (PermissionPolicy::Bypass, "auto-approve"),
+];
+
 fn vibe_acp() -> unharness::harness::acp::AcpHarness {
-    acp_with_modes(&[
-        (PermissionPolicy::Ask, "ask"),
-        (PermissionPolicy::Bypass, "auto-approve"),
-    ])
+    acp_with_modes(VIBE_MODES)
 }
 
 #[tokio::test]
@@ -5318,7 +5339,10 @@ fn vibe_not_signed_in() -> PathBuf {
 
 /// vibe as a config agent that names its sign-in command.
 fn vibe_signing_in() -> unharness::harness::acp::AcpHarness {
-    vibe_acp().signing_in_with(Some("vibe --setup"))
+    fake_acp(unharness::harness::acp::AcpProfile {
+        sign_in: Some("vibe --setup".into()),
+        ..asking_with_modes(VIBE_MODES)
+    })
 }
 
 /// What a turn failed with for want of sign-in, once the process has gone
@@ -5830,10 +5854,12 @@ async fn vibe_refuses_ask_when_its_config_lists_another_unharness_ask() {
 fn vibe_rewinding(fake: &Fake, fixture: &Path) -> SessionHandle {
     let mut cfg = fake.config(fixture, PermissionPolicy::Bypass, true);
     cfg.model = None;
-    acp_harness()
-        .rewinding_with(unharness::harness::vibe::REWIND_METHOD)
-        .start_session(cfg)
-        .unwrap()
+    fake_acp(unharness::harness::acp::AcpProfile {
+        rewind_method: Some(unharness::harness::vibe::REWIND_METHOD),
+        ..asking()
+    })
+    .start_session(cfg)
+    .unwrap()
 }
 
 fn turn_anchors(events: &[AgentEvent]) -> Vec<String> {

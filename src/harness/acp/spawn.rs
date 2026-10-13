@@ -5,7 +5,7 @@
 //! the user's `~/.vibe/config.toml`, where the next plain vibe run starts
 //! from it; set in its environment they apply to that process alone. A
 //! harness that knows this about its agent declares a [`SpawnEnv`]
-//! (`AcpHarness::choosing_at_spawn`): the transport then never sends the
+//! (`AcpProfile::spawn_env`): the transport then never sends the
 //! model or effort option, puts what the builder returns in the agent's
 //! environment, and a change of either starts a new process, and a new
 //! session once the old one was prompted (`Capabilities::model_per_process`):

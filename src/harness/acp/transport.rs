@@ -333,27 +333,27 @@ struct Cancelling {
 #[derive(Clone, Default)]
 pub struct AgentSpec {
     /// The config option id that is the agent's reasoning effort
-    /// (`AcpHarness::declaring_effort_option`).
+    /// (`AcpProfile::effort_option`).
     pub effort_option: Option<String>,
     /// Which of the agent's session modes backs each policy
-    /// (`AcpHarness::with_modes`).
+    /// (`AcpProfile::modes`).
     pub modes: ModeMap,
     /// The agent's model and effort are chosen by its environment when it
-    /// starts, never by a session option (`AcpHarness::choosing_at_spawn`).
+    /// starts, never by a session option (`AcpProfile::spawn_env`).
     pub spawn_env: Option<SpawnEnv>,
     /// What its sessions said about its models, for the builder.
     pub known: SharedModels,
     /// The command that signs the agent in, told to the user when it is
-    /// not (`AcpHarness::signing_in_with`). Never run by unharness.
+    /// not (`AcpProfile::sign_in`). Never run by unharness.
     pub sign_in: Option<String>,
     /// A relative path in an edit's `diff` is in the session's directory
-    /// (`AcpHarness::resolving_relative_edits`).
+    /// (`AcpProfile::relative_edits`).
     pub relative_edits: bool,
     /// Reads what the agent says in fields of its own
-    /// (`AcpHarness::reading_meta_with`).
+    /// (`AcpProfile::meta_reader`).
     pub meta_reader: Option<super::parse::MetaReaderFactory>,
     /// The extension method that rewinds the session to a user message
-    /// (`AcpHarness::rewinding_with`), or none.
+    /// (`AcpProfile::rewind_method`), or none.
     pub rewind: Option<&'static str>,
 }
 
