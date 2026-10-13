@@ -599,6 +599,130 @@ fn pi_harness() -> unharness::harness::pi::PiHarness {
     }
 }
 
+/// A turn sent to a resumed pi waits for the first `get_fork_messages`
+/// answer (#214): pi saves a prompt under the id it was given, so one sent
+/// to the empty session pi made for a missing id
+/// (`fixtures/resume_missing.jsonl`) would make that id resume next time.
+/// There the turn fails unsent; where the listing shows the session, it
+/// goes once the listing is in, and until then an interrupt drops it
+/// without anything reaching pi.
+#[tokio::test]
+async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62".into());
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::SessionReplaced { .. })),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted { stop_reason: StopReason::Error(e) })
+                if e.contains("this prompt was not sent")
+        ),
+        "{events:?}"
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert!(
+        !fake.sent_lines().iter().any(|v| v["type"] == "prompt"),
+        "{:?}",
+        fake.sent_lines()
+    );
+
+    // The session is there: the turn goes after the listing.
+    let fake = Fake::new();
+    let fixture = fake._tmp.path().join("resumed.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+            ">> {\"type\": \"prompt\"}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let sent = fake.sent_lines_eventually(4).await;
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages", "prompt"],
+    );
+    assert_eq!(sent[3]["message"], "hi");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+
+    // Before the listing answers the turn is still held: an interrupt
+    // ends it at once, and neither it nor an `abort` reaches pi (the fake
+    // logs what it reads, so it reads everything once the gate opens).
+    let fake = Fake::new();
+    let gate = fake._tmp.path().join("gate");
+    let fixture = fake._tmp.path().join("resumed_gated.jsonl");
+    std::fs::write(
+        &fixture,
+        concat!(
+            ">> {\"type\": \"get_state\"}\n",
+            ">> {\"type\": \"get_commands\"}\n",
+            ">> {\"type\": \"get_fork_messages\"}\n",
+            "# gate\n",
+            "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
+            "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
+        ),
+    )
+    .unwrap();
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("s1".into());
+    cfg.env.push((
+        "UNHARNESS_FAKE_GATE".into(),
+        gate.to_string_lossy().into_owned(),
+    ));
+    let mut handle = pi_harness().start_session(cfg).unwrap();
+    fake.sent_lines_eventually(3).await;
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Interrupted
+            })
+        ),
+        "{events:?}"
+    );
+    std::fs::write(&gate, "").unwrap();
+    // The listing comes, and nothing more is sent.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        fake.sent_lines()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 #[tokio::test]
 async fn pi_gate_asks_before_a_tool_acts() {
     if !python_available() {
@@ -3351,6 +3475,217 @@ async fn acp_sets_the_mode_back_when_the_agent_leaves_it() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// The lines of a session in `ask` (vibe-acp 2.26.1's shape) that answered
+/// one turn: `session/new` in accept-edits, the mode option set to `ask`
+/// (id 3) and read back, the prompt (id 4) answered.
+fn mode_session_lines() -> Vec<String> {
+    vec![
+        r#">> {"method": "initialize"}"#.into(),
+        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}"#.into(),
+        r#">> {"method": "session/new"}"#.into(),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"result":{{"sessionId":"s1","modes":{{"currentModeId":"accept-edits","availableModes":[{{"id":"ask"}},{{"id":"accept-edits"}},{{"id":"auto-approve"}}]}},"configOptions":{}}}}}"#,
+            mode_option("accept-edits")
+        ),
+        r#">> {"method": "session/set_config_option"}"#.into(),
+        mode_answer(3, "ask"),
+        r#">> {"method": "session/prompt"}"#.into(),
+        r#"{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}"#.into(),
+    ]
+}
+
+/// vibe-acp's mode option, in `current`.
+fn mode_option(current: &str) -> String {
+    format!(
+        r#"[{{"id":"mode","category":"mode","type":"select","currentValue":"{current}","options":[{{"value":"ask"}},{{"value":"accept-edits"}},{{"value":"auto-approve"}}]}}]"#
+    )
+}
+
+/// The answer to mode request `id`, reading back `current`.
+fn mode_answer(id: u64, current: &str) -> String {
+    format!(
+        r#"{{"jsonrpc":"2.0","id":{id},"result":{{"configOptions":{}}}}}"#,
+        mode_option(current)
+    )
+}
+
+/// What the driver sent: each line's method and, for a mode request, the
+/// mode it asked for.
+fn sent_modes(fake: &Fake) -> Vec<String> {
+    fake.sent_lines()
+        .iter()
+        .map(|v| {
+            let method = v["method"].as_str().unwrap_or("answer");
+            match v["params"]["value"].as_str() {
+                Some(mode) if method == "session/set_config_option" => format!("{method}={mode}"),
+                _ => method.to_string(),
+            }
+        })
+        .collect()
+}
+
+/// Events until the driver has handled every command sent before: it
+/// takes them in order, and answers `RemoteControl` (which no ACP agent
+/// has) with an event at once.
+async fn barrier(handle: &mut SessionHandle) -> Vec<AgentEvent> {
+    handle
+        .send(SessionCommand::RemoteControl {
+            enabled: true,
+            name: None,
+        })
+        .await
+        .unwrap();
+    events_until(handle, |e| {
+        matches!(e, AgentEvent::RemoteControl(RemoteControl::Failed { .. }))
+    })
+    .await
+}
+
+/// A line the fake sends for a test to wait on: a command list, which
+/// comes out as `CapabilitiesChanged`.
+const MARKER: &str = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"marker","description":"marker"}]}}}"#;
+
+fn is_marker(e: &AgentEvent) -> bool {
+    matches!(e, AgentEvent::CapabilitiesChanged(CapsUpdate { commands: Some(c), .. })
+        if c.iter().any(|c| c.name == "marker"))
+}
+
+fn turn_started(events: &[AgentEvent]) -> bool {
+    events.iter().any(|e| matches!(e, AgentEvent::TurnStarted))
+}
+
+/// #211: in `ask`, the policy goes to bypass and back to ask before the
+/// agent answers the mode request for bypass (`auto-approve`). The session
+/// last said `ask`, but the agent takes `auto-approve`: the mode is applied
+/// again from that answer, so `ask` is set (only then: never two mode
+/// requests out at once), and the prompt waits for its answer.
+#[tokio::test]
+async fn acp_sets_the_mode_again_when_the_policy_changes_back_before_an_answer() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let mut lines = mode_session_lines();
+    lines.extend([
+        r#">> {"method": "session/set_config_option", "value": "auto-approve"}"#.into(),
+        // Held until the policy is back at ask and the prompt waits.
+        "# gate".into(),
+        mode_answer(5, "auto-approve"),
+        r#">> {"method": "session/set_config_option", "value": "ask"}"#.into(),
+        // Everything the driver did before the second answer comes first.
+        MARKER.into(),
+        mode_answer(6, "ask"),
+        r#">> {"method": "session/prompt"}"#.into(),
+        r#"{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}"#.into(),
+    ]);
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (mut cfg, gate) = gated_config(&fake, &lines);
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+
+    for policy in [PermissionPolicy::Bypass, PermissionPolicy::Ask] {
+        handle
+            .send(SessionCommand::SetPolicy(policy))
+            .await
+            .unwrap();
+    }
+    handle.send(SessionCommand::turn("y")).await.unwrap();
+    let mut before = barrier(&mut handle).await;
+    std::fs::write(&gate, "").unwrap();
+    before.extend(events_until(&mut handle, is_marker).await);
+    // The answer for bypass has come and `ask` has gone out; until its
+    // answer no prompt goes.
+    assert!(!turn_started(&before), "{before:?}");
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(turn_started(&events), "{events:?}");
+    assert_eq!(turn_error(&events), None, "{before:?} {events:?}");
+    assert!(!refused(&before, PermissionPolicy::Ask) && !refused(&events, PermissionPolicy::Ask));
+    assert_eq!(
+        sent_modes(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option=ask",
+            "session/prompt",
+            "session/set_config_option=auto-approve",
+            "session/set_config_option=ask",
+            "session/prompt",
+        ]
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
+/// #211: the policy goes to bypass and back to ask during a turn. The
+/// answer for bypass says the agent is in `auto-approve`, which can run
+/// what ask asks about: the turn is stopped, `ask` set again, and the next
+/// prompt goes only once it is read back.
+#[tokio::test]
+async fn acp_stops_a_turn_when_a_late_mode_answer_is_wider_than_the_policy() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let mut lines = mode_session_lines();
+    lines.extend([
+        r#">> {"method": "session/prompt"}"#.into(),
+        r#">> {"method": "session/set_config_option", "value": "auto-approve"}"#.into(),
+        "# gate".into(),
+        mode_answer(6, "auto-approve"),
+        r#">> {"method": "session/cancel"}"#.into(),
+        r#">> {"method": "session/set_config_option", "value": "ask"}"#.into(),
+        mode_answer(7, "ask"),
+        r#"{"jsonrpc":"2.0","id":5,"result":{"stopReason":"cancelled"}}"#.into(),
+        r#">> {"method": "session/prompt"}"#.into(),
+        r#"{"jsonrpc":"2.0","id":8,"result":{"stopReason":"end_turn"}}"#.into(),
+    ]);
+    let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let (mut cfg, gate) = gated_config(&fake, &lines);
+    cfg.policy = PermissionPolicy::Ask;
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("x")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+
+    handle.send(SessionCommand::turn("y")).await.unwrap();
+    events_until(&mut handle, |e| matches!(e, AgentEvent::TurnStarted)).await;
+    for policy in [PermissionPolicy::Bypass, PermissionPolicy::Ask] {
+        handle
+            .send(SessionCommand::SetPolicy(policy))
+            .await
+            .unwrap();
+    }
+    barrier(&mut handle).await;
+    std::fs::write(&gate, "").unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(interrupted(&events), "{events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e, AgentEvent::Notice(n)
+            if n.contains("is in mode 'auto-approve' (the policy changed to ask while a mode was being set)")
+                && n.contains("the turn is stopped"))),
+        "{events:?}"
+    );
+    handle.send(SessionCommand::turn("z")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert_eq!(turn_error(&events), None, "{events:?}");
+    assert_eq!(
+        sent_modes(&fake),
+        [
+            "initialize",
+            "session/new",
+            "session/set_config_option=ask",
+            "session/prompt",
+            "session/prompt",
+            "session/set_config_option=auto-approve",
+            "session/cancel",
+            "session/set_config_option=ask",
+            "session/prompt",
+        ]
+    );
+    assert!(!refused(&events, PermissionPolicy::Ask));
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// `--print` fails where the TUI would ask for another policy.
 #[tokio::test]
 async fn headless_fails_when_an_acp_agent_cannot_hold_ask() {
@@ -3773,6 +4108,7 @@ fn headless_run_with(
         policy: "ask".into(),
         sandbox: "off".into(),
         cwd: fake._tmp.path().to_path_buf(),
+        resume: None,
     });
     run
 }
@@ -3845,6 +4181,106 @@ async fn headless_does_not_wait_for_a_vibe_subagent_nobody_waits_for() {
     let err = String::from_utf8_lossy(&run.err);
     assert!(
         err.contains("not waiting for 1 subagent(s): fake tells a subagent's end only when"),
+        "{err}"
+    );
+}
+
+/// `--print --resume <id>` of a session the agent no longer has: pi 1.1.0
+/// creates an empty one under the id (`fixtures/resume_missing.jsonl`),
+/// vibe-acp 2.26.1 answers `session/load` with "Session not found" and the
+/// driver starts a new one (`vibe_acp_load_missing.jsonl`). Either fails
+/// the run with the reason rather than answer from the new session, and
+/// pi is never sent the prompt (#214).
+#[tokio::test]
+async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
+    if !python_available() {
+        return;
+    }
+    let resuming = |fake: &Fake, format, id: &str| {
+        let rules = unharness::core::Rules::load_in(
+            &fake._tmp.path().join("config"),
+            Some(fake._tmp.path()),
+        )
+        .unwrap();
+        let mut run = unharness::headless::Headless::new(
+            format,
+            rules,
+            fake._tmp.path().to_path_buf(),
+            "fake",
+            Default::default(),
+            Vec::new(),
+            Vec::new(),
+        );
+        run.begin(&unharness::headless::RunInfo {
+            harness: "fake".into(),
+            policy: "ask".into(),
+            sandbox: "off".into(),
+            cwd: fake._tmp.path().to_path_buf(),
+            resume: Some(id.into()),
+        });
+        run
+    };
+
+    let pi_missing = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62";
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(pi_missing.into());
+    let handle = pi_harness().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Json, pi_missing);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "pong?".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    let result: Value = serde_json::from_slice(&run.out).unwrap();
+    assert_eq!(result["status"], "error");
+    assert_eq!(
+        result["error"],
+        format!(
+            "fake: could not resume the session (pi has none under its id, and started an \
+             empty one); stopped, since the session started in its place knows nothing of \
+             {pi_missing}"
+        )
+    );
+    // pi made an empty session under the id: it is not handed out.
+    assert_eq!(result["session_id"], Value::Null);
+    // The prompt waited for pi's listing and was never sent: pi saves a
+    // prompt under the id it was given, which would make the next resume
+    // of that id pass for one.
+    let sent = fake.sent_lines();
+    assert_eq!(
+        sent.iter()
+            .filter_map(|v| v["type"].as_str())
+            .collect::<Vec<_>>(),
+        ["get_state", "get_commands", "get_fork_messages"],
+        "{sent:?}"
+    );
+
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_load_missing.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some(MISSING_SESSION.into());
+    let handle = vibe_acp().start_session(cfg).unwrap();
+    let mut run = resuming(&fake, unharness::headless::Format::Text, MISSING_SESSION);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        unharness::headless::drive(handle, "Reply with the single word: pong".into(), &mut run),
+    )
+    .await
+    .expect("the run ends");
+    assert_eq!(run.finish(), 1);
+    assert!(run.out.is_empty(), "{}", String::from_utf8_lossy(&run.out));
+    let err = String::from_utf8_lossy(&run.err);
+    assert!(
+        err.contains(&format!(
+            "fake: could not resume the session (Session not found: {MISSING_SESSION}); \
+             stopped, since the session started in its place knows nothing of {MISSING_SESSION}"
+        )),
         "{err}"
     );
 }

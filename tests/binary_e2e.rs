@@ -828,6 +828,74 @@ fn print_with_an_acp_agent_that_is_not_signed_in_says_what_to_run() {
     assert!(out.stdout.is_empty());
 }
 
+/// `--print --resume <id>` with the built-in vibe, whose `vibe-acp`
+/// (2.26.1's recording, played by the fake) has no such session and answers
+/// `session/load` with "Session not found": the run fails with exit 1 and
+/// the reason, on stderr for `text` and in the result for `json`, rather
+/// than answer from the new session the driver starts in its place (#214).
+/// The recording was made in vibe's own `ask` mode, which the `modes`
+/// table maps `ask` to, so that without the fix the run would go on to
+/// the prompt and exit 0; what is checked is the exact reason.
+#[test]
+fn print_resume_of_a_session_the_agent_no_longer_has_fails() {
+    if !python_available() {
+        return;
+    }
+    let missing = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f60";
+    let why = format!(
+        "Mistral Vibe: could not resume the session (Session not found: {missing}); \
+         stopped, since the session started in its place knows nothing of {missing}"
+    );
+    for format in ["text", "json"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for dir in ["home", "config/unharness", "state", "data", "cache", "ws"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        std::fs::write(
+            root.join("config/unharness/config.toml"),
+            format!(
+                "[harnesses.vibe]\ncommand = [\"python3\", \"{}\"]\nmodes = {{ ask = \"ask\" }}\n",
+                repo().join("scripts/fake-harness.py").display()
+            ),
+        )
+        .unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_unharness"))
+            .args(["-H", "vibe", "--sandbox", "off", "--policy", "ask"])
+            .arg(format!("--resume={missing}"))
+            .args(["--print", "--format", format])
+            .arg("Reply with the single word: pong")
+            .current_dir(root.join("ws"))
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("XDG_DATA_HOME", root.join("data"))
+            .env("XDG_CACHE_HOME", root.join("cache"))
+            .env(
+                "UNHARNESS_FAKE_FIXTURE",
+                repo().join("src/harness/acp/fixtures/vibe_acp_load_missing.jsonl"),
+            )
+            .env("UNHARNESS_FAKE_HANG", "1")
+            .env_remove("VIBE_HOME")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{format}: {stderr}");
+        if format == "text" {
+            assert!(stderr.contains(&why), "{stderr}");
+            assert!(stdout.is_empty(), "{stdout}");
+        } else {
+            let result: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+            assert_eq!(result["status"], "error", "{stdout}");
+            assert_eq!(result["session_id"], serde_json::Value::Null);
+            assert_eq!(result["error"], why.as_str());
+            assert_eq!(result["text"], "");
+        }
+    }
+}
+
 /// `--print --native` and `--no-tui` with the built-in vibe: the `vibe`
 /// beside the configured `vibe-acp` (a stand-in that writes down what it
 /// was given) runs with the policy's agent and the model by environment,
@@ -913,5 +981,155 @@ fn native_print_and_no_tui_run_vibes_own_cli() {
     assert_eq!(
         tui,
         format!("--workdir\n{ws}\n--agent\nauto-approve\n--\nhi\nmodel=\ncwd={ws}\n")
+    );
+}
+
+/// A home, config and state of its own, a workspace, and an empty `PATH`
+/// (no vendor CLI is started), with `config` as the global config.
+fn scratch_with_config(config: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    // `ws/.git` makes it a workspace, so doctor reads its tables there.
+    for dir in [
+        "home",
+        "config/unharness",
+        "state",
+        "data",
+        "cache",
+        "ws/.git",
+        "bin",
+    ] {
+        std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+    }
+    std::fs::write(tmp.path().join("config/unharness/config.toml"), config).unwrap();
+    tmp
+}
+
+fn unharness_in(root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_unharness"))
+        .args(args)
+        .current_dir(root.join("ws"))
+        .env("PATH", root.join("bin"))
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+/// `doctor` with a `[harnesses.vibe]` table that cannot be built (a
+/// provider without models), an ACP agent named like a preset whose modes
+/// do not parse (the preset's binary on PATH) and one without a command:
+/// the errors are said first and the tables named in the harness list,
+/// neither the built-in vibe nor the preset is shown in their place nor
+/// taken as the default, the rest is, and the exit status is 1 (#217).
+#[test]
+fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = scratch_with_config(
+        "default_harness = \"gemini\"\n\
+         [harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
+         [harnesses.vibe.providers.lan]\napi_base = \"http://127.0.0.1:8080/v1\"\nmodels = []\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+         display_name = \"My Gemini\"\nmodes = { always = \"auto-approve\" }\n\
+         [harnesses.nocmd]\nprotocol = \"acp\"\n\
+         [harnesses.claud]\ndefault_policy = \"nah\"\n",
+    );
+    let gemini = tmp.path().join("bin/gemini");
+    std::fs::write(&gemini, "#!/bin/sh\necho 0.1.0\n").unwrap();
+    std::fs::set_permissions(&gemini, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    for said in [
+        "unharness will not start until this is fixed",
+        "[harnesses.vibe.providers.lan]",
+        "[harnesses.gemini]: unknown policy 'always'",
+        "[harnesses.nocmd] protocol = \"acp\" but no command",
+        "[harnesses.claud] default_policy: unknown policy 'nah'",
+        "[harnesses.vibe] not shown: the table is wrong",
+        "[harnesses.gemini] not shown: the table is wrong",
+        "[harnesses.nocmd] not shown: the table is wrong",
+        "Active Default: [harnesses.gemini] is wrong (see Config above)",
+        // A table with an error that is not left out is still unknown.
+        "unknown harness 'claud'",
+        "fix them before starting unharness",
+    ] {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+    // The built-in vibe (and its `vibe-acp`) and the preset are not shown
+    // in their place; the harnesses whose tables are whole are.
+    for not_said in [
+        "Mistral Vibe",
+        "vibe-acp",
+        "Gemini",
+        "unknown harness 'vibe'",
+        "unknown harness 'gemini'",
+        "unknown harness 'nocmd'",
+    ] {
+        assert!(!stdout.contains(not_said), "{not_said}: {stdout}");
+    }
+    assert!(stdout.contains("Claude Code") && stdout.contains("Conversations:"));
+    assert!(stdout.contains("Workspace Context:\n  Root:"), "{stdout}");
+
+    // With the tables fixed doctor shows vibe and the agent and ends well.
+    std::fs::write(
+        tmp.path().join("config/unharness/config.toml"),
+        "[harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+         display_name = \"My Gemini\"\n",
+    )
+    .unwrap();
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("Mistral Vibe")
+            && stdout.contains("My Gemini")
+            && !stdout.contains("will not start"),
+        "{stdout}"
+    );
+}
+
+/// `switch` and `models` with a `[harnesses.vibe]` table whose modes do
+/// not parse fail with the error a run gives, and `switch` writes nothing
+/// (#217).
+#[test]
+fn switch_and_models_fail_on_a_wrong_harness_table_as_a_run_does() {
+    let config = "[harnesses.vibe]\nmodes = { always = \"auto-approve\" }\n";
+    let tmp = scratch_with_config(config);
+    let error = "[harnesses.vibe]: unknown policy 'always'";
+    for args in [
+        &["--print", "hi"][..],
+        &["switch", "vibe", "--global"],
+        &["switch", "claude"],
+        &["models", "--harness", "vibe"],
+    ] {
+        let out = unharness_in(tmp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(error), "{args:?}: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("config/unharness/config.toml")).unwrap(),
+        config
+    );
+    assert!(!tmp.path().join("config/unharness/workspaces").exists());
+
+    // An ACP agent without a command is no harness either: a run that
+    // defaults to it fails rather than starting the preset of its name.
+    let tmp = scratch_with_config(
+        "default_harness = \"gemini\"\n\
+         [harnesses.gemini]\nprotocol = \"acp\"\ndisplay_name = \"My Gemini\"\n",
+    );
+    let out = unharness_in(tmp.path(), &["--print", "--sandbox", "off", "hi"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("[harnesses.gemini] protocol = \"acp\" but no command"),
+        "{stderr}"
     );
 }

@@ -845,29 +845,44 @@ fn started_event(id: &str, tool: &ToolState) -> AgentEvent {
 
 /// What a tool call does, for allow rules. Claude's tools are known by name.
 /// For any other agent there is the protocol's `kind`, and only what says
-/// exactly what will happen counts: a command (codex-acp sends it as
-/// `rawInput.command`, an MCP call as `server` and `tool`), or the files of
-/// an edit's `diff` content. `locations` only describe a call ("where to
-/// look"), so a read, a move or a delete is not known well enough. A
-/// relative path in a diff is unknown, unless `relative_to` is where the
-/// agent is known to write it.
+/// exactly what will happen counts: a command (codex-acp and vibe-acp send
+/// it as `rawInput` `{command, cwd}` or `{command}`, codex-acp an MCP call
+/// as `{server, tool, arguments}`), or the files of an edit's `diff`
+/// content. An input with any other key (`args`, `env`, …) or a `cwd` that
+/// is not a string is no recorded shape, and may run something other than
+/// what `command` says. `locations` only describe a call ("where to look"),
+/// so a read, a move or a delete is not known well enough. A relative path
+/// in a diff is unknown, unless `relative_to` is where the agent is known to
+/// write it.
 fn tool_action(tool: &ToolState, relative_to: Option<&Path>) -> ToolAction {
     if tool.claude {
         return claude_tool_action(&tool.name, &tool.input);
     }
     let raw = |key: &str| tool.input.get(key).and_then(Value::as_str);
+    let only = |keys: &[&str]| {
+        tool.input
+            .as_object()
+            .is_some_and(|o| o.keys().all(|k| keys.contains(&k.as_str())))
+    };
     let entries = |list: &Value| list.as_array().cloned().unwrap_or_default();
     let path = |entry: &Value| entry.get("path").and_then(Value::as_str).map(PathBuf::from);
     match tool.kind.as_str() {
         "execute" => match (raw("command"), raw("server"), raw("tool")) {
-            (Some(command), _, _) => ToolAction::Shell {
-                command: unwrap_shell(command),
-                cwd: raw("cwd").map(Into::into),
-            },
-            (None, Some(server), Some(name)) => ToolAction::Mcp {
-                server: server.to_string(),
-                tool: name.to_string(),
-            },
+            (Some(command), _, _)
+                if only(&["command", "cwd"])
+                    && tool.input.get("cwd").is_none_or(Value::is_string) =>
+            {
+                ToolAction::Shell {
+                    command: unwrap_shell(command),
+                    cwd: raw("cwd").map(Into::into),
+                }
+            }
+            (None, Some(server), Some(name)) if only(&["server", "tool", "arguments"]) => {
+                ToolAction::Mcp {
+                    server: server.to_string(),
+                    tool: name.to_string(),
+                }
+            }
             _ => ToolAction::Opaque,
         },
         "edit" => {
@@ -1075,17 +1090,78 @@ mod tests {
         ] {
             assert_eq!(call(fields.clone()), ToolAction::Opaque, "{fields}");
         }
-        // Claude's tools, passed on, are known by name whatever the kind.
+        // Claude's tools, passed on, are known by name whatever the kind,
+        // and their inputs read as Claude's (`description` is its Bash's).
         assert_eq!(
-            call(
-                json!({"name": "Bash", "kind": "execute", "rawInput": {"command": "ls"},
-                "_meta": {"claudeCode": {"toolName": "Bash"}}})
-            ),
+            call(json!({"name": "Bash", "kind": "execute",
+                "rawInput": {"command": "ls", "description": "List files"},
+                "_meta": {"claudeCode": {"toolName": "Bash"}}})),
             ToolAction::Shell {
                 command: "ls".into(),
                 cwd: None
             }
         );
+    }
+
+    /// codex-acp 2.1.1 and vibe-acp 2.26.1 sent an `execute` call's input
+    /// as `{command, cwd}` or `{command}`, codex-acp an MCP call's as
+    /// `{server, tool, arguments}` (every committed recording). A key beside
+    /// them may change what runs (`{"command": "git", "args": ["push",
+    /// "--force"]}`), so an allow rule for the command must not answer it
+    /// (#213).
+    #[test]
+    fn an_execute_input_with_a_field_no_recording_had_is_opaque() {
+        let execute = |input: Value| {
+            requested(json!({"toolCallId": "t", "name": "exec_command",
+                "kind": "execute", "rawInput": input}))
+        };
+        assert_eq!(
+            execute(json!({"command": "git status"})),
+            ToolAction::Shell {
+                command: "git status".into(),
+                cwd: None
+            }
+        );
+        for (key, value) in [
+            ("args", json!(["push", "--force"])),
+            ("argv", json!(["git", "push", "--force"])),
+            ("shell", json!("/bin/sh")),
+            ("env", json!({"GIT_DIR": "/elsewhere"})),
+            ("elevated", json!(true)),
+            ("server", json!("docs")),
+        ] {
+            for mut input in [
+                json!({"command": "git status"}),
+                json!({"command": "git status", "cwd": "/w"}),
+            ] {
+                input[key] = value.clone();
+                assert_eq!(execute(input.clone()), ToolAction::Opaque, "{input}");
+            }
+        }
+        // A `cwd` that is not a path (every recorded one was a string).
+        for cwd in [json!(["/w"]), Value::Null] {
+            assert_eq!(
+                execute(json!({"command": "git status", "cwd": cwd})),
+                ToolAction::Opaque
+            );
+        }
+        let mcp = json!({"server": "docs", "tool": "search", "arguments": {}});
+        assert_eq!(
+            execute(mcp.clone()),
+            ToolAction::Mcp {
+                server: "docs".into(),
+                tool: "search".into()
+            }
+        );
+        for (key, value) in [
+            ("env", json!({"TOKEN": "x"})),
+            ("url", json!("https://example.com/mcp")),
+            ("cwd", json!("/w")),
+        ] {
+            let mut input = mcp.clone();
+            input[key] = value;
+            assert_eq!(execute(input.clone()), ToolAction::Opaque, "{input}");
+        }
     }
 
     fn parser() -> AcpParser {

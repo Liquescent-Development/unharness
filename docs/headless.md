@@ -48,7 +48,8 @@ stderr carries everything else: the sandbox level, warnings, denials,
 and in `text` and `json` the harness's notices and errors.
 
 Exit status: `0` when the answer is complete, `130` when interrupted,
-`1` on an error (the harness failed the turn or exited early).
+`1` on an error (the harness failed the turn or exited early, or the
+session `--resume` named is gone; see below).
 
 `Ctrl+C` interrupts the running turn and ends the run. A second one, or
 one while only subagents are running, ends it at once. SIGTERM, SIGHUP
@@ -102,6 +103,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `turn_completed` | `status`: `done`, `interrupted` or `error`; `error` |
 | `policy_changed` | `policy`: the one the session runs under now (Claude reports each change of its mode, also one the model makes) |
 | `notice` | `message` |
+| `session_replaced` | `reason`: the session `--resume` named could not be resumed and the harness started a new one; the run fails with it, and nothing of the new session follows |
 | `error` | `message` (the turn goes on) |
 | `process_exited` | `code` |
 
@@ -156,6 +158,8 @@ The `json` output, and the last `stream-json` line:
 
 - `status` is `done`, `interrupted` or `error`, with the reason in
   `error`. An error in any turn of the run is the run's.
+- `session_id` is `null` when the session `--resume` named was replaced
+  (below).
 - `text` is the main agent's text, as `--format text` prints it.
 - `turns` counts the turns that ended, including ones the harness took to
   report a subagent.
@@ -165,7 +169,15 @@ The `json` output, and the last `stream-json` line:
   harness's own configuration during the run.
 
 `session_id` can be passed to `--resume` to continue the vendor session
-in another `-p` run.
+in another `-p` run. When the harness no longer has that session the run
+fails (exit 1) rather than be answered by a session that knows nothing
+of it: Claude Code and Codex refuse the resume themselves, and pi and an
+ACP agent start a new session in its place, which the run stops before it
+answers (pi is not sent the prompt). The reason is on stderr with
+`--format text` and in the result's `error` with `json` and
+`stream-json`. `--native` and `--no-tui` run the harness's own command
+and are not covered: `pi --print` resuming a session that is gone
+answers from a new one and exits 0.
 
 ## The harness's own output
 

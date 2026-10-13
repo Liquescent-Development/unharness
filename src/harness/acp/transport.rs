@@ -40,7 +40,7 @@ use tokio::time::Instant;
 
 use super::auth::{self, AuthMethod};
 use super::elicitation::{self, Form, Refusal};
-use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, mode_step, read_back};
+use super::modes::{AgentModes, ModeMap, ModeStep, SetVia, answered_mode, mode_step, read_back};
 use super::parse::{
     AcpParser, RequestEnd, SessionOptions, can_close, can_fork, can_load, can_resume, error_text,
     mcp_http,
@@ -459,9 +459,8 @@ enum Outstanding {
     Prompt,
     /// The extension request that rewinds the session; turns wait for it.
     Rewind,
-    /// Setting the agent's mode for `policy`; `seq` tells the newest.
+    /// Setting the agent's mode for `policy`. Only one is out at a time.
     Mode {
-        seq: u64,
         policy: PermissionPolicy,
         mode: String,
         via: SetVia,
@@ -514,8 +513,10 @@ struct Driver {
     /// What the session said about its modes.
     agent_modes: AgentModes,
     mode: ModeState,
-    /// Numbers the mode requests; only the newest one's answer counts.
-    mode_seq: u64,
+    /// The policy changed while a mode request was out: its answer does
+    /// not decide what is held, and the mode is applied again once it
+    /// has come (#211).
+    reapply: bool,
     /// Policies this session could not hold, as reported.
     refused: Vec<PermissionPolicy>,
     /// The configured model and effort are still to be sent to the
@@ -652,6 +653,20 @@ impl Driver {
             .as_ref()
             .map(|p| p.own_modes.clone())
             .unwrap_or_default();
+        // Never two mode requests out at once: an agent may apply and
+        // answer them in either order (vibe-acp runs each request as a
+        // task of its own), so which mode it ends in would not be known.
+        // The prompt waits, and the mode is applied again from what the
+        // answer says (#211).
+        if self
+            .outstanding
+            .values()
+            .any(|o| matches!(o, Outstanding::Mode { .. }))
+        {
+            self.mode = ModeState::Setting;
+            self.reapply = true;
+            return Ok(());
+        }
         match mode_step(
             self.harness.as_str(),
             policy,
@@ -668,7 +683,6 @@ impl Driver {
                 self.mode_ready(events).await
             }
             ModeStep::Set { mode, via } => {
-                self.mode_seq += 1;
                 let (method, params) = match &via {
                     SetVia::Option(id) => (
                         "session/set_config_option",
@@ -680,18 +694,8 @@ impl Driver {
                     ),
                 };
                 self.mode = ModeState::Setting;
-                let seq = self.mode_seq;
-                self.request(
-                    method,
-                    params,
-                    Outstanding::Mode {
-                        seq,
-                        policy,
-                        mode,
-                        via,
-                    },
-                )
-                .await
+                self.request(method, params, Outstanding::Mode { policy, mode, via })
+                    .await
             }
             ModeStep::Refuse(why) => self.refuse(why, events).await,
         }
@@ -744,7 +748,7 @@ impl Driver {
     /// The answer to a mode request: the mode took, or the policy is refused.
     async fn on_mode_answer(
         &mut self,
-        (seq, policy, mode, via): (u64, PermissionPolicy, String, SetVia),
+        (policy, mode, via): (PermissionPolicy, String, SetVia),
         result: &Value,
         error: Option<&Value>,
         events: &mpsc::Sender<AgentEvent>,
@@ -754,15 +758,35 @@ impl Driver {
             self.agent_modes.take_options(o);
             self.options = o.clone();
         }
-        // A later policy change asked for another mode since.
-        if seq != self.mode_seq {
-            return Ok(());
-        }
         let options = options.unwrap_or_default();
         let answer = match error {
             Some(e) => Err(error_text(e)),
             None => Ok(&options),
         };
+        // The policy changed while this request was out: its answer does
+        // not decide what is held, but says which mode the agent is in,
+        // from which the mode is applied again. A turn running in a mode
+        // that can run what the policy asks about is stopped first.
+        if std::mem::take(&mut self.reapply) {
+            if let Some(now) = answered_mode(&mode, answer) {
+                self.agent_modes.current = Some(now);
+            }
+            let policy = self.policy;
+            let turn_running = self.outstanding.values().any(|o| *o == Outstanding::Prompt);
+            if let Some(now) = self.agent_modes.current.clone()
+                && turn_running
+                && !self.mode_map.within(policy, &now)
+            {
+                let name = self.harness.as_str();
+                let _ = events
+                    .send(AgentEvent::Notice(format!(
+                        "{name} is in mode '{now}' (the policy changed to {policy} while a mode was being set), which can run what {policy} asks about; the turn is stopped and the mode for {policy} set again"
+                    )))
+                    .await;
+                self.cancel_turn(events).await?;
+            }
+            return self.apply_mode(events).await;
+        }
         match read_back(self.harness.as_str(), policy, &mode, &via, answer) {
             Ok(()) => {
                 self.agent_modes.current = Some(mode.clone());
@@ -941,6 +965,7 @@ impl Driver {
         self.session_id = None;
         self.mode = ModeState::Setting;
         self.outstanding.clear();
+        self.reapply = false;
         self.parser.set_replaying(false);
         self.proc.end();
     }
@@ -1341,7 +1366,7 @@ async fn drive(
         mode_map,
         agent_modes: AgentModes::default(),
         mode: ModeState::Setting,
-        mode_seq: 0,
+        reapply: false,
         refused: Vec::new(),
         setup_pending: false,
         can_close: false,
@@ -1679,21 +1704,14 @@ async fn on_line(d: &mut Driver, line: &str, events: &mpsc::Sender<AgentEvent>) 
                         .await;
                     return Ok(());
                 }
-                (
-                    Some(Outstanding::Mode {
-                        seq,
-                        policy,
-                        mode,
-                        via,
-                    }),
-                    error,
-                ) => {
-                    // An error is the driver's to report: the policy is refused.
+                (Some(Outstanding::Mode { policy, mode, via }), error) => {
+                    // An error is the driver's to report: the policy is
+                    // refused (or, changed meanwhile, its mode applied again).
                     if error.is_none() {
                         forward(d, line, events).await;
                     }
                     return d
-                        .on_mode_answer((seq, policy, mode, via), &result, error.as_ref(), events)
+                        .on_mode_answer((policy, mode, via), &result, error.as_ref(), events)
                         .await;
                 }
                 // Either way the turn that waited goes now: after a failed

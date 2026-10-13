@@ -78,7 +78,13 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   are read from `<config dir>/unharness/workspaces/`, never from the
   workspace: an in-tree `unharness.toml` is not read by anything. The config and state
   directories are never writable in the sandbox. A config file that does
-  not parse is an error, never a silent fall back to defaults.
+  not parse is an error, never a silent fall back to defaults, and so is
+  a harness table that is wrong (an unknown policy, a mode map or a
+  provider that is not whole, an ACP agent without a command,
+  `registry::config_errors`): a run, `switch` and `models` stop on it in
+  `Registry::from_config`, and `doctor` names it, leaves out the harness
+  it could not build (no built-in or preset takes its name) and exits 1
+  (#217).
 - **"Allow always" is an unharness rule.** A harness is only ever told
   "allow" or "deny": what it offers to remember (Claude's
   `updatedPermissions`, Codex's `acceptForSession`, an ACP `allow_always`
@@ -402,16 +408,34 @@ recorded ones. For anything else:
   mode, taken at its word, since vibe answers `{}` also for one it does not
   list (`plan`) and changes nothing. Neither request was followed by a
   `current_mode_update` or `config_option_update` from vibe in three runs.
+  Only one mode request is out at a time (#211): vibe-acp 2.26.1 runs
+  every incoming request as a task of its own (`acp/task/dispatcher.py`,
+  read in its source) and its `set_config_option` and `set_mode` await
+  the switch before they read back, so two could apply and answer in
+  either order. A policy change while one is out sends nothing and holds
+  the prompt; that answer then does not decide what is held but says
+  which mode the agent is in (its read-back, else the mode asked for
+  unless it was refused), from which the mode is applied again, a
+  running turn cancelled first when that mode is not one the map gives a
+  policy at or below the current one. Before, bypass and back to ask
+  before vibe answered held its `auto-approve` under `ask` (found in a
+  code review).
   A mode not offered, an error, a read-back that differs, or a reattach
   whose answer names no modes refuses the policy for the session
   (`CapsUpdate::refused_policies`): the waiting prompt fails unsent, a
   running one is cancelled, the TUI gives way as to an unsupported policy
   (the picker, or the nearest less permissive one sent as `SetPolicy`), and
-  `--print` exits 1. An agent with modes and no map has every policy below
-  `bypass` refused the same way (decided on #155), naming the missing
-  map, since the mode it is in may run what the policy asks about: a vibe
-  session loaded in `auto-approve` would run commands unasked under
-  `accept-edits`. Only `bypass` leaves the mode alone. A
+  `--print` exits 1. The TUI forgets the refusal when that session ends
+  (shut down, exited, its driver gone: `App::forget_refusals`, which redoes
+  an open policy picker, or closes one that waited once the wanted policy
+  is in effect again), and `/clear` ends a session that refused one also
+  when nothing was sent to it, so that the next session is asked for the
+  policy again (#216). A prompt the refusal failed is not sent again. An
+  agent with modes and no map has every policy below `bypass` refused the
+  same way (decided on #155), naming the missing map, since the mode it
+  is in may run what the policy asks about: a vibe session loaded in
+  `auto-approve` would run commands unasked under `accept-edits`. Only
+  `bypass` leaves the mode alone. A
   mode the agent reports going into by itself (`current_mode_update`, the
   mode option of `config_option_update`) is set back, and a running turn
   cancelled first when that mode is not one the map gives a policy at or
@@ -426,7 +450,9 @@ recorded ones. For anything else:
   an agent that resumes with
   `{}` but has modes and no map (taken to have none, so nothing is
   refused), and claude-agent-acp
-  under a map (its recordings start in `default`, so nothing was sent).
+  under a map (its recordings start in `default`, so nothing was sent),
+  and a policy changed while a mode request is out on a real agent (e2e
+  tests with the fake only).
   Withdrawn requests (#158, `Driver::withdraw`): claude-agent-acp 0.85.1
   sends `$/cancel_request` (`{"requestId": 0}`) for a
   `session/request_permission` the client has not answered once the call is
@@ -620,7 +646,8 @@ recorded ones. For anything else:
   -32602 "Session not found" (`record-acp.py --fallback-new`,
   `fixtures/vibe_acp_{load,fork}_missing.jsonl`). The TUI
   (`App::session_replaced`) takes the new session as one started for a
-  harness switched to (see Bridging). Checked in the TUI (tmux, Landlock,
+  harness switched to (see Bridging); `--print --resume` fails on it
+  (see Headless). Checked in the TUI (tmux, Landlock,
   scratch `VIBE_HOME`, built-in vibe, `--policy ask`): a turn given a code
   word, `/quit`, the session's directory removed from
   `logs/session/unified/`, then `--resume`: the notice named "Session not
@@ -922,8 +949,18 @@ recorded ones. For anything else:
   child's answer into the parent model's input
   (`_subagents/_notifications.py`) and the client hears nothing, so a
   row the agent did not wait for stays at work until the session ends,
-  saying that its end shows only when the agent waits for it. A child's
-  own tool calls are never sent. Its permission requests are, on the
+  saying that its end shows only when the agent waits for it. Under
+  `unreported_ends` such a row (`App::awaited_subagents`) does not keep
+  the TUI busy (status rule, herdr; its own spinner and time still run,
+  `has_running_subagents`) and holds back
+  neither `/clear`, a model, effort or provider change
+  (`App::refused_for_subagents`) nor a handoff summary
+  (`handoff_wanted_for`), since it would hold them until the session
+  ends (#215); each ends the session, and the row with it, as stopped.
+  The refusals name Ctrl+S, and `Delete` on a running row names `s`,
+  only where the harness can stop one. A child that answers while the
+  summary is written may put its answer in that turn (not seen). A
+  child's own tool calls are never sent. Its permission requests are, on the
   parent's session, id-only for a call no update named
   (`vibe/acp/agent.py:879-887`): a bare `tool` asked about as `Opaque`
   under every policy but bypass (`fixtures/vibe_acp_subagent.jsonl`, also
@@ -994,7 +1031,8 @@ recorded ones. For anything else:
   user's `config.toml` are plain model choices (#164). Others come from
   `[harnesses.vibe.providers.<name>]` in unharness's config (`api_base`,
   `models`, optional `api_style`, `backend`, `api_key_env_var`, checked
-  at startup with the table named, `vibe::providers`): one chosen
+  by a run, `switch` and `models` with the table named,
+  `vibe::providers`; `doctor` shows no vibe then): one chosen
   (`--provider`, `/provider`) goes to `vibe-acp` as `VIBE_PROVIDERS` (named
   `unharness-<name>`, since vibe merges providers by name across layers,
   `WithUnionMerge`), each model as a whole entry in `VIBE_MODELS` (alias
@@ -1401,11 +1439,13 @@ recorded ones. For anything else:
   command and output, a written file with its tabs, a response's
   markdown), and on a code block in a response that block's code
   (`markdown::code_blocks`, matched by order to the rows `Rows::code`
-  marks). Checked live (tmux, Claude Code haiku, a stand-in `wl-copy`):
-  drags over a wrapped Bash call and its output, its label alone, a
-  Write, a list and a code block; right clicks on a collapsed call, a
-  Write (its tab kept), a code block and prose; a real right click
-  through a tmux with `mouse on` reached unharness, not tmux's menu.
+  marks; it parses the sanitized text the rows are drawn from and puts
+  back each tab whose spaces the code holds whole, #218). Checked live
+  (tmux, Claude Code haiku, a stand-in `wl-copy`): drags over a wrapped
+  Bash call and its output, its label alone, a Write, a list and a code
+  block; right clicks on a collapsed call, a Write (its tab kept), a
+  code block and prose; a real right click through a tmux with `mouse
+  on` reached unharness, not tmux's menu.
   Unverified: herdr, other terminals' right button, macOS.
 - MCP servers (`core/mcp.rs`, `[mcp_servers.<name>]`), each run with a stdio
   and an http server defined only in unharness's config, which the model
@@ -1576,11 +1616,19 @@ recorded ones. For anything else:
   (`fixtures/app_server_file_change.jsonl`). Unverified: codex-acp 2.1.1
   asked for no permission in its default mode in three recordings (a shell
   command, an edit, a network command), so the action of a non-Claude ACP
-  request is built from its tool calls' shapes (`rawInput.command` and
-  `cwd`, `diff` content paths) and the spec's `kind`, and a read, move or
-  delete is `Opaque`; Codex's `move_path` on a rename, and a command or
-  file approval with `reason`, `grantRoot` or any field the recordings
-  lack (`Opaque`); the wording of Codex's MCP approval question, which the
+  request is built from its tool calls' shapes (an `execute` call's
+  `rawInput.command` with at most a string `cwd`, or its `server` and
+  `tool` with at most `arguments`; any other key, such as `args` or `env`,
+  makes it `Opaque` (#213), since no recording had one; `diff` content
+  paths) and the spec's `kind`, and a read, move or delete is `Opaque`.
+  Read in codex-acp 2.1.1's source (`dist/index.js`, `permission()`), not
+  recorded: a permission request's input is `{command, cwd, url?,
+  additionalPermissions?}`, `url` for a network approval and
+  `additionalPermissions` for a sandbox escalation, which an allow rule
+  for the command answered before #213 and is now `Opaque`. Also
+  unverified: Codex's `move_path` on a rename, and a command or file
+  approval with `reason`, `grantRoot` or any field the recordings lack
+  (`Opaque`); the wording of Codex's MCP approval question, which the
   parser checks for the server and tool (one recording); Claude's
   `NotebookEdit` and `MultiEdit` inputs (field names from the tool schemas,
   no request recorded). An ACP agent that offers `allow_always` and no
@@ -1732,7 +1780,18 @@ recorded ones. For anything else:
   and one the model stopped (`TaskStop`) brought no turn. A subagent's
   subagent counts only when it ends after its parent (the only case
   recorded). A subagent whose end never comes holds the run until
-  `Ctrl+C`. Not persisted as a conversation.
+  `Ctrl+C`. With `--resume`, a `SessionReplaced` (pi, an ACP agent; see
+  Bridging) fails the run at once (#214): exit 1, the reason on stderr
+  for `text` and in the result's `error`, a `session_replaced` line in
+  `stream-json` and nothing of the new session after it, `session_id`
+  `null`, and the session is shut down before the new one answers, as
+  Claude and Codex exit 1 on a session they do not have; without
+  `--resume` it is a notice. pi is never sent the prompt (the hold in
+  Bridging). Run only against `fake-harness.py` (`vibe_acp_load_missing`,
+  pi's `resume_missing`): there the ACP driver had not sent the prompt
+  either (it waits for the new session's mode), which is a race the
+  tests do not hold it to. `--native` and `--no-tui` are not covered.
+  Not persisted as a conversation.
 - Hooks (`HookStarted`/`HookEnded`, `Block::Hook`): Claude Code 2.1.292
   sends `system` `hook_started` and `hook_response` for every hook under
   `--include-hook-events` (`SessionStart` also without it), keyed by
@@ -1937,7 +1996,8 @@ recorded ones. For anything else:
   asks the harness being left for a handoff summary (`App::ask_handoff`,
   `Block::Handoff`), with every permission request denied while it
   writes; not while its subagents are at work (their requests and reports
-  would land in that turn). Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
+  would land in that turn), but for one whose end is never told (vibe's,
+  #215). Checked live (pty, Claude Code 2.1.292 → Codex 0.157.0
   app-server, `bridge_max_chars = 600`): Claude wrote the summary within
   the word limit it was given, the switch followed the turn, and Codex
   answered from the first prompt and the summary it was sent. Windows
@@ -1956,13 +2016,24 @@ recorded ones. For anything else:
   conversation) the next prompt bridges from the start, the last turn
   included. Rewind anchors and a pending fork of the harness go. A
   handoff summary asked of such a session is not used: the switch goes
-  on without one, and the session left is forgotten. Sent by the ACP
+  on without one, and the session left is forgotten. A `--print
+  --resume` run fails on it instead (see Headless). Sent by the ACP
   driver (above) and by pi's parser: pi 1.1.0 given a `--session-id` it
   has no session for warns on stderr and creates an empty one under that
   id, so a resumed session whose first `get_fork_messages` lists no user
   message is one (`fixtures/resume_missing.jsonl`, `record-pi.py
-  --resume`; `--fork` of a missing session exits 1). The others fail
-  instead of starting fresh, so they report nothing: Claude Code 2.1.296
+  --resume`; `--fork` of a missing session exits 1). pi saves a prompt
+  into that session at once (`SessionManager._persist`, read in 1.1.0,
+  and seen in a scratch run: killed as soon as the empty listing was
+  read, pi had written the session file with the user message, and a
+  second pi given the id listed it), after which the id resumes as if it
+  were the conversation's. So the pi transport holds a turn sent to a
+  resumed session until that first listing answers; when it shows a
+  replacement the turn ends with an error unsent, else it goes. In the
+  TUI a turn is held only when a prompt starts the resume, since it
+  starts sessions unprompted; sent again, the prompt goes with the
+  bridge. The others fail instead of starting fresh, so they report
+  nothing: Claude Code 2.1.296
   `--resume` of an unknown id ("No conversation found with session ID",
   exit 1) and Codex 0.157.0 `exec resume` ("thread/resume failed: no
   rollout found", exit 1; the app-server driver fails the turn on a

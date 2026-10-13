@@ -46,7 +46,7 @@ async fn run() -> Result<ExitCode> {
 
     match cli.command {
         Some(Commands::Init) => init::init_workspace(&cwd)?,
-        Some(Commands::Doctor) => doctor::run_doctor(&cwd, &config)?,
+        Some(Commands::Doctor) => return doctor::run_doctor(&cwd, &config),
         Some(Commands::Sync) => handle_sync(&cwd)?,
         Some(Commands::Skills { args }) => {
             if args.first().map(String::as_str) == Some("import") {
