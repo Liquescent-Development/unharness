@@ -17,10 +17,10 @@ use anyhow::{Result, bail};
 use colored::*;
 use serde_json::{Value, json};
 
-use crate::core::rules::rule_may_answer;
+use crate::core::permissions::{Route, Router, Why};
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
-    PermissionRequest, RemoteControl, Rule, Rules, SessionCommand, SessionHandle, StopReason,
+    PermissionRequest, RemoteControl, Rules, SessionCommand, SessionHandle, StopReason,
     SubagentStatus, SubagentSupport, ToolAction, Usage,
 };
 
@@ -462,49 +462,50 @@ impl<O: Write, E: Write> Headless<O, E> {
         }
     }
 
-    /// Allow what an allow rule covers; deny or dismiss the rest.
+    /// Allow what an allow rule covers (`core::permissions`); deny or
+    /// dismiss the rest, since nobody is there to ask.
     fn answer(&mut self, req: &PermissionRequest) -> SessionCommand {
-        let (decision, line) = match &req.kind {
-            PermissionKind::ToolUse { tool, action, .. } => {
-                let ruled = rule_may_answer(self.planning, action)
-                    .then(|| self.rules.allows(tool, action, &self.cwd))
-                    .flatten();
-                match ruled {
-                    Some(rules) => {
-                        let rules: Vec<String> = rules.into_iter().map(Rule::describe).collect();
-                        self.note(&format!(
-                            "allowed {tool} by your rule for {}",
-                            rules.join(", and for ")
-                        ));
-                        (
-                            PermissionDecision::Allow {
-                                updated_input: None,
-                            },
-                            json!({"decision": "allow", "rules": rules}),
-                        )
-                    }
-                    None => {
-                        self.warn(format!(
-                            "denied {tool}{}: nobody can be asked without the TUI (an allow rule or --policy would let it run)",
-                            action_text(action)
-                        ));
-                        self.denied
-                            .push(json!({"tool": tool, "action": action_json(action)}));
-                        (
-                            PermissionDecision::Deny {
-                                reason: "Denied: unharness is running without a user to ask. \
-                                         Nothing that is not covered by an allow rule or the \
-                                         permission policy can run."
-                                    .into(),
-                            },
-                            json!({"decision": "deny"}),
-                        )
-                    }
-                }
+        let route = Router {
+            rules: &self.rules,
+            cwd: &self.cwd,
+            planning: self.planning,
+            handoff: None,
+        }
+        .route(req);
+        let (decision, line) = match (route, &req.kind) {
+            (
+                Route::Answered {
+                    decision,
+                    why: Why::Rules(rules),
+                },
+                PermissionKind::ToolUse { tool, .. },
+            ) => {
+                self.note(&format!(
+                    "allowed {tool} by your rule for {}",
+                    rules.join(", and for ")
+                ));
+                (decision, json!({"decision": "allow", "rules": rules}))
+            }
+            (Route::Ask, PermissionKind::ToolUse { tool, action, .. }) => {
+                self.warn(format!(
+                    "denied {tool}{}: nobody can be asked without the TUI (an allow rule or --policy would let it run)",
+                    action_text(action)
+                ));
+                self.denied
+                    .push(json!({"tool": tool, "action": action_json(action)}));
+                (
+                    PermissionDecision::Deny {
+                        reason: "Denied: unharness is running without a user to ask. \
+                                 Nothing that is not covered by an allow rule or the \
+                                 permission policy can run."
+                            .into(),
+                    },
+                    json!({"decision": "deny"}),
+                )
             }
             // The agent can enter plan mode by itself (Claude's
             // `EnterPlanMode`); its plan is never approved here.
-            PermissionKind::PlanApproval { .. } => {
+            (Route::Ask, PermissionKind::PlanApproval { .. }) => {
                 self.warn(format!(
                     "kept {} planning: nobody can approve a plan without the TUI",
                     self.name
@@ -518,7 +519,7 @@ impl<O: Write, E: Write> Headless<O, E> {
                     json!({"decision": "deny"}),
                 )
             }
-            _ => {
+            (Route::Ask, _) => {
                 self.warn(format!(
                     "dismissed a question from {}: nobody can answer it without the TUI",
                     self.name
@@ -527,6 +528,16 @@ impl<O: Write, E: Write> Headless<O, E> {
                     PermissionDecision::Answer(Value::Null),
                     json!({"decision": "dismiss"}),
                 )
+            }
+            // Only a rule answers here, since a headless run writes no
+            // handoff summary; anything else is said as what it decided.
+            (Route::Answered { decision, .. }, _) => {
+                let word = match decision {
+                    PermissionDecision::Allow { .. } => "allow",
+                    PermissionDecision::Deny { .. } => "deny",
+                    PermissionDecision::Answer(_) => "dismiss",
+                };
+                (decision, json!({"decision": word}))
             }
         };
         let mut line = line;
@@ -990,7 +1001,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
 mod tests {
     use super::*;
     use crate::core::rules::Scope;
-    use crate::core::{Question, QuestionOption, SubagentStatus};
+    use crate::core::{Question, QuestionOption, Rule, SubagentStatus};
 
     type Run = Headless<Vec<u8>, Vec<u8>>;
 
@@ -1359,6 +1370,101 @@ mod tests {
             err.contains("denied Bash (shell \"rm -rf target\")"),
             "{err}"
         );
+    }
+
+    /// What the agent is told, the `permission_answered` lines and what
+    /// stderr says, word for word.
+    #[test]
+    fn each_answer_is_said_the_same_way_every_time() {
+        let (_dir, mut run) = headless(Format::StreamJson, false);
+        run.rules
+            .append(Scope::Workspace, &[Rule::shell("cargo test")])
+            .unwrap();
+        let request = |id: &str, kind: PermissionKind| {
+            AgentEvent::PermissionRequest(PermissionRequest {
+                id: id.into(),
+                kind,
+                tool_call_id: None,
+            })
+        };
+        let commands = feed(
+            &mut run,
+            vec![
+                shell_request("a", "cargo test"),
+                shell_request("b", "rm -rf target"),
+                request(
+                    "plan",
+                    PermissionKind::PlanApproval {
+                        plan: "# Plan".into(),
+                        plan_file: None,
+                    },
+                ),
+                request(
+                    "c",
+                    PermissionKind::Confirm {
+                        title: "Go on?".into(),
+                        message: None,
+                    },
+                ),
+                done(),
+            ],
+        );
+        let respond = |id: &str, decision: PermissionDecision| SessionCommand::RespondPermission {
+            id: id.into(),
+            decision,
+        };
+        assert_eq!(
+            commands,
+            [
+                respond(
+                    "a",
+                    PermissionDecision::Allow {
+                        updated_input: None
+                    }
+                ),
+                respond(
+                    "b",
+                    PermissionDecision::Deny {
+                        reason: "Denied: unharness is running without a user to ask. Nothing \
+                                 that is not covered by an allow rule or the permission policy \
+                                 can run."
+                            .into()
+                    }
+                ),
+                respond(
+                    "plan",
+                    PermissionDecision::Deny {
+                        reason: "unharness is running without a user to approve the plan. Do \
+                                 not carry it out; end the turn with the plan."
+                            .into()
+                    }
+                ),
+                respond("c", PermissionDecision::Answer(Value::Null)),
+            ]
+        );
+        let out = String::from_utf8_lossy(&run.out);
+        let answered: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("\"type\":\"permission_answered\""))
+            .collect();
+        assert_eq!(
+            answered,
+            [
+                r#"{"decision":"allow","id":"a","rules":["shell commands starting with `cargo test`"],"type":"permission_answered"}"#,
+                r#"{"decision":"deny","id":"b","type":"permission_answered"}"#,
+                r#"{"decision":"deny","id":"plan","type":"permission_answered"}"#,
+                r#"{"decision":"dismiss","id":"c","type":"permission_answered"}"#,
+            ]
+        );
+        let err = String::from_utf8_lossy(&run.err);
+        for said in [
+            "allowed Bash by your rule for shell commands starting with `cargo test`\n",
+            "denied Bash (shell \"rm -rf target\"): nobody can be asked without the TUI (an allow rule or --policy would let it run)\n",
+            "kept claude planning: nobody can approve a plan without the TUI\n",
+            "dismissed a question from claude: nobody can answer it without the TUI\n",
+        ] {
+            assert!(err.contains(said), "{said}\n{err}");
+        }
     }
 
     #[test]
