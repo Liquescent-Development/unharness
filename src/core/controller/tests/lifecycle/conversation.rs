@@ -4,7 +4,7 @@ use super::*;
 fn conversation_persists_across_harness_switch_and_resumes() {
     use crate::core::transcript::Block;
     let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.keep();
+    let cwd = tmp.path().to_path_buf();
     let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
     app.submit_prompt("first question".into());
     app.take_actions();
@@ -368,7 +368,12 @@ fn exit_summary_only_when_saved() {
 fn resume_errors_are_reported_not_fatal() {
     use crate::core::transcript::Block;
     let tmp = tempfile::tempdir().unwrap();
-    let app = test_app_in(tmp.keep(), HarnessId::CLAUDE, Some("nope".into()), false);
+    let app = test_app_in(
+        tmp.path().to_path_buf(),
+        HarnessId::CLAUDE,
+        Some("nope".into()),
+        false,
+    );
     assert!(
         app.controller
             .conversation

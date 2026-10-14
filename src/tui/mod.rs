@@ -810,7 +810,7 @@ mod tests {
     use super::*;
     use crate::core::controller::Action;
     use crate::core::transcript;
-    use crate::tui::app::tests::test_app;
+    use crate::tui::app::tests::{TestApp, test_app};
 
     const NONE: KeyModifiers = KeyModifiers::NONE;
 
@@ -1235,7 +1235,7 @@ mod tests {
     /// A Codex session restarted by a sandbox change, whose old driver
     /// has not seen its CLI exit, and a prompt typed after it.
     async fn a_held_restart() -> (
-        App,
+        TestApp,
         Option<SessionHandle>,
         Ending,
         tokio::sync::mpsc::Sender<crate::core::AgentEvent>,

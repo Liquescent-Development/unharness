@@ -42,7 +42,7 @@ fn slash_commands_and_suggestions() {
 }
 
 /// Claude, its session having listed `/hello`, `/clear` and `/model`.
-fn app_with_claude_commands() -> App {
+fn app_with_claude_commands() -> TestApp {
     let mut app = test_app(HarnessId::CLAUDE);
     let command = |name: &str, hint: Option<&str>| {
         HarnessCommand::new(name, Some(&format!("{name} it\nmore")), hint).unwrap()

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
@@ -398,7 +398,8 @@ fn a_model_chosen_after_a_failed_start_starts_the_session() {
 /// Claude after a turn, with a provider sent to it and not yet answered.
 fn claude_taking_bedrock() -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app =
+        test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false).holding(tmp);
     app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
@@ -599,7 +600,7 @@ fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
 #[test]
 fn a_choice_taken_sends_only_what_was_typed_after_it() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
