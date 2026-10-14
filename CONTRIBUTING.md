@@ -83,8 +83,10 @@ src/tui/       App (the view and its controller), modals, rendering, the
                keys, the pickers), each forwarding to the controller what
                is its; their tests (of the view and the App's own
                part) the same way under tests/
-src/headless.rs  `--print`: one prompt through a session, written as text,
-               json or stream-json (schema in docs/headless.md)
+src/headless.rs  `--print`: one prompt through a session, tracked in a
+               Tracking of its own (controller/tracking.rs, without the
+               controller) and written as text, json or stream-json
+               (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
                them for tests/session_e2e.rs
 docs/dev/      status notes that cross harnesses; each harness's own is its

@@ -3,7 +3,12 @@
 Headless `--print` (`src/headless.rs`, `docs/headless.md`) runs one
 prompt through `start_session` and writes text, a result object or
 `stream-json` lines (schema 1, `event_json`); `--native` keeps the vendor
-print command. Checked live on Claude Code 2.1.292 (text, json,
+print command. What it tracks of the session's events (its id, model
+and usage, the subagents and the turn ends owed for them) and who
+answers a request are a `Tracking` of its own
+(`src/core/controller/tracking.rs`), which the TUI's controller keeps
+too; `--print` has no controller and no conversation store. Checked
+live on Claude Code 2.1.292 (text, json,
 stream-json with a `Write` denied under `ask`, a prompt on stdin, SIGINT
 giving exit 130: Claude ends that turn with `error_during_execution`)
 and agy 1.2.17 (`accept-edits`). Codex, pi and ACP agents run only
