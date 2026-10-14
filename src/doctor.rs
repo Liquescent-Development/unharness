@@ -327,11 +327,10 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                 &discover_skills_in_dir(&workspace_skills_dir(root)),
             );
             for k in config.harnesses.keys() {
-                // A table left out is named under Config.
+                // A table with an error, one no harness reads among them,
+                // is named under Config.
                 if registry.parse(k).is_none()
-                    && !config_errors
-                        .iter()
-                        .any(|e| e.left_out && e.table.as_deref() == Some(k))
+                    && !config_errors.iter().any(|e| e.table.as_deref() == Some(k))
                 {
                     println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k);
                 }

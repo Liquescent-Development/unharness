@@ -1055,22 +1055,15 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         "[harnesses.gemini] not shown: the table is wrong",
         "[harnesses.nocmd] not shown: the table is wrong",
         "Active Default: [harnesses.gemini] is wrong (see Config above)",
-        // A table with an error that is not left out is still unknown.
-        "unknown harness 'claud'",
         "fix them before starting unharness",
     ] {
         assert!(stdout.contains(said), "{said}: {stdout}");
     }
     // The built-in vibe (and its `vibe-acp`) and the preset are not shown
-    // in their place; the harnesses whose tables are whole are.
-    for not_said in [
-        "Mistral Vibe",
-        "vibe-acp",
-        "Gemini",
-        "unknown harness 'vibe'",
-        "unknown harness 'gemini'",
-        "unknown harness 'nocmd'",
-    ] {
+    // in their place; the harnesses whose tables are whole are. A table
+    // with an error, one no harness reads among them, is named under
+    // Config only.
+    for not_said in ["Mistral Vibe", "vibe-acp", "Gemini", "unknown harness"] {
         assert!(!stdout.contains(not_said), "{not_said}: {stdout}");
     }
     assert!(stdout.contains("Claude Code") && stdout.contains("Conversations:"));
@@ -1137,24 +1130,31 @@ fn switch_and_models_fail_on_a_wrong_harness_table_as_a_run_does() {
 
 /// A table under another name for a harness, a key unharness no longer
 /// takes, and `command` or `display_name` where nothing reads them, in
-/// the global file and a workspace's: `doctor` names each and exits 1,
-/// and a run, `switch` and `models` stop on the first (#281).
+/// the global file and a workspace's: `doctor` names each under Config
+/// only, also another name for a harness it leaves out, and exits 1; a
+/// run, `switch` and `models` stop on the first (#281).
 #[test]
 fn tables_and_keys_nothing_reads_stop_a_run() {
     let tmp = scratch_with_config(
-        "[harnesses.claude]\npersist_sessions = true\n\
+        "[harnesses.agy]\ncommand = [\"/opt/agy\"]\n\
+         [harnesses.claude]\npersist_sessions = true\n\
          [harnesses.codex]\ncommand = [\"/opt/codex\"]\n",
     );
     let store = tmp.path().join("config/unharness/workspaces");
     std::fs::create_dir_all(&store).unwrap();
     std::fs::write(
         unharness::config::Config::workspace_path_in(&store, &tmp.path().join("ws")),
-        "[harnesses.claude-code]\nrelocate_config = false\n\
+        "[harnesses.antigravity]\ndefault_model = \"m\"\n\
+         [harnesses.claude-code]\nrelocate_config = false\n\
          [harnesses.pi]\ndisplay_name = \"My pi\"\n",
     )
     .unwrap();
     // In the order of their tables' names.
     let errors = [
+        "[harnesses.agy] command: agy does not take this key; to run another agy binary, set \
+         binary",
+        "[harnesses.antigravity]: antigravity is another name for agy; its table is \
+         [harnesses.agy]",
         "[harnesses.claude] persist_sessions: unharness no longer takes this key, which did \
          nothing; delete the line",
         "[harnesses.claude-code]: claude-code is another name for claude; its table is \
@@ -1171,12 +1171,14 @@ fn tables_and_keys_nothing_reads_stop_a_run() {
         assert!(stdout.contains(said), "{said}: {stdout}");
     }
     for said in [
+        "[harnesses.agy] not shown: the table is wrong",
         "[harnesses.codex] not shown: the table is wrong",
         "[harnesses.pi] not shown: the table is wrong",
         "Claude Code",
     ] {
         assert!(stdout.contains(said), "{said}: {stdout}");
     }
+    assert!(!stdout.contains("unknown harness"), "{stdout}");
 
     for args in [
         &["--print", "--sandbox", "off", "hi"][..],
