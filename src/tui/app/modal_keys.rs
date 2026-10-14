@@ -119,9 +119,10 @@ impl App {
                         KeyCode::Enter => {
                             let rules = draft.rules();
                             let covers = match &m.request.kind {
-                                PermissionKind::ToolUse { tool, action, .. } => {
-                                    self.rules.would_allow(&rules, tool, action, &self.cwd)
-                                }
+                                PermissionKind::ToolUse { tool, action, .. } => self
+                                    .controller
+                                    .rules
+                                    .would_allow(&rules, tool, action, &self.controller.cwd),
                                 _ => false,
                             };
                             // A rule that would not have allowed this very
@@ -173,8 +174,12 @@ impl App {
                         KeyCode::Char('a') => {
                             if let PermissionKind::ToolUse { tool, action, .. } = &m.request.kind {
                                 m.always = Some(AlwaysDraft::new(
-                                    self.rules.propose(tool, action, &self.cwd),
-                                    self.rules.has_workspace(),
+                                    self.controller.rules.propose(
+                                        tool,
+                                        action,
+                                        &self.controller.cwd,
+                                    ),
+                                    self.controller.rules.has_workspace(),
                                 ));
                             }
                             None

@@ -16,7 +16,7 @@ fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
             stop_reason: StopReason::Done,
         });
     }
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.take_actions();
     let two = app
         .controller
@@ -66,7 +66,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
     });
     for (prompt, anchor) in [("one", "a1"), ("two", "a2"), ("three", "a3")] {
         app.submit_prompt(prompt.into());
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
         app.on_event(AgentEvent::TextDelta(format!("re {prompt}")));
         app.on_event(done());
@@ -110,7 +110,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
     app.take_input();
 
     // The session is not running: it is reattached, then rewound.
-    app.session_alive = false;
+    app.controller.session_alive = false;
     let two = block_of(&app, "two");
     app.rewind_to(two, false);
     assert_eq!(
@@ -129,7 +129,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
 
     // The harness reports that it did not rewind: fall back to a fresh
     // session that gets the remaining conversation as context.
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::RewindFailed {
         reason: "stale target".into(),
     });
@@ -149,7 +149,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
         model: None,
     });
     app.submit_prompt("one".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnAnchor { id: "b1".into() });
     app.on_event(done());
     app.take_actions();
@@ -240,7 +240,7 @@ fn anchors_attach_in_order_even_when_they_arrive_late() {
     // already have started the next one.
     let mut app = test_app(HarnessId::PI);
     app.submit_prompt("one".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.queue_prompt("two".into());
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
@@ -287,7 +287,7 @@ fn fork_branches_sessions_where_the_harness_can() {
     app.on_event(AgentEvent::TurnAnchor { id: "u2".into() });
     app.on_event(done());
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
 
     let original = app.controller.conversation.record.id.clone();
     app.fork_conversation();
@@ -303,7 +303,7 @@ fn fork_branches_sessions_where_the_harness_can() {
             .unwrap(),
         "claude-1"
     );
-    assert!(app.controller.fork_pending(app.active));
+    assert!(app.controller.fork_pending(app.controller.active));
     assert!(app.controller.conversation.anchors.is_empty());
     assert!(
         !app.controller
@@ -339,7 +339,7 @@ fn fork_branches_sessions_where_the_harness_can() {
         session_id: "claude-2".into(),
         model: None,
     });
-    assert!(!app.controller.fork_pending(app.active));
+    assert!(!app.controller.fork_pending(app.controller.active));
     assert_eq!(
         app.controller.conversation.session_ids[&HarnessId::CLAUDE],
         "claude-2"
@@ -394,11 +394,11 @@ fn fork_branches_an_acp_session_once_the_agent_says_it_can() {
             stop_reason: StopReason::Done,
         });
         app.take_actions();
-        app.session_alive = false;
+        app.controller.session_alive = false;
         app.fork_conversation();
         (
             app.controller.conversation.session_ids.get(&acp).cloned(),
-            app.controller.fork_pending(app.active),
+            app.controller.fork_pending(app.controller.active),
         )
     };
     assert_eq!(forked(Some(true)), (Some("acp-1".to_string()), true));
@@ -465,7 +465,7 @@ fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
         stop_reason: StopReason::Done,
     });
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.fork_conversation();
     app.take_actions();
     app.start_when_idle();
@@ -475,13 +475,13 @@ fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
             resume: Some("claude-1".into())
         }]
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-2".into(),
         model: None,
     });
     // The branch is not taken until something is sent to it.
-    assert!(app.controller.fork_pending(app.active));
+    assert!(app.controller.fork_pending(app.controller.active));
     assert_eq!(
         app.controller.conversation.session_ids[&HarnessId::CLAUDE],
         "claude-1"
@@ -503,13 +503,13 @@ fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
             resume: Some("claude-1".into())
         }]
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-3".into(),
         model: None,
     });
     app.submit_prompt("two".into());
-    assert!(!app.controller.fork_pending(app.active));
+    assert!(!app.controller.fork_pending(app.controller.active));
     assert_eq!(
         app.controller.conversation.session_ids[&HarnessId::CLAUDE],
         "claude-3"
@@ -522,7 +522,7 @@ fn a_rewound_session_is_the_conversation_s() {
     let mut app = test_app(HarnessId::CLAUDE);
     for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
         app.submit_prompt(prompt.into());
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(AgentEvent::SessionStarted {
             session_id: "s1".into(),
             model: None,
@@ -534,10 +534,10 @@ fn a_rewound_session_is_the_conversation_s() {
     }
     app.take_actions();
     // As after a resume: started early on its session.
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.start_when_idle();
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     let two = app
         .controller
         .conversation

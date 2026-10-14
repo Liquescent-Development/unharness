@@ -8,7 +8,7 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -19,10 +19,10 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     });
     app.switch_harness(HarnessId::CODEX);
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.submit_prompt("second question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "codex-1".into(),
         model: None,
@@ -41,7 +41,7 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     assert_eq!(rows[0].title, "first question");
 
     let mut again = test_app_in(cwd.clone(), HarnessId::CLAUDE, Some(String::new()), false);
-    assert_eq!(again.active, HarnessId::CODEX);
+    assert_eq!(again.controller.active, HarnessId::CODEX);
     assert_eq!(again.controller.conversation.record.id, conv_id);
     assert_eq!(
         again
@@ -90,14 +90,14 @@ fn conversation_persists_across_harness_switch_and_resumes() {
             Action::turn("third")
         ]
     );
-    again.session_alive = true;
+    again.controller.session_alive = true;
     again.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
 
     again.switch_harness(HarnessId::CLAUDE);
     again.take_actions();
-    again.session_alive = false;
+    again.controller.session_alive = false;
     again.submit_prompt("fourth".into());
     let actions = again.take_actions();
     assert_eq!(
@@ -115,7 +115,7 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     }
 
     let forced = test_app_in(cwd, HarnessId::PI, Some(conv_id[..8].to_string()), true);
-    assert_eq!(forced.active, HarnessId::PI);
+    assert_eq!(forced.controller.active, HarnessId::PI);
     assert_eq!(forced.controller.conversation.session_ids.len(), 2);
 }
 
@@ -152,7 +152,7 @@ fn clear_starts_a_new_conversation() {
     }));
     app.on_event(done());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     assert!(!app.controller.conversation.last_active_index.is_empty());
 
     let old = app.controller.conversation.record.id.clone();
@@ -162,7 +162,7 @@ fn clear_starts_a_new_conversation() {
     assert!(app.controller.conversation.last_active_index.is_empty());
     assert_eq!(app.controller.conversation.session_usage, Usage::default());
     assert_eq!(app.controller.conversation.context, ContextUsage::default());
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert_eq!(
         app.controller.model(HarnessId::CLAUDE).unwrap().model,
         "opus"
@@ -175,7 +175,7 @@ fn clear_starts_a_new_conversation() {
         "only the new conversation's notice"
     );
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert!(!app.session_alive);
+    assert!(!app.controller.session_alive);
 
     // The next session knows nothing of the old one.
     app.start_when_idle();
@@ -194,7 +194,7 @@ fn clear_starts_a_new_conversation() {
     ));
 
     // A harness used before the clear starts afresh too.
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.switch_harness(HarnessId::CODEX);
     app.submit_prompt("three".into());
     assert_eq!(
@@ -230,7 +230,7 @@ fn clear_keeps_a_session_that_knows_nothing() {
     });
     app.handle_slash_command("/clear");
     assert!(app.take_actions().is_empty());
-    assert!(app.session_alive);
+    assert!(app.controller.session_alive);
     // Its id is the new conversation's once something is sent.
     app.submit_prompt("hello".into());
     assert_eq!(
@@ -258,9 +258,9 @@ fn clear_tells_a_configuration_change_in_the_new_conversation() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    app.session_alive = true;
+    app.controller.session_alive = true;
     let config = tempfile::tempdir().unwrap();
-    app.guard = Some(Watch::begin(
+    app.controller.guard = Some(Watch::begin(
         &[Guarded::Tree(config.path().to_path_buf())],
         None,
     ));
@@ -305,9 +305,9 @@ fn clear_keeps_held_prompts() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Error("boom".into()),
     });
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     app.handle_slash_command("/clear");
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     assert!(
         notices(&app)
             .last()
@@ -340,7 +340,7 @@ fn clear_is_refused_while_busy() {
             .contains("subagent(s) still at work")
     );
 
-    app.subagents.clear();
+    app.controller.subagents.clear();
     app.run_shell("sleep 5");
     app.handle_slash_command("/clear");
     assert_eq!(app.controller.conversation.record.id, id);
@@ -353,7 +353,7 @@ fn exit_summary_only_when_saved() {
     assert!(app.controller.exit_summary().is_none());
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "s1".into(),
         model: None,
@@ -377,7 +377,7 @@ fn resume_errors_are_reported_not_fatal() {
             .iter()
             .any(|b| matches!(b, Block::Error(e) if e.contains("could not resume")))
     );
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
 }
 
 /// What a conversation and the screen showing it hold, set on purpose so
@@ -415,7 +415,7 @@ fn leave_traces(app: &mut App) {
     app.scroll = 5;
     app.auto_scroll = false;
     app.open_policy_picker();
-    app.pending_prompts.push_back(PermissionRequest {
+    app.controller.pending_prompts.push_back(PermissionRequest {
         id: "r1".into(),
         kind: PermissionKind::Confirm {
             title: "Go on?".into(),
@@ -423,7 +423,7 @@ fn leave_traces(app: &mut App) {
         },
         tool_call_id: None,
     });
-    app.asked_planning.insert("r1".into());
+    app.controller.asked_planning.insert("r1".into());
 }
 
 fn assert_no_traces(app: &App, after: &str) {
@@ -441,7 +441,7 @@ fn assert_no_traces(app: &App, after: &str) {
     assert_eq!((app.scroll, app.auto_scroll), (0, true), "{after}");
     assert!(app.modal.is_none(), "{after}");
     assert!(
-        app.pending_prompts.is_empty() && app.asked_planning.is_empty(),
+        app.controller.pending_prompts.is_empty() && app.controller.asked_planning.is_empty(),
         "{after}"
     );
 }
@@ -455,7 +455,7 @@ fn clear_and_resume_leave_nothing_of_the_conversation_before() {
     let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.submit_prompt("one".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,

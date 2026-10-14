@@ -8,9 +8,10 @@
 //! for it.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use super::Controller;
+use super::{Controller, Front};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
     CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
@@ -19,13 +20,16 @@ use crate::core::conversations::{
 use crate::core::transcript::Transcript;
 use crate::core::{ContextUsage, HarnessId, PlanEntry, Usage};
 
-/// Where a run keeps its conversations, and checkpoints the workspace's
-/// files.
+/// Where a run keeps its conversations, checkpoints the workspace's
+/// files, and keeps the context windows harnesses reported.
 pub struct Keeping {
     pub store: ConversationStore,
     /// The workspace's shadow repository; `None` outside a git repository
     /// or when switched off.
     pub checkpoints: Option<Checkpoints>,
+    /// The file the context windows are kept in, under the state directory
+    /// (`conversations::default_context_windows_path`).
+    pub context_windows: PathBuf,
 }
 
 /// The conversation a run is in. Everything here belongs to it: a new
@@ -92,10 +96,14 @@ impl ConversationState {
 impl Controller {
     /// Run `record` from here on, on `active`, in place of the conversation
     /// before: a new one (`/clear`), or one saved (`--resume`, `/resume`).
-    /// Nothing of the one before is kept, nor which harness planned in it.
+    /// Nothing of the one before is kept, nor which harness planned in it,
+    /// nor a request of its waiting for an answer.
     pub fn install(&mut self, record: Conversation, active: HarnessId) {
         self.conversation = ConversationState::new(record, active);
         self.policy.forget_plans();
+        self.active = active;
+        self.pending_prompts.clear();
+        self.asked_planning.clear();
     }
 
     /// A new conversation that keeps the models and efforts this one chose.
@@ -141,8 +149,9 @@ impl Controller {
     }
 
     /// Write the conversation to disk. Failures are reported once per run.
-    pub fn persist(&mut self, active: HarnessId, prompted: bool) {
-        if let Err(e) = self.save_conversation(active, prompted)
+    pub fn persist(&mut self) {
+        let prompted = self.session_seen();
+        if let Err(e) = self.save_conversation(self.active, prompted)
             && !self.persist_failed
         {
             self.persist_failed = true;
@@ -175,7 +184,7 @@ impl Controller {
     /// another policy than it last did. `at_start`: by `--resume`.
     pub fn announce_resume(&mut self, active: HarnessId, at_start: bool) {
         let summary = self.conversation.record.summary();
-        let name = self.short_name(active);
+        let name = self.short_name_of(active);
         self.conversation.transcript.push_notice(format!(
             "resumed conversation {} ({}); continuing on {}",
             &summary.id[..8.min(summary.id.len())],
@@ -329,6 +338,12 @@ impl Controller {
 
     /// Reverse the last file restore (itself reversible the same way).
     pub fn undo_restore(&mut self) {
+        if self.is_generating {
+            self.conversation
+                .transcript
+                .push_error("finish or interrupt the current turn first");
+            return;
+        }
         let (Some(cp), Some(undo)) = (
             self.checkpoints.clone(),
             self.conversation.restore_undo.clone(),
@@ -405,5 +420,120 @@ impl Controller {
         branched.sort_unstable();
         fresh.sort_unstable();
         (branched, fresh)
+    }
+}
+
+/// Starting a new conversation and resuming a saved one.
+impl Controller {
+    /// Start a new conversation in this workspace, as a fresh launch would,
+    /// keeping the harness and what the user chose to run it with. The one
+    /// left is saved first and stays in `/resume`; its sessions stay with
+    /// it, so every harness starts afresh in the new one.
+    pub fn new_conversation(&mut self, front: &mut dyn Front) {
+        if self.is_generating {
+            self.conversation
+                .transcript
+                .push_error("finish or interrupt the current turn before clearing");
+            return;
+        }
+        if self.refused_while_settling() {
+            return;
+        }
+        // They would end with the session, and report into the new one.
+        if self.refused_for_subagents("clearing") {
+            return;
+        }
+        if self.shell.is_some() {
+            self.conversation.transcript.push_error(
+                "stop the ! command first (Esc); its output belongs to this conversation",
+            );
+            return;
+        }
+        // Nothing of it is dropped: one that cannot be saved stays.
+        let prompted = self.session_seen();
+        if let Err(e) = self.save_conversation(self.active, prompted) {
+            self.conversation.transcript.push_error(format!(
+                "could not save the conversation, so /clear keeps it: {e:#}"
+            ));
+            return;
+        }
+        let had_content = self.conversation.record.has_content();
+        // A session started with nothing to resume and sent nothing knows
+        // nothing of this conversation, and serves the next. Any other ends,
+        // a blank one resumed on a session of this conversation too, and
+        // one that refused a policy, so that the next is asked for it again
+        // (its process may have been started with what refused it).
+        let keep = self.session_alive
+            && self.session_blank
+            && !self.conversation.session_ids.contains_key(&self.active)
+            && !self.session_refused();
+        self.end_remote_control();
+        let said = self.conversation.transcript.blocks.len();
+        if self.session_alive && !keep {
+            self.shutdown_session(front);
+        }
+        // What ending it told (a change to the harness's configuration) is
+        // told in the new conversation.
+        let told = self.conversation.transcript.blocks.split_off(said);
+        self.idle_start_paused = false;
+        let next = self.successor(self.active);
+        self.install(next, self.active);
+        front.conversation_installed();
+        self.conversation.transcript.push_system(if had_content {
+            "New conversation; the previous one is in /resume."
+        } else {
+            "New conversation."
+        });
+        self.conversation.transcript.blocks.extend(told);
+        // Prompts held after a turn that did not finish are the user's, not
+        // the conversation's.
+        if !self.queued.is_empty() {
+            self.conversation.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
+    }
+
+    /// Replace the current state with a saved conversation.
+    pub fn resume_conversation(&mut self, id_or_prefix: String, front: &mut dyn Front) {
+        if self.is_generating {
+            self.conversation
+                .transcript
+                .push_error("finish or interrupt the current turn before resuming");
+            return;
+        }
+        if self.refused_while_settling() {
+            return;
+        }
+        let conv = match self.store.load(&id_or_prefix) {
+            Ok(c) => c,
+            Err(e) => {
+                self.conversation
+                    .transcript
+                    .push_error(format!("could not resume: {e}"));
+                return;
+            }
+        };
+        // Another conversation, perhaps on another harness.
+        self.end_remote_control();
+        if self.session_alive {
+            self.shutdown_session(front);
+        }
+        self.idle_start_paused = false;
+        self.persist();
+        let active = if self.registry().get(conv.active_harness).is_some() {
+            conv.active_harness
+        } else {
+            self.active
+        };
+        self.install(conv, active);
+        front.conversation_installed();
+        self.take_conversation_choices();
+        self.announce_resume(self.active, false);
+        if let Some(w) = self.policy_warning() {
+            self.conversation.transcript.push_notice(w);
+        }
+        self.require_policy(front);
     }
 }

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::*;
@@ -33,6 +34,10 @@ fn launch(policy: Option<PermissionPolicy>) -> Launch {
         model: None,
         effort: None,
         default_providers: HashMap::new(),
+        cwd: PathBuf::from("/"),
+        workspace_root: None,
+        sandbox: SandboxSetup::off(),
+        rules: Rules::default(),
     }
 }
 
@@ -42,6 +47,7 @@ fn keeping(dir: &tempfile::TempDir) -> Keeping {
     Keeping {
         store: ConversationStore::at(dir.path().to_path_buf()),
         checkpoints: None,
+        context_windows: dir.path().join("context_windows.json"),
     }
 }
 
@@ -68,7 +74,7 @@ fn policy_resolution_per_harness() {
     assert!(warning(&c, AGY).unwrap().contains("less permissive"));
 
     // A policy chosen in the TUI is for the harness it was chosen on.
-    assert!(c.set_policy(AGY, Bypass, false).is_ok());
+    assert!(c.route_policy(AGY, Bypass, false).is_ok());
     assert_eq!(c.effective_policy(CLAUDE), Some(Auto));
     assert_eq!(c.effective_policy(AGY), Some(Bypass));
 }
@@ -90,7 +96,7 @@ fn a_harness_default_policy_stays_with_its_harness() {
     assert_eq!(c.effective_policy(AGY), Some(Bypass));
 
     // A policy set in the TUI is for the harness it was set on.
-    assert!(c.set_policy(CLAUDE, AcceptEdits, false).is_ok());
+    assert!(c.route_policy(CLAUDE, AcceptEdits, false).is_ok());
     assert_eq!(c.effective_policy(AGY), Some(Bypass));
     assert_eq!(c.effective_policy(CLAUDE), Some(AcceptEdits));
 }
@@ -100,19 +106,19 @@ fn a_harness_default_policy_stays_with_its_harness() {
 #[test]
 fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
     let (_dir, mut c) = controller(None);
-    let e = c.set_policy(PI, Auto, true).unwrap_err();
+    let e = c.route_policy(PI, Auto, true).unwrap_err();
     assert_eq!(e.supported, vec![Ask, Bypass]);
 
-    let set = c.set_policy(CLAUDE, AcceptEdits, true).unwrap();
+    let set = c.route_policy(CLAUDE, AcceptEdits, true).unwrap();
     assert!(set.send && !set.was_waiting);
-    assert!(!c.set_policy(CLAUDE, AcceptEdits, true).unwrap().send);
-    assert!(c.set_policy(CLAUDE, Auto, true).unwrap().send);
+    assert!(!c.route_policy(CLAUDE, AcceptEdits, true).unwrap().send);
+    assert!(c.route_policy(CLAUDE, Auto, true).unwrap().send);
     // Its reports, the first after the later choice: the newest stays.
-    assert_eq!(c.on_policy_changed(CLAUDE, AcceptEdits), None);
-    assert_eq!(c.on_policy_changed(CLAUDE, Auto), None);
+    assert_eq!(c.policy_changed(CLAUDE, AcceptEdits), None);
+    assert_eq!(c.policy_changed(CLAUDE, Auto), None);
     assert_eq!(c.effective_policy(CLAUDE), Some(Auto));
     // Nothing is sent to a session nothing went to yet.
-    assert!(!c.set_policy(CLAUDE, Ask, false).unwrap().send);
+    assert!(!c.route_policy(CLAUDE, Ask, false).unwrap().send);
 }
 
 /// A mode the agent goes into by itself becomes its harness's policy, and
@@ -120,10 +126,10 @@ fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
 #[test]
 fn a_mode_the_agent_goes_into_is_its_policy() {
     let (_dir, mut c) = controller(None);
-    c.set_policy(CLAUDE, AcceptEdits, true).unwrap();
-    c.on_policy_changed(CLAUDE, AcceptEdits);
+    c.route_policy(CLAUDE, AcceptEdits, true).unwrap();
+    c.policy_changed(CLAUDE, AcceptEdits);
     assert_eq!(
-        c.on_policy_changed(CLAUDE, Plan).as_deref(),
+        c.policy_changed(CLAUDE, Plan).as_deref(),
         Some(
             "Claude Code (claude) went into plan mode: it asks you to approve its plan before it acts"
         )
@@ -139,11 +145,11 @@ fn a_mode_the_agent_goes_into_is_its_policy() {
         vec![Ask, AcceptEdits, Auto, Bypass]
     );
     assert_eq!(
-        c.on_policy_changed(CLAUDE, Ask).as_deref(),
+        c.policy_changed(CLAUDE, Ask).as_deref(),
         Some("Claude Code (claude) now runs under policy ask")
     );
     // Nor is the policy in effect news.
-    assert_eq!(c.on_policy_changed(CLAUDE, Ask), None);
+    assert_eq!(c.policy_changed(CLAUDE, Ask), None);
 }
 
 /// A refusal moves the policy in effect to the nearest less permissive
@@ -172,14 +178,14 @@ fn a_refused_policy_gives_way_until_the_session_ends() {
     );
     assert!(c.refused_policies(CLAUDE));
     // Its report is not news.
-    assert_eq!(c.on_policy_changed(CLAUDE, Ask), None);
+    assert_eq!(c.policy_changed(CLAUDE, Ask), None);
     assert_eq!(
         refuse(&mut c, &PermissionPolicy::ALL, false).refused,
         Some(Refused::Waits)
     );
     assert_eq!(c.effective_policy(CLAUDE), None);
-    assert!(c.forget_refusals(CLAUDE));
-    assert!(!c.forget_refusals(CLAUDE));
+    assert!(c.drop_refusals(CLAUDE));
+    assert!(!c.drop_refusals(CLAUDE));
     assert_eq!(c.effective_policy(CLAUDE), Some(AcceptEdits));
 }
 
@@ -194,7 +200,7 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     conv.policy_choices.insert(CLAUDE, Bypass);
 
     let (_dir, mut c) = controller(None);
-    c.set_policy(PI, Bypass, false).unwrap();
+    c.route_policy(PI, Bypass, false).unwrap();
     c.take_conversation(&conv);
     assert_eq!(c.effective_policy(AGY), Some(AcceptEdits));
     assert_eq!(c.effective_policy(CLAUDE), Some(Bypass));
@@ -419,7 +425,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..prompted
     };
     assert_eq!(
-        c.set_model(VIBE, "glm-5-3".into(), &turn).unwrap_err(),
+        c.route_model(VIBE, "glm-5-3".into(), &turn).unwrap_err(),
         "finish or interrupt the current turn before changing the model"
     );
     let busy = SessionNow {
@@ -427,7 +433,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..prompted
     };
     assert_eq!(
-        c.set_model(VIBE, "glm-5-3".into(), &busy).unwrap_err(),
+        c.route_model(VIBE, "glm-5-3".into(), &busy).unwrap_err(),
         "2 subagent(s) still at work would be stopped; wait for them before changing the model"
     );
     assert_eq!(c.model(VIBE), None);
@@ -435,7 +441,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     // Between turns it is sent, and held until the session says how it
     // took it; until then another is refused, as is what would end it.
     let (m, route) = c
-        .set_model(
+        .route_model(
             VIBE,
             "glm-5-3".into(),
             &SessionNow {
@@ -449,10 +455,10 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     let taking = format!("{vibe} is still taking the model just chosen; try again in a moment");
     assert_eq!(c.settling(VIBE, false), Some(taking.clone()));
     assert_eq!(
-        c.set_provider(VIBE, "lan".into(), &prompted).unwrap_err(),
+        c.route_provider(VIBE, "lan".into(), &prompted).unwrap_err(),
         taking
     );
-    let answered = c.choice_answered().unwrap();
+    let answered = c.pending_answered().unwrap();
     assert_eq!((answered.queued, answered.what), (1, "model"));
     assert_eq!(c.settling(VIBE, false), None);
 
@@ -467,7 +473,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         stored: true,
         ..Default::default()
     };
-    let (_, route) = c.set_effort(VIBE, "OFF".into(), &stored).unwrap();
+    let (_, route) = c.route_effort(VIBE, "OFF".into(), &stored).unwrap();
     assert_eq!(route, Route::Renew(KEEPS_CHOICES));
     assert_eq!(c.effort(VIBE), Some("off"));
     // And none is made while the vibe before it is still exiting.
@@ -476,7 +482,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..stored
     };
     assert_eq!(
-        c.set_model(VIBE, "mistral-medium-3.5".into(), &held)
+        c.route_model(VIBE, "mistral-medium-3.5".into(), &held)
             .unwrap_err(),
         format!("the previous {vibe} is still exiting; try again in a moment")
     );
@@ -486,13 +492,13 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..Default::default()
     };
     assert_eq!(
-        c.set_model(VIBE, "mistral-medium-3.5".into(), &blank)
+        c.route_model(VIBE, "mistral-medium-3.5".into(), &blank)
             .unwrap()
             .1,
         Route::Restart
     );
     assert_eq!(
-        c.set_model(VIBE, "glm-5-3".into(), &SessionNow::default())
+        c.route_model(VIBE, "glm-5-3".into(), &SessionNow::default())
             .unwrap()
             .1,
         Route::None
@@ -501,24 +507,26 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     // Claude takes its effort any time and its provider between turns,
     // and a held start does not hold the provider back.
     assert_eq!(
-        c.set_effort(CLAUDE, "high".into(), &prompted).unwrap().1,
+        c.route_effort(CLAUDE, "high".into(), &prompted).unwrap().1,
         Route::Send(SessionCommand::SetEffort(Some("high".into())))
     );
     assert!(
-        c.set_effort(CLAUDE, "loud".into(), &prompted)
+        c.route_effort(CLAUDE, "loud".into(), &prompted)
             .unwrap_err()
             .starts_with("unknown effort 'loud'; Claude supports: ")
     );
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
+        c.route_provider(CLAUDE, "bedrock".into(), &prompted)
+            .unwrap(),
         Route::Hold(SessionCommand::SetProvider("bedrock".into()))
     );
     assert_eq!(
-        c.choice_answered().unwrap().provider,
+        c.pending_answered().unwrap().provider,
         Some("bedrock".into())
     );
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
+        c.route_provider(CLAUDE, "bedrock".into(), &prompted)
+            .unwrap(),
         Route::None
     );
     let held = SessionNow {
@@ -527,7 +535,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..Default::default()
     };
     assert_eq!(
-        c.set_provider(CLAUDE, "vertex".into(), &held).unwrap(),
+        c.route_provider(CLAUDE, "vertex".into(), &held).unwrap(),
         Route::None
     );
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"vertex".into()));
@@ -621,11 +629,12 @@ fn a_save_that_fails_is_said_once() {
         Keeping {
             store: ConversationStore::at(dir.path().to_path_buf()),
             checkpoints: None,
+            context_windows: dir.path().join("context_windows.json"),
         },
     );
     c.install(saved_conversation(), CODEX);
     for _ in 0..3 {
-        c.persist(CODEX, true);
+        c.persist();
     }
     let said = c
         .conversation

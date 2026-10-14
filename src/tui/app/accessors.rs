@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{Action, App};
 use crate::core::registry::Registry;
 use crate::core::{Capabilities, HarnessCommand};
-use crate::harness::{Harness, resolve_binary};
+use crate::harness::Harness;
 use crate::tui::modal::Modal;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -19,48 +19,46 @@ impl App {
     }
 
     pub fn harness(&self) -> &dyn Harness {
-        self.registry()
-            .get(self.active)
-            .expect("active harness is registered")
+        self.controller.harness()
     }
 
     pub fn short_name(&self) -> &'static str {
-        self.harness().descriptor().short_name
+        self.controller.short_name()
     }
 
     pub fn display_name(&self) -> &'static str {
-        self.harness().descriptor().display_name
+        self.controller.display_name()
     }
 
     /// The commands of its own the active harness's session listed.
     pub fn harness_commands(&self) -> &[HarnessCommand] {
-        self.controller.harness_commands(self.active)
+        self.controller.harness_commands(self.controller.active)
     }
 
     /// Declared capabilities of the active harness plus what its session
-    /// reported (`Controller::caps_of`).
+    /// reported (`Controller::caps`).
     pub fn caps(&self) -> Capabilities {
-        self.controller
-            .caps_of(self.active)
-            .unwrap_or_else(|| self.harness().capabilities())
+        self.controller.caps()
     }
 
     pub fn harness_binary(&self) -> Option<PathBuf> {
-        let d = self.harness().descriptor();
-        resolve_binary(d, self.controller.config.binary_override(d.id.as_str()))
+        self.controller.harness_binary()
     }
 
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
         let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
-        let provider = self.controller.runs_on(self.active).map(|runs_on| {
-            format!(
-                "runs on {runs_on}, not the chosen {} (/provider)",
-                self.current_provider()
-                    .map(|p| p.as_str())
-                    .unwrap_or("provider")
-            )
-        });
+        let provider = self
+            .controller
+            .runs_on(self.controller.active)
+            .map(|runs_on| {
+                format!(
+                    "runs on {runs_on}, not the chosen {} (/provider)",
+                    self.current_provider()
+                        .map(|p| p.as_str())
+                        .unwrap_or("provider")
+                )
+            });
         let parts: Vec<String> = [sandbox, self.policy_warning(), provider]
             .into_iter()
             .flatten()
@@ -69,16 +67,17 @@ impl App {
     }
 
     pub fn take_actions(&mut self) -> Vec<Action> {
-        self.actions.drain(..).collect()
+        self.controller.take_actions()
     }
 
     pub fn is_thinking(&self) -> bool {
-        self.is_generating && self.controller.conversation.transcript.is_thinking()
+        self.controller.is_generating && self.controller.conversation.transcript.is_thinking()
     }
 
     pub fn elapsed_secs(&self) -> f32 {
-        if self.is_generating {
-            self.generation_start
+        if self.controller.is_generating {
+            self.controller
+                .generation_start
                 .map(|s| s.elapsed().as_secs_f32())
                 .unwrap_or(0.0)
         } else {
@@ -95,10 +94,10 @@ impl App {
         if self.awaiting_answer() {
             return "Waiting for you".to_string();
         }
-        if self.compacting {
+        if self.controller.compacting() {
             return "Compacting".to_string();
         }
-        if self.handoff.is_some() {
+        if self.controller.writing_handoff() {
             return "Writing a handoff summary".to_string();
         }
         if let Some(super::transcript::Block::Tool {
@@ -129,7 +128,9 @@ impl App {
     /// A turn is running, subagents whose end will be told are still at
     /// work after one (`awaited_subagents`), or a `!` command runs.
     pub fn is_busy(&self) -> bool {
-        self.is_generating || self.awaited_subagents() > 0 || self.shell.is_some()
+        self.controller.is_generating
+            || self.controller.awaited_subagents() > 0
+            || self.controller.shell.is_some()
     }
 
     /// What herdr is told about this session: blocked while a harness
@@ -146,7 +147,8 @@ impl App {
             _ => None,
         }
         .or_else(|| {
-            self.pending_prompts
+            self.controller
+                .pending_prompts
                 .front()
                 .map(|req| super::herdr::request_message(&req.kind))
         });

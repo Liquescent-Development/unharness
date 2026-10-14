@@ -1,94 +1,35 @@
-//! The `!` command typed at the prompt.
+//! The `!` command typed at the prompt. Running it is the controller's
+//! (`core::controller`, `shell_command.rs`).
 
-use std::time::Instant;
-
-use super::{Action, App, ShellRun};
-use crate::core::conversations::ShellStatus;
+use super::App;
 
 impl App {
     /// Run `command`, typed after `!`, in the session's directory under its
-    /// sandbox. Not during a turn, and one at a time.
+    /// sandbox. Not during a turn, and one at a time: refused, it goes
+    /// back to the prompt box if that is empty.
     pub fn run_shell(&mut self, command: &str) {
         let typed = format!("!{command}");
-        if command.is_empty() {
-            self.controller
-                .conversation
-                .transcript
-                .push_notice("nothing to run after `!` (`\\!` sends a prompt that starts with !)");
-            return;
+        if self.with(|c, screen| c.run_shell(command, screen)) && self.input.is_empty() {
+            self.set_input(&typed);
         }
-        if self.is_generating || self.shell.is_some() {
-            self.controller.conversation.transcript.push_notice(if self.is_generating {
-                "a `!` command cannot run during a turn; it is back in the prompt"
-            } else {
-                "a `!` command is already running (Esc stops it); this one is back in the prompt"
-            });
-            if self.input.is_empty() {
-                self.set_input(&typed);
-            }
-            return;
-        }
-        self.controller
-            .conversation
-            .transcript
-            .shell_started(command);
-        self.shell = Some(ShellRun {
-            started: Instant::now(),
-            stopping: false,
-        });
-        self.auto_scroll = true;
-        self.actions.push_back(Action::RunShell {
-            command: command.to_string(),
-        });
     }
 
     /// Kill the running `!` command (Esc, Ctrl+C).
     pub fn stop_shell(&mut self) {
-        if let Some(run) = self.shell.as_mut()
-            && !run.stopping
-        {
-            run.stopping = true;
-            self.actions.push_back(Action::StopShell);
-        }
+        self.controller.stop_shell();
     }
 
     pub fn shell_output(&mut self, line: &str) {
-        if self.shell.is_some() {
-            self.controller.conversation.transcript.shell_output(line);
-        }
+        self.controller.shell_output(line);
     }
 
     /// The `!` command ended with `code`, `None` when a signal ended it.
     pub fn shell_exited(&mut self, code: Option<i32>) {
-        let Some(run) = self.shell.take() else {
-            return;
-        };
-        self.controller
-            .conversation
-            .transcript
-            .shell_ended(match code {
-                Some(code) => ShellStatus::Exited { code },
-                None if run.stopping => ShellStatus::Killed,
-                None => ShellStatus::Signalled,
-            });
-        self.after_shell();
+        self.with(|c, screen| c.shell_exited(code, screen));
     }
 
     /// The `!` command could not be started.
     pub fn shell_failed(&mut self, error: String) {
-        if self.shell.take().is_none() {
-            return;
-        }
-        self.controller
-            .conversation
-            .transcript
-            .shell_ended(ShellStatus::Failed { error });
-        self.after_shell();
-    }
-
-    fn after_shell(&mut self) {
-        self.persist();
-        // Prompts sent while it ran waited for its output.
-        self.send_next_queued();
+        self.with(|c, screen| c.shell_failed(error, screen));
     }
 }

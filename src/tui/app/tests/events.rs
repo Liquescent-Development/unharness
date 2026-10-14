@@ -52,7 +52,7 @@ fn live_capabilities_and_status_events_apply() {
 #[test]
 fn what_a_session_reports_is_said() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
         effort_levels: Some(vec!["low".into(), "high".into()]),
         provider: Some("vertex".into()),
@@ -96,7 +96,7 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
         base + 1
     );
     assert_eq!(
-        rate_limit_summary(app.rate_limit.as_ref().unwrap()),
+        rate_limit_summary(app.controller.rate_limit.as_ref().unwrap()),
         "five_hour 90% used"
     );
 }
@@ -170,7 +170,7 @@ fn herdr_hears_working_blocked_and_idle() {
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
     assert_eq!(app.herdr_report().state, State::Idle);
 
-    app.is_generating = true;
+    app.controller.is_generating = true;
     assert_eq!(app.herdr_report().state, State::Working);
 
     // Two requests: one in the modal, one queued behind it.
@@ -185,11 +185,11 @@ fn herdr_hears_working_blocked_and_idle() {
     app.modal = None;
     app.open_effort_picker();
     app.open_sandbox_picker();
-    assert!(!app.pending_prompts.is_empty());
+    assert!(!app.controller.pending_prompts.is_empty());
     assert_eq!(app.herdr_report().state, State::Blocked);
 
     app.modal = None;
-    app.pending_prompts.clear();
+    app.controller.pending_prompts.clear();
     assert_eq!(app.herdr_report().state, State::Working);
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,

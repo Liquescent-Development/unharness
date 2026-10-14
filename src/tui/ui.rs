@@ -233,10 +233,13 @@ fn pinned_lines(app: &App) -> Vec<Line<'static>> {
             )));
         }
     }
-    for (i, q) in app.queued.iter().enumerate() {
+    for (i, q) in app.controller.queued.iter().enumerate() {
         if i == QUEUE_ROWS {
             lines.push(Line::from(Span::styled(
-                format!("  … {} more queued", app.queued.len() - QUEUE_ROWS),
+                format!(
+                    "  … {} more queued",
+                    app.controller.queued.len() - QUEUE_ROWS
+                ),
                 Style::default().fg(Color::DarkGray),
             )));
             break;
@@ -1391,7 +1394,7 @@ fn render_bottom(
     // Status rule: ── ⠇ Running shell · 12s ─────
     let status = if let Some(message) = app.flash_text() {
         Span::styled(format!(" {message} "), Style::default().fg(Color::Green))
-    } else if app.is_generating {
+    } else if app.controller.is_generating {
         Span::styled(
             format!(
                 " {} {} · {:.0}s ",
@@ -1403,7 +1406,7 @@ fn render_bottom(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )
-    } else if let Some(run) = &app.shell {
+    } else if let Some(run) = &app.controller.shell {
         Span::styled(
             format!(
                 " {} Running your command · {:.0}s · Esc stops it ",
@@ -1448,7 +1451,7 @@ fn render_bottom(
     );
 
     // Prompt line
-    let prompt_style = if app.is_generating || app.subagent_focus_index().is_some() {
+    let prompt_style = if app.controller.is_generating || app.subagent_focus_index().is_some() {
         Style::default().fg(Color::DarkGray)
     } else {
         Style::default()
@@ -1509,9 +1512,9 @@ fn render_bottom(
     frame.render_widget(Paragraph::new(subagents), rows[3]);
 
     // Line 1: where (left) · harness/model/effort/policy (right)
-    let mut cwd = app.cwd.to_string_lossy().to_string();
+    let mut cwd = app.controller.cwd.to_string_lossy().to_string();
     if let Some(home) = dirs::home_dir()
-        && let Ok(rest) = app.cwd.strip_prefix(&home)
+        && let Ok(rest) = app.controller.cwd.strip_prefix(&home)
     {
         cwd = format!("~/{}", rest.to_string_lossy());
     }
@@ -1539,7 +1542,7 @@ fn render_bottom(
         (
             format!("[{}]", app.short_name()),
             Style::default()
-                .fg(harness_color(app.active))
+                .fg(harness_color(app.controller.active))
                 .add_modifier(Modifier::BOLD),
             0,
         ),
@@ -1588,7 +1591,7 @@ fn render_bottom(
         app.controller
             .conversation
             .session_ids
-            .get(&app.active)
+            .get(&app.controller.active)
             .map(|id| {
                 format!(
                     "conv {} · session {}",
@@ -1971,7 +1974,11 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                         ", no permission prompts"
                     }
                 );
-                (o.display_name.to_string(), status, o.id == app.active)
+                (
+                    o.display_name.to_string(),
+                    status,
+                    o.id == app.controller.active,
+                )
             }),
         ),
         Modal::Provider(p) => (
@@ -2091,7 +2098,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     *level == app.sandbox_level().0,
                 )
             });
-            if let Err(why) = &app.sandbox.backend {
+            if let Err(why) = &app.controller.sandbox.backend {
                 let note = wrap_prefixed_text(
                     " ",
                     &format!("no sandbox here: {why}"),
@@ -2863,7 +2870,7 @@ mod tests {
     #[test]
     fn a_narrow_status_still_shows_the_harness_and_policy() {
         let mut app = test_app(HarnessId::CLAUDE);
-        app.cwd =
+        app.controller.cwd =
             std::path::PathBuf::from("/srv/projects/some-organisation/a-rather-long-repository");
         app.set_model("claude-a-model-with-a-long-name-20991231".into());
         assert!(app.set_policy(PermissionPolicy::Auto));
@@ -2895,7 +2902,7 @@ mod tests {
         };
         let mut app = test_app(HarnessId::CLAUDE);
         let why = "Landlock is not available (Function not implemented (os error 38))";
-        app.sandbox.backend = Err(why.into());
+        app.controller.sandbox.backend = Err(why.into());
         app.open_sandbox_picker();
         let text = joined(screen(&mut app, 60, 30).0);
         assert!(text.contains("(os error 38))"), "{text}");
@@ -2939,7 +2946,7 @@ mod tests {
     fn question_app(questions: Vec<crate::core::Question>) -> App {
         use crate::core::{AgentEvent, PermissionRequest};
         let mut app = test_app(HarnessId::CLAUDE);
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
             id: "q".into(),
             kind: PermissionKind::Question { questions },
@@ -4636,7 +4643,7 @@ mod tests {
         let text = rows.join("\n");
         assert!(text.contains("── ") && text.contains("6 subagents running ·"));
         assert!(!text.contains("Ready"), "{text}");
-        assert!(app.is_busy() && !app.is_generating);
+        assert!(app.is_busy() && !app.controller.is_generating);
         // The cursor is in the prompt.
         assert!(rows[cursor.1 as usize].starts_with('❯'));
 
@@ -5013,7 +5020,7 @@ mod tests {
         term.draw(|f| render(f, &mut app)).unwrap();
         app.open_policy_picker();
         term.draw(|f| render(f, &mut app)).unwrap();
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(crate::core::AgentEvent::SubagentStarted {
             id: "spawn".into(),
             description: "look around".into(),

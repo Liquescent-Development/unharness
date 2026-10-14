@@ -1,9 +1,13 @@
 use super::*;
+use crate::config::BridgeSummary;
+use crate::core::controller::Handoff;
 use crate::core::rules::Scope;
+use crate::core::sandbox::SandboxLevel;
 use crate::core::transcript::Transcript;
 use crate::core::{
-    CapsUpdate, ContextUsage, ModelRef, Parser, PermissionDecision, PermissionKind, Question,
-    QuestionOption, Rule, ToolAction, Usage,
+    CapsUpdate, ContextUsage, ModelRef, Parser, PermissionDecision, PermissionKind,
+    PermissionRequest, Question, QuestionOption, Rule, SessionCommand, StopReason, ToolAction,
+    Usage,
 };
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
@@ -185,10 +189,10 @@ fn sent_turn(app: &mut App) -> String {
 /// Claude, live, after a turn too long for a bridge of 500 characters.
 fn over_budget_app() -> App {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.bridge_max_chars = Some(500);
+    app.controller.bridge_max_chars = Some(500);
     app.submit_prompt("the task".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -295,8 +299,8 @@ pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
 /// A session started before anything was sent to it, as the event loop
 /// starts one.
 fn blank_session(app: &mut App) {
-    app.session_alive = true;
-    app.session_blank = true;
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
 }
 
 fn starts(actions: &[Action]) -> usize {
@@ -327,7 +331,7 @@ fn vibe_app() -> (App, tempfile::TempDir) {
 fn prompted_vibe(app: &mut App) {
     app.submit_prompt("remember the word kumquat".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "v1".into(),
         model: Some("mistral-medium-3.5".into()),

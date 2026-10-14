@@ -1,7 +1,7 @@
 //! The provider, model and effort each harness runs with, where each came
 //! from, and when one may be chosen.
 
-use super::{Controller, Origin, Pick};
+use super::{Action, Controller, Front, Origin, Pick};
 use crate::core::{HarnessId, ModelInfo, ModelRef, ProviderId, SessionCommand};
 
 /// What a harness runs with besides its policy.
@@ -93,7 +93,7 @@ pub struct PendingChoice {
     pub provider: Option<ProviderId>,
 }
 
-/// What the TUI knows of the active harness's session that decides whether
+/// What is known of the active harness's session that decides whether
 /// a choice may be made now, and how it reaches the session.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionNow {
@@ -131,7 +131,7 @@ pub enum Route {
     Restart,
     /// The session takes it only between turns: it is sent, and what is
     /// typed after it waits until the session has said how it took it
-    /// (`Controller::choice_answered`).
+    /// (`Controller::pending_answered`).
     Hold(SessionCommand),
     /// It is sent.
     Send(SessionCommand),
@@ -258,7 +258,7 @@ impl Controller {
     /// and has not said how it took it (which may leave it for a new
     /// session, or start its CLI again).
     pub fn settling(&self, harness: HarnessId, start_held: bool) -> Option<String> {
-        let name = self.short_name(harness);
+        let name = self.short_name_of(harness);
         if start_held {
             return Some(format!(
                 "the previous {name} is still exiting; try again in a moment"
@@ -318,7 +318,7 @@ impl Controller {
     /// where it is the process's, a session nothing was sent to is started
     /// again on it; a stored session that keeps what it ran is left for a
     /// new one.
-    pub fn set_provider(
+    pub fn route_provider(
         &mut self,
         harness: HarnessId,
         provider: ProviderId,
@@ -357,7 +357,7 @@ impl Controller {
 
     /// Choose `model` for `harness`, if it may be chosen now (else why
     /// not); returns it and how it reaches the session (`Controller::route`).
-    pub fn set_model(
+    pub fn route_model(
         &mut self,
         harness: HarnessId,
         model: String,
@@ -384,7 +384,7 @@ impl Controller {
     /// Choose `effort` for `harness`, one of the levels it has, if it may be
     /// chosen now (else why not); returns it and how it reaches the session
     /// (`Controller::route`).
-    pub fn set_effort(
+    pub fn route_effort(
         &mut self,
         harness: HarnessId,
         effort: String,
@@ -394,7 +394,7 @@ impl Controller {
         if caps.effort_levels.is_empty() {
             return Err(format!(
                 "{} does not expose reasoning effort",
-                self.display_name(harness)
+                self.display_name_of(harness)
             ));
         }
         let effort = effort.to_lowercase();
@@ -402,7 +402,7 @@ impl Controller {
             return Err(format!(
                 "unknown effort '{}'; {} supports: {}",
                 effort,
-                self.short_name(harness),
+                self.short_name_of(harness),
                 caps.effort_levels.join(", ")
             ));
         }
@@ -469,7 +469,7 @@ impl Controller {
 
     /// The choice the session was sent has been answered, or will not be
     /// (its process is gone): what waited for the answer.
-    pub fn choice_answered(&mut self) -> Option<PendingChoice> {
+    pub fn pending_answered(&mut self) -> Option<PendingChoice> {
         self.pending.take()
     }
 
@@ -520,4 +520,184 @@ pub fn subagents_refusal(n: usize, can_stop: bool, doing: &str) -> String {
         ""
     };
     format!("{n} subagent(s) still at work would be stopped; wait for them{stop} before {doing}")
+}
+
+/// Choosing the active harness's provider, model and effort, and what a
+/// choice does to its session.
+impl Controller {
+    pub fn model_label(&self) -> String {
+        match self.model(self.active) {
+            Some(m) => m.label(),
+            None => match self.provider(self.active) {
+                Some(p) => format!("{p}/default"),
+                None => "default".to_string(),
+            },
+        }
+    }
+
+    /// What decides whether a choice may be made now, and how it reaches
+    /// the session (`Controller::route_provider` and the others).
+    fn session_now(&self) -> SessionNow {
+        SessionNow {
+            alive: self.session_alive,
+            prompted: self.session_seen(),
+            start_held: self.start_held,
+            turn: self.is_generating,
+            subagents: self.awaited_subagents(),
+            stored: self.conversation.session_ids.contains_key(&self.active),
+            queued: self.queued.len(),
+        }
+    }
+
+    /// Choose the active harness's provider (`Controller::route_provider`).
+    pub fn set_provider(&mut self, provider: ProviderId, front: &mut dyn Front) {
+        let now = self.session_now();
+        let route = match self.route_provider(self.active, provider.clone(), &now) {
+            Ok(route) => route,
+            Err(why) => {
+                self.conversation.transcript.push_error(why);
+                return;
+            }
+        };
+        self.idle_start_paused = false;
+        let line = provider_line(&provider);
+        match route {
+            Route::Renew(why) => {
+                self.conversation.transcript.push_system(line);
+                self.session_renewed(&format!("provider {provider}: {why}"), front);
+            }
+            Route::Restart => {
+                self.conversation
+                    .transcript
+                    .push_system(restart_line(&provider, self.display_name()));
+                self.shutdown_session(front);
+            }
+            // Its line says how the session took it, with its answer.
+            Route::Hold(cmd) => self.choice_sent(cmd),
+            Route::Send(cmd) => {
+                self.conversation.transcript.push_system(line);
+                self.actions.push_back(Action::Command(cmd));
+            }
+            Route::None => self.conversation.transcript.push_system(line),
+        }
+    }
+
+    pub fn set_model(&mut self, model: String, front: &mut dyn Front) {
+        let now = self.session_now();
+        let (m, route) = match self.route_model(self.active, model, &now) {
+            Ok(set) => set,
+            Err(why) => {
+                self.conversation.transcript.push_error(why);
+                return;
+            }
+        };
+        self.idle_start_paused = false;
+        self.conversation
+            .transcript
+            .push_system(format!("Model: {}", m.label()));
+        self.apply_choice(route, &format!("model {}", m.model), front);
+    }
+
+    pub fn set_effort(&mut self, effort: String, front: &mut dyn Front) {
+        let now = self.session_now();
+        let (effort, route) = match self.route_effort(self.active, effort, &now) {
+            Ok(set) => set,
+            Err(why) => {
+                self.conversation.transcript.push_error(why);
+                return;
+            }
+        };
+        self.idle_start_paused = false;
+        self.conversation
+            .transcript
+            .push_system(format!("Effort: {effort}"));
+        self.apply_choice(route, &format!("effort {effort}"), front);
+    }
+
+    /// Carry out a model or effort just chosen (worded `choice`) as the
+    /// controller routes it (`Controller::route`).
+    fn apply_choice(&mut self, route: Route, choice: &str, front: &mut dyn Front) {
+        match route {
+            Route::Renew(why) => self.session_renewed(&format!("{choice}: {why}"), front),
+            // The next session starts with it.
+            Route::None => {}
+            Route::Restart => self.shutdown_session(front),
+            Route::Hold(cmd) => self.choice_sent(cmd),
+            Route::Send(cmd) => self.actions.push_back(Action::Command(cmd)),
+        }
+    }
+
+    /// Send `cmd`, a choice the session takes only between turns, whose
+    /// answer the controller waits for (`Route::Hold`): what is typed after
+    /// it is held until the session has said how it took it (`Restarted`,
+    /// `SessionRenewed`). Its process may be started again by its driver:
+    /// as before the TUI starts one, what the session changed since its
+    /// last turn is told now, its harness is prepared, and the next process
+    /// is watched from its start.
+    fn choice_sent(&mut self, cmd: SessionCommand) {
+        self.check_guard();
+        match self.harness().prepare() {
+            Ok(Some(note)) => self.conversation.transcript.push_notice(note),
+            Ok(None) => {}
+            Err(e) => self
+                .conversation
+                .transcript
+                .push_error(format!("{}: {e:#}", self.short_name())),
+        }
+        self.arm_guard();
+        self.actions.push_back(Action::Command(cmd));
+    }
+
+    /// The choice the session was sent has been answered, or will not be
+    /// (its process is gone): what waited for the answer. A provider's line
+    /// is said here, as `taken` words it.
+    pub(super) fn choice_answered(
+        &mut self,
+        taken: impl FnOnce(&ProviderId) -> String,
+    ) -> Option<PendingChoice> {
+        let pending = self.pending_answered()?;
+        if let Some(provider) = &pending.provider {
+            self.conversation.transcript.push_system(taken(provider));
+        }
+        Some(pending)
+    }
+
+    /// The choice the session was sent will not be answered: it is ending,
+    /// or gone. A stored session that keeps what it ran is forgotten, as
+    /// its answer would have had it, so that it is not resumed as it ran;
+    /// what was typed after the choice waits for Enter.
+    pub(super) fn choice_unanswered(&mut self) {
+        let Some(pending) = self.choice_answered(provider_line) else {
+            return;
+        };
+        let stored = self.conversation.session_ids.contains_key(&self.active);
+        if self.stored_session_keeps(self.active, stored).is_some() {
+            self.forget_ids(self.active);
+        }
+        if self.queued.len() > pending.queued {
+            self.conversation.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
+    }
+
+    /// The choice the session was sent is taken: the first prompt typed
+    /// after it goes now, as it would have had it been typed then; those
+    /// held before it still wait.
+    pub(super) fn send_typed_after(&mut self, pending: &PendingChoice, front: &mut dyn Front) {
+        if self.queued.len() > pending.queued {
+            self.send_queued(pending.queued, front);
+        }
+    }
+}
+
+/// What is said of a provider chosen.
+pub(super) fn provider_line(provider: &ProviderId) -> String {
+    format!("Provider: {provider} (pick a model with Ctrl+M)")
+}
+
+/// What is said of a provider whose harness's process starts again on it.
+pub(super) fn restart_line(provider: &ProviderId, name: &str) -> String {
+    format!("Provider: {provider} ({name} restarts on it; pick a model with Ctrl+M)")
 }

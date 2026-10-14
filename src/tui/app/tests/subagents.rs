@@ -150,8 +150,8 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert!(!app.is_generating);
-    assert_eq!(app.subagents.len(), 1);
+    assert!(!app.controller.is_generating);
+    assert_eq!(app.controller.subagents.len(), 1);
     assert_eq!(spawn_block(&app, "spawn").status, None);
     let main = kinds(&app.controller.conversation.transcript.blocks);
 
@@ -159,14 +159,20 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     app.on_event(sub("spawn", AgentEvent::TextDelta("Looking.".into())));
     app.on_event(sub("spawn", read_call("inner", "a.txt")));
     // Until the harness words it, the call is the activity.
-    assert_eq!(app.subagents[0].activity.as_deref(), Some("Read a.txt"));
+    assert_eq!(
+        app.controller.subagents[0].activity.as_deref(),
+        Some("Read a.txt")
+    );
     app.on_event(AgentEvent::SubagentProgress {
         id: "spawn".into(),
         activity: "Reading a.txt".into(),
     });
     app.on_event(sub("spawn", read_call("inner2", "b.txt")));
-    assert_eq!(app.subagents[0].activity.as_deref(), Some("Reading a.txt"));
-    assert_eq!(app.subagents[0].tools, 2);
+    assert_eq!(
+        app.controller.subagents[0].activity.as_deref(),
+        Some("Reading a.txt")
+    );
+    assert_eq!(app.controller.subagents[0].tools, 2);
     app.on_event(sub("spawn", AgentEvent::Notice("retrying".into())));
     app.on_event(sub(
         "spawn",
@@ -177,7 +183,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
         status: SubagentStatus::Completed,
         result: Some("The word is alpha.".into()),
     });
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
 
     // All of it is in the subagent's transcript, the report (once) last,
     // and none of it in the main one.
@@ -245,7 +251,7 @@ fn a_report_after_the_end_is_added_once() {
         })
     };
     ended(&mut app, None);
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
     let took = spawn_block(&app, "spawn").duration;
     assert!(took.is_some());
     ended(&mut app, Some("All good."));
@@ -287,13 +293,13 @@ fn a_subagents_own_subagent_outlives_it() {
     ended(&mut app, "outer");
     let inner = spawn_block(&app, "inner");
     assert_eq!((inner.status, inner.duration), (None, None));
-    assert_eq!(app.subagents.len(), 1);
+    assert_eq!(app.controller.subagents.len(), 1);
     std::thread::sleep(Duration::from_millis(20));
     ended(&mut app, "inner");
     let inner = spawn_block(&app, "inner");
     assert_eq!(inner.status, Some(SubagentStatus::Completed));
     assert!(inner.duration.unwrap() >= Duration::from_millis(20));
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
 }
 
 #[test]
@@ -304,7 +310,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
     assert!(app.modal.is_none());
 
     app.submit_prompt("delegate".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     spawn(&mut app, "first", "look around", None);
     spawn(&mut app, "second", "look elsewhere", Some("Explore"));
     app.on_event(sub("first", read_call("f1", "a.txt")));
@@ -413,7 +419,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
         stop_reason: StopReason::Done,
     });
     app.queue_prompt("meanwhile".into());
-    assert!(app.queued.is_empty());
+    assert!(app.controller.queued.is_empty());
     assert!(matches!(
         app.take_actions().as_slice(),
         [Action::SendTurn { text, .. }] if text == "meanwhile"
@@ -421,7 +427,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
 
     // The session dies: nothing is left running, however deep.
     app.on_event(AgentEvent::ProcessExited { code: Some(1) });
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
     for id in ["second", "deep"] {
         assert_eq!(
             spawn_block(&app, id).status,
@@ -431,7 +437,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
 
     // A harness that cannot stop one says so.
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     spawn(&mut app, "spawn", "look around", None);
     app.open_subagent("spawn");
     app.stop_viewed_subagent();
@@ -477,7 +483,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/claude/fixtures/subagent_parallel.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.subagents.is_empty() && !app.is_generating);
+    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
     let got = reports(&app);
     assert_eq!(got.len(), 3);
     assert!(got.iter().all(|(s, _)| *s == done));
@@ -532,7 +538,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
     );
     let got = reports(&app);
     assert_eq!(got.len(), 1);
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
     assert!(got[0].0 == done && got[0].1.ends_with("**alpha**"));
 
     // Claude: a subagent that starts one of its own and ends first.
@@ -543,7 +549,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/claude/fixtures/subagent_nested.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.subagents.is_empty() && !app.is_generating);
+    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
     let runs = app.controller.conversation.transcript.agents();
     assert_eq!(runs.len(), 2);
     assert!(runs.iter().all(|(_, run, _)| run.duration.is_some()));
@@ -568,7 +574,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
             }
         },
     );
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
     let got = reports(&app);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].0, done);
@@ -582,7 +588,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/codex/fixtures/app_server_subagent_background.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.subagents.is_empty() && !app.is_generating);
+    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
     assert_eq!(reports(&app), vec![(done, "alpha".to_string())]);
 
     let mut app = test_app(HarnessId::CODEX);
@@ -661,7 +667,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     vibe_renews(&mut app, "effort off");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_effort(), Some("off"));
-    assert!(app.subagents.is_empty());
+    assert!(app.controller.subagents.is_empty());
     assert_eq!(
         spawn_block(&app, "s1").status,
         Some(SubagentStatus::Cancelled)
@@ -683,7 +689,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
     assert_ne!(app.controller.conversation.record.id, id);
-    assert!(app.subagents.is_empty() && app.subagent_rows().is_empty());
+    assert!(app.controller.subagents.is_empty() && app.subagent_rows().is_empty());
 
     // And a provider change.
     let (mut app, _cwd) = vibe_app_with_provider();
@@ -697,7 +703,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     // A conversation over the new session's budget is summarized
     // first.
     let (mut app, _cwd) = vibe_app();
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     vibe_with_unseen_child(&mut app);
     app.on_event(AgentEvent::TextDelta("x".repeat(600)));
     app.on_event(AgentEvent::TurnCompleted {
@@ -717,12 +723,12 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
 #[test]
 fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     assert!(app.caps().subagents.stop);
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     app.submit_prompt("delegate".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -763,8 +769,8 @@ fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     app.subagent_list_up();
     // A switch asks no summary while it works.
     app.switch_harness(HarnessId::CODEX);
-    assert!(!app.is_generating);
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert!(!app.controller.is_generating);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
 
     // Antigravity tells the end but cannot stop one: the user is only
     // told to wait.
@@ -773,7 +779,7 @@ fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     assert!(!app.caps().subagents.stop);
     app.submit_prompt("delegate".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     spawn(&mut app, "s1", "look around", None);
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,

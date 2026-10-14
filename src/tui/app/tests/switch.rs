@@ -1,6 +1,6 @@
 use super::*;
+use crate::core::controller::handoff_prompt;
 use crate::core::transcript::DEFAULT_BRIDGE_MAX_CHARS;
-use crate::tui::app::switch::handoff_prompt;
 use crate::tui::modal::ListPicker;
 
 #[test]
@@ -13,7 +13,7 @@ fn no_handoff_is_asked_for_while_subagents_are_at_work() {
         unreported_end: false,
     });
     app.switch_harness(HarnessId::CODEX);
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
 }
 
@@ -27,7 +27,7 @@ fn prompts_held_before_a_handoff_stay_held_after_it() {
         stop_reason: StopReason::Interrupted,
     });
     app.take_actions();
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
 
     app.switch_harness(HarnessId::CODEX);
     assert!(sent_turn(&mut app).contains("Write a handoff summary"));
@@ -35,15 +35,15 @@ fn prompts_held_before_a_handoff_stay_held_after_it() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
 }
 
 #[test]
 fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
     let mut app = over_budget_app();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.controller.overlay(
         HarnessId::CLAUDE,
         CapsUpdate {
@@ -52,14 +52,14 @@ fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
         },
     );
     app.switch_harness(HarnessId::CODEX);
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert!(app.take_actions().is_empty());
 
     // One that can is resumed for it.
     let mut app = over_budget_app();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.switch_harness(HarnessId::CODEX);
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert!(matches!(
         &app.take_actions()[..],
         [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
@@ -73,13 +73,13 @@ fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
 fn a_handoff_from_a_replaced_session_is_no_summary() {
     use super::super::transcript::Block;
     let mut app = over_budget_app();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.switch_harness(HarnessId::CODEX);
     assert!(matches!(
         &app.take_actions()[..],
         [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "claude-1"
     ));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionReplaced {
         reason: "could not resume the session (Session not found)".into(),
     });
@@ -93,7 +93,7 @@ fn a_handoff_from_a_replaced_session_is_no_summary() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert!(
         !app.controller
             .conversation
@@ -112,7 +112,7 @@ fn a_handoff_from_a_replaced_session_is_no_summary() {
             .session_ids
             .contains_key(&HarnessId::CLAUDE)
     );
-    assert_eq!(app.bridge_start(HarnessId::CLAUDE), 0);
+    assert_eq!(app.controller.bridge_start(HarnessId::CLAUDE), 0);
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn steering_a_handoff_summary_queues_the_message_for_the_next_harness() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert!(
         app.controller
             .conversation
@@ -158,10 +158,10 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
         })
     };
     let mut app = test_app(HarnessId::CLAUDE);
-    app.bridge_max_chars = Some(500);
+    app.controller.bridge_max_chars = Some(500);
     app.submit_prompt("the task".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -174,7 +174,7 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
     app.switch_harness(HarnessId::CODEX);
     let ask = sent_turn(&mut app);
     assert!(ask.contains("Write a handoff summary for that agent, in at most 50 words"));
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     // It is not to run anything.
     app.on_event(cargo_test_requests("cargo test").remove(0));
     assert!(app.modal.is_none());
@@ -187,9 +187,9 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
     ));
     app.on_event(AgentEvent::TextDelta("Goal: the task. Next: tests.".into()));
     done(&mut app);
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    app.session_alive = false;
+    app.controller.session_alive = false;
     let saved = app
         .controller
         .store
@@ -208,7 +208,7 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
     );
     assert!(sent.contains("Goal: the task. Next: tests."));
     assert!(!sent.contains("xxxxx"));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TextDelta("y".repeat(1_000)));
     done(&mut app);
 
@@ -219,17 +219,17 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Interrupted,
     });
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert!(app.controller.conversation.transcript.blocks.iter().any(
         |b| matches!(b, Block::Notice(n) if n == "no handoff summary; Claude gets the conversation as it is")
     ));
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
 
     // Off: no summary asked for.
-    app.bridge_summary = BridgeSummary::Never;
+    app.controller.bridge_summary = BridgeSummary::Never;
     app.switch_harness(HarnessId::CODEX);
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn the_bridge_is_measured_by_the_window_its_harness_reported() {
     let cwd = tmp.keep();
     let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
     assert_eq!(
-        app.bridge_budget(HarnessId::CLAUDE),
+        app.controller.bridge_budget(HarnessId::CLAUDE),
         DEFAULT_BRIDGE_MAX_CHARS
     );
     app.on_event(AgentEvent::Context(ContextUsage {
@@ -246,27 +246,27 @@ fn the_bridge_is_measured_by_the_window_its_harness_reported() {
         window: Some(200_000),
     }));
     // A quarter of it, at four characters a token.
-    assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 200_000);
+    assert_eq!(app.controller.bridge_budget(HarnessId::CLAUDE), 200_000);
     assert_eq!(
-        app.bridge_budget(HarnessId::CODEX),
+        app.controller.bridge_budget(HarnessId::CODEX),
         DEFAULT_BRIDGE_MAX_CHARS
     );
 
     // Kept for the next run, by model.
     let mut again = test_app_in(cwd, HarnessId::CLAUDE, None, false);
-    assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 200_000);
+    assert_eq!(again.controller.bridge_budget(HarnessId::CLAUDE), 200_000);
     // On anthropic, the provider it guessed.
     again
         .controller
         .choose_model(HarnessId::CLAUDE, "opus".into());
     assert_eq!(
-        again.bridge_budget(HarnessId::CLAUDE),
+        again.controller.bridge_budget(HarnessId::CLAUDE),
         DEFAULT_BRIDGE_MAX_CHARS
     );
 
     // A budget the user set wins.
-    again.bridge_max_chars = Some(1_000);
-    assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 1_000);
+    again.controller.bridge_max_chars = Some(1_000);
+    assert_eq!(again.controller.bridge_budget(HarnessId::CLAUDE), 1_000);
 }
 
 #[test]
@@ -282,19 +282,19 @@ fn context_windows_are_not_taken_from_the_workspace_or_out_of_range() {
     .unwrap();
     let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
     assert_eq!(
-        app.bridge_budget(HarnessId::CLAUDE),
+        app.controller.bridge_budget(HarnessId::CLAUDE),
         DEFAULT_BRIDGE_MAX_CHARS
     );
     app.on_event(AgentEvent::Context(ContextUsage {
         used: None,
         window: Some(1),
     }));
-    assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 8_000);
+    assert_eq!(app.controller.bridge_budget(HarnessId::CLAUDE), 8_000);
     app.on_event(AgentEvent::Context(ContextUsage {
         used: None,
         window: Some(u64::MAX),
     }));
-    assert_eq!(app.bridge_budget(HarnessId::CLAUDE), 2_000_000);
+    assert_eq!(app.controller.bridge_budget(HarnessId::CLAUDE), 2_000_000);
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn switching_harness_bridges_context_once() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TextDelta("first answer".into()));
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
@@ -310,7 +310,7 @@ fn switching_harness_bridges_context_once() {
 
     app.switch_harness(HarnessId::AGY);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    app.session_alive = false;
+    app.controller.session_alive = false;
     // agy has no `ask`.
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.modal = None;
@@ -326,7 +326,7 @@ fn switching_harness_bridges_context_once() {
         }
         other => panic!("{other:?}"),
     }
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
@@ -356,7 +356,7 @@ fn a_harness_that_is_not_installed_cannot_be_chosen() {
     app.handle_modal_key(key(KeyCode::Down));
     app.handle_modal_key(key(KeyCode::Enter));
     assert!(app.modal.is_none());
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
 
     // Nor is it offered or taken by name.
     for c in "/switch ".chars() {
@@ -366,7 +366,7 @@ fn a_harness_that_is_not_installed_cannot_be_chosen() {
     assert_eq!(offered, ["/switch claude"]);
     app.set_input("");
     app.handle_slash_command("/switch codex");
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert!(app.controller.conversation.transcript.blocks.iter().any(|b| matches!(
         b,
         crate::core::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
@@ -385,17 +385,17 @@ fn held_context_survives_a_switch_away_and_back() {
     let mut app = test_app(HarnessId::CODEX);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TextDelta("first answer".into()));
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
     app.switch_harness(HarnessId::CLAUDE);
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.handle_slash_command("/hello world");
     assert_eq!(sent_turn(&mut app), "/hello world");
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -406,10 +406,10 @@ fn held_context_survives_a_switch_away_and_back() {
 
     app.switch_harness(HarnessId::CODEX);
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.switch_harness(HarnessId::CLAUDE);
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.submit_prompt("next".into());
     let next = sent_turn(&mut app);
     assert!(next.contains("first answer"), "{next}");

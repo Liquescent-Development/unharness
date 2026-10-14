@@ -1,47 +1,20 @@
-//! Subagents: the list under the prompt and their own transcripts.
+//! Subagents: the list under the prompt and their own transcripts. Those
+//! at work are the controller's (`core::controller`, `subagents.rs`).
 
-use super::{Action, App, SubagentOption, SubagentRow, TranscriptView};
-use crate::core::SessionCommand;
-use crate::core::controller::subagents_refusal;
+use super::{App, SubagentOption, SubagentRow};
 use crate::core::transcript::Transcript;
 use crate::tui::modal::{ListPicker, Modal};
 
 impl App {
-    /// The subagents at work whose end the harness reports. Only these
-    /// keep the status rule and herdr at work, hold back what would end
-    /// the session (`refused_for_subagents`) and a handoff summary. One
-    /// whose end may never be told (Mistral Vibe's, until its agent waits
-    /// for it; `SubagentStarted::unreported_end`) would hold them until
-    /// the session ends: it stays listed at work with its note, and goes
-    /// with the session.
-    pub(super) fn awaited_subagents(&self) -> usize {
-        self.subagents.iter().filter(|a| !a.unreported_end).count()
-    }
-
     /// Any subagent is listed at work, whether or not its end will be
     /// told: its row's spinner and time go on.
     pub fn has_running_subagents(&self) -> bool {
-        !self.subagents.is_empty()
-    }
-
-    /// Whether subagents at work keep the session from being ended for
-    /// `doing` (they would end with it); if so the user is told, and
-    /// pointed at stopping them only where the harness can.
-    pub(super) fn refused_for_subagents(&mut self, doing: &str) -> bool {
-        let n = self.awaited_subagents();
-        if n == 0 {
-            return false;
-        }
-        self.controller
-            .conversation
-            .transcript
-            .push_error(subagents_refusal(n, self.caps().subagents.stop, doing));
-        true
+        !self.controller.subagents.is_empty()
     }
 
     /// "2 subagents running", when any are whose end will be told.
     pub fn subagents_label(&self) -> Option<String> {
-        match self.awaited_subagents() {
+        match self.controller.awaited_subagents() {
             0 => None,
             1 => Some("1 subagent running".to_string()),
             n => Some(format!("{n} subagents running")),
@@ -51,7 +24,8 @@ impl App {
     /// How long the longest-running subagent whose end will be told has
     /// been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
-        self.subagents
+        self.controller
+            .subagents
             .iter()
             .filter(|a| !a.unreported_end)
             .map(|a| a.started.elapsed().as_secs_f32())
@@ -69,7 +43,7 @@ impl App {
             .listed_agents()
             .into_iter()
             .map(|(id, run, depth)| {
-                let live = self.subagents.iter().find(|a| a.id == id);
+                let live = self.controller.subagents.iter().find(|a| a.id == id);
                 SubagentRow {
                     id: id.to_string(),
                     description: run.description.clone(),
@@ -148,7 +122,7 @@ impl App {
         {
             run.dismissed = true;
         }
-        self.persist();
+        self.controller.persist();
         let rows = self.subagent_rows();
         self.subagent_focus = rows
             .get(at.min(rows.len().saturating_sub(1)))
@@ -217,19 +191,12 @@ impl App {
 
     /// Back to the main transcript, where it was.
     pub fn close_subagent_view(&mut self) {
-        if self.viewing.take().is_some() {
-            self.show_from_the_end();
-            (self.scroll, self.auto_scroll) = self.main_scroll;
-        }
+        self.split().1.close_subagent_view();
     }
 
     /// Another transcript is to be drawn: nothing kept from the last one applies.
     pub(super) fn show_from_the_end(&mut self) {
-        self.transcript_view = TranscriptView::default();
-        self.selection = None;
-        self.last_click = None;
-        self.scroll = 0;
-        self.auto_scroll = true;
+        self.split().1.show_from_the_end();
     }
 
     /// The subagent in view, if it still exists (a rewind may have removed it).
@@ -286,23 +253,6 @@ impl App {
         let Some(id) = self.viewing.clone() else {
             return;
         };
-        if !self.subagents.iter().any(|a| a.id == id) {
-            self.flash("This subagent is not running");
-        } else if !self.caps().subagents.stop || !self.session_alive {
-            self.flash(format!(
-                "{} cannot stop a subagent from here",
-                self.short_name()
-            ));
-        } else {
-            self.flash("Stopping…");
-            self.actions
-                .push_back(Action::Command(SessionCommand::StopSubagent { id }));
-        }
-    }
-
-    /// The session is going away, and whatever its subagents were doing.
-    pub(super) fn drop_subagents(&mut self) {
-        self.subagents.clear();
-        self.controller.conversation.transcript.end_running_agents();
+        self.with(|c, screen| c.stop_subagent(id, screen));
     }
 }

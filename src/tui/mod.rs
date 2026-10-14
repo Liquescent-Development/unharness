@@ -247,7 +247,7 @@ async fn event_loop(
     // An error (the terminal gone, say) still ends the session the
     // orderly way below, and is returned after.
     let mut failed: Option<anyhow::Error> = None;
-    while !app.should_quit {
+    while !app.controller.should_quit {
         if let Some(h) = herdr.as_deref_mut() {
             h.update(app.herdr_report());
         }
@@ -685,9 +685,9 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('v')) => app.request_clipboard(),
         (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
-            if app.is_generating {
+            if app.controller.is_generating {
                 app.interrupt();
-            } else if app.shell.is_some() {
+            } else if app.controller.shell.is_some() {
                 app.stop_shell();
             } else {
                 app.quit();
@@ -744,9 +744,9 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             // An open list is what Esc closes, also while a turn runs.
             if !app.suggestions.is_empty() {
                 app.close_suggestions();
-            } else if app.is_generating {
+            } else if app.controller.is_generating {
                 app.interrupt();
-            } else if app.shell.is_some() {
+            } else if app.controller.shell.is_some() {
                 app.stop_shell();
             } else if !app.input.is_empty() {
                 app.take_input();
@@ -756,7 +756,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             if app.input.trim().is_empty() {
                 // Idle with prompts held back (after an interrupt or error,
                 // or for want of a policy, which is then asked for again).
-                if !app.send_next_queued() && !app.queued.is_empty() {
+                if !app.send_next_queued() && !app.controller.queued.is_empty() {
                     app.require_policy();
                 }
                 return;
@@ -885,7 +885,7 @@ async fn run_actions(
 ) {
     let mut actions = std::mem::take(&mut ending.held);
     actions.extend(app.take_actions());
-    app.start_held = false;
+    app.controller.start_held = false;
     while let Some(action) = actions.pop_front() {
         match action {
             Action::RunShell { command } => {
@@ -893,7 +893,7 @@ async fn run_actions(
                 // command typed here is confined no less than the agent.
                 let started = app
                     .session_sandbox()
-                    .and_then(|sandbox| shell::spawn(&command, &app.cwd, &sandbox));
+                    .and_then(|sandbox| shell::spawn(&command, &app.controller.cwd, &sandbox));
                 match started {
                     Ok(p) => *shell = Some(p),
                     Err(e) => app.shell_failed(format!("{e:#}")),
@@ -912,7 +912,7 @@ async fn run_actions(
                 // provider change, a switch away, a resume) may still be
                 // writing it, or hold its lock: it is resumed, or forked,
                 // once that one is gone. What follows waits with it.
-                if resume.is_some() && ending.running(app.active) {
+                if resume.is_some() && ending.running(app.controller.active) {
                     // An interrupt can only be for the turn that waits:
                     // it is not sent at all.
                     if actions
@@ -938,29 +938,29 @@ async fn run_actions(
                     ));
                     actions.push_front(Action::StartSession { resume });
                     ending.held = actions;
-                    app.start_held = true;
+                    app.controller.start_held = true;
                     return;
                 }
                 let prepared = app.harness().prepare();
                 // After `prepare`, which may itself create a watched file.
-                app.arm_guard();
+                app.controller.arm_guard();
                 if let Ok(Some(note)) = &prepared {
                     app.controller
                         .conversation
                         .transcript
                         .push_notice(note.clone());
                 }
-                app.show_session_notice();
-                let mcp_servers = app.session_mcp_servers();
+                app.controller.show_session_notice();
+                let mcp_servers = app.controller.session_mcp_servers();
                 match prepared.and_then(|_| start_session(app, resume, mcp_servers)) {
                     Ok(handle) => {
                         *session = Some(handle);
-                        app.session_alive = true;
-                        app.session_sandbox_level = Some(app.sandbox_level().0);
+                        app.controller.session_alive = true;
+                        app.controller.session_sandbox_level = Some(app.sandbox_level().0);
                         let policy = app.effective_policy();
                         app.controller.policy.started_under(policy);
                         // Remote Control the user had on, on the process before.
-                        if let Some(cmd) = app.remote_control_resend() {
+                        if let Some(cmd) = app.controller.remote_control_resend() {
                             actions.push_front(Action::Command(cmd));
                         }
                     }
@@ -976,7 +976,7 @@ async fn run_actions(
                             stop_reason: crate::core::StopReason::Error(e.to_string()),
                         });
                     }
-                } else if app.is_generating {
+                } else if app.controller.is_generating {
                     // StartSession failed; the error was already reported.
                 }
             }
@@ -993,7 +993,7 @@ async fn run_actions(
                     let _ = s.send(SessionCommand::Shutdown).await;
                     ending.follow(s);
                 }
-                app.session_alive = false;
+                app.controller.session_alive = false;
             }
         }
     }
@@ -1013,15 +1013,15 @@ fn start_session(
     .with_context(|| format!("{} not found on PATH", desc.binary_names.join("/")))?;
     let cfg = SessionConfig {
         binary,
-        cwd: app.cwd.clone(),
-        workspace_root: app.workspace_root.clone(),
+        cwd: app.controller.cwd.clone(),
+        workspace_root: app.controller.workspace_root.clone(),
         model: app.current_model().cloned(),
         provider: app.chosen_provider().cloned(),
         effort: app.current_effort().map(str::to_string),
         policy: app
             .effective_policy()
             .context("no permission policy is chosen")?,
-        fork: resume.is_some() && app.controller.fork_pending(app.active),
+        fork: resume.is_some() && app.controller.fork_pending(app.controller.active),
         resume: if app.caps().resume_by_id {
             resume
         } else {
@@ -1058,10 +1058,10 @@ mod tests {
         handle_key(&mut app, KeyModifiers::SHIFT, KeyCode::Enter);
         type_text(&mut app, "three");
         assert_eq!(app.input, "one\ntwo\nthree");
-        assert!(!app.is_generating);
+        assert!(!app.controller.is_generating);
 
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert!(app.input.is_empty() && app.is_generating);
+        assert!(app.input.is_empty() && app.controller.is_generating);
         assert!(app.take_actions().iter().any(|a| matches!(
             a,
             Action::SendTurn { text, .. } if text == "one\ntwo\nthree"
@@ -1153,7 +1153,7 @@ mod tests {
         type_text(&mut app, "first");
         handle_key(&mut app, NONE, KeyCode::Enter);
         app.take_actions();
-        assert!(app.is_generating);
+        assert!(app.controller.is_generating);
 
         // While a turn runs, Esc closes the list and leaves the turn alone.
         type_text(&mut app, "hi @c");
@@ -1163,14 +1163,14 @@ mod tests {
         assert!(app.take_actions().is_empty());
         // Closed, Enter sends the text as typed.
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert_eq!(app.queued.len(), 1);
-        assert_eq!(app.queued[0].text, "hi @c");
+        assert_eq!(app.controller.queued.len(), 1);
+        assert_eq!(app.controller.queued[0].text, "hi @c");
 
         // A word no file matches does not hold Enter back either.
         type_text(&mut app, "thanks @zzz");
         assert!(app.suggestions.is_empty());
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert_eq!(app.queued.len(), 2);
+        assert_eq!(app.controller.queued.len(), 2);
 
         // Left moves the cursor out of the word: no list to act on.
         type_text(&mut app, "@c");
@@ -1288,10 +1288,10 @@ mod tests {
         // Enter during the turn queues; Alt+Up takes the prompt back.
         type_text(&mut app, "queued");
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert_eq!(app.queued.len(), 1);
+        assert_eq!(app.controller.queued.len(), 1);
         handle_key(&mut app, KeyModifiers::ALT, KeyCode::Up);
         assert_eq!(app.input, "queued");
-        assert!(app.queued.is_empty());
+        assert!(app.controller.queued.is_empty());
         app.take_input();
 
         // Scrolling: PageUp/PageDown, and Shift+Up/Down by a couple of lines.
@@ -1309,7 +1309,7 @@ mod tests {
     #[test]
     fn esc_never_stops_a_subagent_and_ctrl_s_offers_the_choice() {
         let mut app = test_app(HarnessId::CLAUDE);
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(crate::core::AgentEvent::SubagentStarted {
             id: "spawn".into(),
             description: "look around".into(),
@@ -1322,8 +1322,8 @@ mod tests {
             handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         }
         assert!(app.input.is_empty() && app.take_actions().is_empty());
-        assert_eq!(app.subagents.len(), 1);
-        assert!(app.modal.is_none() && !app.should_quit);
+        assert_eq!(app.controller.subagents.len(), 1);
+        assert!(app.modal.is_none() && !app.controller.should_quit);
 
         handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('s'));
         assert!(matches!(app.modal, Some(modal::Modal::Subagents(_))));
@@ -1331,7 +1331,7 @@ mod tests {
 
         // Idle, Ctrl+C quits as it always did.
         handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('c'));
-        assert!(app.should_quit);
+        assert!(app.controller.should_quit);
     }
 
     #[test]
@@ -1342,7 +1342,7 @@ mod tests {
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
         assert!(app.subagent_focus.is_none());
 
-        app.session_alive = true;
+        app.controller.session_alive = true;
         for id in ["one", "two"] {
             app.on_event(crate::core::AgentEvent::SubagentStarted {
                 id: id.into(),
@@ -1379,7 +1379,7 @@ mod tests {
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         assert!(app.subagent_focus.is_none() && app.input == "a\nb");
-        assert_eq!(app.subagents.len(), 2);
+        assert_eq!(app.controller.subagents.len(), 2);
 
         // Delete in the list leaves a running one, and the draft, alone.
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
@@ -1407,7 +1407,7 @@ mod tests {
     #[test]
     fn in_a_subagents_view_the_keys_are_for_reading_stopping_and_leaving() {
         let mut app = test_app(HarnessId::CLAUDE);
-        app.session_alive = true;
+        app.controller.session_alive = true;
         for id in ["one", "two"] {
             app.on_event(crate::core::AgentEvent::SubagentStarted {
                 id: id.into(),
@@ -1443,7 +1443,7 @@ mod tests {
         // Esc leaves the view and stops nothing; the draft is still there.
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         assert!(app.viewing.is_none() && app.take_actions().is_empty());
-        assert_eq!(app.subagents.len(), 2);
+        assert_eq!(app.controller.subagents.len(), 2);
         assert_eq!(app.input, "draft");
     }
 
@@ -1487,12 +1487,12 @@ mod tests {
         let mut session = Some(old);
         let mut ending = Ending::new();
         let mut shell = None;
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.controller
             .conversation
             .session_ids
             .insert(HarnessId::CODEX, "thread-1".into());
-        app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
+        app.controller.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
         assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert_eq!(cmds.recv().await, Some(SessionCommand::Shutdown));
@@ -1507,7 +1507,7 @@ mod tests {
         handle_key(&mut app, NONE, KeyCode::Enter);
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_none(), "started beside the old CLI");
-        assert!(app.is_generating && app.start_held);
+        assert!(app.controller.is_generating && app.controller.start_held);
         (app, session, ending, events, cmds)
     }
 
@@ -1527,7 +1527,7 @@ mod tests {
         ending.gone(gone);
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_some());
-        assert!(ending.held.is_empty() && !app.start_held);
+        assert!(ending.held.is_empty() && !app.controller.start_held);
     }
 
     // A driver stuck before its CLI ends, holding it: the hold does not
@@ -1568,7 +1568,7 @@ mod tests {
         let mut shell = None;
         app.interrupt();
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
-        assert!(!app.is_generating);
+        assert!(!app.controller.is_generating);
         assert!(
             ending
                 .held
@@ -1580,7 +1580,7 @@ mod tests {
         // Nothing else starts a session meanwhile, also with no turn
         // running: it would take the held start for its own.
         app.switch_harness(HarnessId::CLAUDE);
-        assert_eq!(app.active, HarnessId::CODEX);
+        assert_eq!(app.controller.active, HarnessId::CODEX);
         assert!(app.controller.conversation.transcript.blocks.iter().any(
             |b| matches!(b, crate::core::transcript::Block::Error(e) if e.contains("still exiting"))
         ));
@@ -1600,17 +1600,17 @@ mod tests {
         let mut session = Some(old);
         let mut ending = Ending::new();
         let mut shell = None;
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.controller
             .conversation
             .session_ids
             .insert(HarnessId::CODEX, "thread-1".into());
-        app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
+        app.controller.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
         assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
         app.start_when_idle();
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert_eq!(cmds.recv().await, Some(SessionCommand::Shutdown));
-        assert!(session.is_none() && app.start_held);
+        assert!(session.is_none() && app.controller.start_held);
 
         type_text(&mut app, "go on");
         handle_key(&mut app, NONE, KeyCode::Enter);
@@ -1717,15 +1717,15 @@ mod tests {
             crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
         type_text(&mut app, "! echo hi; test -f marker.txt && echo here");
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert!(app.shell.is_some() && app.is_busy() && !app.is_generating);
+        assert!(app.controller.shell.is_some() && app.is_busy() && !app.controller.is_generating);
         run_to_end(&mut app).await;
-        assert!(app.shell.is_none());
+        assert!(app.controller.shell.is_none());
         assert_eq!(
             shell_block(&app),
             ("hi\nhere\n".into(), ShellStatus::Exited { code: 0 })
         );
         // Nothing went to the agent, no session was started for it.
-        assert!(!app.session_alive);
+        assert!(!app.controller.session_alive);
 
         type_text(&mut app, "what did it print?");
         handle_key(&mut app, NONE, KeyCode::Enter);
@@ -1745,7 +1745,7 @@ mod tests {
         ));
 
         // Once: the next prompt goes alone.
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(crate::core::AgentEvent::TurnCompleted {
             stop_reason: crate::core::StopReason::Done,
         });
@@ -1755,7 +1755,7 @@ mod tests {
 
         // Saved with the conversation and back on resume, already sent.
         let id = app.controller.conversation.record.id.clone();
-        app.persist();
+        app.controller.persist();
         let back = crate::tui::app::tests::test_app_in(dir, HarnessId::CLAUDE, Some(id), false);
         assert_eq!(
             shell_block(&back),
@@ -1788,7 +1788,7 @@ mod tests {
         // A prompt is held for the output; another `!` is refused and kept.
         type_text(&mut app, "explain");
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert_eq!(app.queued.len(), 1);
+        assert_eq!(app.controller.queued.len(), 1);
         type_text(&mut app, "!ls");
         handle_key(&mut app, NONE, KeyCode::Enter);
         assert_eq!(app.input, "!ls");
@@ -1796,7 +1796,7 @@ mod tests {
         assert!(sent_turns(&mut app).is_empty());
 
         handle_key(&mut app, NONE, KeyCode::Esc);
-        assert!(!app.should_quit);
+        assert!(!app.controller.should_quit);
         let started = std::time::Instant::now();
         while shell.is_some() {
             run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
@@ -1828,7 +1828,7 @@ mod tests {
         let dir = tmp.path().canonicalize().unwrap();
         let mut app =
             crate::tui::app::tests::test_app_in(dir.clone(), HarnessId::CLAUDE, None, false);
-        app.sandbox = setup;
+        app.controller.sandbox = setup;
         type_text(&mut app, "!echo x > made.txt");
         handle_key(&mut app, NONE, KeyCode::Enter);
         run_to_end(&mut app).await;
@@ -1836,7 +1836,7 @@ mod tests {
         assert!(!dir.join("made.txt").exists());
 
         // The same command at the level that lets the agent write there.
-        app.sandbox = SandboxSetup::detect(Some(SandboxLevel::WorkspaceWrite));
+        app.controller.sandbox = SandboxSetup::detect(Some(SandboxLevel::WorkspaceWrite));
         type_text(&mut app, "!echo x > made.txt");
         handle_key(&mut app, NONE, KeyCode::Enter);
         run_to_end(&mut app).await;
@@ -1850,12 +1850,12 @@ mod tests {
         type_text(&mut app, "\\!important");
         handle_key(&mut app, NONE, KeyCode::Enter);
         assert_eq!(sent_turns(&mut app), vec!["!important".to_string()]);
-        assert!(app.is_generating);
+        assert!(app.controller.is_generating);
 
         // During a turn a `!` neither runs nor is queued: it is handed back.
         type_text(&mut app, "!make");
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert!(app.shell.is_none() && app.queued.is_empty());
+        assert!(app.controller.shell.is_none() && app.controller.queued.is_empty());
         assert_eq!(app.input, "!make");
         assert!(app.take_actions().is_empty());
         // Recalled like any prompt.
@@ -1868,7 +1868,7 @@ mod tests {
         finish_turn(&mut app);
         type_text(&mut app, "!  ");
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert!(app.shell.is_none() && app.take_actions().is_empty());
+        assert!(app.controller.shell.is_none() && app.take_actions().is_empty());
     }
 
     #[test]
@@ -1878,7 +1878,7 @@ mod tests {
         type_text(&mut app, "hello");
         handle_key(&mut app, NONE, KeyCode::Enter);
         app.take_actions();
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(crate::core::AgentEvent::SessionStarted {
             session_id: "claude-1".into(),
             model: None,
@@ -1893,7 +1893,7 @@ mod tests {
         assert_eq!(shell_block(&app).1, ShellStatus::Exited { code: 0 });
         app.switch_harness(HarnessId::CODEX);
         app.take_actions();
-        app.session_alive = false;
+        app.controller.session_alive = false;
 
         // Codex has it from the bridge, and only once.
         type_text(&mut app, "on codex");
@@ -1901,7 +1901,7 @@ mod tests {
         let sent = sent_turns(&mut app);
         assert_eq!(sent[0].matches("$ git status").count(), 1, "{}", sent[0]);
         assert!(sent[0].contains("[Context: shell commands the user ran from the unharness prompt, with their output]\n$ git status\nclean\n[exit 0]"));
-        app.session_alive = true;
+        app.controller.session_alive = true;
         app.on_event(crate::core::AgentEvent::SessionStarted {
             session_id: "codex-1".into(),
             model: None,
@@ -1911,7 +1911,7 @@ mod tests {
         // Claude never saw it: it is in the bridge back.
         app.switch_harness(HarnessId::CLAUDE);
         app.take_actions();
-        app.session_alive = false;
+        app.controller.session_alive = false;
         type_text(&mut app, "back");
         handle_key(&mut app, NONE, KeyCode::Enter);
         let sent = sent_turns(&mut app);
@@ -1941,6 +1941,6 @@ mod tests {
         assert_eq!(app.cursor, app.input.chars().count());
         assert!(app.suggestions.is_empty());
         handle_key(&mut app, NONE, KeyCode::Enter);
-        assert!(app.is_generating);
+        assert!(app.controller.is_generating);
     }
 }

@@ -6,9 +6,9 @@ fn remote_control_is_offered_only_where_declared() {
     use super::super::transcript::Block;
     // pi runs commands of its own: one called /rc is its.
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.handle_slash_command("/rc now");
-    assert!(app.remote.is_none());
+    assert!(app.controller.remote.is_none());
     assert!(
         app.controller
             .conversation
@@ -36,7 +36,7 @@ fn remote_control_is_offered_only_where_declared() {
 fn remote_control_taken_off_before_it_answers_says_off_once() {
     use super::super::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.handle_slash_command("/rc");
     app.handle_slash_command("/rc off");
     // The answers to both, in order.
@@ -72,15 +72,15 @@ fn remote_control_waits_for_the_session_and_pauses_with_its_process() {
     app.handle_slash_command("/rc");
     assert!(app.take_actions().is_empty());
     assert_eq!(app.remote_status().as_deref(), Some("remote: paused"));
-    app.session_alive = true;
-    assert!(app.remote_control_resend().is_some());
+    app.controller.session_alive = true;
+    assert!(app.controller.remote_control_resend().is_some());
     app.on_event(AgentEvent::RemoteControl(RemoteControl::On {
         url: "https://claude.ai/code/session_x".into(),
     }));
     assert_eq!(app.remote_status().as_deref(), Some("remote"));
     app.on_event(AgentEvent::ProcessExited { code: Some(1) });
     assert_eq!(app.remote_status().as_deref(), Some("remote: paused"));
-    assert!(app.remote_control_resend().is_some());
+    assert!(app.controller.remote_control_resend().is_some());
 }
 
 #[test]
@@ -89,7 +89,7 @@ fn a_resume_ends_remote_control() {
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -97,7 +97,7 @@ fn a_resume_ends_remote_control() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    app.persist();
+    app.controller.persist();
     let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/rc");
     app.take_actions();
@@ -124,8 +124,8 @@ fn a_remote_first_prompt_leaves_the_bridge_owed_and_titles_the_conversation() {
         .conversation
         .transcript
         .append_assistant("Codex", "answered on codex");
-    app.session_alive = true;
-    app.session_blank = true;
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -134,7 +134,7 @@ fn a_remote_first_prompt_leaves_the_bridge_owed_and_titles_the_conversation() {
         text: "typed remotely".into(),
     });
     // The next prompt typed here still tells Claude what it missed.
-    assert_eq!(app.bridge_start(HarnessId::CLAUDE), 0);
+    assert_eq!(app.controller.bridge_start(HarnessId::CLAUDE), 0);
     assert_eq!(
         app.controller.conversation.first_prompt.as_deref(),
         Some("typed remotely")
@@ -144,7 +144,7 @@ fn a_remote_first_prompt_leaves_the_bridge_owed_and_titles_the_conversation() {
 #[test]
 fn remote_control_comes_back_on_each_new_process_until_a_switch() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.handle_slash_command("/remote-control on my desk");
     assert_eq!(
         app.take_actions(),
@@ -164,7 +164,7 @@ fn remote_control_comes_back_on_each_new_process_until_a_switch() {
     assert_eq!(app.remote_status().as_deref(), Some("remote"));
     // A new process (a sandbox change, a resume...) is put on it again.
     assert_eq!(
-        app.remote_control_resend(),
+        app.controller.remote_control_resend(),
         Some(SessionCommand::RemoteControl {
             enabled: true,
             name: Some("my desk".into())
@@ -172,7 +172,7 @@ fn remote_control_comes_back_on_each_new_process_until_a_switch() {
     );
     assert_eq!(app.remote_status().as_deref(), Some("remote: starting"));
     // A switch ends it, telling the remote side first.
-    app.switch_now(HarnessId::CODEX);
+    app.with(|c, screen| c.switch_now(HarnessId::CODEX, screen));
     let actions = app.take_actions();
     assert_eq!(
         actions[0],
@@ -183,28 +183,28 @@ fn remote_control_comes_back_on_each_new_process_until_a_switch() {
     );
     assert_eq!(actions[1], Action::Shutdown);
     assert_eq!(app.remote_status(), None);
-    assert_eq!(app.remote_control_resend(), None);
+    assert_eq!(app.controller.remote_control_resend(), None);
 }
 
 #[test]
 fn a_failed_remote_control_is_dropped() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.handle_slash_command("/rc");
     app.take_actions();
     app.on_event(AgentEvent::RemoteControl(RemoteControl::Failed {
         reason: "your organization does not allow Remote Control".into(),
     }));
     assert_eq!(app.remote_status(), None);
-    assert_eq!(app.remote_control_resend(), None);
+    assert_eq!(app.controller.remote_control_resend(), None);
 }
 
 #[test]
 fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
     use super::super::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
-    app.session_blank = true;
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -212,7 +212,7 @@ fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
     app.on_event(AgentEvent::RemotePrompt {
         text: "Reply with the single word: pong".into(),
     });
-    assert!(!app.session_blank);
+    assert!(!app.controller.session_blank);
     assert_eq!(
         app.controller
             .conversation
@@ -236,7 +236,7 @@ fn a_process_started_again_by_its_driver_is_a_new_process_of_the_session() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -251,7 +251,7 @@ fn a_process_started_again_by_its_driver_is_a_new_process_of_the_session() {
     app.take_actions();
     app.on_event(AgentEvent::Restarted);
     assert!(app.take_actions().is_empty());
-    assert!(app.session_alive && app.session_blank);
+    assert!(app.controller.session_alive && app.controller.session_blank);
     assert_eq!(app.remote_status().as_deref(), Some("remote: starting"));
     // Resumed: the same session, which the next prompt commits.
     app.on_event(AgentEvent::SessionStarted {
@@ -259,7 +259,7 @@ fn a_process_started_again_by_its_driver_is_a_new_process_of_the_session() {
         model: None,
     });
     app.submit_prompt("again".into());
-    assert!(!app.session_blank);
+    assert!(!app.controller.session_blank);
     assert_eq!(
         app.controller
             .conversation

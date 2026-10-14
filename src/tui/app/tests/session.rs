@@ -7,13 +7,13 @@ use crate::harness::Harness;
 #[test]
 fn a_session_in_place_of_one_not_resumed_is_told_the_conversation() {
     let mut app = over_budget_app();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.start_when_idle();
     assert!(matches!(
         &app.take_actions()[..],
         [Action::StartSession { resume: Some(id) }] if id == "claude-1"
     ));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionReplaced {
         reason: "could not resume the session (Session not found)".into(),
     });
@@ -70,8 +70,8 @@ fn a_session_replaced_under_the_same_id_is_told_the_conversation() {
         .conversation
         .session_ids
         .insert(HarnessId::PI, "pi-1".into());
-    app.session_alive = true;
-    app.session_blank = true;
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "pi-1".into(),
         model: None,
@@ -100,7 +100,7 @@ fn a_session_replaced_under_a_prompt_is_told_the_conversation_next() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("The code word is pineapple. Reply with: ok".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -118,7 +118,7 @@ fn a_session_replaced_under_a_prompt_is_told_the_conversation_next() {
         [Action::StartSession { resume: Some(id) }, Action::SendTurn { text, .. }]
             if id == "claude-1" && text == "Say hi"
     ));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionReplaced {
         reason: "this agent cannot resume sessions".into(),
     });
@@ -164,7 +164,7 @@ fn a_prompt_a_replaced_session_was_not_sent_goes_again_with_the_conversation() {
     let mut app = test_app(HarnessId::PI);
     app.submit_prompt("The code word is pineapple. Reply with: ok".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "pi-1".into(),
         model: None,
@@ -180,7 +180,7 @@ fn a_prompt_a_replaced_session_was_not_sent_goes_again_with_the_conversation() {
         &app.take_actions()[..],
         [Action::StartSession { resume: Some(id) }, Action::SendTurn { .. }] if id == "pi-1"
     ));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     // pi names the id it made an empty session under, then lists it.
     app.on_event(AgentEvent::SessionStarted {
         session_id: "pi-1".into(),
@@ -259,15 +259,15 @@ fn a_session_notice_is_said_once() {
         registry,
     );
     let before = notices(&app).len();
-    app.show_session_notice();
-    app.show_session_notice();
+    app.controller.show_session_notice();
+    app.controller.show_session_notice();
     let said = notices(&app);
     assert_eq!(said.len(), before + 1, "{said:?}");
     assert_eq!(said.last().unwrap(), &format!("about {}", cwd.display()));
     // A harness with nothing to say adds nothing.
     let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
     let before = notices(&app).len();
-    app.show_session_notice();
+    app.controller.show_session_notice();
     assert_eq!(notices(&app).len(), before);
 }
 
@@ -291,12 +291,12 @@ fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
             .filter(|b| matches!(b, Block::Notice(n) if n.contains("MCP")))
             .count()
     };
-    assert_eq!(app.session_mcp_servers().len(), 1);
+    assert_eq!(app.controller.session_mcp_servers().len(), 1);
     assert_eq!(notices(&app), 0);
 
     app.switch_harness(HarnessId::PI);
-    assert!(app.session_mcp_servers().is_empty());
-    assert!(app.session_mcp_servers().is_empty());
+    assert!(app.controller.session_mcp_servers().is_empty());
+    assert!(app.controller.session_mcp_servers().is_empty());
     assert_eq!(notices(&app), 1);
 }
 
@@ -341,7 +341,7 @@ fn an_unprompted_session_is_sent_the_whole_bridge() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TextDelta("first answer".into()));
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
@@ -369,14 +369,16 @@ fn an_unprompted_session_is_sent_the_whole_bridge() {
 #[test]
 fn a_prompt_while_a_start_is_queued_starts_no_second_session() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.actions.push_back(Action::StartSession { resume: None });
-    app.session_blank = true;
+    app.controller
+        .actions
+        .push_back(Action::StartSession { resume: None });
+    app.controller.session_blank = true;
     app.submit_prompt("hello".into());
     assert_eq!(
         app.take_actions(),
         vec![Action::StartSession { resume: None }, Action::turn("hello")]
     );
-    assert!(!app.session_blank);
+    assert!(!app.controller.session_blank);
 }
 
 #[test]
@@ -384,7 +386,10 @@ fn an_idle_harness_is_started_once_before_the_first_prompt() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.start_when_idle();
     app.start_when_idle();
-    assert_eq!(app.actions, [Action::StartSession { resume: None }]);
+    assert_eq!(
+        app.controller.actions,
+        [Action::StartSession { resume: None }]
+    );
     // A prompt typed before the start ran does not start another, and
     // takes the session for the conversation.
     app.submit_prompt("hello".into());
@@ -392,9 +397,9 @@ fn an_idle_harness_is_started_once_before_the_first_prompt() {
         app.take_actions(),
         vec![Action::StartSession { resume: None }, Action::turn("hello")]
     );
-    assert!(!app.session_blank);
+    assert!(!app.controller.session_blank);
     // Running: nothing more to start.
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.start_when_idle();
     assert!(app.take_actions().is_empty());
 }
@@ -429,7 +434,7 @@ fn a_harness_that_leaves_a_session_behind_starts_with_the_first_prompt() {
     assert!(app.take_actions().is_empty());
     app.submit_prompt("hello".into());
     assert_eq!(starts(&app.take_actions()), 1);
-    assert!(!app.session_blank);
+    assert!(!app.controller.session_blank);
 }
 
 #[test]
@@ -437,7 +442,7 @@ fn a_session_that_ends_by_itself_waits_for_the_user() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.start_when_idle();
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::ProcessExited { code: Some(1) });
     assert!(
         notices(&app)
@@ -515,13 +520,13 @@ fn an_agent_that_is_not_signed_in_is_told_once_and_waits_for_the_user() {
     let mut app = test_app(HarnessId::CODEX);
     app.start_when_idle();
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.submit_prompt("hello".into());
     app.take_actions();
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
     app.on_event(failed());
     app.on_event(AgentEvent::ProcessExited { code: Some(0) });
-    assert!(!app.is_generating);
+    assert!(!app.controller.is_generating);
     assert_eq!(told(&app), 1);
     app.start_when_idle();
     assert!(app.take_actions().is_empty());
@@ -534,7 +539,7 @@ fn what_an_unprompted_session_changed_is_told_when_it_ends() {
     use crate::core::guard::{Guarded, Watch};
     let config = tempfile::tempdir().unwrap();
     let mut app = test_app(HarnessId::CLAUDE);
-    app.guard = Some(Watch::begin(
+    app.controller.guard = Some(Watch::begin(
         &[Guarded::Tree(config.path().to_path_buf())],
         None,
     ));

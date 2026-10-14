@@ -36,7 +36,7 @@ fn claude_turn_under(cwd: &Path, policy: Option<PermissionPolicy>) {
     }
     app.submit_prompt("hi".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -100,7 +100,7 @@ fn a_saved_policy_the_harness_lacks_is_never_loosened() {
     conv.policy = Some(PermissionPolicy::Ask);
     store.save(&conv).unwrap();
     let app = resume_with(tmp.path(), None);
-    assert_eq!(app.active, HarnessId::AGY);
+    assert_eq!(app.controller.active, HarnessId::AGY);
     assert_eq!(app.effective_policy(), None);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
 }
@@ -135,7 +135,7 @@ fn resuming_in_the_tui_takes_the_conversations_policy() {
     app.resume_conversation(plain.id.clone());
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
     assert!(!notices(&app).iter().any(|n| n.contains("last ran")));
-    app.persist();
+    app.controller.persist();
     assert_eq!(store.load(&plain.id).unwrap().policy, None);
 }
 
@@ -257,7 +257,7 @@ fn codex_turn_choosing(cwd: &Path, model: Option<&str>, effort: Option<&str>) {
     }
     app.submit_prompt("hi".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "codex-1".into(),
         model: None,
@@ -298,7 +298,7 @@ fn resuming_in_the_tui_does_not_carry_one_conversations_model_into_another() {
     app.resume_conversation(plain.id.clone());
     assert_eq!(codex_model(&app), Some("configured-model"));
     assert_eq!(app.current_effort(), None);
-    app.persist();
+    app.controller.persist();
     let saved = store.load(&plain.id).unwrap();
     assert!(saved.models.is_empty() && saved.efforts.is_empty());
 

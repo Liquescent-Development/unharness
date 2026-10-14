@@ -1,5 +1,5 @@
 use super::*;
-use crate::tui::app::turn::STOP_GRACE;
+use crate::core::controller::STOP_GRACE;
 
 #[test]
 fn prompts_queue_during_a_turn_and_drain_on_completion() {
@@ -8,12 +8,12 @@ fn prompts_queue_during_a_turn_and_drain_on_completion() {
     };
     let mut app = test_app(HarnessId::CLAUDE);
     app.queue_prompt("first".into());
-    assert!(app.is_generating && app.queued.is_empty());
+    assert!(app.controller.is_generating && app.controller.queued.is_empty());
     app.take_actions();
 
     app.queue_prompt("second".into());
     app.queue_prompt("third".into());
-    assert_eq!(app.queued.len(), 2);
+    assert_eq!(app.controller.queued.len(), 2);
     assert!(app.take_actions().is_empty());
 
     // The newest one can be pulled back for editing.
@@ -21,9 +21,9 @@ fn prompts_queue_during_a_turn_and_drain_on_completion() {
     assert_eq!(app.input, "third");
     app.take_input();
 
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(done());
-    assert!(app.is_generating && app.queued.is_empty());
+    assert!(app.controller.is_generating && app.controller.queued.is_empty());
     assert_eq!(app.take_actions(), vec![Action::turn("second")]);
 
     // After an interrupt the queue is held until the user presses Enter.
@@ -31,7 +31,7 @@ fn prompts_queue_during_a_turn_and_drain_on_completion() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Interrupted,
     });
-    assert!(!app.is_generating && app.queued.len() == 1);
+    assert!(!app.controller.is_generating && app.controller.queued.len() == 1);
     assert!(app.send_next_queued());
     assert_eq!(app.take_actions(), vec![Action::turn("fourth")]);
 }
@@ -40,7 +40,7 @@ fn prompts_queue_during_a_turn_and_drain_on_completion() {
 fn steer_goes_into_the_turn_or_falls_back_to_the_queue() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("go".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.take_actions();
     app.steer("left a bit".into());
     assert_eq!(
@@ -50,16 +50,16 @@ fn steer_goes_into_the_turn_or_falls_back_to_the_queue() {
             attachments: Vec::new()
         })]
     );
-    assert!(app.queued.is_empty());
+    assert!(app.controller.queued.is_empty());
 
     // Antigravity cannot be steered: the message waits for the turn to end.
     let mut app = test_app(HarnessId::AGY);
     app.submit_prompt("go".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.take_actions();
     app.steer("left a bit".into());
     assert!(app.take_actions().is_empty());
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn compact_needs_an_idle_live_session_that_supports_it() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.compact(None);
     assert!(app.take_actions().is_empty());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.handle_slash_command("/compact keep the API notes");
     assert_eq!(
         app.take_actions(),
@@ -79,10 +79,10 @@ fn compact_needs_an_idle_live_session_that_supports_it() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert!(!app.is_generating);
+    assert!(!app.controller.is_generating);
 
     let mut app = test_app(HarnessId::AGY);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.compact(None);
     assert!(app.take_actions().is_empty());
 }
@@ -91,16 +91,16 @@ fn compact_needs_an_idle_live_session_that_supports_it() {
 fn submit_starts_session_then_sends_turn() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("hello".into());
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
     assert_eq!(
         app.take_actions(),
         vec![Action::StartSession { resume: None }, Action::turn("hello")]
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    assert!(!app.is_generating);
+    assert!(!app.controller.is_generating);
     app.submit_prompt("again".into());
     assert_eq!(app.take_actions(), vec![Action::turn("again")]);
 }
@@ -110,13 +110,13 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     use crate::core::guard::{Guarded, Watch};
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.controller
         .conversation
         .session_ids
         .insert(HarnessId::PI, "pi-1".into());
     let config = tempfile::tempdir().unwrap();
-    app.guard = Some(Watch::begin(
+    app.controller.guard = Some(Watch::begin(
         &[Guarded::Tree(config.path().to_path_buf())],
         None,
     ));
@@ -146,15 +146,17 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
             .count()
     };
     assert_eq!(notices(&app, "waiting for"), 1);
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
 
     // After it, the process is ended and the turn with it.
     std::fs::write(config.path().join("extension.ts"), "x").unwrap();
     app.on_event(pi_gate_request("g1", "ls"));
-    app.interrupted = Some((Instant::now() - STOP_GRACE, true));
+    app.controller.interrupted = Some((Instant::now() - STOP_GRACE, true));
     app.interrupt();
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert!(!app.is_generating && !app.session_alive && !app.awaiting_answer());
+    assert!(
+        !app.controller.is_generating && !app.controller.session_alive && !app.awaiting_answer()
+    );
     assert!(matches!(
         app.controller
             .conversation
@@ -203,22 +205,22 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Interrupted,
     });
-    assert!(app.interrupted.is_none());
+    assert!(app.controller.interrupted.is_none());
 }
 
 #[test]
 fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.submit_prompt("look".into());
     app.take_actions();
     app.interrupt();
     app.take_actions();
-    app.interrupted = Some((Instant::now() - STOP_GRACE, false));
+    app.controller.interrupted = Some((Instant::now() - STOP_GRACE, false));
     app.interrupt();
     assert_eq!(app.take_actions(), vec![]);
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
     assert!(app.controller.conversation.transcript.blocks.iter().any(
         |b| matches!(b, Block::Notice(n) if n.ends_with("asked again, its process is ended"))
     ));
@@ -236,7 +238,7 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
     let stuck = |app: &mut App| {
         app.interrupt();
         app.take_actions();
-        app.interrupted = Some((Instant::now() - STOP_GRACE, true));
+        app.controller.interrupted = Some((Instant::now() - STOP_GRACE, true));
         app.interrupt();
         notices(app)
             .into_iter()
@@ -260,7 +262,7 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
     );
 
     let (mut app, _cwd) = vibe_app();
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     prompted_vibe(&mut app);
     app.on_event(AgentEvent::TextDelta("x".repeat(600)));
     app.on_event(AgentEvent::TurnCompleted {
@@ -293,10 +295,10 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
     // One for a switch: the switch goes ahead, which says so itself.
     let mut app = over_budget_app();
     app.switch_harness(HarnessId::CODEX);
-    assert!(app.handoff.is_some());
+    assert!(app.controller.handoff.is_some());
     assert_eq!(
         stuck(&mut app),
         ["Claude did not stop, so its process was ended"]
     );
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
 }

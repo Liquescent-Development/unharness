@@ -1,42 +1,75 @@
-//! The session controller: what decides how each harness runs, apart from
-//! what the TUI shows of it. Per harness: the permission policy asked for
-//! and in effect ([`PolicyState`]), the provider, model and effort chosen
-//! and where each came from ([`ChoiceState`]) with the lists they are
-//! chosen from, and what its live sessions reported on top of its declared
-//! capabilities ([`Controller::caps_of`]). For the active harness's
-//! session: when a choice may be made, how it reaches the session
-//! ([`Route`]), and a choice sent that the session has not said how it took
+//! The session controller: what decides how each harness runs, and the
+//! state machine of the active harness's session, apart from what the TUI
+//! shows of it. Per harness: the permission policy asked for and in effect
+//! ([`PolicyState`]), the provider, model and effort chosen and where each
+//! came from ([`ChoiceState`]) with the lists they are chosen from, and
+//! what its live sessions reported on top of its declared capabilities
+//! ([`Controller::caps_of`]). For the active harness's session: when a
+//! choice may be made, how it reaches the session ([`Route`]), and a
+//! choice sent that the session has not said how it took
 //! ([`PendingChoice`]), which holds back what follows it. And the
 //! conversation it runs ([`ConversationState`]): installed as one, saved,
 //! and its file checkpoints.
 //!
+//! The lifecycle of that session is here too: started early or with a
+//! prompt, committed to the conversation, replaced, renewed and ended
+//! (`session.rs`); turns, the prompts queued behind one, steering and
+//! interrupting (`turn.rs`); a switch to another harness and its handoff
+//! summary (`switch.rs`); the permission requests it makes
+//! (`requests.rs`); its subagents (`subagents.rs`); Remote Control
+//! (`remote.rs`); rewind and fork (`rewind.rs`); the sandbox it runs in
+//! (`sandbox.rs`); the `!` command (`shell_command.rs`); and what each of
+//! its events does (`events.rs`). What that asks of the session and of the
+//! event loop is returned as [`Action`]s.
+//!
 //! The TUI calls into it and reads from it. What it says of the
-//! conversation it holds (a save that failed, a checkpoint that could not
-//! be taken, a resumed conversation's choices, a file restore undone) it
-//! puts in that conversation's transcript itself; what it says of a choice
-//! or a policy comes back as values (notices, refusals) for the TUI to
-//! push there. `headless` resolves its policy through the same
-//! [`PolicyState`].
+//! conversation it holds it puts in that conversation's transcript itself;
+//! where its logic reads or changes what is on screen (a request's dialog,
+//! the policy picker, the prompt box), it goes through the [`Front`] it is
+//! given. `headless` resolves its policy through the same [`PolicyState`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
-use crate::config::Config;
+use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
-use crate::core::conversations::{Conversation, ConversationStore};
-use crate::core::registry::Registry;
-use crate::core::{
-    Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef, PermissionPolicy,
-    PolicySupport, ProviderId,
+use crate::core::conversations::{
+    ContextWindows, Conversation, ConversationStore, load_context_windows,
 };
+use crate::core::guard::Watch;
+use crate::core::registry::Registry;
+use crate::core::sandbox::{SandboxLevel, SandboxSetup};
+use crate::core::{
+    Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef,
+    PermissionPolicy, PermissionRequest, PolicySupport, ProviderId, RateLimitInfo, Rules,
+    SessionCommand,
+};
+use crate::harness::{Harness, resolve_binary};
 
 mod choices;
 mod conversation;
+mod events;
+mod front;
 mod policy;
+mod remote;
+mod requests;
+mod rewind;
+mod sandbox;
+mod session;
+mod shell_command;
+mod subagents;
+mod switch;
+mod turn;
 
 pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow, subagents_refusal};
 pub use conversation::{ConversationState, Keeping};
+pub use events::rate_limit_summary;
+pub use front::{Front, PlanAsk, PolicyAsk};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
+pub use switch::handoff_prompt;
+pub use turn::STOP_GRACE;
 
 /// Where a choice came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,7 +109,8 @@ pub struct CapsReport {
     pub refused: Option<Refused>,
 }
 
-/// What a run named on its command line, for the harness it starts on.
+/// What a run named on its command line, for the harness it starts on,
+/// and where it runs.
 #[derive(Debug, Clone)]
 pub struct Launch {
     pub harness: HarnessId,
@@ -88,9 +122,119 @@ pub struct Launch {
     /// Each harness's guess at its own provider (`Harness::default_provider`),
     /// which reads the user's vendor configuration.
     pub default_providers: HashMap<HarnessId, ProviderId>,
+    /// The session's directory.
+    pub cwd: PathBuf,
+    /// The workspace root found above it, if any.
+    pub workspace_root: Option<PathBuf>,
+    /// The sandbox level asked for (flag or config) and the platform's
+    /// backend.
+    pub sandbox: SandboxSetup,
+    /// The user's allow rules, and where "allow always" adds to them.
+    pub rules: Rules,
 }
 
-/// The state that decides how each harness runs. See the module.
+/// Side effects the event loop performs on the controller's behalf.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Start a session for the active harness (if none is alive).
+    StartSession {
+        resume: Option<String>,
+    },
+    SendTurn {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
+    Command(SessionCommand),
+    /// Shut the active session down (harness switch, resume, quit).
+    Shutdown,
+    /// Run a command the user typed after `!`.
+    RunShell {
+        command: String,
+    },
+    /// Kill the running `!` command.
+    StopShell,
+}
+
+impl Action {
+    /// A text-only turn.
+    pub fn turn(text: impl Into<String>) -> Self {
+        Action::SendTurn {
+            text: text.into(),
+            attachments: Vec::new(),
+        }
+    }
+}
+
+/// The `!` command at work; its output goes to the last running
+/// `Block::Shell`.
+#[derive(Debug, Clone)]
+pub struct ShellRun {
+    pub started: Instant,
+    /// The user asked for it to be stopped.
+    pub stopping: bool,
+}
+
+/// The harness the user is switching away from writing a summary for the
+/// next one, or for a new session of its own (`renew`): the switch, or the
+/// new session, happens when its turn ends.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Handoff {
+    pub(crate) to: HarnessId,
+    /// Where its turn began in the transcript.
+    pub(crate) start: usize,
+    /// Prompts were held when it was asked for (after an interrupt): the
+    /// user sends those, also after the switch.
+    pub(crate) held: bool,
+    /// The next session is a new one of the same harness, for another
+    /// model or effort (`Controller::session_renewed`).
+    pub(crate) renew: bool,
+    /// The session asked for it could not be resumed and runs new
+    /// (`AgentEvent::SessionReplaced`): what it writes summarizes nothing.
+    pub(crate) blind: bool,
+}
+
+/// A subagent that is at work.
+#[derive(Debug, Clone)]
+pub struct RunningSubagent {
+    /// The tool call that spawned it.
+    pub id: String,
+    pub description: String,
+    pub kind: Option<String>,
+    /// What it is doing now.
+    pub activity: Option<String>,
+    /// The harness words its activity itself, so its tool calls need not.
+    described: bool,
+    /// Tool calls it has made.
+    pub tools: usize,
+    pub started: Instant,
+    /// Its end may never be told (`AgentEvent::SubagentStarted`): it holds
+    /// nothing back (`Controller::awaited_subagents`).
+    pub unreported_end: bool,
+}
+
+/// A prompt waiting for the running turn to finish.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedPrompt {
+    pub text: String,
+    pub attachments: Vec<Attachment>,
+    /// The harness active when it was typed: whether a `/` prompt is a
+    /// command was decided for that one.
+    pub harness: HarnessId,
+}
+
+/// The active harness's session on the vendor's remote control.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RemoteSession {
+    /// What it is called there, if the user named it.
+    name: Option<String>,
+    /// Where it can be opened, once the harness's process said.
+    url: Option<String>,
+    /// How the connection stands, in the harness's words.
+    state: Option<String>,
+}
+
+/// The state that decides how each harness runs, and the active harness's
+/// session as it goes. See the module.
 pub struct Controller {
     registry: Arc<Registry>,
     /// The run's configuration: each harness's defaults, the bridge's
@@ -120,6 +264,74 @@ pub struct Controller {
     checkpoints: Option<Checkpoints>,
     checkpoint_failed: bool,
     restore_seq: usize,
+
+    /// The harness the conversation runs on now.
+    pub active: HarnessId,
+    pub cwd: PathBuf,
+    pub workspace_root: Option<PathBuf>,
+    /// The sandbox level asked for (flag, config, or `/sandbox`) and the
+    /// platform's backend. A change reaches the harness's next process.
+    pub sandbox: SandboxSetup,
+    /// The level the live session's process was started under.
+    pub session_sandbox_level: Option<SandboxLevel>,
+    /// The active harness's own configuration files as they were when its
+    /// session started, to notice a change (`core::guard`).
+    pub guard: Option<Watch>,
+    /// The bridge's budget, when the user set one.
+    pub bridge_max_chars: Option<usize>,
+    pub(crate) bridge_summary: BridgeSummary,
+    /// What the bridge to a harness is measured against otherwise.
+    context_windows: ContextWindows,
+    context_windows_path: PathBuf,
+    pub(crate) handoff: Option<Handoff>,
+    pub session_alive: bool,
+    /// The vendor's remote control the user put the active harness's
+    /// session on (`/remote-control`). It outlives the harness's process:
+    /// each new one is put on it again (`remote_control_resend`); a
+    /// switch, a fork, a resume, `/clear` and quit end it.
+    pub(crate) remote: Option<RemoteSession>,
+    /// The live or starting session was started before anything was sent
+    /// to it (so that its commands are listed): until the first prompt it
+    /// is not part of the conversation.
+    pub(crate) session_blank: bool,
+    /// The id (and model) such a session reported, committed with the
+    /// first prompt.
+    pub(crate) blank_session: Option<(String, Option<String>)>,
+    /// The last session ended by itself or could not start: the next
+    /// one waits for the user (a prompt, a switch, a resume).
+    pub(crate) idle_start_paused: bool,
+    /// The session's start waits for the CLI that ended the one before it
+    /// to be gone (`tui::Ending`): what would start another is refused
+    /// meanwhile, as during a turn.
+    pub start_held: bool,
+
+    pub is_generating: bool,
+    pub generation_start: Option<Instant>,
+    /// When the running turn was asked to stop, and whether the user has
+    /// been told it has not yet.
+    pub(crate) interrupted: Option<(Instant, bool)>,
+    pub rate_limit: Option<RateLimitInfo>,
+    /// Subagents at work, oldest first. They can outlive the turn that
+    /// started them.
+    pub subagents: Vec<RunningSubagent>,
+    /// Prompts entered during a turn; one is sent each time a turn completes.
+    pub queued: VecDeque<QueuedPrompt>,
+    /// The `!` command running now.
+    pub shell: Option<ShellRun>,
+    pub(crate) compacting: bool,
+    /// The harnesses already told which MCP servers they do not get.
+    mcp_warned: HashSet<HarnessId>,
+    /// The harnesses whose [`Harness::session_notice`] was shown.
+    session_noticed: HashSet<HarnessId>,
+    /// Permission requests waiting behind another dialog for the user.
+    pub(crate) pending_prompts: VecDeque<PermissionRequest>,
+    /// Requests in `pending_prompts` the agent made while it planned: they
+    /// are judged so also when they come out after the plan's approval.
+    pub(crate) asked_planning: HashSet<String>,
+    /// Requests these allow are answered without asking.
+    pub rules: Rules,
+    pub should_quit: bool,
+    pub(crate) actions: VecDeque<Action>,
 }
 
 impl Controller {
@@ -181,6 +393,8 @@ impl Controller {
         if let Some(e) = launch.effort {
             state.effort = Some(Pick::new(e, Origin::User));
         }
+        let bridge_max_chars = config.bridge_max_chars;
+        let bridge_summary = config.bridge_summary.unwrap_or_default();
         Controller {
             registry,
             config,
@@ -196,6 +410,38 @@ impl Controller {
             checkpoints: keeping.checkpoints,
             checkpoint_failed: false,
             restore_seq: 0,
+            active: launch.harness,
+            cwd: launch.cwd,
+            workspace_root: launch.workspace_root,
+            sandbox: launch.sandbox,
+            session_sandbox_level: None,
+            guard: None,
+            bridge_max_chars,
+            bridge_summary,
+            context_windows: load_context_windows(&keeping.context_windows),
+            context_windows_path: keeping.context_windows,
+            handoff: None,
+            session_alive: false,
+            remote: None,
+            session_blank: false,
+            blank_session: None,
+            idle_start_paused: false,
+            start_held: false,
+            is_generating: false,
+            generation_start: None,
+            interrupted: None,
+            rate_limit: None,
+            subagents: Vec::new(),
+            queued: VecDeque::new(),
+            shell: None,
+            compacting: false,
+            mcp_warned: HashSet::new(),
+            session_noticed: HashSet::new(),
+            pending_prompts: VecDeque::new(),
+            asked_planning: HashSet::new(),
+            rules: launch.rules,
+            should_quit: false,
+            actions: VecDeque::new(),
         }
     }
 
@@ -232,16 +478,59 @@ impl Controller {
     }
 
     /// The display name of `harness`, for what is said of it.
-    fn display_name(&self, harness: HarnessId) -> &'static str {
+    fn display_name_of(&self, harness: HarnessId) -> &'static str {
         self.registry
             .get(harness)
             .map_or("the harness", |h| h.descriptor().display_name)
     }
 
-    fn short_name(&self, harness: HarnessId) -> &'static str {
+    fn short_name_of(&self, harness: HarnessId) -> &'static str {
         self.registry
             .get(harness)
             .map_or("the harness", |h| h.descriptor().short_name)
+    }
+
+    /// The active harness.
+    pub fn harness(&self) -> &dyn Harness {
+        self.registry
+            .get(self.active)
+            .expect("active harness is registered")
+    }
+
+    pub fn short_name(&self) -> &'static str {
+        self.harness().descriptor().short_name
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        self.harness().descriptor().display_name
+    }
+
+    /// Declared capabilities of the active harness plus what its session
+    /// reported (`Controller::caps_of`).
+    pub fn caps(&self) -> Capabilities {
+        self.caps_of(self.active)
+            .unwrap_or_else(|| self.harness().capabilities())
+    }
+
+    /// Where the active harness's CLI is.
+    pub fn harness_binary(&self) -> Option<PathBuf> {
+        let d = self.harness().descriptor();
+        resolve_binary(d, self.config.binary_override(d.id.as_str()))
+    }
+
+    /// What the event loop is to do for it, oldest first.
+    pub fn take_actions(&mut self) -> Vec<Action> {
+        self.actions.drain(..).collect()
+    }
+
+    /// A handoff summary is being written.
+    pub fn writing_handoff(&self) -> bool {
+        self.handoff.is_some()
+    }
+
+    /// The running turn compacts the context.
+    pub fn compacting(&self) -> bool {
+        self.compacting
     }
 
     /// `harness`'s live session reported `update`. A policy it refused
@@ -261,7 +550,7 @@ impl Controller {
         // is told; the driver reported the mismatch and the status line
         // keeps showing it.
         if let Some(reported) = &update.provider {
-            let name = self.short_name(harness);
+            let name = self.short_name_of(harness);
             let state = self.choices.entry(harness).or_default();
             if state.chosen_provider().is_some() {
                 state.runs_on = (state.provider() != Some(reported)).then(|| reported.clone());
@@ -307,7 +596,7 @@ impl Controller {
     /// again, and refuses it again if it still cannot hold it. The rest of
     /// what it reported is the agent's, kept until the next one says.
     /// Returns whether it had refused any.
-    pub fn forget_refusals(&mut self, harness: HarnessId) -> bool {
+    pub fn drop_refusals(&mut self, harness: HarnessId) -> bool {
         self.live
             .get_mut(&harness)
             .is_some_and(|u| u.refused_policies.take().is_some())

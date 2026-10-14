@@ -13,7 +13,10 @@ fn at_completes_a_file_where_the_cursor_is() {
     // The first `@` asks for the files; there are none to show yet.
     assert_eq!(app.completing_file, Some(4));
     assert!(app.suggestions.is_empty());
-    assert_eq!(app.take_file_index_request(), Some(app.cwd.clone()));
+    assert_eq!(
+        app.take_file_index_request(),
+        Some(app.controller.cwd.clone())
+    );
     app.insert_char('m');
     assert_eq!(app.take_file_index_request(), None);
 

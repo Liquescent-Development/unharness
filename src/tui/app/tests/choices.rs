@@ -4,10 +4,10 @@ use super::*;
 fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -61,9 +61,9 @@ fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
 fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     app.set_provider("bedrock".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     // Claude's settings chose otherwise.
     app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
         provider: Some("anthropic".into()),
@@ -97,7 +97,7 @@ fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
         kind: None,
         unreported_end: false,
     });
-    assert!(!app.subagents.is_empty());
+    assert!(!app.controller.subagents.is_empty());
     app.set_provider("vertex".into());
     assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
     assert!(app.take_actions().is_empty());
@@ -163,7 +163,7 @@ fn completion_asks_for_a_list_once() {
     // Nor when the list cannot even be asked for (it was a stack
     // overflow: the failure re-ran completion, which asked again).
     let mut app = test_app(HarnessId::CLAUDE);
-    app.sandbox = SandboxSetup {
+    app.controller.sandbox = SandboxSetup {
         explicit: Some(SandboxLevel::ReadOnly),
         backend: Err("no kernel".into()),
     };
@@ -291,7 +291,7 @@ fn a_choice_before_the_first_prompt_starts_the_session_again_with_it() {
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     app.start_when_idle();
     assert_eq!(starts(&app.take_actions()), 1);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.set_model("opus".into());
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
 
@@ -299,7 +299,7 @@ fn a_choice_before_the_first_prompt_starts_the_session_again_with_it() {
     app.start_when_idle();
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
@@ -393,8 +393,8 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
         app.take_actions(),
         vec![Action::StartSession { resume: None }]
     );
-    app.session_alive = true;
-    app.session_blank = true;
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "v2".into(),
         model: Some("mistral-medium-3.5".into()),
@@ -427,10 +427,10 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     ));
     app.submit_prompt("and now?".into());
     assert!(app.take_actions().is_empty());
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     vibe_renews(&mut app, "model glm-5-3");
     assert_eq!(app.current_model().unwrap().model, "glm-5-3");
-    assert!(app.queued.is_empty());
+    assert!(app.controller.queued.is_empty());
     let actions = app.take_actions();
     assert_eq!(
         actions[..2],
@@ -462,7 +462,7 @@ fn a_choice_for_a_stored_vibe_session_with_none_prompted_starts_a_new_one() {
     });
     app.take_actions();
     // Resumed, nothing sent yet.
-    app.session_blank = true;
+    app.controller.session_blank = true;
     app.set_effort("off".into());
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert!(
@@ -573,7 +573,7 @@ fn a_vibe_provider_goes_with_the_model() {
 #[test]
 fn a_new_session_for_a_choice_gets_a_handoff_when_over_budget() {
     let (mut app, _cwd) = vibe_app();
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     prompted_vibe(&mut app);
     app.on_event(AgentEvent::TextDelta("x".repeat(600)));
     app.on_event(AgentEvent::TurnCompleted {
@@ -585,7 +585,7 @@ fn a_new_session_for_a_choice_gets_a_handoff_when_over_budget() {
     vibe_renews(&mut app, "effort off");
     let ask = sent_turn(&mut app);
     assert!(ask.contains("new session of yours"), "{ask}");
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
     // The old session is still the one asked.
     assert!(
         app.controller
@@ -625,10 +625,10 @@ fn a_model_chosen_after_a_failed_start_starts_the_session() {
 fn claude_taking_bedrock() -> App {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -669,7 +669,7 @@ fn a_choice_waits_for_the_one_before_to_be_taken() {
     assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
     assert_eq!(app.current_model(), None);
     assert_eq!(app.current_effort(), None);
-    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert_eq!(
         notices(&app).iter().filter(|n| **n == still).count(),
         5,
@@ -680,7 +680,7 @@ fn a_choice_waits_for_the_one_before_to_be_taken() {
     assert!(app.take_actions().is_empty());
     app.on_event(AgentEvent::Restarted);
     assert_eq!(app.take_actions(), vec![Action::turn("again")]);
-    assert!(app.is_generating && !app.session_blank);
+    assert!(app.controller.is_generating && !app.controller.session_blank);
     // Taken: the next choice goes.
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
@@ -699,7 +699,7 @@ fn a_choice_waits_for_the_one_before_to_be_taken() {
 #[test]
 fn a_second_vibe_choice_before_the_answer_is_refused() {
     let (mut app, _cwd) = vibe_app();
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     prompted_vibe(&mut app);
     app.on_event(AgentEvent::TextDelta("x".repeat(600)));
     app.on_event(AgentEvent::TurnCompleted {
@@ -738,7 +738,7 @@ fn a_second_vibe_choice_before_the_answer_is_refused() {
 #[test]
 fn a_second_renewal_during_the_summary_changes_nothing() {
     let (mut app, _cwd) = vibe_app();
-    app.bridge_max_chars = Some(300);
+    app.controller.bridge_max_chars = Some(300);
     prompted_vibe(&mut app);
     app.on_event(AgentEvent::TextDelta("x".repeat(600)));
     app.on_event(AgentEvent::TurnCompleted {
@@ -753,7 +753,7 @@ fn a_second_renewal_during_the_summary_changes_nothing() {
     vibe_renews(&mut app, "effort off");
     assert!(app.take_actions().is_empty());
     assert_eq!(app.controller.conversation.transcript.blocks.len(), said);
-    assert!(app.is_generating);
+    assert!(app.controller.is_generating);
     assert!(
         app.controller
             .conversation
@@ -812,7 +812,7 @@ fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
             .contains_key(&HarnessId::VIBE)
     );
     // What was typed after it waits for Enter.
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     assert!(
         notices(&app)
             .iter()
@@ -826,10 +826,10 @@ fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
 fn a_choice_taken_sends_only_what_was_typed_after_it() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -839,14 +839,14 @@ fn a_choice_taken_sends_only_what_was_typed_after_it() {
         stop_reason: StopReason::Interrupted,
     });
     app.take_actions();
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     app.set_provider("bedrock".into());
     app.take_actions();
     app.submit_prompt("after".into());
     app.on_event(AgentEvent::Restarted);
     assert_eq!(app.take_actions(), vec![Action::turn("after")]);
-    assert_eq!(app.queued.len(), 1);
-    assert_eq!(app.queued[0].text, "held");
+    assert_eq!(app.controller.queued.len(), 1);
+    assert_eq!(app.controller.queued[0].text, "held");
 }
 
 /// A vibe choice for a stored session waits for the vibe before it to
@@ -860,8 +860,8 @@ fn a_choice_waits_for_the_cli_before_only_where_the_stored_session_keeps_it() {
         stop_reason: StopReason::Done,
     });
     app.take_actions();
-    app.session_alive = false;
-    app.start_held = true;
+    app.controller.session_alive = false;
+    app.controller.start_held = true;
     app.set_effort("off".into());
     assert_eq!(app.current_effort(), None);
     assert!(
@@ -878,8 +878,8 @@ fn a_choice_waits_for_the_cli_before_only_where_the_stored_session_keeps_it() {
 
     let mut app = claude_taking_bedrock();
     app.on_event(AgentEvent::Restarted);
-    app.session_alive = false;
-    app.start_held = true;
+    app.controller.session_alive = false;
+    app.controller.start_held = true;
     app.set_provider("vertex".into());
     assert_eq!(app.chosen_provider(), Some(&"vertex".into()));
 }
