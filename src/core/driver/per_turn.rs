@@ -75,11 +75,22 @@ pub trait PerTurnProtocol: Send + Sync {
 
 /// Drive `protocol` for the session whose handle this returns. `caps` is
 /// what its harness declares.
+///
+/// A CLI run once per turn branches no session: one asked to fork
+/// (`SessionConfig::fork`) starts new, and says so (`SessionReplaced`),
+/// rather than going on in the session it was to branch (Codex `exec`,
+/// where `transport = "auto"` declared app-server's fork).
 pub fn start(
     cfg: SessionConfig,
     caps: &Capabilities,
     protocol: Arc<dyn PerTurnProtocol>,
 ) -> Result<SessionHandle> {
+    let unforked = (cfg.fork && cfg.resume.is_some()).then(|| {
+        format!(
+            "could not fork the session ({} cannot fork one)",
+            protocol.harness()
+        )
+    });
     let state = TurnState {
         binary: cfg.binary,
         cwd: cfg.cwd,
@@ -87,7 +98,7 @@ pub fn start(
         provider: cfg.provider,
         effort: cfg.effort,
         policy: cfg.policy,
-        session_id: cfg.resume,
+        session_id: cfg.resume.filter(|_| unforked.is_none()),
         extra_args: cfg.extra_args,
         env: cfg.env,
         mcp_servers: cfg.mcp_servers,
@@ -106,10 +117,13 @@ pub fn start(
         slot,
         events_tx,
         cmd_rx,
+        unforked,
     ));
     Ok(handle)
 }
 
+/// `unforked`: why the session runs new instead of the fork it was asked
+/// for.
 async fn drive(
     mut state: TurnState,
     caps: Capabilities,
@@ -117,12 +131,16 @@ async fn drive(
     slot: ProcessSlot,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
+    unforked: Option<String>,
 ) {
     let reported = protocol.reported_caps();
     if let Some(update) = &reported {
         let _ = events
             .send(AgentEvent::CapabilitiesChanged(update.clone()))
             .await;
+    }
+    if let Some(reason) = unforked {
+        let _ = events.send(AgentEvent::SessionReplaced { reason }).await;
     }
     // Announce the resumed session immediately so the TUI can label it.
     if let Some(id) = &state.session_id {
@@ -398,6 +416,13 @@ mod tests {
             mcp_servers: Vec::new(),
             sandbox: Sandbox::off(),
         }
+    }
+
+    async fn next(h: &mut SessionHandle) -> AgentEvent {
+        tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     async fn collect_turn(h: &mut SessionHandle) -> Vec<AgentEvent> {
@@ -695,12 +720,6 @@ mod tests {
                 })
             }
         }
-        async fn next(h: &mut SessionHandle) -> AgentEvent {
-            tokio::time::timeout(Duration::from_secs(5), h.events.recv())
-                .await
-                .unwrap()
-                .unwrap()
-        }
         let reported = AgentEvent::CapabilitiesChanged(Lacking.reported_caps().unwrap());
         let mut resumed = cfg();
         resumed.resume = Some("t1".into());
@@ -727,6 +746,39 @@ mod tests {
             next(&mut h).await,
             AgentEvent::ProcessExited { .. }
         ));
+    }
+
+    // A session asked to fork starts new, and says so: its first turn
+    // resumes nothing, rather than going on in the session it was to
+    // branch (Codex `exec`, where `auto` declared app-server's fork).
+    #[tokio::test]
+    async fn a_session_asked_to_fork_runs_new_instead() {
+        let mut forked = cfg();
+        forked.resume = Some("s0".into());
+        forked.fork = true;
+        let mut h = start(forked, &caps(), Arc::new(Echo)).unwrap();
+        assert_eq!(
+            next(&mut h).await,
+            AgentEvent::SessionReplaced {
+                reason: "could not fork the session (codex cannot fork one)".into()
+            }
+        );
+        h.send(SessionCommand::turn("one")).await.unwrap();
+        let turn = collect_turn(&mut h).await;
+        assert_eq!(turn[0], AgentEvent::TurnStarted);
+        assert!(
+            turn.contains(&AgentEvent::SessionStarted {
+                session_id: "s1".into(),
+                model: None
+            }),
+            "{turn:?}"
+        );
+        assert!(
+            !turn
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.starts_with("resumed"))),
+            "{turn:?}"
+        );
     }
 
     #[tokio::test]
