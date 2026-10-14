@@ -17,12 +17,15 @@ use anyhow::{Result, bail};
 use colored::*;
 use serde_json::{Value, json};
 
+use crate::config::Config;
+use crate::core::controller::PolicyState;
 use crate::core::permissions::{Route, Router, Why};
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
-    PermissionRequest, RemoteControl, Rules, SessionCommand, SessionHandle, StopReason,
-    SubagentStatus, SubagentSupport, ToolAction, Usage,
+    PermissionRequest, PolicyResolution, PolicySupport, RemoteControl, Rules, SessionCommand,
+    SessionHandle, StopReason, SubagentStatus, SubagentSupport, ToolAction, Usage,
 };
+use crate::harness::Harness;
 
 /// The version of the `stream-json` and `json` output. Raised whenever a
 /// line changes in a way a reader of the old one could misread; a new
@@ -48,6 +51,38 @@ impl Format {
             Some(other) => bail!("unknown format '{other}' (text, json, stream-json)"),
         })
     }
+}
+
+/// The policy of a run without the TUI, resolved as the TUI resolves one
+/// (`PolicyState`), with nothing chosen for the harness: the policy named
+/// for every harness, else its configured default. Nobody is there to
+/// choose another one, so a policy the harness does not have, with nothing
+/// less permissive in its place, ends the run. Nor is anybody there to
+/// approve a plan, so `plan` is never one. `policies`: what the harness
+/// offers such a run (`--print` is a session; `--print --native` and
+/// `--no-tui` run its CLI, `Harness::print_policies`).
+pub fn run_policy(
+    harness: &dyn Harness,
+    policies: &[PolicySupport],
+    policy: &PolicyState,
+    config: &Config,
+) -> Result<PolicyResolution> {
+    let policies: Vec<PolicySupport> = policies
+        .iter()
+        .filter(|p| p.policy != PermissionPolicy::Plan)
+        .copied()
+        .collect();
+    policy
+        .resolve(config, harness.descriptor().id, &policies)
+        .map_err(|e| {
+            let supported: Vec<&str> = e.supported.iter().map(|p| p.as_str()).collect();
+            anyhow::anyhow!(
+                "policy '{}' is not available for {} without the TUI; pass --policy with one of: {}",
+                e.requested,
+                harness.descriptor().display_name,
+                supported.join(", ")
+            )
+        })
 }
 
 /// What the run is, for the first `stream-json` line.
@@ -1025,6 +1060,47 @@ mod tests {
     use crate::core::{Question, QuestionOption, Rule, SubagentStatus};
 
     type Run = Headless<Vec<u8>, Vec<u8>>;
+
+    #[test]
+    fn a_run_without_the_tui_does_not_pick_a_policy() {
+        use crate::harness::Harness;
+        use crate::harness::codex::{CodexHarness, CodexTransport};
+        // `requested` named for every harness, nothing configured.
+        fn print_policy(
+            harness: &dyn Harness,
+            policies: &[PolicySupport],
+            requested: PermissionPolicy,
+        ) -> Result<PolicyResolution> {
+            let named = PolicyState::new(Some(requested));
+            run_policy(harness, policies, &named, &Config::default())
+        }
+        // `--print --native` on Codex is `exec`, which has no `ask`.
+        let codex = CodexHarness::new(CodexTransport::AppServer);
+        for print_mode in [true, false] {
+            let policies = codex.print_policies(print_mode);
+            let e = print_policy(&codex, &policies, PermissionPolicy::Ask).unwrap_err();
+            assert_eq!(
+                e.to_string(),
+                "policy 'ask' is not available for Codex (codex) without the TUI; pass --policy with one of: accept-edits, auto, bypass"
+            );
+        }
+        let res = print_policy(&codex, &codex.print_policies(true), PermissionPolicy::Auto);
+        assert_eq!(res.unwrap().effective, PermissionPolicy::Auto);
+        // Headless `--print` is a session, which asks (and is answered no).
+        let policies = codex.capabilities().permission_policies;
+        let res = print_policy(&codex, &policies, PermissionPolicy::Ask).unwrap();
+        assert_eq!(res.effective, PermissionPolicy::Ask);
+        let claude = crate::harness::claude::ClaudeHarness::default();
+        let res = print_policy(&claude, &claude.print_policies(true), PermissionPolicy::Ask);
+        assert_eq!(res.unwrap().effective, PermissionPolicy::Ask);
+        // Nobody could approve the plan.
+        let policies = claude.capabilities().permission_policies;
+        let e = print_policy(&claude, &policies, PermissionPolicy::Plan).unwrap_err();
+        assert!(
+            e.to_string()
+                .starts_with("policy 'plan' is not available for Claude")
+        );
+    }
 
     fn headless(format: Format, report_turn: bool) -> (tempfile::TempDir, Run) {
         headless_with(
