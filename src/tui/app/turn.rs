@@ -25,7 +25,7 @@ impl App {
         if !self.input.is_empty() {
             return;
         }
-        if let Some(q) = self.controller.queued.pop_back() {
+        if let Some(q) = self.controller.unqueue_last() {
             self.cursor = q.text.chars().count();
             self.input = q.text;
             self.attachments.extend(q.attachments);

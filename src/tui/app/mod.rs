@@ -1,7 +1,8 @@
 //! TUI state: the view, and the controller it shows (`core::controller`).
 //! Pure with respect to I/O: key handling changes the view and asks the
-//! controller, which queues `Action`s that the event loop in `tui/mod.rs`
-//! executes against the session.
+//! controller, which queues `Action`s; the event loop in `tui/mod.rs`
+//! hands them to `controller::run_actions`, which carries them out
+//! against the session.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;

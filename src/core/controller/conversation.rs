@@ -97,7 +97,8 @@ impl Controller {
     /// Run `record` from here on, on `active`, in place of the conversation
     /// before: a new one (`/clear`), or one saved (`--resume`, `/resume`).
     /// Nothing of the one before is kept, nor which harness planned in it,
-    /// nor a request of its waiting for an answer.
+    /// nor a request of its waiting for an answer. Prompts held stay: they
+    /// are the user's, not the conversation's.
     pub fn install(&mut self, record: Conversation, active: HarnessId) {
         self.conversation = ConversationState::new(record, active);
         self.policy.forget_plans();

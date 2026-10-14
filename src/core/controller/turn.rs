@@ -216,6 +216,11 @@ impl Controller {
         true
     }
 
+    /// Take the newest queued prompt back, to be edited.
+    pub fn unqueue_last(&mut self) -> Option<QueuedPrompt> {
+        self.queued.pop_back()
+    }
+
     /// Inject a message into the running turn, where the harness can; queue it otherwise.
     /// A handoff summary's turn is not steered: the answer to the message
     /// would be taken for the summary. The message goes to the next harness.
