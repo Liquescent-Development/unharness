@@ -2086,10 +2086,11 @@ async fn shut_down(handle: &mut SessionHandle) {
 }
 
 /// What an ACP agent does not offer (`AcpHarness::capabilities`) never
-/// reaches it: each is answered with one notice, in order with what it
-/// takes.
+/// reaches it: each is answered with one event, in order with what it
+/// takes. A compaction ends the turn the TUI runs it as, and a rewind
+/// fails; the rest are notices.
 #[tokio::test]
-async fn acp_answers_a_command_it_cannot_carry_out_with_one_notice() {
+async fn acp_answers_a_command_it_cannot_carry_out_once() {
     if !python_available() {
         return;
     }
@@ -2136,26 +2137,37 @@ async fn acp_answers_a_command_it_cannot_carry_out_with_one_notice() {
     ] {
         handle.send(cmd).await.unwrap();
     }
-    let notices: Vec<String> = events_until(
+    let answers: Vec<AgentEvent> = events_until(
         &mut handle,
         |e| matches!(e, AgentEvent::Notice(n) if n.starts_with("no pending")),
     )
     .await
     .into_iter()
-    .filter_map(|e| match e {
-        AgentEvent::Notice(n) => Some(n),
-        _ => None,
+    .filter(|e| {
+        matches!(
+            e,
+            AgentEvent::Notice(_)
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::RewindFailed { .. }
+        )
     })
     .collect();
+    let notice = |n: &str| AgentEvent::Notice(n.into());
     assert_eq!(
-        notices,
+        answers,
         [
-            "fake-acp cannot steer a running turn",
-            "fake-acp cannot compact its context on request",
-            "fake-acp cannot rewind its session",
-            "fake-acp cannot stop a subagent",
-            "fake-acp cannot go on remote control",
-            "no pending permission request none",
+            notice("fake-acp cannot steer a running turn"),
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(
+                    "fake-acp cannot compact its context on request".into()
+                )
+            },
+            AgentEvent::RewindFailed {
+                reason: "fake-acp cannot rewind its session".into()
+            },
+            notice("fake-acp cannot stop a subagent"),
+            notice("fake-acp cannot go on remote control"),
+            notice("no pending permission request none"),
         ]
     );
     assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);

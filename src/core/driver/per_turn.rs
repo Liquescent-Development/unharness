@@ -3,8 +3,9 @@
 //! For harnesses whose CLI has no long-lived stdin protocol (codex
 //! `exec`), every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
 //! as the long-lived transports, and answers a command it cannot carry out
-//! as the long-lived loop does: one `Notice`, worded from the harness's
-//! [`Capabilities`].
+//! as the long-lived loop does: one event, worded from the harness's
+//! [`Capabilities`], which ends what the TUI waits on after such a
+//! command (a compaction's turn, a rewind).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{asks, cannot, exited};
+use super::{asks, exited};
 use crate::core::caps::{Capabilities, PermissionPolicy};
 use crate::core::event::{AgentEvent, StopReason};
 use crate::core::ids::{HarnessId, ModelRef, ProviderId};
@@ -129,9 +130,9 @@ async fn drive(
                     if let Some(mut p) = current.take() { p.kill().await; }
                     return;
                 };
-                let (what, offered) = asks(&cmd, &caps);
+                let (refusal, offered) = asks(&cmd, &caps);
                 if !offered {
-                    let _ = events.send(cannot(protocol.harness(), what)).await;
+                    let _ = events.send(refusal.event(protocol.harness())).await;
                     continue;
                 }
                 match cmd {
@@ -143,7 +144,7 @@ async fn drive(
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. }
                     | SessionCommand::RespondPermission { .. } => {
-                        let _ = events.send(cannot(protocol.harness(), what)).await;
+                        let _ = events.send(refusal.event(protocol.harness())).await;
                     }
                     SessionCommand::SendTurn { text, attachments } => {
                         if current.is_some() {
@@ -397,9 +398,11 @@ mod tests {
 
     // What a CLI run once per turn cannot do is answered as the long-lived
     // loop answers it, also where the harness declares it, and so is what
-    // the harness does not declare: one notice each, and nothing runs.
+    // the harness does not declare: one event each, and nothing runs. A
+    // compaction ends the turn the TUI runs it as, and a rewind fails
+    // (#288: Codex under `auto` come to `exec` left the TUI compacting).
     #[tokio::test]
-    async fn a_command_it_cannot_carry_out_is_answered_with_one_notice() {
+    async fn a_command_it_cannot_carry_out_is_answered_once() {
         let mut every_but_interrupt = Capabilities {
             steer: true,
             compaction: true,
@@ -433,24 +436,37 @@ mod tests {
         ] {
             h.send(cmd).await.unwrap();
         }
-        let turn = collect_turn(&mut h).await;
-        let said: Vec<&AgentEvent> = turn
-            .iter()
-            .take_while(|ev| **ev != AgentEvent::TurnStarted)
-            .collect();
+        let mut said = Vec::new();
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev == AgentEvent::TurnStarted {
+                break;
+            }
+            said.push(ev);
+        }
         let notice = |what: &str| AgentEvent::Notice(format!("codex cannot {what}"));
         assert_eq!(
             said,
             [
-                &notice("steer a running turn"),
-                &notice("rewind its session"),
-                &notice("interrupt a turn"),
-                &notice("stop a subagent"),
-                &notice("take an answer to a permission request"),
-                &notice("go on remote control"),
-                &notice("compact its context on request"),
+                notice("steer a running turn"),
+                AgentEvent::RewindFailed {
+                    reason: "codex cannot rewind its session".into()
+                },
+                notice("interrupt a turn"),
+                notice("stop a subagent"),
+                notice("take an answer to a permission request"),
+                notice("go on remote control"),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(
+                        "codex cannot compact its context on request".into()
+                    )
+                },
             ]
         );
+        let turn = collect_turn(&mut h).await;
         // Nothing reached a CLI before the turn: the first is the turn's.
         assert!(
             turn.contains(&AgentEvent::SessionStarted {
