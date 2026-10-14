@@ -518,7 +518,9 @@ impl<P: StreamProtocol> Loop<P> {
         if self.stop_waiting() {
             // Its grace starts now rather than with the answer.
             self.proc.end();
-        } else if !self.shutting_down {
+        } else if !self.shutting_down && self.waiting.is_none() {
+            // A CLI ending for a restart was ended as a shutdown ends it:
+            // it keeps its grace, and nothing is started in its place.
             self.proc.kill().await;
         }
     }
@@ -671,6 +673,10 @@ impl<P: StreamProtocol> Loop<P> {
     /// behind what was being told: the CLI is then ended as asked, and
     /// killed otherwise.
     async fn gone(&mut self) {
+        // Ended already, as a shutdown ends it, for a restart.
+        if self.waiting.is_some() {
+            return;
+        }
         if self.shutting_down {
             // Nothing will wait for an answer now: its grace starts.
             if self.stop_waiting() {
@@ -810,6 +816,8 @@ mod tests {
         restart_as: Option<String>,
         /// `on_deadline` says so once, then.
         deadline: Option<Instant>,
+        /// How often it was asked how its CLI ends.
+        shutdowns: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Toy {
@@ -821,6 +829,7 @@ mod tests {
                 restart: None,
                 restart_as: None,
                 deadline: None,
+                shutdowns: Default::default(),
             }
         }
     }
@@ -892,6 +901,8 @@ mod tests {
         }
 
         fn shutdown(&mut self) -> Shutdown {
+            self.shutdowns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match &self.end_with {
                 Some(first) => Shutdown::End {
                     first: first.clone(),
@@ -1425,13 +1436,16 @@ mod tests {
     }
 
     // A shutdown while the CLI ends for a restart ends the session: no CLI
-    // is started again, and what waited for the restart is dropped.
+    // is started again, what waited for the restart is dropped, and the
+    // CLI, ended already as a shutdown ends it, is not ended a second time
+    // (what it is sent first would go to its closed input).
     #[tokio::test]
     async fn a_shutdown_during_a_restart_starts_nothing_again() {
         let toy = Toy {
             restart: Some(|| sh("echo started; cat >/dev/null")),
             ..Toy::new()
         };
+        let shutdowns = toy.shutdowns.clone();
         let mut h = run("echo $$; cat >/dev/null; sleep 0.3", toy);
         pid(&mut h).await;
         h.send(opus()).await.unwrap();
@@ -1441,6 +1455,30 @@ mod tests {
             until_exited(&mut h).await,
             [AgentEvent::ProcessExited { code: Some(0) }]
         );
+        assert_eq!(shutdowns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // The handle dropped while the CLI ends for a restart: it keeps its
+    // grace, as a CLI shut down does, and none is started in its place.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_handle_dropped_during_a_restart_leaves_the_cli_its_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let toy = Toy {
+            restart_as: Some(format!("touch {}; cat >/dev/null", started.display())),
+            ..Toy::new()
+        };
+        let mut h = run(DEAF, toy);
+        let cli = pid(&mut h).await;
+        h.send(opus()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(h);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!started.exists(), "started again with no session");
     }
 
     // A choice the session cannot take is told, and nothing else is done:

@@ -1752,10 +1752,16 @@ async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
     let fixture = repo().join("src/harness/agy/fixtures/turn.jsonl");
     let pids = fake._tmp.path().join("pids");
     let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
-    cfg.env.push((
-        "UNHARNESS_FAKE_BACKGROUND".into(),
-        format!("group:{}", pids.display()),
-    ));
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_BACKGROUND".into(),
+            format!("group:{}", pids.display()),
+        ),
+        // Each process says when it starts, and one whose input closed
+        // takes a while to finish.
+        ("UNHARNESS_FAKE_ARGV".into(), "1".into()),
+        ("UNHARNESS_FAKE_LINGER".into(), "0.5".into()),
+    ]);
     let mut handle = unharness::harness::agy::AgyHarness
         .start_session(cfg)
         .unwrap();
@@ -1789,6 +1795,13 @@ async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
     let (second, _) = background_pids(&pids).await;
     assert_ne!(first, second);
     assert!(!running(first), "started beside the process it replaces");
+    // The first was ended (its input closed), not killed, and had finished
+    // before the second started.
+    let started: Vec<String> = logged(&fake)
+        .into_iter()
+        .filter(|l| l == "argv" || l == "ended")
+        .collect();
+    assert_eq!(started, ["argv", "ended", "argv"]);
     let turns: Vec<Value> = fake
         .sent_lines()
         .into_iter()
