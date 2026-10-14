@@ -268,6 +268,18 @@ fn codex_turn_choosing(cwd: &Path, model: Option<&str>, effort: Option<&str>) {
     app.quit();
 }
 
+/// What resuming says of the choices it did not take reaches the
+/// transcript (`Controller::take_conversation` decides it, the TUI pushes
+/// it).
+#[test]
+fn a_model_left_on_resume_is_said() {
+    let tmp = tempfile::tempdir().unwrap();
+    codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
+    let app = resume_codex_with(tmp.path(), None, None, "ollama");
+    assert!(notices(&app).iter().any(|n| n
+        == "the model chosen for Codex in this conversation (openai/gpt-chosen) is not used: Codex is on ollama now"));
+}
+
 #[test]
 fn resuming_in_the_tui_does_not_carry_one_conversations_model_into_another() {
     let tmp = tempfile::tempdir().unwrap();
