@@ -174,6 +174,12 @@ pub struct Capabilities {
     /// A session can be started before anything is sent to it and leave
     /// nothing behind, so the TUI starts it as soon as it is idle without
     /// one, to have what it reports (its commands) before the first prompt.
+    ///
+    /// Read by `App::start_when_idle` alone. It stays a flag (#275): it
+    /// decides whether a process is started at all before the first
+    /// prompt, when there is no driver yet to decide anything (agy 1.3.2
+    /// writes a conversation for every process it starts,
+    /// `docs/dev/slash-commands.md`).
     pub start_unprompted: bool,
     /// The session can be put on the vendor's own remote control (Claude's
     /// Remote Control: claude.ai/code and the Claude app), and taken off it
@@ -242,6 +248,12 @@ pub struct SubagentSupport {
     pub stop: bool,
     /// One that ends between turns is reported to the agent in a turn the
     /// harness starts by itself.
+    ///
+    /// Read by `headless::Headless` alone, which counts that turn's end
+    /// before a `--print` run is over (`docs/dev/headless.md`); the TUI
+    /// shows such a turn as it comes. It stays a flag (#275): that the
+    /// turn will come is known of the harness (Claude Code), not said on
+    /// its stream before the turn starts.
     pub report_turn: bool,
     /// The end of one can go unreported (Mistral Vibe tells it only when
     /// the agent waits for the subagent), so a print run does not wait
