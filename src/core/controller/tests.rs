@@ -542,3 +542,101 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     );
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"vertex".into()));
 }
+
+/// A conversation as the store gives it back, with something in each
+/// field `ConversationState` takes from it.
+fn saved_conversation() -> Conversation {
+    use crate::core::conversations::{BlockRecord, CheckpointRecord, TurnAnchorRecord};
+    let mut c = Conversation::new(CODEX);
+    c.title = "the task".into();
+    c.sessions.insert(CLAUDE, "claude-1".into());
+    c.sessions.insert(CODEX, "codex-1".into());
+    c.bookmarks.insert(CLAUDE, 2);
+    c.blocks = vec![
+        BlockRecord::User {
+            text: "the task".into(),
+        },
+        BlockRecord::Assistant {
+            text: "done".into(),
+            sender: "claude".into(),
+            secs: Some(1.5),
+        },
+        BlockRecord::User {
+            text: "and then".into(),
+        },
+    ];
+    c.usage.insert(
+        CODEX,
+        crate::core::Usage {
+            input: 7,
+            ..Default::default()
+        },
+    );
+    c.anchors.push(TurnAnchorRecord {
+        block: 0,
+        harness: CLAUDE,
+        id: "u1".into(),
+    });
+    c.checkpoints.push(CheckpointRecord {
+        block: 2,
+        commit: "abc".into(),
+    });
+    c.fork_pending = vec![CLAUDE, CODEX];
+    c
+}
+
+/// A conversation installed and saved again is what was saved: nothing
+/// is lost or added between the store and the controller.
+#[test]
+fn a_conversation_installed_is_saved_as_it_came() {
+    let config = Config::default();
+    let saved = saved_conversation();
+    let mut c = controller(None);
+    c.install(saved.clone(), CODEX);
+    let state = &c.conversation;
+    assert_eq!(state.session_ids, saved.sessions);
+    assert_eq!(state.transcript.blocks.len(), 3);
+    assert_eq!(state.session_usage.input, 7);
+    assert_eq!(state.first_prompt.as_deref(), Some("the task"));
+    assert!(state.fork_pending.contains(&CLAUDE) && state.fork_pending.contains(&CODEX));
+
+    c.sync_conversation(&config, CODEX, false);
+    let again = Conversation {
+        updated_at: saved.updated_at.clone(),
+        ..c.conversation.record.clone()
+    };
+    assert_eq!(again, saved);
+}
+
+/// A conversation that cannot be written is said once in a run, not at
+/// every turn.
+#[test]
+fn a_save_that_fails_is_said_once() {
+    let config = Config::default();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("conversations"), "in the way").unwrap();
+    let mut c = Controller::new(
+        registry(),
+        &config,
+        launch(None),
+        Keeping {
+            store: ConversationStore::at(dir.path().to_path_buf()),
+            checkpoints: None,
+        },
+    );
+    c.install(saved_conversation(), CODEX);
+    for _ in 0..3 {
+        c.persist(&config, CODEX, true);
+    }
+    let said = c
+        .conversation
+        .transcript
+        .blocks
+        .iter()
+        .filter(|b| {
+            matches!(b, crate::core::transcript::Block::Error(e)
+                if e.starts_with("could not save the conversation"))
+        })
+        .count();
+    assert_eq!(said, 1);
+}
