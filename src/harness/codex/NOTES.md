@@ -13,6 +13,21 @@ everything before the reaper, now ends with the turn on `exec` and
 with the session on `app-server`. What else Codex keeps between turns
 (MCP servers) is unverified.
 
+`transport = "auto"` is resolved once per run (`app-server --help`), and
+declares app-server's capabilities. A Codex without `app-server` runs
+`exec`, whose session reports first what `exec` lacks of them, kept for
+the run (`CapsUpdate::lacks` and `lacks_policies`: steering, compaction,
+rewind, stopping a subagent, interactive permissions and `ask`; fork,
+plan mode and questions as flags), so that the TUI stops offering them.
+A `/compact` or rewind sent to `exec` all the same reaches no CLI: the
+driver ends the compaction's turn with "codex cannot compact its context
+on request" as its error, and answers the rewind with `RewindFailed`
+("not supported"). `exec` branches no thread: a session asked to fork
+starts new and says so (`SessionReplaced`) rather than resuming the
+original. All of this was checked against `scripts/fake-harness.py`
+alone, which fails `app-server --help`; no Codex without `app-server`
+was run (#288).
+
 ## `turn/plan/updated`
 
 Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
