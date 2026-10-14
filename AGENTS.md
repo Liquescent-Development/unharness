@@ -82,9 +82,10 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   workspace: an in-tree `unharness.toml` is not read by anything. The config and state
   directories are never writable in the sandbox. A config file that does
   not parse is an error, never a silent fall back to defaults, and so is
-  a harness table that is wrong (an unknown policy or Codex transport, a
-  mode map or a provider that is not whole, an ACP agent without a
-  command, a key its harness does not take, `registry::config_errors`):
+  a harness table that is wrong (an unknown policy, Codex transport or
+  protocol, a mode map or a provider that is not whole, an ACP agent without a
+  command, a key its harness does not take, a table no harness takes, a
+  key unharness no longer takes, `registry::config_errors`):
   a run, `switch` and `models` stop on it in `Registry::from_config`, and
   `doctor` names it, leaves out the harness it could not build (no
   built-in or preset takes its name) and exits 1 (#217).

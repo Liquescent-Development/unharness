@@ -5140,7 +5140,7 @@ async fn claude_remote_control_turns_on_withdraws_remote_answers_and_turns_off()
 /// `VIBE_*` variable from the environment the tests run in (#219).
 fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
-        command: vec![fake_harness().to_string_lossy().into_owned()],
+        command: Some(vec![fake_harness().to_string_lossy().into_owned()]),
         ..Default::default()
     })
     .unwrap()
@@ -5153,7 +5153,7 @@ fn vibe_harness(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
 /// sessions list no `unharness-ask`.
 fn vibe_harness_recorded_in_ask(profiles: &Path) -> unharness::harness::vibe::VibeHarness {
     unharness::harness::vibe::VibeHarness::from_settings(&unharness::config::HarnessSettings {
-        command: vec![fake_harness().to_string_lossy().into_owned()],
+        command: Some(vec![fake_harness().to_string_lossy().into_owned()]),
         rest: toml::toml! {
             modes = { ask = "ask", auto = "smart-approve", bypass = "auto-approve" }
         },

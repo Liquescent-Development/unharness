@@ -1050,37 +1050,34 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         "[harnesses.gemini]: unknown policy 'always'",
         "[harnesses.nocmd] protocol = \"acp\" but no command",
         "[harnesses.claud] default_policy: unknown policy 'nah'",
+        "[harnesses.claud]: no harness's table is named claud",
         "[harnesses.vibe] not shown: the table is wrong",
         "[harnesses.gemini] not shown: the table is wrong",
         "[harnesses.nocmd] not shown: the table is wrong",
         "Active Default: [harnesses.gemini] is wrong (see Config above)",
-        // A table with an error that is not left out is still unknown.
-        "unknown harness 'claud'",
         "fix them before starting unharness",
     ] {
         assert!(stdout.contains(said), "{said}: {stdout}");
     }
     // The built-in vibe (and its `vibe-acp`) and the preset are not shown
-    // in their place; the harnesses whose tables are whole are.
-    for not_said in [
-        "Mistral Vibe",
-        "vibe-acp",
-        "Gemini",
-        "unknown harness 'vibe'",
-        "unknown harness 'gemini'",
-        "unknown harness 'nocmd'",
-    ] {
+    // in their place; the harnesses whose tables are whole are. A table
+    // with an error, one no harness reads among them, is named under
+    // Config only.
+    for not_said in ["Mistral Vibe", "vibe-acp", "Gemini", "unknown harness"] {
         assert!(!stdout.contains(not_said), "{not_said}: {stdout}");
     }
     assert!(stdout.contains("Claude Code") && stdout.contains("Conversations:"));
     assert!(stdout.contains("Workspace Context:\n  Root:"), "{stdout}");
 
     // With the tables fixed doctor shows vibe and the agent and ends well.
+    // A preset's table whose binary is not on PATH is for that preset,
+    // not for an unknown harness.
     std::fs::write(
         tmp.path().join("config/unharness/config.toml"),
         "[harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
          [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
-         display_name = \"My Gemini\"\n",
+         display_name = \"My Gemini\"\n\
+         [harnesses.opencode]\ndefault_model = \"m\"\n",
     )
     .unwrap();
     let out = unharness_in(tmp.path(), &["doctor"]);
@@ -1090,6 +1087,13 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         stdout.contains("Mistral Vibe")
             && stdout.contains("My Gemini")
             && !stdout.contains("will not start"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "[harnesses.opencode]: the OpenCode preset is not installed (binary 'opencode' \
+             not found on PATH)"
+        ) && !stdout.contains("unknown harness"),
         "{stdout}"
     );
 }
@@ -1132,4 +1136,68 @@ fn switch_and_models_fail_on_a_wrong_harness_table_as_a_run_does() {
         stderr.contains("[harnesses.gemini] protocol = \"acp\" but no command"),
         "{stderr}"
     );
+}
+
+/// A table under another name for a harness, a key unharness no longer
+/// takes, and `command` or `display_name` where nothing reads them, in
+/// the global file and a workspace's: `doctor` names each under Config
+/// only, also another name for a harness it leaves out, and exits 1; a
+/// run, `switch` and `models` stop on the first (#281).
+#[test]
+fn tables_and_keys_nothing_reads_stop_a_run() {
+    let tmp = scratch_with_config(
+        "[harnesses.agy]\ncommand = [\"/opt/agy\"]\n\
+         [harnesses.claude]\npersist_sessions = true\n\
+         [harnesses.codex]\ncommand = [\"/opt/codex\"]\n",
+    );
+    let store = tmp.path().join("config/unharness/workspaces");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        unharness::config::Config::workspace_path_in(&store, &tmp.path().join("ws")),
+        "[harnesses.antigravity]\ndefault_model = \"m\"\n\
+         [harnesses.claude-code]\nrelocate_config = false\n\
+         [harnesses.pi]\ndisplay_name = \"My pi\"\n",
+    )
+    .unwrap();
+    // In the order of their tables' names.
+    let errors = [
+        "[harnesses.agy] command: agy does not take this key; to run another agy binary, set \
+         binary",
+        "[harnesses.antigravity]: antigravity is another name for agy; its table is \
+         [harnesses.agy]",
+        "[harnesses.claude] persist_sessions: unharness no longer takes this key, which did \
+         nothing; delete the line",
+        "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+         [harnesses.claude]",
+        "[harnesses.codex] command: codex does not take this key; to run another codex \
+         binary, set binary",
+        "[harnesses.pi] display_name: pi does not take this key",
+    ];
+
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    for said in errors {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+    for said in [
+        "[harnesses.agy] not shown: the table is wrong",
+        "[harnesses.codex] not shown: the table is wrong",
+        "[harnesses.pi] not shown: the table is wrong",
+        "Claude Code",
+    ] {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+    assert!(!stdout.contains("unknown harness"), "{stdout}");
+
+    for args in [
+        &["--print", "--sandbox", "off", "hi"][..],
+        &["switch", "claude"],
+        &["models", "--harness", "claude"],
+    ] {
+        let out = unharness_in(tmp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(errors[0]), "{args:?}: {stderr}");
+    }
 }

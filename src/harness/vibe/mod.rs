@@ -419,11 +419,10 @@ impl VibeHarness {
     /// provider that is not whole are both reported
     /// ([`crate::config::TableErrors`]).
     pub fn from_settings(settings: &HarnessSettings) -> Result<Self> {
-        let own: Own = settings.own(HarnessId::VIBE.as_str())?;
-        let command = if settings.command.is_empty() {
-            vec![COMMAND.to_string()]
-        } else {
-            settings.command.clone()
+        let own: Own = settings.own_of_agent(HarnessId::VIBE.as_str())?;
+        let command = match settings.command.as_deref() {
+            None | Some([]) => vec![COMMAND.to_string()],
+            Some(command) => command.to_vec(),
         };
         let modes = if own.modes.is_empty() {
             Ok(mode_map())
@@ -1831,7 +1830,7 @@ provider = "mine"
         // A `[harnesses.vibe]` table sets the command and the rest in place
         // of the built-in's; the choice at spawn stays.
         let settings = HarnessSettings {
-            command: vec!["/opt/vibe/bin/vibe-acp".into()],
+            command: Some(vec!["/opt/vibe/bin/vibe-acp".into()]),
             display_name: Some("Vibe (mine)".into()),
             rest: toml::toml! { asks_permission = false },
             ..Default::default()
@@ -2487,7 +2486,7 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
 
     /// The providers a `[harnesses.vibe]` table defines, checked.
     fn providers_of(table: &HarnessSettings) -> Result<Vec<Provider>> {
-        providers(&table.own::<Own>("vibe")?.providers)
+        providers(&table.own_of_agent::<Own>("vibe")?.providers)
     }
 
     fn lan() -> Provider {
