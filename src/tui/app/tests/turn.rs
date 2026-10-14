@@ -108,7 +108,7 @@ fn submit_starts_session_then_sends_turn() {
 #[test]
 fn an_interrupt_the_turn_ignores_ends_the_process() {
     use crate::core::guard::{Guarded, Watch};
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.session_alive = true;
     app.session_ids.insert(HarnessId::PI, "pi-1".into());
@@ -196,7 +196,7 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
 
 #[test]
 fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.session_alive = true;
     app.submit_prompt("look".into());

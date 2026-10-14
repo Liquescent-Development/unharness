@@ -1,7 +1,7 @@
 use super::*;
+use crate::core::transcript::DEFAULT_BRIDGE_MAX_CHARS;
 use crate::tui::app::switch::handoff_prompt;
 use crate::tui::modal::ListPicker;
-use crate::tui::transcript::DEFAULT_BRIDGE_MAX_CHARS;
 
 #[test]
 fn no_handoff_is_asked_for_while_subagents_are_at_work() {
@@ -356,7 +356,7 @@ fn a_harness_that_is_not_installed_cannot_be_chosen() {
     assert_eq!(app.active, HarnessId::CLAUDE);
     assert!(app.transcript.blocks.iter().any(|b| matches!(
         b,
-        crate::tui::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
+        crate::core::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
     )));
 
     // A picker with no rows closes on Enter, as Esc would.

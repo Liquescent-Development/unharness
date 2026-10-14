@@ -135,7 +135,7 @@ pub(crate) fn test_app(harness: HarnessId) -> App {
     test_app_in(tmp.keep(), harness, None, false)
 }
 
-fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::super::transcript::AgentRun {
+fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::transcript::AgentRun {
     app.transcript
         .agent(want)
         .unwrap_or_else(|| panic!("no subagent on {want}"))
@@ -199,7 +199,7 @@ fn over_budget_app() -> App {
 }
 
 fn has_notice(app: &App, text: &str) -> bool {
-    use super::super::transcript::Block;
+    use super::transcript::Block;
     app.transcript
         .blocks
         .iter()
@@ -265,7 +265,7 @@ fn pi_gate_request(id: &str, command: &str) -> AgentEvent {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    use super::super::transcript::Block;
+    use super::transcript::Block;
     app.transcript
         .blocks
         .iter()

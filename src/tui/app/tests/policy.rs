@@ -377,7 +377,7 @@ fn a_policy_the_harness_lacks_cannot_be_chosen() {
     app.handle_slash_command("/policy auto");
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
     assert!(app.transcript.blocks.iter().any(
-        |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("'auto'") && e.contains("ask, bypass"))
+        |b| matches!(b, crate::core::transcript::Block::Error(e) if e.contains("'auto'") && e.contains("ask, bypass"))
     ));
 
     for c in "/policy a".chars() {

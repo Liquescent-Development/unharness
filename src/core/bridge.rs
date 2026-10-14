@@ -677,7 +677,7 @@ fn first_lines(s: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::transcript::Transcript;
+    use crate::core::transcript::Transcript;
     use serde_json::json;
     use std::time::Duration;
 

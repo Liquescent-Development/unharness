@@ -3,7 +3,7 @@ use crate::tui::modal::AlwaysDraft;
 
 #[test]
 fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     app.session_alive = true;
     app.rules
@@ -87,7 +87,7 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
 /// it is written the rule answers again, and says so.
 #[test]
 fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let notices = |app: &App| -> Vec<String> {
         app.transcript
             .blocks
@@ -315,7 +315,7 @@ fn a_request_of_a_session_the_picker_ends_goes_with_it() {
 
 #[test]
 fn a_withdrawn_request_closes_unanswered() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.session_alive = true;
     app.start_generation();
@@ -358,7 +358,7 @@ fn a_request_no_rule_can_cover_says_so_and_stays_a_question() {
 
 #[test]
 fn a_rule_that_cannot_be_saved_still_allows_this_once() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     app.session_alive = true;
     // Something that is not a rules file is in the way.
@@ -382,7 +382,7 @@ fn a_rule_that_cannot_be_saved_still_allows_this_once() {
 
 #[test]
 fn allow_lists_the_rules_and_where_they_are_kept() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     app.handle_slash_command("/allow");
     app.rules

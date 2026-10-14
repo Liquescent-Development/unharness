@@ -2,9 +2,9 @@
 
 use super::App;
 use crate::core::conversations::{Conversation, now_rfc3339, truncate_title};
+use crate::core::transcript::Transcript;
 use crate::core::{ContextUsage, Usage};
 use crate::tui::modal::{ListPicker, Modal};
-use crate::tui::transcript::Transcript;
 
 impl App {
     /// Printed after the TUI closes, when a conversation was saved.

@@ -3,9 +3,9 @@
 use super::{Action, App, Handoff};
 use crate::config::BridgeSummary;
 use crate::core::conversations::{CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, save_context_windows};
+use crate::core::transcript::DEFAULT_BRIDGE_MAX_CHARS;
 use crate::core::{ContextUsage, HarnessId, ModelRef, Usage};
 use crate::tui::modal::{ListPicker, Modal};
-use crate::tui::transcript::DEFAULT_BRIDGE_MAX_CHARS;
 
 impl App {
     /// How long the bridge to `harness` may be: `bridge_max_chars` when

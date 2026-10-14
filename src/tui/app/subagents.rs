@@ -3,8 +3,8 @@
 use super::{Action, App, SubagentOption, SubagentRow, TranscriptView};
 use crate::core::SessionCommand;
 use crate::core::controller::subagents_refusal;
+use crate::core::transcript::Transcript;
 use crate::tui::modal::{ListPicker, Modal};
-use crate::tui::transcript::Transcript;
 
 impl App {
     /// The subagents at work whose end the harness reports. Only these

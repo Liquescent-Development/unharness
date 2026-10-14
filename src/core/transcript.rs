@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::code::{sanitize, strip_controls};
+use super::text::{sanitize, strip_controls};
 use crate::core::conversations::{AgentRecord, BlockRecord, ShellStatus};
 use crate::core::{HookOutcome, SubagentStatus};
 

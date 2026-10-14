@@ -1,6 +1,7 @@
 //! Harness-agnostic core: identifiers, capabilities, the event model, and the
 //! session/process plumbing every harness transport is built on.
 
+pub mod bridge;
 pub mod caps;
 pub mod checkpoints;
 pub mod controller;
@@ -19,7 +20,10 @@ pub mod registry;
 pub mod rules;
 pub mod sandbox;
 pub mod session;
+pub mod shell;
 pub mod testing;
+pub mod text;
+pub mod transcript;
 
 pub use caps::{
     Capabilities, Choices, McpChannel, McpSupport, PermissionPolicy, PolicyResolution,

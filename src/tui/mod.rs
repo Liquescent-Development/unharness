@@ -2,7 +2,6 @@
 //! the active harness session's event stream.
 
 pub mod app;
-pub mod bridge;
 pub mod clipboard;
 pub mod code;
 pub mod drop;
@@ -17,8 +16,6 @@ pub mod modal;
 pub mod prompt;
 pub mod rows;
 pub mod selection;
-pub mod shell;
-pub mod transcript;
 pub mod ui;
 
 use std::collections::{HashMap, VecDeque};
@@ -50,6 +47,7 @@ use crate::core::Rules;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
+use crate::core::shell;
 use crate::core::{
     HarnessId, McpServer, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle,
 };
@@ -891,7 +889,7 @@ async fn run_actions(
                 // command typed here is confined no less than the agent.
                 let started = app
                     .session_sandbox()
-                    .and_then(|sandbox| self::shell::spawn(&command, &app.cwd, &sandbox));
+                    .and_then(|sandbox| shell::spawn(&command, &app.cwd, &sandbox));
                 match started {
                     Ok(p) => *shell = Some(p),
                     Err(e) => app.shell_failed(format!("{e:#}")),
@@ -1030,6 +1028,7 @@ fn start_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::transcript;
     use crate::tui::app::tests::test_app;
 
     const NONE: KeyModifiers = KeyModifiers::NONE;
@@ -1570,7 +1569,7 @@ mod tests {
         app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.active, HarnessId::CODEX);
         assert!(app.transcript.blocks.iter().any(
-            |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("still exiting"))
+            |b| matches!(b, crate::core::transcript::Block::Error(e) if e.contains("still exiting"))
         ));
     }
 

@@ -12,10 +12,7 @@ use ratatui::text::Line;
 use super::history::PromptHistory;
 use super::modal::{HarnessOption, Modal};
 use super::selection::{Point, RowCopy, Selection};
-// The files below, and their tests, reach these through this module
-// (`super::transcript`, `super::shell`, ...), as when they were one file.
-use super::transcript::{self, Transcript, tool_summary};
-use super::{bridge, herdr, markdown, shell};
+use super::{herdr, markdown};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::controller::{Controller, Launch};
@@ -32,6 +29,11 @@ use crate::core::{
     Usage,
 };
 use crate::harness::ModelInfo;
+
+// The files below, and their tests, reach these through this module
+// (`super::transcript`, `super::shell`, ...), as when they were one file.
+use crate::core::transcript::{self, Transcript, tool_summary};
+use crate::core::{bridge, shell};
 
 mod accessors;
 mod choices;

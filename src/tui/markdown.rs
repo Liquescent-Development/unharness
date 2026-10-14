@@ -15,9 +15,10 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::code::{code_lines, diff_lines, sanitize, sanitize_tabs};
+use super::code::{code_lines, diff_lines};
 use super::rows::{Part, Rows};
 use super::selection::{Join, RowCopy};
+use crate::core::text::{sanitize, sanitize_tabs};
 
 /// `done` when no more of `text` is coming: a fence it leaves open is
 /// then not still streaming.

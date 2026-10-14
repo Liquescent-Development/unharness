@@ -425,7 +425,7 @@ pub fn run_import(cwd: &Path, workspace_root: Option<&Path>, args: &[String]) ->
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let desc = crate::tui::transcript::truncate_chars(&desc, 90);
+        let desc = crate::core::transcript::truncate_chars(&desc, 90);
         println!(
             "  {:>2}. {:<28} {:<16} {:<10} {}",
             i + 1,

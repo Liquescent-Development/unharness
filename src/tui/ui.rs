@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::{App, CodeRows, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
-    sanitize, wrap_words, wrap_words_joined, written_lines,
+    wrap_words, wrap_words_joined, written_lines,
 };
 use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
@@ -25,13 +25,14 @@ use super::modal::{
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
-use super::transcript::{
-    Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
-    tool_summary, tool_summary_full, truncate_chars, waits_on_user,
-};
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
+use crate::core::text::sanitize;
+use crate::core::transcript::{
+    Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
+    tool_summary, tool_summary_full, truncate_chars, waits_on_user,
+};
 use crate::core::{
     HarnessId, HookOutcome, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus,
 };
@@ -4648,7 +4649,7 @@ mod tests {
         assert!(app.transcript.agent("s5").is_some());
         // That it was taken off is saved with the conversation.
         let saved = app.store.load(&app.conversation.id).unwrap();
-        let back = super::super::transcript::Transcript::from_records(&saved.blocks);
+        let back = crate::core::transcript::Transcript::from_records(&saved.blocks);
         assert_eq!(back.agents().len(), 6);
         assert_eq!(back.listed_agents().len(), 5);
 
