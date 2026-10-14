@@ -10,9 +10,13 @@
 //! conversation it runs ([`ConversationState`]): installed as one, saved,
 //! and its file checkpoints.
 //!
-//! The TUI calls into it and reads from it; what it wants shown comes back
-//! as values (notices, refusals) for the TUI to push to the transcript.
-//! `headless` resolves its policy through the same [`PolicyState`].
+//! The TUI calls into it and reads from it. What it says of the
+//! conversation it holds (a save that failed, a checkpoint that could not
+//! be taken, a resumed conversation's choices, a file restore undone) it
+//! puts in that conversation's transcript itself; what it says of a choice
+//! or a policy comes back as values (notices, refusals) for the TUI to
+//! push there. `headless` resolves its policy through the same
+//! [`PolicyState`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
