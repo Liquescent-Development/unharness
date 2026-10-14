@@ -77,6 +77,9 @@ impl App {
     /// again on it; a stored session that keeps what it ran is left for a
     /// new one ([`App::renewal_without_session`]).
     pub fn set_provider(&mut self, provider: ProviderId) {
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
         let changed = self.current_provider() != Some(&provider);
         let between = self.between_turns(Choice::Provider);
         if changed && between && self.refused_between_turns(Choice::Provider) {
@@ -109,6 +112,7 @@ impl App {
             // Its line says how the session took it, with its answer.
             self.choice_sent(
                 SessionCommand::SetProvider(provider.clone()),
+                Choice::Provider,
                 Some(provider),
             );
         } else {
@@ -121,6 +125,9 @@ impl App {
     }
 
     pub fn set_model(&mut self, model: String) {
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
         let between = self.between_turns(Choice::Model);
         if between && self.refused_between_turns(Choice::Model) {
             return;
@@ -136,7 +143,7 @@ impl App {
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Model: {}", m.label()));
         let choice = format!("model {}", m.model);
-        self.apply_choice(between, SessionCommand::SetModel(m), &choice);
+        self.apply_choice(between, SessionCommand::SetModel(m), Choice::Model, &choice);
     }
 
     pub fn set_effort(&mut self, effort: String) {
@@ -158,6 +165,9 @@ impl App {
             ));
             return;
         }
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
         let between = self.between_turns(Choice::Effort);
         if between && self.refused_between_turns(Choice::Effort) {
             return;
@@ -168,7 +178,12 @@ impl App {
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Effort: {effort}"));
         let choice = format!("effort {effort}");
-        self.apply_choice(between, SessionCommand::SetEffort(Some(effort)), &choice);
+        self.apply_choice(
+            between,
+            SessionCommand::SetEffort(Some(effort)),
+            Choice::Effort,
+            &choice,
+        );
     }
 
     /// Carry out a model or effort just chosen (`cmd`, worded `choice`),
@@ -176,7 +191,7 @@ impl App {
     /// session that keeps what it ran is left for a new one; one nothing
     /// was sent to is started again with it (Claude would take an effort
     /// as a turn); one prompted is told, and says how it took it.
-    fn apply_choice(&mut self, between: bool, cmd: SessionCommand, choice: &str) {
+    fn apply_choice(&mut self, between: bool, cmd: SessionCommand, kind: Choice, choice: &str) {
         if let Some(why) = self.renewal_without_session() {
             self.session_renewed(&format!("{choice}: {why}"));
         } else if !self.session_alive {
@@ -184,7 +199,7 @@ impl App {
         } else if self.session_blank {
             self.shutdown_session();
         } else if between {
-            self.choice_sent(cmd, None);
+            self.choice_sent(cmd, kind, None);
         } else {
             self.actions.push_back(Action::Command(cmd));
         }
@@ -227,10 +242,15 @@ impl App {
     /// turn, nor while subagents whose end will be told are at work (they
     /// would end with the session or its process), nor, for a stored
     /// session that keeps what it ran, while the CLI before is still
-    /// exiting (the start that waits for it resumes that session).
+    /// exiting (the start that waits for it resumes that session). (No
+    /// choice is made while the session has not said how it took the one
+    /// before, `choice_pending`: it may be leaving for a new session, or
+    /// starting its CLI again, which would take an effort sent meanwhile
+    /// as a turn.)
     fn refused_between_turns(&mut self, choice: Choice) -> bool {
         let what = choice.what();
-        if self.stored_session_keeps().is_some() && self.refused_while_start_held() {
+        if self.start_held && self.stored_session_keeps().is_some() && self.refused_while_settling()
+        {
             return true;
         }
         if !self.session_alive {
@@ -252,7 +272,7 @@ impl App {
     /// its driver: as before the TUI starts one, what the session changed
     /// since its last turn is told now, its harness is prepared, and the
     /// next process is watched from its start.
-    fn choice_sent(&mut self, cmd: SessionCommand, provider: Option<ProviderId>) {
+    fn choice_sent(&mut self, cmd: SessionCommand, kind: Choice, provider: Option<ProviderId>) {
         self.check_guard();
         match self.harness().prepare() {
             Ok(Some(note)) => self.transcript.push_notice(note),
@@ -264,6 +284,7 @@ impl App {
         self.arm_guard();
         self.choice_pending = Some(PendingChoice {
             queued: self.queued.len(),
+            what: kind.what(),
             provider,
         });
         self.actions.push_back(Action::Command(cmd));
@@ -281,6 +302,34 @@ impl App {
             self.transcript.push_system(taken(provider));
         }
         Some(pending)
+    }
+
+    /// The choice the session was sent will not be answered: it is ending,
+    /// or gone. A stored session that keeps what it ran is forgotten, as
+    /// its answer would have had it, so that it is not resumed as it ran;
+    /// what was typed after the choice waits for Enter.
+    pub(super) fn choice_unanswered(&mut self) {
+        let Some(pending) = self.choice_answered(provider_line) else {
+            return;
+        };
+        if self.stored_session_keeps().is_some() {
+            self.forget_ids(self.active);
+        }
+        if self.queued.len() > pending.queued {
+            self.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
+    }
+
+    /// The choice the session was sent is taken: the first prompt typed
+    /// after it goes now, as it would have had it been typed then; those
+    /// held before it still wait.
+    pub(super) fn send_typed_after(&mut self, pending: &PendingChoice) {
+        if self.queued.len() > pending.queued {
+            self.send_queued(pending.queued);
+        }
     }
 
     pub fn open_provider_picker(&mut self) {
@@ -576,6 +625,8 @@ pub(super) struct PendingChoice {
     /// The prompts queued when it was sent: any after them were typed
     /// after it, and go when it has been taken.
     pub queued: usize,
+    /// What was chosen: `model`, `effort`, `provider`.
+    pub what: &'static str,
     /// A provider's line, which says how the session took it, waits for
     /// the answer.
     pub provider: Option<ProviderId>,

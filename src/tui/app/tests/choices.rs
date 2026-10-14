@@ -556,3 +556,212 @@ fn a_model_chosen_after_a_failed_start_starts_the_session() {
     app.start_when_idle();
     assert_eq!(starts(&app.take_actions()), 1);
 }
+
+/// Claude after a turn, with a provider sent to it and not yet answered.
+fn claude_taking_bedrock() -> App {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    app.sandbox = SandboxSetup::null(None);
+    app.submit_prompt("hello".into());
+    app.take_actions();
+    app.session_alive = true;
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: None,
+    });
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.set_provider("bedrock".into());
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetProvider(
+            "bedrock".into()
+        ))]
+    );
+    app
+}
+
+/// Until the session has said how it took a choice, another it takes only
+/// between turns is refused, and so is what would end the session: the
+/// first answer is the only one, and a prompt typed meanwhile goes to the
+/// process started for it, once.
+#[test]
+fn a_choice_waits_for_the_one_before_to_be_taken() {
+    let mut app = claude_taking_bedrock();
+    let still = format!(
+        "{} is still taking the provider just chosen; try again in a moment",
+        app.short_name()
+    );
+    app.set_provider("vertex".into());
+    // Nor a model or an effort, which would go to the new process (Claude
+    // would take an effort as a turn).
+    app.set_model("opus".into());
+    app.set_effort("high".into());
+    app.switch_harness(HarnessId::CODEX);
+    app.handle_slash_command("/clear");
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
+    assert_eq!(app.current_model(), None);
+    assert_eq!(app.current_effort(), None);
+    assert_eq!(app.active, HarnessId::CLAUDE);
+    assert_eq!(
+        notices(&app).iter().filter(|n| **n == still).count(),
+        5,
+        "{:?}",
+        notices(&app)
+    );
+    app.submit_prompt("again".into());
+    assert!(app.take_actions().is_empty());
+    app.on_event(AgentEvent::Restarted);
+    assert_eq!(app.take_actions(), vec![Action::turn("again")]);
+    assert!(app.is_generating && !app.session_blank);
+    // Taken: the next choice goes.
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.set_provider("vertex".into());
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetProvider(
+            "vertex".into()
+        ))]
+    );
+}
+
+/// Two vibe choices in one burst, over the bridge's budget: the second is
+/// refused, and the old session is asked for one handoff summary.
+#[test]
+fn a_second_vibe_choice_before_the_answer_is_refused() {
+    let (mut app, _cwd) = vibe_app();
+    app.bridge_max_chars = Some(300);
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.set_effort("off".into());
+    app.set_model("glm-5-3".into());
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetEffort(Some(
+            "off".into()
+        )))]
+    );
+    assert_eq!(app.current_model(), None);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n.ends_with("is still taking the effort just chosen; try again in a moment"))
+    );
+    vibe_renews(&mut app, "effort off");
+    let actions = app.take_actions();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|a| matches!(a, Action::SendTurn { .. }))
+            .count(),
+        1,
+        "{actions:?}"
+    );
+}
+
+/// Quitting before vibe has answered a choice: the stored session, which
+/// keeps what it last ran, is forgotten as the answer would have had it,
+/// so that a resume does not bring it back as it ran.
+#[test]
+fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    app.set_effort("off".into());
+    app.take_actions();
+    app.quit();
+    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    let saved = app.store.load(&app.conversation.id).unwrap();
+    assert!(!saved.sessions.contains_key(&HarnessId::VIBE));
+    assert_eq!(app.current_effort(), Some("off"));
+
+    // So does a session that exits before it answers.
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.set_model("glm-5-3".into());
+    app.submit_prompt("and now?".into());
+    app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    // What was typed after it waits for Enter.
+    assert_eq!(app.queued.len(), 1);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n == "1 queued prompt(s) held; press Enter to send the next")
+    );
+}
+
+/// Prompts held after an interrupted turn are the user's to send: a
+/// choice taken sends only what was typed after it.
+#[test]
+fn a_choice_taken_sends_only_what_was_typed_after_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    app.sandbox = SandboxSetup::null(None);
+    app.submit_prompt("hello".into());
+    app.take_actions();
+    app.session_alive = true;
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: None,
+    });
+    app.queue_prompt("held".into());
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Interrupted,
+    });
+    app.take_actions();
+    assert_eq!(app.queued.len(), 1);
+    app.set_provider("bedrock".into());
+    app.take_actions();
+    app.submit_prompt("after".into());
+    app.on_event(AgentEvent::Restarted);
+    assert_eq!(app.take_actions(), vec![Action::turn("after")]);
+    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.queued[0].text, "held");
+}
+
+/// A vibe choice for a stored session waits for the vibe before it to
+/// exit (the start held for it resumes that session); Claude's provider,
+/// which a held start takes up, does not.
+#[test]
+fn a_choice_waits_for_the_cli_before_only_where_the_stored_session_keeps_it() {
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.session_alive = false;
+    app.start_held = true;
+    app.set_effort("off".into());
+    assert_eq!(app.current_effort(), None);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n.ends_with("is still exiting; try again in a moment"))
+    );
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+
+    let mut app = claude_taking_bedrock();
+    app.on_event(AgentEvent::Restarted);
+    app.session_alive = false;
+    app.start_held = true;
+    app.set_provider("vertex".into());
+    assert_eq!(app.chosen_provider(), Some(&"vertex".into()));
+}

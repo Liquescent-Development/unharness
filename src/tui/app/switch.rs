@@ -76,7 +76,7 @@ impl App {
                 .push_error("finish or interrupt the current turn before switching harness");
             return;
         }
-        if self.refused_while_start_held() {
+        if self.refused_while_settling() {
             return;
         }
         if self.handoff_wanted_for(self.bridge_start(next), self.bridge_budget(next)) {

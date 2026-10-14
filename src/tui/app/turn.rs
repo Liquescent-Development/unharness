@@ -170,6 +170,12 @@ impl App {
 
     /// Send the oldest queued prompt, if idle. Returns whether one was sent.
     pub fn send_next_queued(&mut self) -> bool {
+        self.send_queued(0)
+    }
+
+    /// Send the queued prompt at `at`, if idle; the others keep their
+    /// places. Returns whether one was sent.
+    pub(super) fn send_queued(&mut self, at: usize) -> bool {
         if self.is_generating
             || self.shell.is_some()
             || self.choice_pending.is_some()
@@ -177,7 +183,7 @@ impl App {
         {
             return false;
         }
-        let Some(q) = self.queued.pop_front() else {
+        let Some(q) = self.queued.remove(at) else {
             return false;
         };
         // Whether it runs as a command depends on the harness: one typed
@@ -198,7 +204,7 @@ impl App {
                 format!("{}\n{}", q.text, self.input)
             };
             self.attachments.extend(q.attachments);
-            return self.send_next_queued();
+            return self.send_queued(at);
         }
         let pending = std::mem::replace(&mut self.attachments, q.attachments);
         self.submit_prompt(q.text);

@@ -113,8 +113,8 @@ impl App {
     /// The session's driver stopped taking commands.
     pub fn driver_gone(&mut self) {
         self.transcript.push_error("session driver is gone");
-        self.choice_answered(super::choices::provider_line);
         self.session_alive = false;
+        self.choice_unanswered();
         self.forget_refusals();
         self.session_blank = false;
         self.blank_session = None;
@@ -210,21 +210,39 @@ impl App {
         if harness == self.active && self.session_alive {
             self.shutdown_session();
         }
+        self.forget_ids(harness);
+    }
+
+    /// What points at `harness`'s vendor session: its id, where the bridge
+    /// to it starts, a fork of it to make, rewind anchors into it.
+    pub(super) fn forget_ids(&mut self, harness: HarnessId) {
         self.session_ids.remove(&harness);
         self.last_active_index.remove(&harness);
         self.fork_pending.remove(&harness);
         self.anchors.retain(|a| a.harness != harness);
     }
 
-    /// True, with an error shown, while the session's start is held.
-    pub(super) fn refused_while_start_held(&mut self) -> bool {
+    /// True, with an error shown, while the session is settling: its start
+    /// is held until the CLI before it is gone, or it was sent a choice it
+    /// takes only between turns and has not said how it took it (which
+    /// may leave it for a new session, or start its CLI again).
+    pub(super) fn refused_while_settling(&mut self) -> bool {
         if self.start_held {
             self.transcript.push_error(format!(
                 "the previous {} is still exiting; try again in a moment",
                 self.short_name()
             ));
+            return true;
         }
-        self.start_held
+        if let Some(pending) = &self.choice_pending {
+            self.transcript.push_error(format!(
+                "{} is still taking the {} just chosen; try again in a moment",
+                self.short_name(),
+                pending.what
+            ));
+            return true;
+        }
+        false
     }
 
     /// The session's process is gone, or going: what it was running and
@@ -245,8 +263,6 @@ impl App {
         if self.session_alive {
             self.check_guard();
         }
-        // A choice it was sent will not be answered.
-        self.choice_answered(super::choices::provider_line);
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
@@ -258,6 +274,8 @@ impl App {
         self.running_providers.remove(&self.active);
         self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
+        // A choice it was sent will not be answered now.
+        self.choice_unanswered();
     }
 
     /// The active harness's session cannot take a choice, for `reason`
@@ -269,6 +287,11 @@ impl App {
     /// What was typed after the choice goes after that, as if typed then.
     pub(super) fn session_renewed(&mut self, reason: &str) {
         let pending = self.choice_answered(super::choices::provider_line);
+        // One is under way already (a second answer of a session told two
+        // choices): this one only takes its own.
+        if self.handoff.is_some_and(|h| h.renew) {
+            return;
+        }
         let name = self.display_name();
         self.transcript.push_notice(format!(
             "{name} starts a new session for {reason}. Your next prompt tells it the conversation so far."
@@ -280,8 +303,8 @@ impl App {
             }
         } else {
             self.renew_now();
-            if pending.is_some() {
-                self.send_next_queued();
+            if let Some(pending) = &pending {
+                self.send_typed_after(pending);
             }
         }
     }
@@ -312,8 +335,8 @@ impl App {
             remote.url = None;
             remote.state = None;
         }
-        if pending.is_some() {
-            self.send_next_queued();
+        if let Some(pending) = &pending {
+            self.send_typed_after(pending);
         }
     }
 

@@ -1181,7 +1181,7 @@ impl App {
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
                 // A choice it was sent will not be answered.
-                self.choice_answered(choices::provider_line);
+                self.choice_unanswered();
                 self.forget_refusals();
                 if self.session_blank {
                     self.transcript.push_notice(format!(
