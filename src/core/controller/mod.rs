@@ -530,9 +530,9 @@ impl Controller {
         self.compacting
     }
 
-    /// `harness`'s live session reported `update`. A policy it refused
-    /// moves the one in effect as an unsupported policy would; a live
-    /// session (`alive`) is told where it went.
+    /// `harness`'s live session reported `update`. A policy it refused or
+    /// lacks moves the one in effect as an unsupported policy would; a
+    /// live session (`alive`) is told where it went.
     pub fn report(&mut self, harness: HarnessId, update: CapsUpdate, alive: bool) -> CapsReport {
         let mut notices = Vec::new();
         if let Some(levels) = &update.effort_levels
@@ -570,7 +570,7 @@ impl Controller {
             self.model_lists.insert((harness, provider), models.clone());
         }
         let commands = update.commands.is_some() || update.slash_commands.is_some();
-        let refusal = update.refused_policies.is_some();
+        let refusal = update.refused_policies.is_some() || update.lacks_policies.is_some();
         let before = self.effective_policy(harness);
         self.live.entry(harness).or_default().merge(update);
         let refused = if refusal {
@@ -591,8 +591,9 @@ impl Controller {
     /// (`CapsUpdate::refused_policies`: a mode that did not take, a
     /// profile shadowed): the next session is asked for the wanted policy
     /// again, and refuses it again if it still cannot hold it. The rest of
-    /// what it reported is the agent's, kept until the next one says.
-    /// Returns whether it had refused any.
+    /// what it reported is the agent's, kept until the next one says, the
+    /// policies it lacks for the run (`CapsUpdate::lacks_policies`) among
+    /// it. Returns whether it had refused any.
     pub fn drop_refusals(&mut self, harness: HarnessId) -> bool {
         self.live
             .get_mut(&harness)

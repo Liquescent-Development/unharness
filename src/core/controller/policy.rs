@@ -243,8 +243,8 @@ impl PolicyState {
     }
 
     /// The session took policies out of what it offers (an ACP agent whose
-    /// mode for one did not take): `before` was in effect, `policies` is
-    /// what is left. One in effect gives way as an unsupported policy
+    /// mode for one did not take; Codex come to `exec`, for the run):
+    /// `before` was in effect, `policies` is what is left. One in effect gives way as an unsupported policy
     /// does: to the nearest less permissive one, which a live session
     /// (`alive`) is told, or, with none, to the user's choice. `None` when
     /// the policy in effect is not one of them.

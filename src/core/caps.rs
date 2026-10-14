@@ -365,7 +365,10 @@ impl Capabilities {
         if let Some(q) = update.ask_user_question {
             self.ask_user_question = q;
         }
-        if let Some(refused) = &update.refused_policies {
+        for refused in [&update.refused_policies, &update.lacks_policies]
+            .into_iter()
+            .flatten()
+        {
             self.permission_policies
                 .retain(|p| !refused.contains(&p.policy));
         }
@@ -398,15 +401,15 @@ impl Capabilities {
     }
 
     /// The report, on top of these declared capabilities, of a live
-    /// session that can do only what `session` declares: the abilities it
-    /// lacks (`CapsUpdate::lacks`, a list also when it lacks none), the
-    /// flags of a report that it does not have, and the policies it cannot
-    /// hold (`CapsUpdate::refused_policies`). Never what it has beyond
-    /// them: such a report only takes away. The effort levels and models a
+    /// session that can do only what `session` declares, for every session
+    /// of the run: the abilities and policies it lacks (`CapsUpdate::lacks`
+    /// and `lacks_policies`, lists also when it lacks none), and the flags
+    /// of a report that it does not have. Never what it has beyond them:
+    /// such a report only takes away. The effort levels and models a
     /// session offers are its own to report.
     pub fn lacking(&self, session: &Capabilities) -> CapsUpdate {
         let lost = |declared: bool, has: bool| (declared && !has).then_some(false);
-        let refused: Vec<PermissionPolicy> = self
+        let lacked: Vec<PermissionPolicy> = self
             .permission_policies
             .iter()
             .map(|p| p.policy)
@@ -426,7 +429,7 @@ impl Capabilities {
             plan_mode: lost(self.plan_mode, session.plan_mode),
             slash_commands: lost(self.slash_commands, session.slash_commands),
             ask_user_question: lost(self.ask_user_question, session.ask_user_question),
-            refused_policies: (!refused.is_empty()).then_some(refused),
+            lacks_policies: Some(lacked),
             ..Default::default()
         }
     }
@@ -646,7 +649,7 @@ mod tests {
                     Ability::InteractivePermissions
                 ]),
                 fork: Some(false),
-                refused_policies: Some(vec![Ask]),
+                lacks_policies: Some(vec![Ask]),
                 ..Default::default()
             }
         );
@@ -667,6 +670,7 @@ mod tests {
             declared.lacking(&declared),
             CapsUpdate {
                 lacks: Some(Vec::new()),
+                lacks_policies: Some(Vec::new()),
                 ..Default::default()
             }
         );

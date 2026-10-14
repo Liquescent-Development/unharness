@@ -10,7 +10,7 @@ pub mod exec_parse;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -82,6 +82,10 @@ impl CodexTransport {
 
 pub struct CodexHarness {
     pub transport: CodexTransport,
+    /// What `auto` came to against the installed CLI, the first time a
+    /// run needed to know (`effective_transport`): the same for every
+    /// session of the run, which is what its sessions report (#288).
+    resolved: OnceLock<CodexTransport>,
 }
 
 /// What a `[harnesses.codex]` table takes besides the keys every harness
@@ -110,9 +114,7 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
 
 impl Default for CodexHarness {
     fn default() -> Self {
-        CodexHarness {
-            transport: CodexTransport::Auto,
-        }
+        CodexHarness::new(CodexTransport::Auto)
     }
 }
 
@@ -230,13 +232,17 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl CodexHarness {
     pub fn new(transport: CodexTransport) -> Self {
-        CodexHarness { transport }
+        CodexHarness {
+            transport,
+            resolved: OnceLock::new(),
+        }
     }
 
-    /// Resolve `Auto` against the installed binary.
+    /// Resolve `Auto` against the installed binary, once per run: every
+    /// session of the run, and the model list, run on what it came to.
     fn effective_transport(&self, binary: &Path) -> CodexTransport {
         match self.transport {
-            CodexTransport::Auto => {
+            CodexTransport::Auto => *self.resolved.get_or_init(|| {
                 let ok = Command::new(binary)
                     .args(["app-server", "--help"])
                     .stdout(Stdio::null())
@@ -248,7 +254,7 @@ impl CodexHarness {
                 } else {
                     CodexTransport::Exec
                 }
-            }
+            }),
             t => t,
         }
     }
@@ -504,8 +510,8 @@ impl Harness for CodexHarness {
         match transport {
             // What `exec` can do, also where `auto` came to it only now.
             // `auto` declares app-server's capabilities, so its session
-            // reports what `exec` lacks of them (#288). `auto` comes to
-            // the same for every session of a run, from the installed CLI.
+            // reports what `exec` lacks of them (#288), which holds for
+            // the run: `auto` is resolved once per run.
             CodexTransport::Exec => {
                 let exec = CodexHarness::new(transport).capabilities();
                 let reports = (self.transport == CodexTransport::Auto)
@@ -974,7 +980,7 @@ region = "us-east-1"
                 fork: Some(false),
                 plan_mode: Some(false),
                 ask_user_question: Some(false),
-                refused_policies: Some(vec![PermissionPolicy::Ask]),
+                lacks_policies: Some(vec![PermissionPolicy::Ask]),
                 ..Default::default()
             }
         );
@@ -987,6 +993,34 @@ region = "us-east-1"
         assert_eq!(
             (offered.fork, offered.plan_mode, offered.ask_user_question),
             (exec.fork, exec.plan_mode, exec.ask_user_question)
+        );
+    }
+
+    /// `auto` is resolved once per run: a CLI that has `app-server` by the
+    /// second session (here `true`, which takes any arguments) does not
+    /// change what the first came to, nor what its sessions reported.
+    #[cfg(unix)]
+    #[test]
+    fn auto_is_resolved_once_per_run() {
+        let h = CodexHarness::new(CodexTransport::Auto);
+        assert_eq!(
+            h.effective_transport(Path::new("/nonexistent/codex")),
+            CodexTransport::Exec
+        );
+        assert_eq!(
+            h.effective_transport(Path::new("true")),
+            CodexTransport::Exec
+        );
+        let h = CodexHarness::new(CodexTransport::Auto);
+        assert_eq!(
+            h.effective_transport(Path::new("true")),
+            CodexTransport::AppServer
+        );
+        // A transport named in the config is what it says.
+        let h = CodexHarness::new(CodexTransport::AppServer);
+        assert_eq!(
+            h.effective_transport(Path::new("/nonexistent/codex")),
+            CodexTransport::AppServer
         );
     }
 

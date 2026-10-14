@@ -1706,7 +1706,7 @@ async fn codex_auto_without_app_server_runs_exec_and_says_what_it_lacks() {
         panic!("the session did not say what it lacks first");
     };
     assert_eq!(report.lacks, Some(Ability::ALL.to_vec()));
-    assert_eq!(report.refused_policies, Some(vec![PermissionPolicy::Ask]));
+    assert_eq!(report.lacks_policies, Some(vec![PermissionPolicy::Ask]));
     assert_eq!(report.fork, Some(false));
 
     handle

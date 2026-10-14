@@ -189,9 +189,10 @@ fn usage_accumulates() {
 /// A Codex session under `transport = "auto"` that came to `exec` reports
 /// what it lacks of the app-server capabilities `auto` declares (#288):
 /// the TUI stops offering it. `ask` goes too, and with nothing below it the
-/// user chooses a policy. What the session lacks stays when it ends, for
-/// what is decided between sessions (a fork); what it refused goes with
-/// it, as for any session.
+/// user chooses a policy. What the session lacks, `ask` included, holds
+/// for the run (`auto` is resolved once per run): it stays when the
+/// session ends, for what is chosen and decided between sessions (the
+/// policy, a fork).
 #[test]
 fn a_codex_session_come_to_exec_takes_away_what_exec_cannot_do() {
     use crate::core::transcript::Block;
@@ -273,11 +274,14 @@ fn a_codex_session_come_to_exec_takes_away_what_exec_cannot_do() {
     app.with(|c, front| c.compact(None, front));
     assert!(app.take_actions().is_empty() && !app.controller.compacting());
 
-    // Ended, the session leaves what it lacks, not what it refused; a
-    // fork now starts Codex fresh, as `exec` cannot branch its thread.
+    // Ended, the session leaves what it lacks: `ask` is not offered
+    // between sessions either, and a fork now starts Codex fresh, as
+    // `exec` cannot branch its thread.
     app.on_event(AgentEvent::ProcessExited { code: Some(0) });
     assert!(!app.caps().compaction && !app.caps().fork);
-    assert!(app.offered_policies().contains(&PermissionPolicy::Ask));
+    assert!(!app.offered_policies().contains(&PermissionPolicy::Ask));
+    assert!(!app.set_policy(PermissionPolicy::Ask));
+    assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
     app.fork_conversation();
     assert!(
         app.controller.conversation.transcript.blocks.iter().any(|b| matches!(

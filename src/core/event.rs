@@ -319,8 +319,15 @@ pub struct CapsUpdate {
     /// what is offered, and refused by the driver if asked all the same.
     /// It only ever takes away (`Capabilities::lacking` builds one). Each
     /// list replaces the last, and it stays when the session ends, until
-    /// another session of the harness reports one.
+    /// another session of the harness reports one: it holds for every
+    /// session of the run.
     pub lacks: Option<Vec<Ability>>,
+    /// The policies of the harness's that the live session cannot hold, as
+    /// `lacks` is said and kept (Codex under `auto` that came to `exec`
+    /// cannot ask): taken out of what is offered for the run, where a
+    /// policy in `refused_policies` is for its session alone. One in effect
+    /// gives way as a refused one does.
+    pub lacks_policies: Option<Vec<PermissionPolicy>>,
 }
 
 /// A command a harness runs when a prompt starts with `/name`: one of its
@@ -408,6 +415,9 @@ impl CapsUpdate {
         }
         if newer.lacks.is_some() {
             self.lacks = newer.lacks;
+        }
+        if newer.lacks_policies.is_some() {
+            self.lacks_policies = newer.lacks_policies;
         }
     }
 }
@@ -747,6 +757,10 @@ impl AgentEvent {
                 if let Some(l) = &u.lacks {
                     let l: Vec<&str> = l.iter().map(|a| a.as_str()).collect();
                     parts.push(format!("lacks={}", l.join(",")));
+                }
+                if let Some(l) = &u.lacks_policies {
+                    let l: Vec<&str> = l.iter().map(|p| p.as_str()).collect();
+                    parts.push(format!("lacks_policies={}", l.join(",")));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

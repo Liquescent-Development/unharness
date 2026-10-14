@@ -27,8 +27,9 @@ A harness that cannot hold to that does not offer `ask`:
 
 - `codex exec` and headless Antigravity cannot prompt. Under
   `transport = "auto"` a Codex without `app-server` runs `exec`: its
-  session takes `ask` away when it starts, and where `ask` was the policy
-  the TUI asks you for another (a `--print` run under it fails instead);
+  first session takes `ask` away for the rest of the run, and where `ask`
+  was the policy the TUI asks you for another (a `--print` run under it
+  fails instead);
 - `--print --native` on Codex uses `codex exec`, and Codex's own
   interface (`--no-tui`) does not accept the `untrusted` approval policy;
 - an ACP agent offers `ask` only when you have marked it as one that asks,
