@@ -314,7 +314,7 @@ fn the_rule_can_be_changed_and_moved_before_it_is_kept() {
 fn a_request_behind_a_picker_opens_when_the_picker_closes() {
     let mut app = test_app(HarnessId::PI);
     app.controller.session_alive = true;
-    app.with(|c, screen| c.start_generation(screen));
+    app.on_event(AgentEvent::TurnStarted);
     for close in [KeyCode::Esc, KeyCode::Enter] {
         app.open_policy_picker();
         app.on_event(pi_gate_request("g1", "cq query"));
@@ -356,7 +356,7 @@ fn a_withdrawn_request_closes_unanswered() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.controller.session_alive = true;
-    app.with(|c, screen| c.start_generation(screen));
+    app.on_event(AgentEvent::TurnStarted);
     app.on_event(pi_gate_request("g1", "echo one"));
     app.on_event(pi_gate_request("g2", "echo two"));
     app.on_event(pi_gate_request("g3", "echo three"));

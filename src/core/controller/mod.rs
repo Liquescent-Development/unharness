@@ -327,7 +327,7 @@ pub struct Controller {
     /// The harnesses whose [`Harness::session_notice`] was shown.
     session_noticed: HashSet<HarnessId>,
     pub should_quit: bool,
-    pub(crate) actions: VecDeque<Action>,
+    actions: VecDeque<Action>,
 }
 
 impl Controller {

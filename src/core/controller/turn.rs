@@ -12,7 +12,7 @@ use crate::core::{Attachment, SessionCommand, Usage, shell};
 pub const STOP_GRACE: Duration = Duration::from_secs(5);
 
 impl Controller {
-    pub(crate) fn start_generation(&mut self, front: &mut dyn Front) {
+    pub(super) fn start_generation(&mut self, front: &mut dyn Front) {
         self.is_generating = true;
         self.interrupted = None;
         self.conversation.transcript.begin_turn();

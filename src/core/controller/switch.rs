@@ -187,7 +187,7 @@ impl Controller {
         }
     }
 
-    pub(crate) fn switch_now(&mut self, next: HarnessId, front: &mut dyn Front) {
+    pub(super) fn switch_now(&mut self, next: HarnessId, front: &mut dyn Front) {
         self.end_remote_control();
         if self.session_alive {
             self.shutdown_session(front);
