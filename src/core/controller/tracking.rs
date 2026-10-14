@@ -1,11 +1,14 @@
 //! What a front end tracks of its session's events, whoever it shows them
-//! to: the session's id and model and its usage, whether the agent went
-//! into plan mode, the subagents at work and the turn ends still owed for
-//! them, and who answers a permission request, including when nobody is
-//! there to ask. None of it starts, ends or prompts a session: that
-//! lifecycle is the TUI's controller's alone. The controller keeps one
-//! ([`Controller::tracking`]); a run with no one to ask (`--print`) can
-//! keep one without it.
+//! to: the session's id and model and its usage, the subagents at work and
+//! the turn ends still owed for them, and who answers a permission request,
+//! including when nobody is there to ask. None of it starts, ends or
+//! prompts a session: that lifecycle is the TUI's controller's alone. The
+//! controller keeps one ([`Controller::tracking`]); a run with no one to
+//! ask (`--print`) can keep one without it.
+//!
+//! Whether the agent plans is not kept here: each front end knows it its
+//! own way (the TUI from the policy in effect, `--print` from the main
+//! agent's last `PolicyChanged`) and says so with each request it routes.
 //!
 //! [`Controller::tracking`]: super::Controller::tracking
 
@@ -18,9 +21,7 @@ use serde_json::Value;
 use crate::core::permissions::{HandoffTo, Route, Router};
 use crate::core::rules::{Rules, ToolAction};
 use crate::core::transcript::tool_summary;
-use crate::core::{
-    PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, SubagentStatus, Usage,
-};
+use crate::core::{PermissionDecision, PermissionKind, PermissionRequest, SubagentStatus, Usage};
 
 /// A subagent that is at work.
 #[derive(Debug, Clone)]
@@ -65,9 +66,6 @@ pub struct Tracking {
     pub model: Option<String>,
     /// Its usage so far, as the main agent reported it.
     pub usage: Option<Usage>,
-    /// The main agent went into plan mode by itself: only a read is
-    /// answered by a rule meanwhile.
-    pub planning: bool,
     /// Subagents at work, at any depth, oldest first. They can outlive the
     /// turn that started them.
     pub subagents: Vec<RunningSubagent>,
@@ -123,11 +121,6 @@ impl Tracking {
             Some(total) if !u.cumulative => total.add(u),
             _ => self.usage = Some(u.clone()),
         }
-    }
-
-    /// The main agent runs under `p` now.
-    pub fn policy_changed(&mut self, p: PermissionPolicy) {
-        self.planning = p == PermissionPolicy::Plan;
     }
 
     /// A turn is to end before the answer is complete (the prompt's).
@@ -235,8 +228,9 @@ impl Tracking {
 
     /// Who answers `req`: a rule, a handoff summary being written, or the
     /// user (`core::permissions::Router`). It was made while the agent
-    /// planned if `planning`, or if it waited behind a dialog made so.
-    /// Returns the route, and whether it was made while planning.
+    /// planned if `planning` (the agent plans now, as the front end knows
+    /// it), or if it waited behind a dialog and was made so. Returns the
+    /// route, and whether it was made while planning.
     pub fn route(
         &mut self,
         req: &PermissionRequest,
@@ -340,8 +334,8 @@ mod tests {
         t.subagent_started(id.into(), format!("task {id}"), None, unreported_end);
     }
 
-    /// The session's id and model, its usage and whether it plans, as the
-    /// main agent reports them.
+    /// The session's id and model and its usage, as the main agent reports
+    /// them.
     #[test]
     fn the_session_is_what_it_last_reported() {
         let mut t = Tracking::default();
@@ -363,11 +357,6 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(t.usage.as_ref().unwrap().input, 100);
-
-        t.policy_changed(PermissionPolicy::Plan);
-        assert!(t.planning);
-        t.policy_changed(PermissionPolicy::AcceptEdits);
-        assert!(!t.planning);
     }
 
     /// A subagent is at work from its start to its end; one whose end may

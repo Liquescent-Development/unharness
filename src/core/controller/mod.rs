@@ -26,9 +26,9 @@
 //!
 //! What any front end tracks of the session's events, with or without that
 //! lifecycle, is [`Tracking`]: the subagents at work and the turn ends
-//! owed for them, the session's id, model and usage, whether the agent
-//! plans, and who answers a permission request, also with nobody there to
-//! ask. The controller keeps one ([`Controller::tracking`]).
+//! owed for them, the session's id, model and usage, and who answers a
+//! permission request, also with nobody there to ask. The controller keeps
+//! one ([`Controller::tracking`]) and drives the parts the TUI uses.
 //!
 //! The TUI calls into it and reads from it. What it says of the
 //! conversation it holds it puts in that conversation's transcript itself;
@@ -303,9 +303,17 @@ pub struct Controller {
     /// been told it has not yet.
     pub(crate) interrupted: Option<(Instant, bool)>,
     pub rate_limit: Option<RateLimitInfo>,
-    /// What it tracks of the session's events as any front end would: its
-    /// subagents at work, and who answers its permission requests and
-    /// those waiting behind another dialog.
+    /// What it tracks of the session's events as any front end would. The
+    /// TUI drives the subagents at work (`subagent_started`, `_progress`,
+    /// `_tool_started`, `_ended`, `clear_subagents`, `awaited`) and its
+    /// permission requests (`route`, `wait`, `next_waiting`, `withdraw`,
+    /// `drop_waiting`), with `planning` from the policy in effect. The rest
+    /// is for a run with nobody to ask (`--print`, #296), which drives it
+    /// in its own `Tracking`: here the session's id, model and usage stay
+    /// unset (`session_started` and `usage_reported` are not called; the
+    /// conversation keeps them per harness), `owed` stays 0
+    /// (`report_turns`, `turn_expected`, `turn_ended` and `tool_result`
+    /// are not called), and nothing asks `unawaited` or `nobody_to_ask`.
     pub tracking: Tracking,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
