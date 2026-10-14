@@ -188,9 +188,10 @@ pub const DEFINING_AN_AGENT: &str = "a table with protocol = \"acp\" and a comma
 
 /// An ACP agent from its `[harnesses.<name>]` table: one the table defines
 /// (`protocol = "acp"` and its `command`), or else the preset of that
-/// name, whose table takes only the keys every harness takes. A missing
-/// command and a mode map that does not parse are both reported
-/// ([`crate::config::TableErrors`]).
+/// name, whose table takes only the keys every harness takes: the preset
+/// runs its own command under its own name, and `binary` is where another
+/// of its binaries is set. A missing command and a mode map that does not
+/// parse are both reported ([`crate::config::TableErrors`]).
 pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<dyn Harness>> {
     let defined = table.protocol.as_deref() == Some("acp");
     if let Some((name, display, command)) = PRESETS.iter().find(|(n, ..)| *n == name && !defined) {
@@ -204,8 +205,9 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
             ..preset
         }));
     }
-    let own: Own = table.own(name)?;
-    let modes = match (ModeMap::from_config(&own.modes), table.command.is_empty()) {
+    let own: Own = table.own_of_agent(name)?;
+    let command = table.command.as_deref().unwrap_or_default();
+    let modes = match (ModeMap::from_config(&own.modes), command.is_empty()) {
         (Ok(modes), false) => modes,
         (modes, no_command) => {
             let no_command =
@@ -224,7 +226,7 @@ pub fn build(name: &str, table: &crate::config::HarnessSettings) -> Result<Box<d
     Ok(Box::new(AcpHarness::new(
         name,
         table.display_name.as_deref(),
-        &table.command,
+        command,
         profile,
     )?))
 }

@@ -821,6 +821,105 @@ mod tests {
         }
     }
 
+    /// `command` and `display_name` say what runs an agent and the name it
+    /// is shown by: a built-in that runs its own CLI, or a preset's table
+    /// without `protocol = "acp"`, does not take them, and the error points
+    /// to `binary`. An agent's table and vibe's take them (#281).
+    #[test]
+    fn command_and_display_name_are_an_agent_s() {
+        let binary = |name: &str| {
+            format!(
+                "[harnesses.{name}] command: {name} does not take this key; to run another \
+                 {name} binary, set binary"
+            )
+        };
+        let mut cases: Vec<(String, &str, String)> = ["agy", "claude", "codex", "pi"]
+            .into_iter()
+            .map(|name| {
+                let text = format!("[harnesses.{name}]\ncommand = [\"/opt/{name}\"]\n");
+                (text, name, binary(name))
+            })
+            .collect();
+        cases.extend([
+            // An empty one is set too.
+            (
+                "[harnesses.claude]\ncommand = []\n".to_string(),
+                "claude",
+                binary("claude"),
+            ),
+            // `command` is said first.
+            (
+                "[harnesses.codex]\ndisplay_name = \"C\"\ncommand = [\"c\"]\n".to_string(),
+                "codex",
+                binary("codex"),
+            ),
+            (
+                "[harnesses.codex]\ndisplay_name = \"My Codex\"\n".to_string(),
+                "codex",
+                "[harnesses.codex] display_name: codex does not take this key".to_string(),
+            ),
+            (
+                "[harnesses.pi]\ndisplay_name = \"My pi\"\n".to_string(),
+                "pi",
+                "[harnesses.pi] display_name: pi does not take this key".to_string(),
+            ),
+            // A preset's table without `protocol = "acp"` is told how to
+            // define an agent as well.
+            (
+                "[harnesses.gemini]\ncommand = [\"gemini\", \"--experimental-acp\"]\n".to_string(),
+                "gemini",
+                format!("{} ({})", binary("gemini"), acp::DEFINING_AN_AGENT),
+            ),
+            (
+                "[harnesses.kiro]\ndisplay_name = \"My Kiro\"\n".to_string(),
+                "kiro",
+                format!(
+                    "[harnesses.kiro] display_name: kiro does not take this key ({})",
+                    acp::DEFINING_AN_AGENT
+                ),
+            ),
+        ]);
+        for (text, name, said) in cases {
+            let errors = config_errors(&parse(&text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, said);
+            assert!(errors[0].left_out && errors[0].table.as_deref() == Some(name));
+            assert_eq!(
+                Registry::from_config(&parse(&text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                said
+            );
+            assert!(Registry::checked(&parse(&text)).0.parse(name).is_none());
+        }
+
+        // `binary` is what those tables take.
+        for name in ["agy", "claude", "codex", "pi", "gemini"] {
+            let text = format!("[harnesses.{name}]\nbinary = \"/opt/{name}\"\n");
+            assert!(config_errors(&parse(&text)).is_empty(), "{text}");
+        }
+
+        // An agent's table and vibe's take both, and show the name.
+        let good = "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                    display_name = \"Mine\"\n\
+                    [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+                    display_name = \"My Gemini\"\n\
+                    [harnesses.vibe]\ncommand = [\"/opt/vibe-acp\"]\ndisplay_name = \"My Vibe\"\n";
+        let reg = Registry::from_config(&parse(good)).unwrap();
+        for (name, shown) in [
+            ("myagent", "Mine"),
+            ("gemini", "My Gemini"),
+            ("vibe", "My Vibe"),
+        ] {
+            assert_eq!(reg.parse(name).unwrap().descriptor().display_name, shown);
+        }
+        assert_eq!(
+            reg.get(HarnessId::VIBE).unwrap().descriptor().binary_names,
+            ["/opt/vibe-acp"]
+        );
+    }
+
     /// A workspace's file is merged over the global one before anything
     /// is checked, so what it gets wrong is refused the same way, naming
     /// the table (#281).
@@ -852,6 +951,46 @@ mod tests {
             "{e:?}"
         );
         assert!(check("[harnesses.claude]\ndefault_model = \"m\"\n").is_empty());
+
+        for (text, said) in [
+            (
+                "[harnesses.claude]\ncommand = [\"/opt/claude\"]\n",
+                "[harnesses.claude] command: claude does not take this key; to run another \
+                 claude binary, set binary",
+            ),
+            // An empty list keeps the global one's, and is still refused.
+            (
+                "[harnesses.claude]\ncommand = []\n",
+                "[harnesses.claude] command: claude does not take this key; to run another \
+                 claude binary, set binary",
+            ),
+            (
+                "[harnesses.claude]\ndisplay_name = \"Mine\"\n",
+                "[harnesses.claude] display_name: claude does not take this key",
+            ),
+        ] {
+            let e = check(text);
+            assert!(
+                e.len() == 1 && e[0].message == said && e[0].left_out,
+                "{text}: {e:?}"
+            );
+        }
+
+        // An agent defined globally keeps its command under a workspace's
+        // empty list, and takes a name from there.
+        let global = parse("[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n");
+        std::fs::write(
+            Config::workspace_path_in(&store, &root),
+            "[harnesses.myagent]\ncommand = []\ndisplay_name = \"Mine\"\n",
+        )
+        .unwrap();
+        let local = Config::load_workspace_in(&store, &root).unwrap().unwrap();
+        let reg = Registry::from_config(&Config::merge(global, local)).unwrap();
+        let mine = reg.parse("myagent").unwrap().descriptor();
+        assert_eq!(
+            (mine.display_name, mine.binary_names),
+            ("Mine", &["my-agent"][..])
+        );
     }
 
     /// A transport Codex does not have is an error naming the table and
