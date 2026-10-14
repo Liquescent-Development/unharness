@@ -1,6 +1,6 @@
 //! The conversation: saving it, starting a new one, resuming a saved one.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use super::App;
 use crate::core::conversations::{Conversation, now_rfc3339, truncate_title};
@@ -40,8 +40,6 @@ impl App {
         c.checkpoints = self.file_checkpoints.clone();
         c.fork_pending = self.fork_pending.iter().copied().collect();
         c.fork_pending.sort_by_key(|h| h.as_str());
-        c.policy = self.policy_explicit;
-        c.policy_choices = self.policy_choice.clone();
         for h in &self.chosen_models {
             if let Some(m) = self.models.get(h) {
                 c.models.insert(*h, m.clone());
@@ -52,11 +50,12 @@ impl App {
                 c.efforts.insert(*h, e.clone());
             }
         }
-        if self.session_seen()
-            && let Some(p) = self.effective_policy()
-        {
-            self.conversation.last_policies.insert(self.active, p);
-        }
+        self.controller.sync_conversation(
+            &self.config,
+            self.active,
+            self.session_seen(),
+            &mut self.conversation,
+        );
         let c = &mut self.conversation;
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
@@ -90,17 +89,7 @@ impl App {
     /// and efforts, except where this run named its own. What the last
     /// conversation chose goes back to the configured default.
     pub(super) fn take_conversation_choices(&mut self) {
-        let conv = &self.conversation;
-        self.policy_explicit = self.run_policy.or(conv.policy);
-        // A policy named in this run for every harness holds over what the
-        // conversation chose for each, also when it is the one the
-        // conversation was named; what this run chose holds over both.
-        self.policy_choice = if self.run_policy.is_none() {
-            conv.policy_choices.clone()
-        } else {
-            HashMap::new()
-        };
-        self.policy_choice.extend(&self.run_choices);
+        self.controller.take_conversation(&self.conversation);
 
         for h in std::mem::take(&mut self.chosen_models) {
             if self.run_models.contains(&h) {
@@ -188,37 +177,12 @@ impl App {
         let Some(last) = self.conversation.last_policies.get(&self.active).copied() else {
             return;
         };
-        let now = self.effective_policy();
-        if now == Some(last) {
-            return;
+        if let Some(notice) =
+            self.controller
+                .resumed_under(&self.config, self.active, last, at_start)
+        {
+            self.transcript.push_notice(notice);
         }
-        let name = self.short_name();
-        let wanted = self.wanted_policy();
-        let why = if now != Some(wanted) {
-            format!("{wanted} is not available on {name}")
-        } else if self.run_choices.contains_key(&self.active) {
-            "chosen in this run".to_string()
-        } else if self.policy_choice.contains_key(&self.active) {
-            format!("chosen for {name} in this conversation")
-        } else if self.run_policy.is_some() {
-            if at_start {
-                "named with --policy".to_string()
-            } else {
-                "named in this run".to_string()
-            }
-        } else if self.policy_explicit.is_some() {
-            "the policy named for this conversation".to_string()
-        } else {
-            "the configured default".to_string()
-        };
-        self.transcript.push_notice(match now {
-            Some(now) => format!(
-                "{name} last ran this conversation under {last}; it continues under {now} ({why})"
-            ),
-            None => format!(
-                "{name} last ran this conversation under {last}; it waits for a policy ({why})"
-            ),
-        });
     }
 
     /// Start a new conversation in this workspace, as a fresh launch would,
@@ -271,7 +235,7 @@ impl App {
         let told = self.transcript.blocks.split_off(said);
         self.idle_start_paused = false;
         self.conversation = self.successor();
-        self.pre_plan.clear();
+        self.controller.policy.forget_plans();
         self.transcript = Transcript::default();
         self.session_ids.clear();
         self.last_active_index.clear();
@@ -365,7 +329,7 @@ impl App {
         self.pending_prompts.clear();
         self.active = active;
         self.conversation = conv;
-        self.pre_plan.clear();
+        self.controller.policy.forget_plans();
         self.take_conversation_choices();
         self.announce_resume(false);
         if let Some(w) = self.policy_warning() {

@@ -122,8 +122,9 @@ fn app_with_a_binary(harness: HarnessId) -> App {
     let mut app = test_app_with(tmp.keep(), harness, None, false, config, test_registry());
     // As in `test_app_in`: a harness without `ask` waits for a choice.
     if app.effective_policy().is_none() {
-        app.policy_choice
-            .insert(harness, PermissionPolicy::AcceptEdits);
+        app.controller
+            .policy
+            .choose_for_conversation(harness, PermissionPolicy::AcceptEdits);
         app.modal = None;
     }
     app

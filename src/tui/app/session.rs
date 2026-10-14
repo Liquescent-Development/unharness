@@ -266,7 +266,7 @@ impl App {
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
-        self.policies_sent.clear();
+        self.controller.policy.process_ended();
         self.idle_start_paused = false;
         self.drop_subagents();
         self.drop_prompts();
@@ -323,14 +323,15 @@ impl App {
             self.finish_generation();
             self.transcript.push_system("Turn interrupted.");
         }
-        self.policies_sent.clear();
+        self.controller.policy.process_ended();
         self.drop_subagents();
         self.drop_prompts();
         self.running_providers.remove(&self.active);
         self.forget_refusals();
         self.session_blank = true;
         self.blank_session = None;
-        self.session_policy = self.effective_policy();
+        let policy = self.effective_policy();
+        self.controller.policy.started_under(policy);
         if let Some(remote) = self.remote.as_mut() {
             remote.url = None;
             remote.state = None;

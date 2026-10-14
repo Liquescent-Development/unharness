@@ -1,7 +1,7 @@
 //! Providers, models and efforts, and the lists they are chosen from.
 
 use super::{Action, App, ListJob, ListRequest, ListResult};
-use crate::core::{CapsUpdate, HarnessId, ModelRef, ProviderId, SessionCommand};
+use crate::core::{HarnessId, ModelRef, ProviderId, SessionCommand};
 use crate::harness::ModelInfo;
 use crate::tui::modal::{ListPicker, Modal, ProviderOption};
 
@@ -62,10 +62,7 @@ impl App {
     /// where the session would not say before the first prompt.
     pub(super) fn list_commands(&mut self) {
         let request = ListRequest::Commands(self.active);
-        let listed = self
-            .live_caps
-            .get(&self.active)
-            .is_some_and(|c| c.commands.is_some());
+        let listed = self.controller.commands_listed(self.active);
         if !listed && !self.lists_failed.contains(&request) {
             self.request_list(request);
         }
@@ -483,14 +480,7 @@ impl App {
                 let ListRequest::Commands(harness) = request else {
                     return;
                 };
-                self.live_caps
-                    .entry(harness)
-                    .or_default()
-                    .merge(CapsUpdate {
-                        slash_commands: Some(!commands.is_empty()),
-                        commands: Some(commands),
-                        ..Default::default()
-                    });
+                self.controller.commands_arrived(harness, commands);
                 if harness == self.active {
                     self.commands_arrived();
                 }

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::{Action, App};
-use crate::core::{Capabilities, HarnessCommand, HarnessId};
+use crate::core::{Capabilities, HarnessCommand};
 use crate::harness::{Harness, resolve_binary};
 use crate::tui::modal::Modal;
 
@@ -26,27 +26,15 @@ impl App {
 
     /// The commands of its own the active harness's session listed.
     pub fn harness_commands(&self) -> &[HarnessCommand] {
-        self.live_caps
-            .get(&self.active)
-            .and_then(|u| u.commands.as_deref())
-            .unwrap_or_default()
+        self.controller.harness_commands(self.active)
     }
 
-    /// Declared capabilities of the active harness plus what its session reported.
+    /// Declared capabilities of the active harness plus what its session
+    /// reported (`Controller::caps_of`).
     pub fn caps(&self) -> Capabilities {
-        self.caps_of(self.active)
+        self.controller
+            .caps_of(self.active)
             .unwrap_or_else(|| self.harness().capabilities())
-    }
-
-    /// Declared capabilities of `harness` plus what a session of it
-    /// reported in this run (an ACP agent says at `initialize` whether it
-    /// can fork); `None` for one not in the registry.
-    pub(super) fn caps_of(&self, harness: HarnessId) -> Option<Capabilities> {
-        let mut caps = self.registry.get(harness)?.capabilities();
-        if let Some(update) = self.live_caps.get(&harness) {
-            caps.apply(update);
-        }
-        Some(caps)
     }
 
     pub fn harness_binary(&self) -> Option<PathBuf> {

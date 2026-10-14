@@ -44,10 +44,13 @@ fn prompts_held_before_a_handoff_stay_held_after_it() {
 fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
     let mut app = over_budget_app();
     app.session_alive = false;
-    app.live_caps
-        .entry(HarnessId::CLAUDE)
-        .or_default()
-        .resume_by_id = Some(false);
+    app.controller.overlay(
+        HarnessId::CLAUDE,
+        CapsUpdate {
+            resume_by_id: Some(false),
+            ..Default::default()
+        },
+    );
     app.switch_harness(HarnessId::CODEX);
     assert_eq!(app.active, HarnessId::CODEX);
     assert!(app.take_actions().is_empty());

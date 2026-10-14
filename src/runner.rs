@@ -11,6 +11,7 @@ use colored::*;
 use crate::cli::CommonRunArgs;
 use crate::config::Config;
 use crate::core::Rules;
+use crate::core::controller::configured_policy;
 use crate::core::conversations::ConversationStore;
 use crate::core::guard::{self, Watch};
 use crate::core::mcp;
@@ -62,20 +63,6 @@ pub fn explicit_policy(args: &CommonRunArgs) -> Result<Option<PermissionPolicy>>
         });
     }
     Ok(args.auto.then_some(PermissionPolicy::Bypass))
-}
-
-/// The configured policy for `harness`: its own table's, the global one,
-/// Ask. A harness's own default is for that harness only.
-pub fn configured_policy(config: &Config, harness: HarnessId) -> Result<PermissionPolicy> {
-    let configured = config
-        .harness(harness.as_str())
-        .and_then(|h| h.default_policy.as_deref())
-        .or(config.default_policy.as_deref());
-    match configured {
-        Some(p) => PermissionPolicy::parse(p)
-            .ok_or_else(|| anyhow::anyhow!("unknown policy '{p}' in config")),
-        None => Ok(PermissionPolicy::Ask),
-    }
 }
 
 /// The policy of a run without the TUI. Nobody is there to choose another

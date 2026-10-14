@@ -62,7 +62,7 @@ impl App {
         if self.modal.is_none() {
             let mut modal = Modal::for_request(req);
             if let Modal::Plan(m) = &mut modal {
-                let preferred = self.pre_plan.get(&self.active).copied();
+                let preferred = self.controller.policy.pre_plan(self.active);
                 m.set_policies(
                     self.plan_policies(),
                     preferred.unwrap_or(PermissionPolicy::Ask),

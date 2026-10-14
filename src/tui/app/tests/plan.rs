@@ -70,7 +70,7 @@ fn an_approved_plan_is_carried_out_under_the_policy_chosen_with_it() {
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(Bypass));
     app.session_alive = true;
-    app.session_policy = Some(Bypass);
+    app.controller.policy.started_under(Some(Bypass));
     assert!(app.set_policy(Plan));
     app.on_event(plan_request());
     let Some(Modal::Plan(m)) = &app.modal else {

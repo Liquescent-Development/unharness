@@ -207,7 +207,7 @@ fn a_policy_named_on_resume_holds_over_every_choice_even_the_same() {
     // `--policy ask`, the policy it was named: `ask` everywhere, so agy
     // waits for a choice and Claude does not run under `bypass`.
     let mut app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
-    assert_eq!(app.policy_choice, HashMap::new());
+    assert_eq!(app.controller.policy.chosen(), HashMap::new());
     assert_eq!(app.effective_policy(), None);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
     app.modal = None;

@@ -18,6 +18,7 @@ use super::transcript::{self, Transcript, tool_summary};
 use super::{bridge, herdr, markdown, shell};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
+use crate::core::controller::Controller;
 use crate::core::conversations::{
     CheckpointRecord, ContextWindows, Conversation, ConversationStore, TurnAnchorRecord,
     default_context_windows_path, load_context_windows,
@@ -26,9 +27,9 @@ use crate::core::guard::Watch;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
-    AgentEvent, Attachment, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, ModelRef,
-    PermissionPolicy, PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, Rules,
-    SessionCommand, StopReason, Usage,
+    AgentEvent, Attachment, ContextUsage, HarnessCommand, HarnessId, ModelRef, PermissionPolicy,
+    PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, Rules, SessionCommand, StopReason,
+    Usage,
 };
 use crate::harness::ModelInfo;
 
@@ -254,32 +255,14 @@ pub struct App {
 
     pub active: HarnessId,
     pub harness_options: Vec<HarnessOption>,
-    /// The policy named for every harness (`--policy`, or the one a
-    /// resumed conversation was named). Without one each harness has its
-    /// configured default (`policy_requested`).
-    pub policy_explicit: Option<PermissionPolicy>,
-    /// What the user chose in the TUI, per harness. It holds for that
-    /// harness only, over the policy named for every harness.
-    pub policy_choice: HashMap<HarnessId, PermissionPolicy>,
-    /// The policy named in this run (`--policy`): it holds over the one a
-    /// resumed conversation was run with.
-    run_policy: Option<PermissionPolicy>,
-    /// What was chosen in this run: it holds over a resumed conversation's
-    /// choice for the same harness.
-    run_choices: HashMap<HarnessId, PermissionPolicy>,
-    /// The policy each harness ran under before it went into plan mode:
-    /// the one its plan approval offers first.
-    pre_plan: HashMap<HarnessId, PermissionPolicy>,
-    /// Policies sent to the live session whose report has not come back
-    /// (`PolicyChanged`), oldest first.
-    policies_sent: VecDeque<PermissionPolicy>,
+    /// What decides how each harness runs: its policy, and what its
+    /// sessions reported on top of its capabilities.
+    pub controller: Controller,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
     pub sandbox: SandboxSetup,
     /// The level the live session's process was started under.
     pub session_sandbox_level: Option<SandboxLevel>,
-    /// The policy the live session's process was started under.
-    pub session_policy: Option<PermissionPolicy>,
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
@@ -433,8 +416,6 @@ pub struct App {
     /// The `!` command running now.
     pub shell: Option<ShellRun>,
     compacting: bool,
-    /// What live sessions reported on top of the declared capabilities.
-    live_caps: HashMap<HarnessId, CapsUpdate>,
     /// The harnesses already told which MCP servers they do not get.
     mcp_warned: HashSet<HarnessId>,
     /// The harnesses whose [`Harness::session_notice`] was shown.
@@ -764,6 +745,7 @@ impl App {
         let context_windows_path = init
             .context_windows
             .unwrap_or_else(default_context_windows_path);
+        let controller = Controller::new(registry.clone(), init.policy);
         let mut app = App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
@@ -777,15 +759,9 @@ impl App {
             config,
             active,
             harness_options,
-            policy_explicit: init.policy,
-            policy_choice: HashMap::new(),
-            run_policy: init.policy,
-            run_choices: HashMap::new(),
-            pre_plan: HashMap::new(),
-            policies_sent: VecDeque::new(),
+            controller,
             sandbox: init.sandbox,
             session_sandbox_level: None,
-            session_policy: None,
             guard: None,
             providers,
             chosen_providers,
@@ -859,7 +835,6 @@ impl App {
             queued: VecDeque::new(),
             shell: None,
             compacting: false,
-            live_caps: HashMap::new(),
             mcp_warned: HashSet::new(),
             session_noticed: HashSet::new(),
             modal: None,
@@ -1117,15 +1092,14 @@ impl App {
                     self.model_cache
                         .insert((self.active, provider), models.clone());
                 }
-                let commands = update.commands.is_some() || update.slash_commands.is_some();
-                let refusal = update.refused_policies.is_some();
-                let before = self.effective_policy();
-                self.live_caps.entry(self.active).or_default().merge(update);
-                if commands {
+                let report =
+                    self.controller
+                        .report(&self.config, self.active, update, self.session_alive);
+                if report.commands {
                     self.commands_arrived();
                 }
-                if refusal {
-                    self.policy_refused(before);
+                if let Some(refused) = report.refused {
+                    self.policy_refused(refused);
                 }
             }
             AgentEvent::TurnCompleted {
