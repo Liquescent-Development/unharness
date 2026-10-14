@@ -1,10 +1,10 @@
 //! Permission requests: the notice for what `core::permissions` answers
 //! (an allow rule, or a handoff summary being written), the dialog the
 //! front end opens for what it leaves to the user, and the requests
-//! waiting behind another dialog.
+//! waiting behind another dialog (`Tracking`).
 
 use super::{Action, Controller, Front, PlanAsk};
-use crate::core::permissions::{HandoffTo, Route, Router, Why};
+use crate::core::permissions::{HandoffTo, Route, Why};
 use crate::core::{
     PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, SessionCommand,
 };
@@ -13,25 +13,20 @@ impl Controller {
     /// Requests of a session that is gone: nobody can answer them now.
     pub(super) fn drop_prompts(&mut self, front: &mut dyn Front) {
         front.drop_request();
-        self.pending_prompts.clear();
+        self.tracking.drop_waiting();
     }
 
     pub(super) fn on_permission_request(&mut self, req: PermissionRequest, front: &mut dyn Front) {
-        let planning = self.asked_planning.remove(&req.id)
-            || self.effective_policy(self.active) == Some(PermissionPolicy::Plan);
-        let router = Router {
-            rules: &self.rules,
-            cwd: &self.cwd,
-            planning,
-            handoff: self.handoff.map(|h| {
-                if h.renew {
-                    HandoffTo::NewSession
-                } else {
-                    HandoffTo::AnotherAgent
-                }
-            }),
-        };
-        if let Route::Answered { decision, why } = router.route(&req) {
+        let plan_mode = self.effective_policy(self.active) == Some(PermissionPolicy::Plan);
+        let handoff = self.handoff.map(|h| {
+            if h.renew {
+                HandoffTo::NewSession
+            } else {
+                HandoffTo::AnotherAgent
+            }
+        });
+        let (route, planning) = self.tracking.route(&req, &self.cwd, plan_mode, handoff);
+        if let Route::Answered { decision, why } = route {
             match (why, &req.kind) {
                 (Why::Handoff, PermissionKind::ToolUse { tool, .. }) => self
                     .conversation
@@ -66,10 +61,7 @@ impl Controller {
             });
             front.ask(req, plan);
         } else {
-            if planning {
-                self.asked_planning.insert(req.id.clone());
-            }
-            self.pending_prompts.push_back(req);
+            self.tracking.wait(req, planning);
         }
     }
 
@@ -86,7 +78,7 @@ impl Controller {
     /// open now: a rule added in the meantime may answer some of them.
     pub fn show_next_prompt(&mut self, front: &mut dyn Front) {
         while !front.dialog_open()
-            && let Some(req) = self.pending_prompts.pop_front()
+            && let Some(req) = self.tracking.next_waiting()
         {
             self.on_permission_request(req, front);
         }
@@ -101,7 +93,6 @@ impl Controller {
             ));
             self.show_next_prompt(front);
         }
-        self.pending_prompts.retain(|req| req.id != id);
-        self.asked_planning.remove(id);
+        self.tracking.withdraw(id);
     }
 }

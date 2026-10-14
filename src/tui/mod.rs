@@ -1093,7 +1093,7 @@ mod tests {
             handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         }
         assert!(app.input.is_empty() && app.take_actions().is_empty());
-        assert_eq!(app.controller.subagents.len(), 1);
+        assert_eq!(app.controller.tracking.subagents.len(), 1);
         assert!(app.modal.is_none() && !app.controller.should_quit);
 
         handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('s'));
@@ -1150,7 +1150,7 @@ mod tests {
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         assert!(app.subagent_focus.is_none() && app.input == "a\nb");
-        assert_eq!(app.controller.subagents.len(), 2);
+        assert_eq!(app.controller.tracking.subagents.len(), 2);
 
         // Delete in the list leaves a running one, and the draft, alone.
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Down);
@@ -1214,7 +1214,7 @@ mod tests {
         // Esc leaves the view and stops nothing; the draft is still there.
         handle_key(&mut app, KeyModifiers::NONE, KeyCode::Esc);
         assert!(app.viewing.is_none() && app.take_actions().is_empty());
-        assert_eq!(app.controller.subagents.len(), 2);
+        assert_eq!(app.controller.tracking.subagents.len(), 2);
         assert_eq!(app.input, "draft");
     }
 

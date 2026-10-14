@@ -121,6 +121,7 @@ impl App {
                             let covers = match &m.request.kind {
                                 PermissionKind::ToolUse { tool, action, .. } => self
                                     .controller
+                                    .tracking
                                     .rules
                                     .would_allow(&rules, tool, action, &self.controller.cwd),
                                 _ => false,
@@ -174,12 +175,12 @@ impl App {
                         KeyCode::Char('a') => {
                             if let PermissionKind::ToolUse { tool, action, .. } = &m.request.kind {
                                 m.always = Some(AlwaysDraft::new(
-                                    self.controller.rules.propose(
+                                    self.controller.tracking.rules.propose(
                                         tool,
                                         action,
                                         &self.controller.cwd,
                                     ),
-                                    self.controller.rules.has_workspace(),
+                                    self.controller.tracking.rules.has_workspace(),
                                 ));
                             }
                             None

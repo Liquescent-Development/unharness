@@ -13,7 +13,7 @@ impl Controller {
     /// the session ends: it stays listed at work with its note, and goes
     /// with the session.
     pub fn awaited_subagents(&self) -> usize {
-        self.subagents.iter().filter(|a| !a.unreported_end).count()
+        self.tracking.awaited()
     }
 
     /// Whether subagents at work keep the session from being ended for
@@ -34,7 +34,7 @@ impl Controller {
 
     /// Stop the subagent that the tool call `id` spawned.
     pub fn stop_subagent(&mut self, id: String, front: &mut dyn Front) {
-        if !self.subagents.iter().any(|a| a.id == id) {
+        if !self.tracking.subagents.iter().any(|a| a.id == id) {
             front.flash("This subagent is not running".into());
         } else if !self.caps().subagents.stop || !self.session_alive {
             front.flash(format!(
@@ -50,7 +50,7 @@ impl Controller {
 
     /// The session is going away, and whatever its subagents were doing.
     pub(super) fn drop_subagents(&mut self) {
-        self.subagents.clear();
+        self.tracking.clear_subagents();
         self.conversation.transcript.end_running_agents();
     }
 }

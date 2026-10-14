@@ -340,7 +340,7 @@ fn clear_is_refused_while_busy() {
             .contains("subagent(s) still at work")
     );
 
-    app.controller.subagents.clear();
+    app.controller.tracking.subagents.clear();
     app.run_shell("sleep 5");
     app.handle_slash_command("/clear");
     assert_eq!(app.controller.conversation.record.id, id);
@@ -415,15 +415,18 @@ fn leave_traces(app: &mut App) {
     app.scroll = 5;
     app.auto_scroll = false;
     app.open_policy_picker();
-    app.controller.pending_prompts.push_back(PermissionRequest {
-        id: "r1".into(),
-        kind: PermissionKind::Confirm {
-            title: "Go on?".into(),
-            message: None,
-        },
-        tool_call_id: None,
-    });
-    app.controller.asked_planning.insert("r1".into());
+    app.controller
+        .tracking
+        .pending_prompts
+        .push_back(PermissionRequest {
+            id: "r1".into(),
+            kind: PermissionKind::Confirm {
+                title: "Go on?".into(),
+                message: None,
+            },
+            tool_call_id: None,
+        });
+    app.controller.tracking.asked_planning.insert("r1".into());
 }
 
 fn assert_no_traces(app: &App, after: &str) {
@@ -441,7 +444,8 @@ fn assert_no_traces(app: &App, after: &str) {
     assert_eq!((app.scroll, app.auto_scroll), (0, true), "{after}");
     assert!(app.modal.is_none(), "{after}");
     assert!(
-        app.controller.pending_prompts.is_empty() && app.controller.asked_planning.is_empty(),
+        app.controller.tracking.pending_prompts.is_empty()
+            && app.controller.tracking.asked_planning.is_empty(),
         "{after}"
     );
 }

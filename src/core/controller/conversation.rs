@@ -102,8 +102,8 @@ impl Controller {
         self.conversation = ConversationState::new(record, active);
         self.policy.forget_plans();
         self.active = active;
-        self.pending_prompts.clear();
-        self.asked_planning.clear();
+        self.tracking.pending_prompts.clear();
+        self.tracking.asked_planning.clear();
     }
 
     /// A new conversation that keeps the models and efforts this one chose.

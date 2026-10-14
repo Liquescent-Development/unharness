@@ -60,7 +60,13 @@ impl App {
         let name = self.short_name();
         let id = self.controller.active.as_str();
         let root = self.controller.workspace_root.clone();
-        let Some(dir) = self.controller.rules.config_dir().map(Path::to_path_buf) else {
+        let Some(dir) = self
+            .controller
+            .tracking
+            .rules
+            .config_dir()
+            .map(Path::to_path_buf)
+        else {
             self.controller
                 .conversation
                 .transcript

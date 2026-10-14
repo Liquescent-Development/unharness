@@ -26,7 +26,7 @@ impl App {
     /// Whether a request waits for the user, open or behind another modal.
     pub fn awaiting_answer(&self) -> bool {
         self.modal.as_ref().is_some_and(Modal::is_prompt)
-            || !self.controller.pending_prompts.is_empty()
+            || !self.controller.tracking.pending_prompts.is_empty()
     }
 
     /// "Allow always": the request is allowed, and so is what the rules
@@ -39,7 +39,7 @@ impl App {
             Scope::Workspace => "in this workspace",
             Scope::Global => "in every workspace",
         };
-        match self.controller.rules.append(scope, rules) {
+        match self.controller.tracking.rules.append(scope, rules) {
             Ok(path) => self.controller.conversation.transcript.push_notice(format!(
                 "from now on allowing {} {place} (see /allow; kept in {})",
                 what.join(", "),

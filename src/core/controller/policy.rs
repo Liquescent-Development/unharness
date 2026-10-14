@@ -529,7 +529,7 @@ impl Controller {
             harness: self.display_name(),
             offered,
             start,
-            has_workspace: self.rules.has_workspace(),
+            has_workspace: self.tracking.rules.has_workspace(),
         }
     }
 

@@ -151,7 +151,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
         stop_reason: StopReason::Done,
     });
     assert!(!app.controller.is_generating);
-    assert_eq!(app.controller.subagents.len(), 1);
+    assert_eq!(app.controller.tracking.subagents.len(), 1);
     assert_eq!(spawn_block(&app, "spawn").status, None);
     let main = kinds(&app.controller.conversation.transcript.blocks);
 
@@ -160,7 +160,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     app.on_event(sub("spawn", read_call("inner", "a.txt")));
     // Until the harness words it, the call is the activity.
     assert_eq!(
-        app.controller.subagents[0].activity.as_deref(),
+        app.controller.tracking.subagents[0].activity.as_deref(),
         Some("Read a.txt")
     );
     app.on_event(AgentEvent::SubagentProgress {
@@ -169,10 +169,10 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     });
     app.on_event(sub("spawn", read_call("inner2", "b.txt")));
     assert_eq!(
-        app.controller.subagents[0].activity.as_deref(),
+        app.controller.tracking.subagents[0].activity.as_deref(),
         Some("Reading a.txt")
     );
-    assert_eq!(app.controller.subagents[0].tools, 2);
+    assert_eq!(app.controller.tracking.subagents[0].tools, 2);
     app.on_event(sub("spawn", AgentEvent::Notice("retrying".into())));
     app.on_event(sub(
         "spawn",
@@ -183,7 +183,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
         status: SubagentStatus::Completed,
         result: Some("The word is alpha.".into()),
     });
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
 
     // All of it is in the subagent's transcript, the report (once) last,
     // and none of it in the main one.
@@ -251,7 +251,7 @@ fn a_report_after_the_end_is_added_once() {
         })
     };
     ended(&mut app, None);
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
     let took = spawn_block(&app, "spawn").duration;
     assert!(took.is_some());
     ended(&mut app, Some("All good."));
@@ -293,13 +293,13 @@ fn a_subagents_own_subagent_outlives_it() {
     ended(&mut app, "outer");
     let inner = spawn_block(&app, "inner");
     assert_eq!((inner.status, inner.duration), (None, None));
-    assert_eq!(app.controller.subagents.len(), 1);
+    assert_eq!(app.controller.tracking.subagents.len(), 1);
     std::thread::sleep(Duration::from_millis(20));
     ended(&mut app, "inner");
     let inner = spawn_block(&app, "inner");
     assert_eq!(inner.status, Some(SubagentStatus::Completed));
     assert!(inner.duration.unwrap() >= Duration::from_millis(20));
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
 }
 
 #[test]
@@ -427,7 +427,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
 
     // The session dies: nothing is left running, however deep.
     app.on_event(AgentEvent::ProcessExited { code: Some(1) });
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
     for id in ["second", "deep"] {
         assert_eq!(
             spawn_block(&app, id).status,
@@ -483,7 +483,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/claude/fixtures/subagent_parallel.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
+    assert!(app.controller.tracking.subagents.is_empty() && !app.controller.is_generating);
     let got = reports(&app);
     assert_eq!(got.len(), 3);
     assert!(got.iter().all(|(s, _)| *s == done));
@@ -538,7 +538,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
     );
     let got = reports(&app);
     assert_eq!(got.len(), 1);
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
     assert!(got[0].0 == done && got[0].1.ends_with("**alpha**"));
 
     // Claude: a subagent that starts one of its own and ends first.
@@ -549,7 +549,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/claude/fixtures/subagent_nested.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
+    assert!(app.controller.tracking.subagents.is_empty() && !app.controller.is_generating);
     let runs = app.controller.conversation.transcript.agents();
     assert_eq!(runs.len(), 2);
     assert!(runs.iter().all(|(_, run, _)| run.duration.is_some()));
@@ -574,7 +574,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
             }
         },
     );
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
     let got = reports(&app);
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].0, done);
@@ -588,7 +588,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         "src/harness/codex/fixtures/app_server_subagent_background.jsonl",
         |l| p.feed(l),
     );
-    assert!(app.controller.subagents.is_empty() && !app.controller.is_generating);
+    assert!(app.controller.tracking.subagents.is_empty() && !app.controller.is_generating);
     assert_eq!(reports(&app), vec![(done, "alpha".to_string())]);
 
     let mut app = test_app(HarnessId::CODEX);
@@ -667,7 +667,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     vibe_renews(&mut app, "effort off");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_effort(), Some("off"));
-    assert!(app.controller.subagents.is_empty());
+    assert!(app.controller.tracking.subagents.is_empty());
     assert_eq!(
         spawn_block(&app, "s1").status,
         Some(SubagentStatus::Cancelled)
@@ -689,7 +689,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
     assert_ne!(app.controller.conversation.record.id, id);
-    assert!(app.controller.subagents.is_empty() && app.subagent_rows().is_empty());
+    assert!(app.controller.tracking.subagents.is_empty() && app.subagent_rows().is_empty());
 
     // And a provider change.
     let (mut app, _cwd) = vibe_app_with_provider();

@@ -284,6 +284,7 @@ impl App {
             "/allow" => {
                 let list: Vec<String> = self
                     .controller
+                    .tracking
                     .rules
                     .iter()
                     .map(|(scope, rule)| {
@@ -296,7 +297,7 @@ impl App {
                     .collect();
                 let files: Vec<String> = [Scope::Workspace, Scope::Global]
                     .into_iter()
-                    .filter_map(|scope| self.controller.rules.path(scope))
+                    .filter_map(|scope| self.controller.tracking.rules.path(scope))
                     .map(|path| format!("  {}", path.display()))
                     .collect();
                 let files = format!("Kept in (edit to change or remove):\n{}", files.join("\n"));

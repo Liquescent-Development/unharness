@@ -97,7 +97,7 @@ fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
         kind: None,
         unreported_end: false,
     });
-    assert!(!app.controller.subagents.is_empty());
+    assert!(!app.controller.tracking.subagents.is_empty());
     app.set_provider("vertex".into());
     assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
     assert!(app.take_actions().is_empty());

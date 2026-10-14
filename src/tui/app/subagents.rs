@@ -9,7 +9,7 @@ impl App {
     /// Any subagent is listed at work, whether or not its end will be
     /// told: its row's spinner and time go on.
     pub fn has_running_subagents(&self) -> bool {
-        !self.controller.subagents.is_empty()
+        !self.controller.tracking.subagents.is_empty()
     }
 
     /// "2 subagents running", when any are whose end will be told.
@@ -25,6 +25,7 @@ impl App {
     /// been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
         self.controller
+            .tracking
             .subagents
             .iter()
             .filter(|a| !a.unreported_end)
@@ -43,7 +44,12 @@ impl App {
             .listed_agents()
             .into_iter()
             .map(|(id, run, depth)| {
-                let live = self.controller.subagents.iter().find(|a| a.id == id);
+                let live = self
+                    .controller
+                    .tracking
+                    .subagents
+                    .iter()
+                    .find(|a| a.id == id);
                 SubagentRow {
                     id: id.to_string(),
                     description: run.description.clone(),

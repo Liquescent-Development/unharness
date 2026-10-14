@@ -24,6 +24,12 @@
 //! out against the session, holding a start until the CLI that ended the
 //! session before it is gone ([`Ending`]).
 //!
+//! What any front end tracks of the session's events, with or without that
+//! lifecycle, is [`Tracking`]: the subagents at work and the turn ends
+//! owed for them, the session's id, model and usage, whether the agent
+//! plans, and who answers a permission request, also with nobody there to
+//! ask. The controller keeps one ([`Controller::tracking`]).
+//!
 //! The TUI calls into it and reads from it. What it says of the
 //! conversation it holds it puts in that conversation's transcript itself;
 //! where its logic reads or changes what is on screen (a request's dialog,
@@ -45,8 +51,7 @@ use crate::core::registry::Registry;
 use crate::core::sandbox::{SandboxLevel, SandboxSetup};
 use crate::core::{
     Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef,
-    PermissionPolicy, PermissionRequest, PolicySupport, ProviderId, RateLimitInfo, Rules,
-    SessionCommand,
+    PermissionPolicy, PolicySupport, ProviderId, RateLimitInfo, Rules, SessionCommand,
 };
 use crate::harness::{Harness, resolve_binary};
 
@@ -64,6 +69,7 @@ mod session;
 mod shell_command;
 mod subagents;
 mod switch;
+mod tracking;
 mod turn;
 
 pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow, subagents_refusal};
@@ -73,6 +79,7 @@ pub use front::{Front, PlanAsk, PolicyAsk};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
 pub use run::{Ending, run_actions};
 pub use switch::handoff_prompt;
+pub use tracking::{RunningSubagent, Tracking, Unasked};
 pub use turn::STOP_GRACE;
 
 /// Where a choice came from.
@@ -197,25 +204,6 @@ pub(crate) struct Handoff {
     pub(crate) blind: bool,
 }
 
-/// A subagent that is at work.
-#[derive(Debug, Clone)]
-pub struct RunningSubagent {
-    /// The tool call that spawned it.
-    pub id: String,
-    pub description: String,
-    pub kind: Option<String>,
-    /// What it is doing now.
-    pub activity: Option<String>,
-    /// The harness words its activity itself, so its tool calls need not.
-    described: bool,
-    /// Tool calls it has made.
-    pub tools: usize,
-    pub started: Instant,
-    /// Its end may never be told (`AgentEvent::SubagentStarted`): it holds
-    /// nothing back (`Controller::awaited_subagents`).
-    pub unreported_end: bool,
-}
-
 /// A prompt waiting for the running turn to finish.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueuedPrompt {
@@ -315,9 +303,10 @@ pub struct Controller {
     /// been told it has not yet.
     pub(crate) interrupted: Option<(Instant, bool)>,
     pub rate_limit: Option<RateLimitInfo>,
-    /// Subagents at work, oldest first. They can outlive the turn that
-    /// started them.
-    pub subagents: Vec<RunningSubagent>,
+    /// What it tracks of the session's events as any front end would: its
+    /// subagents at work, and who answers its permission requests and
+    /// those waiting behind another dialog.
+    pub tracking: Tracking,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
     /// The `!` command running now.
@@ -327,13 +316,6 @@ pub struct Controller {
     mcp_warned: HashSet<HarnessId>,
     /// The harnesses whose [`Harness::session_notice`] was shown.
     session_noticed: HashSet<HarnessId>,
-    /// Permission requests waiting behind another dialog for the user.
-    pub(crate) pending_prompts: VecDeque<PermissionRequest>,
-    /// Requests in `pending_prompts` the agent made while it planned: they
-    /// are judged so also when they come out after the plan's approval.
-    pub(crate) asked_planning: HashSet<String>,
-    /// Requests these allow are answered without asking.
-    pub rules: Rules,
     pub should_quit: bool,
     pub(crate) actions: VecDeque<Action>,
 }
@@ -435,15 +417,12 @@ impl Controller {
             generation_start: None,
             interrupted: None,
             rate_limit: None,
-            subagents: Vec::new(),
+            tracking: Tracking::new(launch.rules),
             queued: VecDeque::new(),
             shell: None,
             compacting: false,
             mcp_warned: HashSet::new(),
             session_noticed: HashSet::new(),
-            pending_prompts: VecDeque::new(),
-            asked_planning: HashSet::new(),
-            rules: launch.rules,
             should_quit: false,
             actions: VecDeque::new(),
         }

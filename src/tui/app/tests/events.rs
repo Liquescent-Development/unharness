@@ -185,11 +185,11 @@ fn herdr_hears_working_blocked_and_idle() {
     app.modal = None;
     app.open_effort_picker();
     app.open_sandbox_picker();
-    assert!(!app.controller.pending_prompts.is_empty());
+    assert!(!app.controller.tracking.pending_prompts.is_empty());
     assert_eq!(app.herdr_report().state, State::Blocked);
 
     app.modal = None;
-    app.controller.pending_prompts.clear();
+    app.controller.tracking.pending_prompts.clear();
     assert_eq!(app.herdr_report().state, State::Working);
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,

@@ -132,6 +132,7 @@ fn a_plan_not_approved_keeps_the_agent_planning() {
 fn while_planning_a_rule_answers_only_a_read() {
     let mut app = planning_app();
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::edit("**"), Rule::read("**")])
         .unwrap();
@@ -176,6 +177,7 @@ fn while_planning_a_rule_answers_only_a_read() {
 fn a_request_made_while_planning_is_judged_so_after_the_approval() {
     let mut app = planning_app();
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::edit("**")])
         .unwrap();
@@ -192,7 +194,7 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
         },
         tool_call_id: None,
     }));
-    assert_eq!(app.controller.pending_prompts.len(), 1);
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 1);
     // Approved under accept-edits (highlighted: the policy planned from).
     app.handle_modal_key(key(KeyCode::Enter));
     assert_eq!(

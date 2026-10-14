@@ -7,6 +7,7 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller.session_alive = true;
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
@@ -30,6 +31,7 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
 
     // Several commands, several rules: all of them are named.
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::shell("git push")])
         .unwrap();
@@ -54,11 +56,12 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
         app.modal.as_ref().and_then(Modal::request_id),
         Some("claude")
     );
-    assert_eq!(app.controller.pending_prompts.len(), 2);
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 2);
 
     // Run in the workspace it is the rule's command, elsewhere it is not.
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
@@ -79,6 +82,7 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     // A subagent's request is answered the same way.
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller
+        .tracking
         .rules
         .append(Scope::Global, &[Rule::shell("cargo test")])
         .unwrap();
@@ -111,6 +115,7 @@ fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller.session_alive = true;
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
@@ -214,10 +219,22 @@ fn allow_always_writes_a_rule_that_the_next_harness_knows() {
     // waiting is answered by the new rule.
     assert_eq!(app.take_actions(), vec![allowed("claude"), allowed("acp")]);
     assert!(app.modal.is_none());
-    let path = app.controller.rules.path(Scope::Workspace).unwrap();
+    let path = app
+        .controller
+        .tracking
+        .rules
+        .path(Scope::Workspace)
+        .unwrap();
     let written = std::fs::read_to_string(&path).unwrap();
     assert!(written.contains("command = \"cargo test\""), "{written}");
-    assert!(!app.controller.rules.path(Scope::Global).unwrap().exists());
+    assert!(
+        !app.controller
+            .tracking
+            .rules
+            .path(Scope::Global)
+            .unwrap()
+            .exists()
+    );
 
     // After a switch, Codex asks for the same thing and is not asked about.
     app.on_event(codex);
@@ -280,11 +297,12 @@ fn the_rule_can_be_changed_and_moved_before_it_is_kept() {
     app.handle_modal_key(key(KeyCode::Enter));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
     assert_eq!(
-        app.controller.rules.iter().collect::<Vec<_>>(),
+        app.controller.tracking.rules.iter().collect::<Vec<_>>(),
         [(Scope::Global, &Rule::shell("cargo test"))]
     );
     assert!(
         !app.controller
+            .tracking
             .rules
             .path(Scope::Workspace)
             .unwrap()
@@ -375,7 +393,7 @@ fn a_request_no_rule_can_cover_says_so_and_stays_a_question() {
     app.handle_modal_key(key(KeyCode::Esc));
     app.handle_modal_key(key(KeyCode::Char('y')));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
-    assert_eq!(app.controller.rules.iter().count(), 0);
+    assert_eq!(app.controller.tracking.rules.iter().count(), 0);
 }
 
 #[test]
@@ -384,7 +402,12 @@ fn a_rule_that_cannot_be_saved_still_allows_this_once() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller.session_alive = true;
     // Something that is not a rules file is in the way.
-    let path = app.controller.rules.path(Scope::Workspace).unwrap();
+    let path = app
+        .controller
+        .tracking
+        .rules
+        .path(Scope::Workspace)
+        .unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "not toml [").unwrap();
     app.on_event(cargo_test_requests("cargo test").remove(0));
@@ -410,10 +433,12 @@ fn allow_lists_the_rules_and_where_they_are_kept() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.handle_slash_command("/allow");
     app.controller
+        .tracking
         .rules
         .append(Scope::Workspace, &[Rule::edit("src/**")])
         .unwrap();
     app.controller
+        .tracking
         .rules
         .append(Scope::Global, &[Rule::mcp("probe/*")])
         .unwrap();

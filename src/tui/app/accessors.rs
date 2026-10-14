@@ -148,6 +148,7 @@ impl App {
         }
         .or_else(|| {
             self.controller
+                .tracking
                 .pending_prompts
                 .front()
                 .map(|req| super::herdr::request_message(&req.kind))

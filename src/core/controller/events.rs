@@ -1,10 +1,7 @@
 //! The events of the active harness's session: what each does to the
 //! conversation, the session and the turn.
 
-use std::time::Instant;
-
-use super::{Controller, Front, RunningSubagent};
-use crate::core::transcript::tool_summary;
+use super::{Controller, Front};
 use crate::core::{AgentEvent, RateLimitInfo, StopReason};
 
 impl Controller {
@@ -70,17 +67,9 @@ impl Controller {
                 | AgentEvent::SubagentProgress { .. }
                 | AgentEvent::SubagentEnded { .. }) => self.on_event(ev, front),
                 ev => {
-                    if let AgentEvent::ToolCallStarted { name, input, .. } = &ev
-                        && let Some(a) = self.subagents.iter_mut().find(|a| a.id == parent)
-                    {
-                        a.tools += 1;
-                        if !a.described {
-                            a.activity = Some(
-                                format!("{name} {}", tool_summary(name, input))
-                                    .trim_end()
-                                    .to_string(),
-                            );
-                        }
+                    if let AgentEvent::ToolCallStarted { id, name, input } = &ev {
+                        self.tracking
+                            .subagent_tool_started(&parent, id, name, input);
                     }
                     let sender = self
                         .conversation
@@ -120,29 +109,17 @@ impl Controller {
                 self.conversation
                     .transcript
                     .agent_started(&id, &description, kind.as_deref());
-                self.subagents.retain(|a| a.id != id);
-                self.subagents.push(RunningSubagent {
-                    id,
-                    description,
-                    kind,
-                    activity: None,
-                    described: false,
-                    tools: 0,
-                    started: Instant::now(),
-                    unreported_end,
-                });
+                self.tracking
+                    .subagent_started(id, description, kind, unreported_end);
             }
             AgentEvent::SubagentProgress { id, activity } => {
-                if let Some(a) = self.subagents.iter_mut().find(|a| a.id == id) {
-                    a.activity = Some(activity);
-                    a.described = true;
-                }
+                self.tracking.subagent_progress(&id, activity)
             }
             AgentEvent::SubagentEnded { id, status, result } => {
                 self.conversation
                     .transcript
                     .agent_ended(&id, status, result.as_deref());
-                self.subagents.retain(|a| a.id != id);
+                self.tracking.subagent_ended(&id, status);
                 // Between turns nothing else would save its report.
                 if !self.is_generating {
                     self.persist();
