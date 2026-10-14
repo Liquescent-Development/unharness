@@ -50,7 +50,9 @@ src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                session's events, with or without that lifecycle
                (tracking.rs: subagents and the turn ends owed for them,
                the session's id, model and usage, who answers a
-               permission request, also with nobody to ask)),
+               permission request, also with nobody to ask); a run opens
+               it (open.rs), and the lifecycle's tests drive it as the
+               App does, through a recording Front (tests/lifecycle/)),
                the conversation as blocks (transcript.rs), what another
                harness is told of it (bridge.rs), the `!` command (shell.rs:
                telling it from a prompt, running it, and what an agent is
@@ -79,7 +81,8 @@ src/tui/       App (the view and its controller), modals, rendering, the
                Screen (front.rs: the view as the controller's Front), the
                rest one file per concern (input, mouse, suggestions, modal
                keys, the pickers), each forwarding to the controller what
-               is its; their tests the same way under tests/
+               is its; their tests (of the view and the App's own
+               part) the same way under tests/
 src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
