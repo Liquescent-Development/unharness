@@ -12,16 +12,16 @@ doctor` prints the path, and `unharness init` creates the file.
 > A config file that does not parse stops unharness and names the file and
 > line. unharness never falls back to defaults, which would run without your
 > sandbox and policy settings. A harness table that is wrong (an unknown
-> policy or Codex `transport`, a `modes` map or a provider that is not
-> whole, an ACP agent without a command, a key its harness does not take,
-> a value of the wrong type in a key only its harness takes, a key
-> unharness no longer takes, a table no harness takes: a misspelt name,
-> or another name for a harness such as `claude-code`, whose table is
-> `[harnesses.claude]`) stops a run, `unharness switch` and `unharness
-> models` too, and is never replaced by the built-in or preset of its
-> name. Such an error names the table and the key, not the file;
-> `unharness doctor` shows it, leaves out a harness it cannot build,
-> shows the rest, and exits 1.
+> policy, Codex `transport` or `protocol`, a `modes` map or a provider
+> that is not whole, an ACP agent without a command, a key its harness
+> does not take, a value of the wrong type in a key only its harness
+> takes, a key unharness no longer takes, a table no harness takes: a
+> misspelt name, or another name for a harness such as `claude-code`,
+> whose table is `[harnesses.claude]`) stops a run, `unharness switch`
+> and `unharness models` too, and is never replaced by the built-in or
+> preset of its name. Such an error names the table and the key, not the
+> file; `unharness doctor` shows it, leaves out a harness it cannot
+> build, shows the rest, and exits 1.
 
 ## Example
 
@@ -89,7 +89,7 @@ headers = { Authorization = "Bearer …" }
 | `[harnesses.<id>]` | | Per-harness settings. Every harness takes `binary`, `default_model`, `default_effort`, `default_provider`, `default_policy`, `extra_args` and `sandbox_writable`; `protocol`, `command` and `display_name` are an ACP agent's (below). Any other key is one only its harness takes (below), and one it does not take is an error naming it. `<id>` is the harness's own name: a table no harness takes is an error, and so is one under another name for a harness (`claude-code`, `antigravity`, `mistral-vibe`), whose table is the one of its own name |
 | `[harnesses.claude] relocate_config` | `true` | See [Sandbox](sandbox.md#things-to-know) |
 | `[harnesses.codex] transport` | `auto` | `app-server`, or `exec` to force the fallback (Codex marks `app-server` experimental); any other value is an error. Under `exec` every turn is a process of its own, and what it left running ends with the turn (on Linux; elsewhere what it left in its process group) |
-| `[harnesses.<name>] protocol = "acp"` | | With `command`, adds an [ACP agent](acp.md) under the table's name, or replaces the preset of that name. A built-in harness's table (`agy`, `claude`, `codex`, `pi`, `vibe`) stays that harness's whatever it says |
+| `[harnesses.<name>] protocol = "acp"` | | With `command`, adds an [ACP agent](acp.md) under the table's name, or replaces the preset of that name. A built-in harness's table (`agy`, `claude`, `codex`, `pi`, `vibe`) stays that harness's with it. `acp` is the only protocol: any other value is an error, in any table |
 | `[harnesses.<name>] command`, `display_name` | none | The agent's command line, e.g. `["gemini", "--acp"]`, and the name shown for it. Only a table with `protocol = "acp"` takes them, and `vibe`'s (in place of `vibe-acp` and its own name). `agy`, `claude`, `codex`, `pi` and a preset's table without `protocol = "acp"` run their own command under their own name, so there they are an error; another binary of the harness is set with `binary` |
 | `[harnesses.<name>] modes` | none | ACP only: which of the agent's own session modes backs each policy, e.g. `{ ask = "ask", bypass = "auto-approve" }`; see [Modes](acp.md#modes). An agent with modes and no map gets only `bypass`. A workspace's table replaces the global one whole |
 | `[harnesses.<name>] sign_in` | none (`vibe --setup` for `vibe`) | ACP only: the command that signs the agent in, shown when a session fails for want of sign-in; unharness never runs it. See [Sign-in](acp.md#sign-in) |

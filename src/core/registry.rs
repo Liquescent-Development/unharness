@@ -56,13 +56,13 @@ impl Registry {
     pub fn checked(config: &Config) -> (Self, Vec<ConfigError>) {
         let empty = HarnessSettings::default();
         let mut built = Built::default();
+        // A protocol unharness does not have is said before a built-in or
+        // a preset is built from the table, which then leaves it out.
         for (id, build) in BUILTIN {
             let name = id.as_str();
-            built.add(
-                name,
-                build(name, config.harness(name).unwrap_or(&empty)),
-                true,
-            );
+            let table = config.harness(name).unwrap_or(&empty);
+            let harness = known_protocol(name, table).and_then(|()| build(name, table));
+            built.add(name, harness, true);
         }
         // ACP agents defined in config, by name for a stable order. None
         // may take a built-in harness's name.
@@ -85,7 +85,9 @@ impl Registry {
         for (name, installed) in acp::AcpHarness::presets(&taken) {
             let table = config.harness(name);
             if installed || table.is_some() {
-                built.add(name, acp::build(name, table.unwrap_or(&empty)), installed);
+                let table = table.unwrap_or(&empty);
+                let harness = known_protocol(name, table).and_then(|()| acp::build(name, table));
+                built.add(name, harness, installed);
             }
         }
 
@@ -93,6 +95,9 @@ impl Registry {
         for (name, table) in &config.harnesses {
             if !built.read.contains(name) {
                 errors.push(ConfigError::new(Some(name), unread(name, table)));
+                if let Err(e) = known_protocol(name, table) {
+                    errors.push(ConfigError::new(Some(name), e.to_string()));
+                }
             }
             // In every table, whichever harness reads it, if any: a
             // builder leaves these keys to be said here. The harness is
@@ -306,13 +311,25 @@ impl Built {
 /// What is wrong with the config's harness settings ([`Registry::checked`]):
 /// a policy that is not one (the TUI reads them again when the harness is
 /// switched, where an error could no longer end the run), a table no
-/// harness reads, a key unharness no longer takes ([`REMOVED_KEYS`]), and
-/// every builder's error: a key the harness does not take, an ACP agent
-/// without a command, a mode map that does not parse (else the agent is
-/// left in a mode of its own choosing), a provider that is not whole (a
-/// session on it would fail, or run somewhere else).
+/// harness reads, a key unharness no longer takes ([`REMOVED_KEYS`]), a
+/// protocol it does not have, and every builder's error: a key the
+/// harness does not take, an ACP agent without a command, a mode map that
+/// does not parse (else the agent is left in a mode of its own choosing),
+/// a provider that is not whole (a session on it would fail, or run
+/// somewhere else).
 pub fn config_errors(config: &Config) -> Vec<ConfigError> {
     Registry::checked(config).1
+}
+
+/// `protocol` says how unharness drives the agent a table defines, and
+/// `acp` is the one it has: any other value is an error naming the table,
+/// in any table, never the built-in or preset of its name in place of the
+/// agent it was to define.
+fn known_protocol(name: &str, table: &HarnessSettings) -> Result<()> {
+    match table.protocol.as_deref() {
+        Some(p) if p != "acp" => bail!("[harnesses.{name}] protocol: unknown protocol '{p}' (acp)"),
+        _ => Ok(()),
+    }
 }
 
 /// What is wrong with `[harnesses.<name>]`, a table no harness was built
@@ -941,6 +958,71 @@ mod tests {
         );
     }
 
+    /// A `protocol` other than `acp` is an error naming the table, the key
+    /// and the one there is, in any table: a preset's or a built-in's is
+    /// left out, not run in place of the agent the table was to define
+    /// (#281).
+    #[test]
+    fn an_unknown_protocol_is_an_error_naming_it() {
+        let wrong = |name: &str, p: &str| {
+            format!("[harnesses.{name}] protocol: unknown protocol '{p}' (acp)")
+        };
+        for (text, name, p) in [
+            (
+                "[harnesses.gemini]\nprotocol = \"acpx\"\ncommand = [\"gemini\", \"--acp\"]\n",
+                "gemini",
+                "acpx",
+            ),
+            (
+                "[harnesses.opencode]\nprotocol = \"ACP\"\n",
+                "opencode",
+                "ACP",
+            ),
+            (
+                "[harnesses.claude]\nprotocol = \"acpx\"\n",
+                "claude",
+                "acpx",
+            ),
+            ("[harnesses.vibe]\nprotocol = \"stdio\"\n", "vibe", "stdio"),
+        ] {
+            let errors = config_errors(&parse(text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, wrong(name, p));
+            assert!(errors[0].left_out && errors[0].table.as_deref() == Some(name));
+            assert_eq!(
+                Registry::from_config(&parse(text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                wrong(name, p)
+            );
+            assert!(Registry::checked(&parse(text)).0.parse(name).is_none());
+        }
+
+        // A table no harness reads says so as well.
+        let e = config_errors(&parse(
+            "[harnesses.myagent]\nprotocol = \"acpx\"\ncommand = [\"my-agent\"]\n",
+        ));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                format!(
+                    "[harnesses.myagent]: no harness's table is named myagent ({})",
+                    acp::DEFINING_AN_AGENT
+                )
+                .as_str(),
+                wrong("myagent", "acpx").as_str()
+            ]
+        );
+        assert!(e.iter().all(|e| !e.left_out));
+
+        // `acp` on a built-in's table is that built-in's still.
+        let reg =
+            Registry::from_config(&parse("[harnesses.claude]\nprotocol = \"acp\"\n")).unwrap();
+        assert!(reg.get(HarnessId::CLAUDE).is_some());
+    }
+
     /// `persist_sessions` was read by nothing, and unharness no longer
     /// takes it: in any table it is an error naming the table and the key,
     /// so that the line is deleted. The harness itself is whole (#281).
@@ -1075,6 +1157,13 @@ mod tests {
                     == "[harnesses.claude] persist_sessions: unharness no longer takes this key, \
                         which did nothing; delete the line"
                 && !e[0].left_out,
+            "{e:?}"
+        );
+        let e = check("[harnesses.gemini]\nprotocol = \"acpx\"\n");
+        assert!(
+            e.len() == 1
+                && e[0].message == "[harnesses.gemini] protocol: unknown protocol 'acpx' (acp)"
+                && e[0].left_out,
             "{e:?}"
         );
 
