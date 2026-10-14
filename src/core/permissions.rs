@@ -1,8 +1,9 @@
 //! Who answers a permission request that reaches unharness: an allow rule,
 //! unharness itself while a handoff summary is written, or the user. The
-//! TUI and `--print` both ask [`Router::route`]; the TUI opens a modal for
-//! [`Route::Ask`], and `--print`, with nobody to ask, denies it
-//! (`src/headless.rs`). What a transport answers by itself under the
+//! TUI and `--print` both ask [`Router::route`], through their
+//! `core::controller::Tracking`; the TUI opens a modal for [`Route::Ask`],
+//! and `--print`, with nobody to ask, denies it (`Tracking::nobody_to_ask`,
+//! said by `src/headless.rs`). What a transport answers by itself under the
 //! policy (an ACP agent's edit inside the workspace under accept-edits,
 //! `acp::transport::auto_allows`) never gets here.
 

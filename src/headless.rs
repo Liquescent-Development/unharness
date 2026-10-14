@@ -6,9 +6,10 @@
 //!
 //! Nobody is there to answer a permission request: a tool call an allow
 //! rule covers is allowed, every other one is denied, and a question is
-//! dismissed.
+//! dismissed. What it tracks of the session's events, and who answers a
+//! request, is the controller's [`Tracking`], as in the TUI; what it
+//! writes of them is its own.
 
-use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,12 +19,12 @@ use colored::*;
 use serde_json::{Value, json};
 
 use crate::config::Config;
-use crate::core::controller::PolicyState;
-use crate::core::permissions::{Route, Router, Why};
+use crate::core::controller::{PolicyState, Tracking, Unasked};
+use crate::core::permissions::{Route, Why};
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
     PermissionRequest, PolicyResolution, PolicySupport, RemoteControl, Rules, SessionCommand,
-    SessionHandle, StopReason, SubagentStatus, SubagentSupport, ToolAction, Usage,
+    SessionHandle, StopReason, SubagentSupport, ToolAction, Usage,
 };
 use crate::harness::Harness;
 
@@ -99,17 +100,17 @@ pub struct RunInfo {
 /// One headless run: what it has seen and where its output goes.
 pub struct Headless<O: Write, E: Write> {
     format: Format,
-    rules: Rules,
     cwd: PathBuf,
     /// The harness's short name, for stderr.
     name: String,
-    /// `SubagentSupport::report_turn` of the harness.
-    report_turn: bool,
     pub out: O,
     pub err: E,
     harness: String,
-    session_id: Option<String>,
-    model: Option<String>,
+    /// What any front end tracks of the session's events: its id, model
+    /// and usage, the subagents at work, the turn ends still owed before
+    /// the answer is complete (the prompt's, and one for each subagent the
+    /// harness reports in a turn of its own), and who answers a request.
+    tracking: Tracking,
     /// The main agent's text so far.
     text: String,
     /// A tool call or a new turn came since the last text: the next text
@@ -117,22 +118,6 @@ pub struct Headless<O: Write, E: Write> {
     paragraph: bool,
     turn_running: bool,
     turns: u32,
-    /// Turn ends still to come before the answer is complete: the
-    /// prompt's, and one for each subagent the harness reports in a turn
-    /// of its own (`report_turn`).
-    owed: u32,
-    /// Subagents that have started and not ended, at any depth.
-    running: HashSet<String>,
-    /// Those of them whose end may never be told
-    /// (`SubagentStarted::unreported_end`): not waited for.
-    unawaited: HashSet<String>,
-    /// The tool call that spawned a subagent's subagent → the subagent
-    /// that made it.
-    spawned_by: HashMap<String, String>,
-    /// Subagents whose end was counted in `owed` and whose spawning call
-    /// has not returned: one that returns now was waited for (a blocking
-    /// subagent), and its report is the call's result.
-    owing: HashSet<String>,
     /// The session's work is over; what still comes in is written out
     /// but changes nothing.
     settled: bool,
@@ -142,7 +127,6 @@ pub struct Headless<O: Write, E: Write> {
     /// How much of `text` was out when stderr last ended a line: the
     /// cursor is at a line start while nothing has been added since.
     text_at_err: usize,
-    usage: Option<Usage>,
     denied: Vec<Value>,
     warnings: Vec<String>,
     /// How the run ends: an error or interrupt sticks, a later turn's
@@ -172,30 +156,23 @@ impl<O: Write, E: Write> Headless<O, E> {
         out: O,
         err: E,
     ) -> Self {
+        let mut tracking = Tracking::new(rules);
+        tracking.report_turns(subagents.report_turn);
         Headless {
             format,
-            rules,
             cwd,
             name: name.to_string(),
-            report_turn: subagents.report_turn,
             out,
             err,
             harness: String::new(),
-            session_id: None,
-            model: None,
+            tracking,
             text: String::new(),
             paragraph: false,
             turn_running: false,
             turns: 0,
-            owed: 0,
-            running: HashSet::new(),
-            unawaited: HashSet::new(),
-            spawned_by: HashMap::new(),
-            owing: HashSet::new(),
             settled: false,
             shared_terminal: false,
             text_at_err: 0,
-            usage: None,
             denied: Vec::new(),
             warnings: Vec::new(),
             stop: None,
@@ -212,7 +189,7 @@ impl<O: Write, E: Write> Headless<O, E> {
         self.harness = info.harness.clone();
         self.resume = info.resume.clone();
         self.turn_running = true;
-        self.owed = 1;
+        self.tracking.turn_expected();
         self.line(&json!({
             "type": "start",
             "schema": SCHEMA_VERSION,
@@ -231,14 +208,9 @@ impl<O: Write, E: Write> Headless<O, E> {
     pub fn is_done(&self) -> bool {
         match &self.stop {
             None => false,
-            Some(StopReason::Done) => self.owed == 0 && self.awaited() == 0,
+            Some(StopReason::Done) => self.tracking.owed == 0 && self.tracking.awaited() == 0,
             Some(_) => true,
         }
-    }
-
-    /// The subagents at work whose end will be told.
-    fn awaited(&self) -> usize {
-        self.running.len() - self.unawaited.len()
     }
 
     /// Nothing more the session sends counts: it is being shut down.
@@ -316,64 +288,41 @@ impl<O: Write, E: Write> Headless<O, E> {
         }
         let mut commands = Vec::new();
         if !self.settled {
-            self.track(&ev, None, &mut commands);
+            self.take(&ev, None, &mut commands);
         }
         commands
     }
 
     /// `parent` is the subagent an event comes from, `None` for the main
-    /// agent.
-    fn track(&mut self, ev: &AgentEvent, parent: Option<&str>, commands: &mut Vec<SessionCommand>) {
+    /// agent. What any front end tracks of it goes to `tracking`.
+    fn take(&mut self, ev: &AgentEvent, parent: Option<&str>, commands: &mut Vec<SessionCommand>) {
         let main = parent.is_none();
         match ev {
-            AgentEvent::Sub { parent, event } => self.track(event, Some(parent), commands),
-            AgentEvent::PermissionRequest(req) => commands.push(self.answer(req)),
+            AgentEvent::Sub { parent, event } => self.take(event, Some(parent), commands),
+            AgentEvent::PermissionRequest(req) => commands.push(self.respond(req)),
             AgentEvent::PolicyChanged(p) if main => {
                 self.planning = *p == PermissionPolicy::Plan;
             }
             AgentEvent::SubagentStarted {
-                id, unreported_end, ..
-            } => {
-                self.running.insert(id.clone());
-                if *unreported_end {
-                    self.unawaited.insert(id.clone());
-                } else {
-                    self.unawaited.remove(id);
-                }
-            }
+                id,
+                description,
+                kind,
+                unreported_end,
+            } => self.tracking.subagent_started(
+                id.clone(),
+                description.clone(),
+                kind.clone(),
+                *unreported_end,
+            ),
             AgentEvent::SubagentEnded { id, status, .. } => {
-                // Its report may come in a second end of the same id; only
-                // the first one is news. Claude reports each end of a
-                // background subagent in a turn of its own, wherever the
-                // end falls (`fixtures/subagent_parallel.jsonl`), but not
-                // one the agent stopped itself (`subagent_stopped.jsonl`).
-                // A subagent's subagent was seen reported once its parent
-                // had ended (`subagent_nested.jsonl`); while the parent
-                // runs, it is taken to report to the parent.
-                let parent_running = self
-                    .spawned_by
-                    .get(id)
-                    .is_some_and(|p| self.running.contains(p));
-                self.unawaited.remove(id);
-                if self.running.remove(id)
-                    && self.report_turn
-                    && *status != SubagentStatus::Cancelled
-                    && !parent_running
-                {
-                    self.owed += 1;
-                    self.owing.insert(id.clone());
-                }
+                self.tracking.subagent_ended(id, *status)
             }
-            AgentEvent::ToolCallStarted { id, .. } if !main => {
+            AgentEvent::ToolCallStarted { id, name, input } if !main => {
                 if let Some(p) = parent {
-                    self.spawned_by.insert(id.clone(), p.to_string());
+                    self.tracking.subagent_tool_started(p, id, name, input);
                 }
             }
-            AgentEvent::ToolCallResult { id, .. } if self.owing.remove(id) => {
-                // A blocking subagent: its report came back as the result.
-                self.owed = self.owed.saturating_sub(1);
-            }
-            AgentEvent::ToolCallResult { .. } => {}
+            AgentEvent::ToolCallResult { id, .. } => self.tracking.tool_result(id),
             // A hook that did its job quietly is not worth a line.
             AgentEvent::HookEnded {
                 name,
@@ -392,10 +341,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             _ if !main => {}
             AgentEvent::SessionStarted { session_id, model } => {
-                self.session_id = Some(session_id.clone());
-                if model.is_some() {
-                    self.model = model.clone();
-                }
+                self.tracking.session_started(session_id, model.as_deref());
             }
             AgentEvent::TurnStarted => {
                 self.turn_running = true;
@@ -403,14 +349,11 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             AgentEvent::TextDelta(t) => self.text_delta(t),
             AgentEvent::ToolCallStarted { .. } => self.paragraph = true,
-            AgentEvent::Usage(u) => match self.usage.as_mut() {
-                Some(total) if !u.cumulative => total.add(u),
-                _ => self.usage = Some(u.clone()),
-            },
+            AgentEvent::Usage(u) => self.tracking.usage_reported(u),
             AgentEvent::TurnCompleted { stop_reason } => {
                 self.turn_running = false;
                 self.turns += 1;
-                self.owed = self.owed.saturating_sub(1);
+                self.tracking.turn_ended();
                 // However the harness words the end of an interrupted turn:
                 // Claude as an error (`error_during_execution`), pi as done.
                 self.record(if self.interrupted {
@@ -418,8 +361,8 @@ impl<O: Write, E: Write> Headless<O, E> {
                 } else {
                     stop_reason.clone()
                 });
-                let unseen = self.unawaited.len();
-                let n = self.awaited();
+                let unseen = self.tracking.unawaited();
+                let n = self.tracking.awaited();
                 if self.is_done() && unseen > 0 && self.format != Format::StreamJson {
                     // Ended or not: the session goes with the run.
                     self.note(&format!(
@@ -505,16 +448,10 @@ impl<O: Write, E: Write> Headless<O, E> {
         }
     }
 
-    /// Allow what an allow rule covers (`core::permissions`); deny or
-    /// dismiss the rest, since nobody is there to ask.
-    fn answer(&mut self, req: &PermissionRequest) -> SessionCommand {
-        let route = Router {
-            rules: &self.rules,
-            cwd: &self.cwd,
-            planning: self.planning,
-            handoff: None,
-        }
-        .route(req);
+    /// Allow what an allow rule covers (`Tracking::route`); deny or
+    /// dismiss the rest, since nobody is there to ask. Say which.
+    fn respond(&mut self, req: &PermissionRequest) -> SessionCommand {
+        let (route, _) = self.tracking.route(req, &self.cwd, self.planning, None);
         let (decision, line) = match route {
             Route::Answered {
                 decision,
@@ -538,7 +475,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             Route::Answered {
                 why: Why::Handoff, ..
             }
-            | Route::Ask => self.nobody_to_ask(req),
+            | Route::Ask => self.unasked(req),
         };
         let mut line = line;
         line["type"] = json!("permission_answered");
@@ -550,54 +487,37 @@ impl<O: Write, E: Write> Headless<O, E> {
         }
     }
 
-    /// Deny or dismiss a request only the user could answer, and say so on
-    /// stderr and in `warnings` (a tool call also in `denied`).
-    fn nobody_to_ask(&mut self, req: &PermissionRequest) -> (PermissionDecision, Value) {
-        match &req.kind {
-            PermissionKind::ToolUse { tool, action, .. } => {
+    /// Deny or dismiss a request only the user could answer
+    /// (`Tracking::nobody_to_ask`), and say so on stderr and in `warnings`
+    /// (a tool call also in `denied`).
+    fn unasked(&mut self, req: &PermissionRequest) -> (PermissionDecision, Value) {
+        let (decision, unasked) = Tracking::nobody_to_ask(req);
+        let line = match unasked {
+            Unasked::Denied { tool, action } => {
                 self.warn(format!(
                     "denied {tool}{}: nobody can be asked without the TUI (an allow rule or --policy would let it run)",
                     action_text(action)
                 ));
                 self.denied
                     .push(json!({"tool": tool, "action": action_json(action)}));
-                (
-                    PermissionDecision::Deny {
-                        reason: "Denied: unharness is running without a user to ask. \
-                                 Nothing that is not covered by an allow rule or the \
-                                 permission policy can run."
-                            .into(),
-                    },
-                    json!({"decision": "deny"}),
-                )
+                json!({"decision": "deny"})
             }
-            // The agent can enter plan mode by itself (Claude's
-            // `EnterPlanMode`); its plan is never approved here.
-            PermissionKind::PlanApproval { .. } => {
+            Unasked::KeptPlanning => {
                 self.warn(format!(
                     "kept {} planning: nobody can approve a plan without the TUI",
                     self.name
                 ));
-                (
-                    PermissionDecision::Deny {
-                        reason: "unharness is running without a user to approve the plan. \
-                                 Do not carry it out; end the turn with the plan."
-                            .into(),
-                    },
-                    json!({"decision": "deny"}),
-                )
+                json!({"decision": "deny"})
             }
-            _ => {
+            Unasked::Dismissed => {
                 self.warn(format!(
                     "dismissed a question from {}: nobody can answer it without the TUI",
                     self.name
                 ));
-                (
-                    PermissionDecision::Answer(Value::Null),
-                    json!({"decision": "dismiss"}),
-                )
+                json!({"decision": "dismiss"})
             }
-        }
+        };
+        (decision, line)
     }
 
     fn line(&mut self, value: &Value) {
@@ -622,13 +542,13 @@ impl<O: Write, E: Write> Headless<O, E> {
             "type": "result",
             "schema": SCHEMA_VERSION,
             "harness": self.harness,
-            "session_id": self.session_id.as_ref().filter(|_| !self.replaced),
-            "model": self.model,
+            "session_id": self.tracking.session_id.as_ref().filter(|_| !self.replaced),
+            "model": self.tracking.model,
             "status": status,
             "error": error,
             "text": self.text,
             "turns": self.turns,
-            "usage": self.usage.as_ref().map(usage_json),
+            "usage": self.tracking.usage.as_ref().map(usage_json),
             "denied": self.denied,
             "warnings": self.warnings,
             "duration_ms": self.started.elapsed().as_millis() as u64,
@@ -1361,7 +1281,8 @@ mod tests {
     #[test]
     fn while_the_agent_plans_only_a_read_is_answered_by_a_rule() {
         let (_dir, mut run) = headless(Format::Json, false);
-        run.rules
+        run.tracking
+            .rules
             .append(Scope::Workspace, &[Rule::shell("cargo test")])
             .unwrap();
         let plan = AgentEvent::PermissionRequest(PermissionRequest {
@@ -1399,7 +1320,8 @@ mod tests {
     #[test]
     fn a_rule_allows_and_everything_else_is_refused() {
         let (_dir, mut run) = headless(Format::Json, false);
-        run.rules
+        run.tracking
+            .rules
             .append(Scope::Workspace, &[Rule::shell("cargo test")])
             .unwrap();
         let question = AgentEvent::PermissionRequest(PermissionRequest {
@@ -1474,7 +1396,8 @@ mod tests {
     #[test]
     fn each_answer_is_said_the_same_way_every_time() {
         let (_dir, mut run) = headless(Format::StreamJson, false);
-        run.rules
+        run.tracking
+            .rules
             .append(Scope::Workspace, &[Rule::shell("cargo test")])
             .unwrap();
         let request = |id: &str, kind: PermissionKind| {

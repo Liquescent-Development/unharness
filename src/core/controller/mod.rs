@@ -34,7 +34,8 @@
 //! conversation it holds it puts in that conversation's transcript itself;
 //! where its logic reads or changes what is on screen (a request's dialog,
 //! the policy picker, the prompt box), it goes through the [`Front`] it is
-//! given. `headless` resolves its policy through the same [`PolicyState`].
+//! given. `headless` resolves its policy through the same [`PolicyState`],
+//! and tracks its session's events in a [`Tracking`] of its own.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -310,10 +311,10 @@ pub struct Controller {
     /// `_tool_started`, `_ended`, `clear_subagents`, `awaited`) and its
     /// permission requests (`route`, `wait`, `next_waiting`, `withdraw`,
     /// `drop_waiting`), with `planning` from the policy in effect. The rest
-    /// is for a run with nobody to ask (`--print`, #296), which drives it
-    /// in its own `Tracking`: here the session's id, model and usage stay
-    /// unset (`session_started` and `usage_reported` are not called; the
-    /// conversation keeps them per harness), `owed` stays 0
+    /// is for a run with nobody to ask (`--print`, `headless::Headless`),
+    /// which drives it in its own `Tracking`: here the session's id, model
+    /// and usage stay unset (`session_started` and `usage_reported` are not
+    /// called; the conversation keeps them per harness), `owed` stays 0
     /// (`report_turns`, `turn_expected`, `turn_ended` and `tool_result`
     /// are not called), and nothing asks `unawaited` or `nobody_to_ask`.
     pub tracking: Tracking,

@@ -273,11 +273,11 @@ pub struct SubagentSupport {
     /// One that ends between turns is reported to the agent in a turn the
     /// harness starts by itself.
     ///
-    /// Read by `headless::Headless` alone, which counts that turn's end
-    /// before a `--print` run is over (`docs/dev/headless.md`); the TUI
-    /// shows such a turn as it comes. It stays a flag (#275): that the
-    /// turn will come is known of the harness (Claude Code), not said on
-    /// its stream before the turn starts.
+    /// Read by `--print` alone, whose `Tracking` (`report_turns`) counts
+    /// that turn's end before the run is over (`docs/dev/headless.md`);
+    /// the TUI shows such a turn as it comes. It stays a flag (#275): that
+    /// the turn will come is known of the harness (Claude Code), not said
+    /// on its stream before the turn starts.
     pub report_turn: bool,
 }
 
