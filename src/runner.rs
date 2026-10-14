@@ -39,16 +39,6 @@ pub fn binary_overrides(
         .collect()
 }
 
-/// The policy to run with: CLI flag, `-y`, harness config, global config,
-/// Ask (`PolicyState::requested_checked`).
-pub fn requested_policy(
-    args: &CommonRunArgs,
-    config: &Config,
-    harness: HarnessId,
-) -> Result<PermissionPolicy> {
-    PolicyState::new(explicit_policy(args)?).requested_checked(config, harness)
-}
-
 /// The policy named on the command line (`--policy`, then `-y`), which
 /// holds for every harness of the run.
 pub fn explicit_policy(args: &CommonRunArgs) -> Result<Option<PermissionPolicy>> {
@@ -435,6 +425,16 @@ pub fn resolve_resume(
 mod tests {
     use super::*;
     use crate::core::controller::configured_policy;
+
+    /// The policy a run asks of `harness` before any choice, as `run`
+    /// takes it: CLI flag, `-y`, harness config, global config, Ask.
+    fn requested_policy(
+        args: &CommonRunArgs,
+        config: &Config,
+        harness: HarnessId,
+    ) -> Result<PermissionPolicy> {
+        PolicyState::new(explicit_policy(args)?).requested_checked(config, harness)
+    }
 
     #[test]
     fn resume_resolution() {
