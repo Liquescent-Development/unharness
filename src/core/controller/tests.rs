@@ -9,6 +9,7 @@ use crate::harness::pi::PiHarness;
 
 const AGY: HarnessId = HarnessId::AGY;
 const CLAUDE: HarnessId = HarnessId::CLAUDE;
+const CODEX: HarnessId = HarnessId::CODEX;
 const PI: HarnessId = HarnessId::PI;
 
 /// The harnesses the TUI's tests run on.
@@ -22,9 +23,21 @@ fn registry() -> Arc<Registry> {
     )
 }
 
+/// What a run on Claude names: `policy` for every harness, nothing else.
+fn launch(policy: Option<PermissionPolicy>) -> Launch {
+    Launch {
+        harness: CLAUDE,
+        policy,
+        provider: None,
+        model: None,
+        effort: None,
+        default_providers: HashMap::new(),
+    }
+}
+
 /// A controller as a run starts, with `policy` named for every harness.
 fn controller(policy: Option<PermissionPolicy>) -> Controller {
-    Controller::new(registry(), policy)
+    Controller::new(registry(), &Config::default(), launch(policy))
 }
 
 fn warning(c: &Controller, config: &Config, harness: HarnessId) -> Option<String> {
@@ -182,16 +195,13 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
 
     let mut c = controller(None);
     c.set_policy(&config, PI, Bypass, false).unwrap();
-    c.take_conversation(&conv);
+    c.take_conversation(&config, &conv);
     assert_eq!(c.effective_policy(&config, AGY), Some(AcceptEdits));
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(Bypass));
     assert_eq!(c.effective_policy(&config, PI), Some(Bypass));
     assert_eq!(c.policy.source(CLAUDE), PolicySource::ChosenForConversation);
     assert_eq!(c.policy.source(PI), PolicySource::ChosenInRun);
-    assert_eq!(
-        c.policy.source(HarnessId::CODEX),
-        PolicySource::NamedForConversation
-    );
+    assert_eq!(c.policy.source(CODEX), PolicySource::NamedForConversation);
     let mut saved = Conversation::new(CLAUDE);
     c.sync_conversation(&config, CLAUDE, false, &mut saved);
     assert_eq!(saved.policy, Some(Ask));
@@ -202,12 +212,12 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
 
     // `--policy accept-edits`: over every choice of the conversation's.
     let mut c = controller(Some(AcceptEdits));
-    c.take_conversation(&conv);
+    c.take_conversation(&config, &conv);
     assert_eq!(c.policy.chosen(), HashMap::new());
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(AcceptEdits));
     assert_eq!(c.policy.source(CLAUDE), PolicySource::NamedInRun);
     // Another conversation does not take it away.
-    c.take_conversation(&Conversation::new(CLAUDE));
+    c.take_conversation(&config, &Conversation::new(CLAUDE));
     assert_eq!(c.policy.named(), Some(AcceptEdits));
 }
 
@@ -224,4 +234,143 @@ fn a_configured_policy_that_does_not_parse() {
     assert_eq!(p.requested(&config, CLAUDE), Ask);
     let p = PolicyState::new(Some(Auto));
     assert_eq!(p.requested_checked(&config, CLAUDE).unwrap(), Auto);
+}
+
+/// A run on Codex configured on `provider` with `configured-model`, with
+/// `model` and `effort` named on its command line.
+fn codex_run(model: Option<&str>, effort: Option<&str>, provider: &str) -> (Config, Launch) {
+    let mut config = Config::default();
+    config.harnesses.insert(
+        "codex".into(),
+        crate::config::HarnessSettings {
+            default_provider: Some(provider.into()),
+            default_model: Some("configured-model".into()),
+            ..Default::default()
+        },
+    );
+    let launch = Launch {
+        harness: CODEX,
+        model: model.map(Into::into),
+        effort: effort.map(Into::into),
+        ..launch(None)
+    };
+    (config, launch)
+}
+
+/// What a conversation keeps of a run on Codex that chose `model` and
+/// `effort` where given.
+fn codex_conversation(model: Option<&str>, effort: Option<&str>) -> Conversation {
+    let (config, launch) = codex_run(None, None, "openai");
+    let mut c = Controller::new(registry(), &config, launch);
+    if let Some(m) = model {
+        c.choose_model(CODEX, m.into());
+    }
+    if let Some(e) = effort {
+        c.choose_effort(CODEX, e.into());
+    }
+    let mut conv = Conversation::new(CODEX);
+    c.sync_conversation(&config, CODEX, true, &mut conv);
+    conv
+}
+
+/// `conversation` resumed by a run as `codex_run` has it, and what it says.
+fn resume_codex(
+    conversation: &Conversation,
+    model: Option<&str>,
+    effort: Option<&str>,
+    provider: &str,
+) -> (Controller, Vec<String>) {
+    let (config, launch) = codex_run(model, effort, provider);
+    let mut c = Controller::new(registry(), &config, launch);
+    let notices = c.take_conversation(&config, conversation);
+    (c, notices)
+}
+
+fn codex_model(c: &Controller) -> Option<&str> {
+    c.model(CODEX).map(|m| m.model.as_str())
+}
+
+#[test]
+fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
+    let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
+    let (c, _) = resume_codex(&conv, None, None, "openai");
+    assert_eq!(codex_model(&c), Some("gpt-chosen"));
+    assert_eq!(c.effort(CODEX), Some("high"));
+
+    // Named on the command line, they win.
+    let (c, _) = resume_codex(&conv, Some("gpt-flag"), Some("low"), "openai");
+    assert_eq!(codex_model(&c), Some("gpt-flag"));
+    assert_eq!(c.effort(CODEX), Some("low"));
+}
+
+#[test]
+fn a_configured_model_is_not_kept_with_the_conversation() {
+    let conv = codex_conversation(None, None);
+    let (c, _) = resume_codex(&conv, None, None, "openai");
+    assert!(conv.models.is_empty());
+    assert!(conv.efforts.is_empty());
+    assert_eq!(codex_model(&c), Some("configured-model"));
+}
+
+#[test]
+fn a_model_chosen_on_another_provider_is_left() {
+    let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
+    let (c, notices) = resume_codex(&conv, None, None, "ollama");
+    assert_eq!(codex_model(&c), Some("configured-model"));
+    // Its effort was for it.
+    assert_eq!(c.effort(CODEX), None);
+    assert!(notices.iter().any(|n| n
+        == "the model chosen for Codex in this conversation (openai/gpt-chosen) is not used: Codex is on ollama now"));
+}
+
+/// A chosen provider is what the harness is told; one its session reports
+/// otherwise is where it runs, and the guess gives way to what it reports.
+#[test]
+fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
+    let config = Config::default();
+    let mut c = Controller::new(
+        registry(),
+        &config,
+        Launch {
+            model: Some("opus".into()),
+            default_providers: [(CLAUDE, "anthropic".into())].into(),
+            ..launch(None)
+        },
+    );
+    assert_eq!(c.chosen_provider(CLAUDE), None);
+    let report = |c: &mut Controller, provider: &str| {
+        c.report(
+            &config,
+            CLAUDE,
+            CapsUpdate {
+                provider: Some(provider.into()),
+                ..Default::default()
+            },
+            true,
+        )
+        .notices
+    };
+    assert_eq!(
+        report(&mut c, "vertex"),
+        vec!["Claude runs on vertex, chosen by its own configuration".to_string()]
+    );
+    assert_eq!(c.provider(CLAUDE), Some(&"vertex".into()));
+    assert_eq!(c.model(CLAUDE).unwrap().label(), "vertex/opus");
+    assert_eq!(c.chosen_provider(CLAUDE), None);
+
+    let mut conv = Conversation::new(CLAUDE);
+    conv.models
+        .insert(CLAUDE, ModelRef::new(CLAUDE, "vertex", "opus"));
+    assert!(c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
+    assert!(conv.models.is_empty() && c.model(CLAUDE).is_none());
+    assert!(report(&mut c, "anthropic").is_empty());
+    assert_eq!(c.runs_on(CLAUDE), Some(&"anthropic".into()));
+    assert_eq!(c.chosen_provider(CLAUDE), Some(&"bedrock".into()));
+    assert!(report(&mut c, "bedrock").is_empty());
+    assert_eq!(c.runs_on(CLAUDE), None);
+    report(&mut c, "anthropic");
+    c.process_ended(CLAUDE);
+    assert_eq!(c.runs_on(CLAUDE), None);
+    // The same again changes nothing.
+    assert!(!c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
 }

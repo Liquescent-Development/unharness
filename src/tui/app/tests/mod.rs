@@ -1,8 +1,8 @@
 use super::*;
 use crate::core::rules::Scope;
 use crate::core::{
-    CapsUpdate, Parser, PermissionDecision, PermissionKind, Question, QuestionOption, Rule,
-    ToolAction,
+    CapsUpdate, ModelRef, Parser, PermissionDecision, PermissionKind, Question, QuestionOption,
+    Rule, ToolAction,
 };
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;

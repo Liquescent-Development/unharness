@@ -45,7 +45,7 @@ impl App {
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
         let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
-        let provider = self.running_providers.get(&self.active).map(|runs_on| {
+        let provider = self.controller.runs_on(self.active).map(|runs_on| {
             format!(
                 "runs on {runs_on}, not the chosen {} (/provider)",
                 self.current_provider()

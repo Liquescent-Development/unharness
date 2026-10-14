@@ -242,10 +242,10 @@ fn the_bridge_is_measured_by_the_window_its_harness_reported() {
     // Kept for the next run, by model.
     let mut again = test_app_in(cwd, HarnessId::CLAUDE, None, false);
     assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 200_000);
-    again.models.insert(
-        HarnessId::CLAUDE,
-        ModelRef::new(HarnessId::CLAUDE, ProviderId::new("anthropic"), "opus"),
-    );
+    // On anthropic, the provider it guessed.
+    again
+        .controller
+        .choose_model(HarnessId::CLAUDE, "opus".into());
     assert_eq!(
         again.bridge_budget(HarnessId::CLAUDE),
         DEFAULT_BRIDGE_MAX_CHARS

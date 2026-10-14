@@ -142,7 +142,8 @@ fn vertex_models() -> ListResult {
 #[test]
 fn completion_asks_for_a_list_once() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.input = "/model ha".into();
     app.update_suggestions();
@@ -174,7 +175,8 @@ fn completion_asks_for_a_list_once() {
 #[test]
 fn a_list_the_user_moved_on_from_does_not_open() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let vertex = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.open_model_picker();
     app.set_provider("bedrock".into());
@@ -183,8 +185,9 @@ fn a_list_the_user_moved_on_from_does_not_open() {
     assert!(app.modal.is_none());
 
     // Nor over a prompt being typed: it is offered instead.
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
-    app.model_cache.clear();
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
+    app.controller.forget_model_lists();
     app.open_model_picker();
     app.input = "half a prompt".into();
     app.on_list(vertex, vertex_models());
@@ -194,7 +197,8 @@ fn a_list_the_user_moved_on_from_does_not_open() {
 #[test]
 fn model_lists_arrive_without_holding_the_screen() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.open_model_picker();
     assert!(app.modal.is_none());

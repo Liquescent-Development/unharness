@@ -18,7 +18,7 @@ use super::transcript::{self, Transcript, tool_summary};
 use super::{bridge, herdr, markdown, shell};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
-use crate::core::controller::Controller;
+use crate::core::controller::{Controller, Launch};
 use crate::core::conversations::{
     CheckpointRecord, ContextWindows, Conversation, ConversationStore, TurnAnchorRecord,
     default_context_windows_path, load_context_windows,
@@ -27,7 +27,7 @@ use crate::core::guard::Watch;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
-    AgentEvent, Attachment, ContextUsage, HarnessCommand, HarnessId, ModelRef, PermissionPolicy,
+    AgentEvent, Attachment, ContextUsage, HarnessCommand, HarnessId, PermissionPolicy,
     PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, Rules, SessionCommand, StopReason,
     Usage,
 };
@@ -255,8 +255,8 @@ pub struct App {
 
     pub active: HarnessId,
     pub harness_options: Vec<HarnessOption>,
-    /// What decides how each harness runs: its policy, and what its
-    /// sessions reported on top of its capabilities.
+    /// What decides how each harness runs: its policy, provider, model and
+    /// effort, and what its sessions reported on top of its capabilities.
     pub controller: Controller,
     /// The sandbox level asked for (flag, config, or `/sandbox`) and the
     /// platform's backend. A change reaches the harness's next process.
@@ -266,26 +266,6 @@ pub struct App {
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
-    /// The provider of each harness: the user's choice, else a guess at
-    /// the harness's own default, corrected by what its session reports.
-    pub providers: HashMap<HarnessId, ProviderId>,
-    /// Harnesses whose provider the user chose; only those are told it.
-    pub chosen_providers: HashSet<HarnessId>,
-    /// The provider a session runs on when it is not the chosen one.
-    running_providers: HashMap<HarnessId, ProviderId>,
-    pub models: HashMap<HarnessId, ModelRef>,
-    pub efforts: HashMap<HarnessId, String>,
-    /// Harnesses whose model or effort was chosen, in this run or for the
-    /// conversation, rather than configured; only those are kept with the
-    /// conversation.
-    chosen_models: HashSet<HarnessId>,
-    chosen_efforts: HashSet<HarnessId>,
-    /// The ones chosen in this run (`--model`, `/model`, ...): they hold
-    /// over a resumed conversation's.
-    run_models: HashSet<HarnessId>,
-    run_efforts: HashSet<HarnessId>,
-    model_cache: HashMap<(HarnessId, String), Vec<ModelInfo>>,
-    provider_cache: HashMap<HarnessId, Vec<(ProviderId, String)>>,
     /// Lists being fetched, and the ones still to hand to a thread.
     lists_pending: HashSet<ListRequest>,
     /// Lists that failed since they were last asked for by the user.
@@ -636,60 +616,18 @@ impl App {
             });
         }
 
-        let mut providers = HashMap::new();
-        let mut chosen_providers = HashSet::new();
-        let mut models = HashMap::new();
-        let mut efforts = HashMap::new();
-        for h in registry.all() {
-            let id = h.descriptor().id;
-            let settings = config.harness(id.as_str());
-            let chosen = settings.and_then(|s| s.default_provider.clone());
-            if chosen.is_some() {
-                chosen_providers.insert(id);
-            }
-            let provider = chosen.or_else(|| init.default_providers.get(&id).map(|p| p.0.clone()));
-            if let Some(p) = provider.clone() {
-                providers.insert(id, ProviderId::new(p));
-            }
-            if let (Some(p), Some(m)) = (
-                provider.clone(),
-                settings.and_then(|s| s.default_model.clone()),
-            ) {
-                models.insert(id, ModelRef::new(id, p.as_str(), m));
-            }
-            if let Some(e) = settings.and_then(|s| s.default_effort.clone()) {
-                efforts.insert(id, e);
-            }
-        }
-        if let Some(p) = init.provider {
-            providers.insert(init.harness, ProviderId::new(p));
-            chosen_providers.insert(init.harness);
-        }
-        let mut chosen_models = HashSet::new();
-        let mut chosen_efforts = HashSet::new();
-        // `init.model` is only a flag: the configured model of a harness
-        // whose provider is not known yet is still given to it.
-        let configured_model = config
-            .harness(init.harness.as_str())
-            .and_then(|s| s.default_model.clone());
-        if let Some(m) = init
-            .model
-            .clone()
-            .or_else(|| configured_model.filter(|_| !models.contains_key(&init.harness)))
-        {
-            if init.model.is_some() {
-                chosen_models.insert(init.harness);
-            }
-            let p = providers
-                .get(&init.harness)
-                .cloned()
-                .unwrap_or_else(|| ProviderId::new("default"));
-            models.insert(init.harness, ModelRef::new(init.harness, p, m));
-        }
-        if let Some(e) = init.effort {
-            chosen_efforts.insert(init.harness);
-            efforts.insert(init.harness, e);
-        }
+        let controller = Controller::new(
+            registry.clone(),
+            &config,
+            Launch {
+                harness: init.harness,
+                policy: init.policy,
+                provider: init.provider,
+                model: init.model,
+                effort: init.effort,
+                default_providers: init.default_providers,
+            },
+        );
 
         let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
         let history = PromptHistory::load(store.history_path());
@@ -745,7 +683,6 @@ impl App {
         let context_windows_path = init
             .context_windows
             .unwrap_or_else(default_context_windows_path);
-        let controller = Controller::new(registry.clone(), init.policy);
         let mut app = App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
@@ -763,17 +700,6 @@ impl App {
             sandbox: init.sandbox,
             session_sandbox_level: None,
             guard: None,
-            providers,
-            chosen_providers,
-            running_providers: HashMap::new(),
-            models,
-            efforts,
-            run_models: chosen_models.clone(),
-            run_efforts: chosen_efforts.clone(),
-            chosen_models,
-            chosen_efforts,
-            model_cache: HashMap::new(),
-            provider_cache: HashMap::new(),
             lists_pending: HashSet::new(),
             lists_failed: HashSet::new(),
             list_jobs: Vec::new(),
@@ -1055,46 +981,12 @@ impl App {
             }
             AgentEvent::PolicyChanged(p) => self.on_policy_changed(p),
             AgentEvent::CapabilitiesChanged(update) => {
-                if let Some(levels) = &update.effort_levels
-                    && self.caps().effort_levels != *levels
-                {
-                    self.transcript
-                        .push_notice(format!("effort levels now: {}", levels.join(", ")));
-                }
-                // A guess at the harness's own default gives way to what
-                // it reports. A choice stays the user's, and is what the
-                // next session is told; the driver reported the mismatch
-                // and the status line keeps showing it.
-                if let Some(reported) = &update.provider {
-                    if self.chosen_providers.contains(&self.active) {
-                        if self.current_provider() == Some(reported) {
-                            self.running_providers.remove(&self.active);
-                        } else {
-                            self.running_providers.insert(self.active, reported.clone());
-                        }
-                    } else if self.current_provider() != Some(reported) {
-                        self.transcript.push_notice(format!(
-                            "{} runs on {reported}, chosen by its own configuration",
-                            self.short_name()
-                        ));
-                        self.providers.insert(self.active, reported.clone());
-                        if let Some(m) = self.models.get_mut(&self.active) {
-                            m.provider = reported.clone();
-                        }
-                    }
-                }
-                if let Some(models) = &update.models {
-                    let provider = models
-                        .first()
-                        .map(|m| m.model_ref.provider.0.clone())
-                        .or_else(|| self.current_provider().map(|p| p.0.clone()))
-                        .unwrap_or_else(|| "default".into());
-                    self.model_cache
-                        .insert((self.active, provider), models.clone());
-                }
                 let report =
                     self.controller
                         .report(&self.config, self.active, update, self.session_alive);
+                for notice in report.notices {
+                    self.transcript.push_notice(notice);
+                }
                 if report.commands {
                     self.commands_arrived();
                 }

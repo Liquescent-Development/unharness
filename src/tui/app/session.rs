@@ -266,12 +266,11 @@ impl App {
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
-        self.controller.policy.process_ended();
         self.idle_start_paused = false;
         self.drop_subagents();
         self.drop_prompts();
         // The next session reports where it runs.
-        self.running_providers.remove(&self.active);
+        self.controller.process_ended(self.active);
         self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
         // A choice it was sent will not be answered now.
@@ -323,10 +322,9 @@ impl App {
             self.finish_generation();
             self.transcript.push_system("Turn interrupted.");
         }
-        self.controller.policy.process_ended();
         self.drop_subagents();
         self.drop_prompts();
-        self.running_providers.remove(&self.active);
+        self.controller.process_ended(self.active);
         self.forget_refusals();
         self.session_blank = true;
         self.blank_session = None;

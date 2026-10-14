@@ -1,10 +1,8 @@
 //! The conversation: saving it, starting a new one, resuming a saved one.
 
-use std::collections::HashSet;
-
 use super::App;
 use crate::core::conversations::{Conversation, now_rfc3339, truncate_title};
-use crate::core::{ContextUsage, HarnessId, ModelRef, Usage};
+use crate::core::{ContextUsage, Usage};
 use crate::tui::modal::{ListPicker, Modal};
 use crate::tui::transcript::Transcript;
 
@@ -40,16 +38,6 @@ impl App {
         c.checkpoints = self.file_checkpoints.clone();
         c.fork_pending = self.fork_pending.iter().copied().collect();
         c.fork_pending.sort_by_key(|h| h.as_str());
-        for h in &self.chosen_models {
-            if let Some(m) = self.models.get(h) {
-                c.models.insert(*h, m.clone());
-            }
-        }
-        for h in &self.chosen_efforts {
-            if let Some(e) = self.efforts.get(h) {
-                c.efforts.insert(*h, e.clone());
-            }
-        }
         self.controller.sync_conversation(
             &self.config,
             self.active,
@@ -86,76 +74,14 @@ impl App {
     }
 
     /// Take what the resumed conversation was run with, its policy, models
-    /// and efforts, except where this run named its own. What the last
-    /// conversation chose goes back to the configured default.
+    /// and efforts, except where this run named its own
+    /// (`Controller::take_conversation`).
     pub(super) fn take_conversation_choices(&mut self) {
-        self.controller.take_conversation(&self.conversation);
-
-        for h in std::mem::take(&mut self.chosen_models) {
-            if self.run_models.contains(&h) {
-                self.chosen_models.insert(h);
-            } else {
-                match self.configured_model(h) {
-                    Some(m) => self.models.insert(h, m),
-                    None => self.models.remove(&h),
-                };
-            }
-        }
-        for h in std::mem::take(&mut self.chosen_efforts) {
-            if self.run_efforts.contains(&h) {
-                self.chosen_efforts.insert(h);
-            } else {
-                match self.configured_effort(h) {
-                    Some(e) => self.efforts.insert(h, e),
-                    None => self.efforts.remove(&h),
-                };
-            }
-        }
-
-        let mut models: Vec<(HarnessId, ModelRef)> = self
-            .conversation
-            .models
-            .iter()
-            .map(|(h, m)| (*h, m.clone()))
-            .collect();
-        models.sort_by_key(|(h, _)| h.as_str());
-        // An effort is for the model it was chosen with.
-        let mut left = HashSet::new();
-        for (h, m) in models {
-            let Some(harness) = self.registry.get(h) else {
-                continue;
-            };
-            if self.run_models.contains(&h) {
-                continue;
-            }
-            match self.providers.get(&h) {
-                Some(p) if *p != m.provider => {
-                    let name = harness.descriptor().short_name;
-                    self.transcript.push_notice(format!(
-                        "the model chosen for {name} in this conversation ({}) is not used: {name} is on {p} now",
-                        m.label(),
-                    ));
-                    left.insert(h);
-                }
-                _ => {
-                    self.models.insert(h, m);
-                    self.chosen_models.insert(h);
-                }
-            }
-        }
-        let efforts: Vec<(HarnessId, String)> = self
-            .conversation
-            .efforts
-            .iter()
-            .map(|(h, e)| (*h, e.clone()))
-            .collect();
-        for (h, e) in efforts {
-            if self.run_efforts.contains(&h) || left.contains(&h) || self.registry.get(h).is_none()
-            {
-                continue;
-            }
-            self.efforts.insert(h, e);
-            self.chosen_efforts.insert(h);
+        for notice in self
+            .controller
+            .take_conversation(&self.config, &self.conversation)
+        {
+            self.transcript.push_notice(notice);
         }
     }
 

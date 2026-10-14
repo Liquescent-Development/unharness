@@ -1,51 +1,26 @@
 //! Providers, models and efforts, and the lists they are chosen from.
 
 use super::{Action, App, ListJob, ListRequest, ListResult};
-use crate::core::{HarnessId, ModelRef, ProviderId, SessionCommand};
+use crate::core::{ModelRef, ProviderId, SessionCommand};
 use crate::harness::ModelInfo;
 use crate::tui::modal::{ListPicker, Modal, ProviderOption};
 
 impl App {
-    /// The model the config names for `harness`.
-    pub(super) fn configured_model(&self, harness: HarnessId) -> Option<ModelRef> {
-        let model = self
-            .config
-            .harness(harness.as_str())?
-            .default_model
-            .clone()?;
-        let provider = self
-            .providers
-            .get(&harness)
-            .cloned()
-            .unwrap_or_else(|| ProviderId::new("default"));
-        Some(ModelRef::new(harness, provider, model))
-    }
-
-    pub(super) fn configured_effort(&self, harness: HarnessId) -> Option<String> {
-        self.config
-            .harness(harness.as_str())?
-            .default_effort
-            .clone()
-    }
-
     pub fn current_provider(&self) -> Option<&ProviderId> {
-        self.providers.get(&self.active)
+        self.controller.provider(self.active)
     }
 
     /// The provider to tell the active harness, if the user chose one.
     pub fn chosen_provider(&self) -> Option<&ProviderId> {
-        self.chosen_providers
-            .contains(&self.active)
-            .then(|| self.current_provider())
-            .flatten()
+        self.controller.chosen_provider(self.active)
     }
 
     pub fn current_model(&self) -> Option<&ModelRef> {
-        self.models.get(&self.active)
+        self.controller.model(self.active)
     }
 
     pub fn current_effort(&self) -> Option<&str> {
-        self.efforts.get(&self.active).map(String::as_str)
+        self.controller.effort(self.active)
     }
 
     pub fn model_label(&self) -> String {
@@ -82,15 +57,8 @@ impl App {
         if changed && between && self.refused_between_turns(Choice::Provider) {
             return;
         }
-        if changed {
-            self.running_providers.remove(&self.active);
-            self.models.remove(&self.active);
-            self.chosen_models.remove(&self.active);
-            self.run_models.remove(&self.active);
-            self.conversation.models.remove(&self.active);
-        }
-        self.providers.insert(self.active, provider.clone());
-        self.chosen_providers.insert(self.active);
+        self.controller
+            .choose_provider(self.active, provider.clone(), &mut self.conversation);
         self.idle_start_paused = false;
         let line = provider_line(&provider);
         if !changed {
@@ -129,14 +97,7 @@ impl App {
         if between && self.refused_between_turns(Choice::Model) {
             return;
         }
-        let provider = self
-            .current_provider()
-            .cloned()
-            .unwrap_or_else(|| ProviderId::new("default"));
-        let m = ModelRef::new(self.active, provider, model);
-        self.models.insert(self.active, m.clone());
-        self.chosen_models.insert(self.active);
-        self.run_models.insert(self.active);
+        let m = self.controller.choose_model(self.active, model);
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Model: {}", m.label()));
         let choice = format!("model {}", m.model);
@@ -169,9 +130,7 @@ impl App {
         if between && self.refused_between_turns(Choice::Effort) {
             return;
         }
-        self.efforts.insert(self.active, effort.clone());
-        self.chosen_efforts.insert(self.active);
-        self.run_efforts.insert(self.active);
+        self.controller.choose_effort(self.active, effort.clone());
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Effort: {effort}"));
         let choice = format!("effort {effort}");
@@ -340,7 +299,7 @@ impl App {
             ));
             return;
         }
-        match self.provider_cache.get(&self.active).cloned() {
+        match self.controller.provider_list(self.active).cloned() {
             Some(providers) => self.show_provider_picker(Ok(providers)),
             None => self.wait_for_list(ListRequest::Providers(self.active)),
         }
@@ -374,10 +333,7 @@ impl App {
     /// the user opens asks again.
     pub(super) fn cached_models(&mut self, provider: &ProviderId) -> Option<Vec<ModelInfo>> {
         let request = ListRequest::Models(self.active, provider.clone());
-        let cached = self
-            .model_cache
-            .get(&(self.active, provider.0.clone()))
-            .cloned();
+        let cached = self.controller.model_list(self.active, provider).cloned();
         if cached.is_none() && !self.lists_failed.contains(&request) {
             self.request_list(request);
         }
@@ -490,7 +446,7 @@ impl App {
                 let ListRequest::Providers(harness) = request else {
                     return;
                 };
-                self.provider_cache.insert(harness, providers.clone());
+                self.controller.keep_providers(harness, providers.clone());
                 if self.waiting_for(&request) {
                     self.show_provider_picker(Ok(providers));
                 }
@@ -500,8 +456,8 @@ impl App {
                 let ListRequest::Models(harness, provider) = &request else {
                     return;
                 };
-                self.model_cache
-                    .insert((*harness, provider.0.clone()), models.clone());
+                self.controller
+                    .keep_models(*harness, provider.0.clone(), models.clone());
                 if self.completing_file.is_none() && self.input.starts_with("/model ") {
                     self.update_suggestions();
                 }
@@ -549,11 +505,7 @@ impl App {
             }
             return;
         };
-        match self
-            .model_cache
-            .get(&(self.active, provider.0.clone()))
-            .cloned()
-        {
+        match self.controller.model_list(self.active, &provider).cloned() {
             Some(models) => self.show_model_picker(&provider, Ok(models)),
             None => self.wait_for_list(ListRequest::Models(self.active, provider)),
         }

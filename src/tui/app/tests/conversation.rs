@@ -152,7 +152,10 @@ fn clear_starts_a_new_conversation() {
     assert_eq!(app.session_usage, Usage::default());
     assert_eq!(app.context, ContextUsage::default());
     assert_eq!(app.active, HarnessId::CLAUDE);
-    assert_eq!(app.models[&HarnessId::CLAUDE].model, "opus");
+    assert_eq!(
+        app.controller.model(HarnessId::CLAUDE).unwrap().model,
+        "opus"
+    );
     // No harness has run in it yet.
     assert!(app.conversation.last_policies.is_empty());
     assert_eq!(

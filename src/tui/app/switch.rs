@@ -27,8 +27,8 @@ impl App {
 
     /// The model `harness` runs, as the context windows are kept by.
     fn model_key(&self, harness: HarnessId) -> String {
-        self.models
-            .get(&harness)
+        self.controller
+            .model(harness)
             .map_or_else(|| "default".to_string(), ModelRef::label)
     }
 
