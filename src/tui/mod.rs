@@ -1006,8 +1006,11 @@ fn start_session(
 ) -> Result<SessionHandle> {
     let harness = app.harness();
     let desc = harness.descriptor();
-    let binary = resolve_binary(desc, app.config.binary_override(desc.id.as_str()))
-        .with_context(|| format!("{} not found on PATH", desc.binary_names.join("/")))?;
+    let binary = resolve_binary(
+        desc,
+        app.controller.config.binary_override(desc.id.as_str()),
+    )
+    .with_context(|| format!("{} not found on PATH", desc.binary_names.join("/")))?;
     let cfg = SessionConfig {
         binary,
         cwd: app.cwd.clone(),
@@ -1024,7 +1027,7 @@ fn start_session(
         } else {
             None
         },
-        extra_args: app.config.extra_args(desc.id.as_str()).to_vec(),
+        extra_args: app.controller.config.extra_args(desc.id.as_str()).to_vec(),
         env: Vec::new(),
         mcp_servers,
         sandbox: app.session_sandbox()?,
@@ -1470,7 +1473,7 @@ mod tests {
         use crate::core::{SessionInfo, session::ProcessModel};
         let mut app = test_app(HarnessId::CODEX);
         // What starts in its place exits at once, and touches nothing.
-        app.config.harnesses.insert(
+        app.controller.config.harnesses.insert(
             "codex".into(),
             crate::config::HarnessSettings {
                 binary: crate::harness::which("true"),

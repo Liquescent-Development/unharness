@@ -237,8 +237,7 @@ impl App {
             .last_active_index
             .insert(self.active, seen);
         let prompted = self.session_seen();
-        self.controller
-            .sync_conversation(&self.config, self.active, prompted);
+        self.controller.sync_conversation(self.active, prompted);
         self.active = next;
         self.controller.conversation.session_usage = self
             .controller

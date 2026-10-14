@@ -16,7 +16,7 @@ impl App {
         crate::runner::session_sandbox(
             self.harness(),
             &self.sandbox,
-            &self.config,
+            &self.controller.config,
             self.workspace_root.as_deref().unwrap_or(&self.cwd),
         )
     }

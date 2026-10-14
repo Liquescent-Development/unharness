@@ -1079,7 +1079,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     );
     // Only where it can be clicked.
     view.jump = (!app.auto_scroll
-        && app.config.mouse.unwrap_or(true)
+        && app.controller.config.mouse.unwrap_or(true)
         && inner.width >= JUMP_LABEL.width() as u16)
         .then(|| Rect {
             x: inner.x + (inner.width - JUMP_LABEL.width() as u16) / 2,

@@ -2,7 +2,6 @@
 //! from, and when one may be chosen.
 
 use super::{Controller, Origin, Pick};
-use crate::config::Config;
 use crate::core::{HarnessId, ModelInfo, ModelRef, ProviderId, SessionCommand};
 
 /// What a harness runs with besides its policy.
@@ -170,8 +169,12 @@ impl Controller {
     }
 
     /// The model the config names for `harness`, on its provider.
-    pub(super) fn configured_model(&self, config: &Config, harness: HarnessId) -> Option<ModelRef> {
-        let model = config.harness(harness.as_str())?.default_model.clone()?;
+    pub(super) fn configured_model(&self, harness: HarnessId) -> Option<ModelRef> {
+        let model = self
+            .config
+            .harness(harness.as_str())?
+            .default_model
+            .clone()?;
         let provider = self
             .provider(harness)
             .cloned()

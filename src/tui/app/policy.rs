@@ -15,23 +15,27 @@ impl App {
     /// The policy the user asked for on the active harness: the one named
     /// for the run, or this harness's configured default.
     pub fn policy_requested(&self) -> PermissionPolicy {
-        self.controller.policy.requested(&self.config, self.active)
+        self.controller
+            .policy
+            .requested(&self.controller.config, self.active)
     }
 
     /// The policy asked of the active harness: what the user chose for it,
     /// else the requested one.
     pub fn wanted_policy(&self) -> PermissionPolicy {
-        self.controller.policy.wanted(&self.config, self.active)
+        self.controller
+            .policy
+            .wanted(&self.controller.config, self.active)
     }
 
     fn policy_resolution(&self) -> Result<PolicyResolution, PolicyUnavailable> {
-        self.controller.policy_resolution(&self.config, self.active)
+        self.controller.policy_resolution(self.active)
     }
 
     /// `None` until the user chooses, where the requested policy is not
     /// available: a more permissive one is never taken for them.
     pub fn effective_policy(&self) -> Option<PermissionPolicy> {
-        self.controller.effective_policy(&self.config, self.active)
+        self.controller.effective_policy(self.active)
     }
 
     /// The effective policy for a message.
@@ -96,10 +100,7 @@ impl App {
     /// policy it has can be: what the user picks is what runs.
     pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
         let prompted = self.session_seen();
-        let set = match self
-            .controller
-            .set_policy(&self.config, self.active, p, prompted)
-        {
+        let set = match self.controller.set_policy(self.active, p, prompted) {
             Ok(set) => set,
             Err(e) => {
                 self.controller
@@ -133,10 +134,7 @@ impl App {
 
     /// The session runs under `p` now; one it moved to by itself is said.
     pub(super) fn on_policy_changed(&mut self, p: PermissionPolicy) {
-        if let Some(notice) = self
-            .controller
-            .on_policy_changed(&self.config, self.active, p)
-        {
+        if let Some(notice) = self.controller.on_policy_changed(self.active, p) {
             self.controller.conversation.transcript.push_notice(notice);
         }
     }
@@ -233,7 +231,8 @@ impl App {
                          keep {w} here)"
                     ));
                 }
-                self.config
+                self.controller
+                    .config
                     .harnesses
                     .entry(id.to_string())
                     .or_default()

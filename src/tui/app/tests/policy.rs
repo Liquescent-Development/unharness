@@ -418,7 +418,7 @@ fn the_policy_picker_saves_a_harness_default() {
         Some("bypass")
     );
     assert_eq!(
-        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.controller.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
     assert!(!dir.join("config.toml").exists());
@@ -446,7 +446,7 @@ fn the_policy_picker_saves_a_harness_default() {
             .any(|n| n == "this workspace's settings make bypass pi's default here")
     );
     assert_eq!(
-        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.controller.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
 

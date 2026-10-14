@@ -275,7 +275,7 @@ fn a_session_notice_is_said_once() {
 fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
     use super::super::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
-    app.config.mcp_servers.insert(
+    app.controller.config.mcp_servers.insert(
         "files".into(),
         crate::core::mcp::McpServerSettings {
             command: Some("files-mcp".into()),

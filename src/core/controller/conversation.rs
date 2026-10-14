@@ -11,7 +11,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use super::Controller;
-use crate::config::Config;
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
     CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
@@ -118,7 +117,7 @@ impl Controller {
 
     /// Bring what is saved up to date. `active` runs the conversation, and
     /// its live session was sent something (`prompted`).
-    pub fn sync_conversation(&mut self, config: &Config, active: HarnessId, prompted: bool) {
+    pub fn sync_conversation(&mut self, active: HarnessId, prompted: bool) {
         let c = &mut self.conversation;
         let r = &mut c.record;
         r.active_harness = active;
@@ -131,7 +130,7 @@ impl Controller {
         r.checkpoints = c.file_checkpoints.clone();
         r.fork_pending = c.fork_pending.iter().copied().collect();
         r.fork_pending.sort_by_key(|h| h.as_str());
-        self.sync_choices(config, active, prompted);
+        self.sync_choices(active, prompted);
         let c = &mut self.conversation;
         if c.record.title.is_empty()
             && let Some(p) = &c.first_prompt
@@ -142,8 +141,8 @@ impl Controller {
     }
 
     /// Write the conversation to disk. Failures are reported once per run.
-    pub fn persist(&mut self, config: &Config, active: HarnessId, prompted: bool) {
-        if let Err(e) = self.save_conversation(config, active, prompted)
+    pub fn persist(&mut self, active: HarnessId, prompted: bool) {
+        if let Err(e) = self.save_conversation(active, prompted)
             && !self.persist_failed
         {
             self.persist_failed = true;
@@ -154,13 +153,8 @@ impl Controller {
     }
 
     /// Write the conversation to disk, if it has anything to keep.
-    pub fn save_conversation(
-        &mut self,
-        config: &Config,
-        active: HarnessId,
-        prompted: bool,
-    ) -> anyhow::Result<()> {
-        self.sync_conversation(config, active, prompted);
+    pub fn save_conversation(&mut self, active: HarnessId, prompted: bool) -> anyhow::Result<()> {
+        self.sync_conversation(active, prompted);
         if !self.conversation.record.has_content() {
             return Ok(());
         }
@@ -170,16 +164,16 @@ impl Controller {
     /// Take what the resumed conversation was run with, its policy, models
     /// and efforts, except where this run named its own
     /// (`Controller::take_conversation`).
-    pub fn take_conversation_choices(&mut self, config: &Config) {
+    pub fn take_conversation_choices(&mut self) {
         let record = self.conversation.record.clone();
-        for notice in self.take_conversation(config, &record) {
+        for notice in self.take_conversation(&record) {
             self.conversation.transcript.push_notice(notice);
         }
     }
 
     /// Say which conversation was resumed, and whether `active` runs under
     /// another policy than it last did. `at_start`: by `--resume`.
-    pub fn announce_resume(&mut self, config: &Config, active: HarnessId, at_start: bool) {
+    pub fn announce_resume(&mut self, active: HarnessId, at_start: bool) {
         let summary = self.conversation.record.summary();
         let name = self.short_name(active);
         self.conversation.transcript.push_notice(format!(
@@ -196,7 +190,7 @@ impl Controller {
         let Some(last) = self.conversation.record.last_policies.get(&active).copied() else {
             return;
         };
-        if let Some(notice) = self.resumed_under(config, active, last, at_start) {
+        if let Some(notice) = self.resumed_under(active, last, at_start) {
             self.conversation.transcript.push_notice(notice);
         }
     }

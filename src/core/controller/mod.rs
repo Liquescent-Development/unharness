@@ -93,6 +93,9 @@ pub struct Launch {
 /// The state that decides how each harness runs. See the module.
 pub struct Controller {
     registry: Arc<Registry>,
+    /// The run's configuration: each harness's defaults, the bridge's
+    /// budget, the MCP servers, what a CLI is started with.
+    pub config: Config,
     pub policy: PolicyState,
     choices: HashMap<HarnessId, ChoiceState>,
     /// The models each harness offers on a provider, as last listed.
@@ -125,7 +128,7 @@ impl Controller {
     /// what `launch` names. A configured model of a harness whose provider
     /// is not known is given to the run's harness only. It runs a new
     /// conversation, kept and checkpointed as `keeping` says.
-    pub fn new(registry: Arc<Registry>, config: &Config, launch: Launch, keeping: Keeping) -> Self {
+    pub fn new(registry: Arc<Registry>, config: Config, launch: Launch, keeping: Keeping) -> Self {
         let mut choices: HashMap<HarnessId, ChoiceState> = HashMap::new();
         for h in registry.all() {
             let id = h.descriptor().id;
@@ -180,6 +183,7 @@ impl Controller {
         }
         Controller {
             registry,
+            config,
             policy: PolicyState::new(launch.policy),
             choices,
             model_lists: HashMap::new(),
@@ -243,13 +247,7 @@ impl Controller {
     /// `harness`'s live session reported `update`. A policy it refused
     /// moves the one in effect as an unsupported policy would; a live
     /// session (`alive`) is told where it went.
-    pub fn report(
-        &mut self,
-        config: &Config,
-        harness: HarnessId,
-        update: CapsUpdate,
-        alive: bool,
-    ) -> CapsReport {
+    pub fn report(&mut self, harness: HarnessId, update: CapsUpdate, alive: bool) -> CapsReport {
         let mut notices = Vec::new();
         if let Some(levels) = &update.effort_levels
             && self
@@ -287,12 +285,12 @@ impl Controller {
         }
         let commands = update.commands.is_some() || update.slash_commands.is_some();
         let refusal = update.refused_policies.is_some();
-        let before = self.effective_policy(config, harness);
+        let before = self.effective_policy(harness);
         self.live.entry(harness).or_default().merge(update);
         let refused = if refusal {
             let policies = self.policies(harness);
             self.policy
-                .on_refused(config, harness, before, &policies, alive)
+                .on_refused(&self.config, harness, before, &policies, alive)
         } else {
             None
         };
@@ -351,16 +349,13 @@ impl Controller {
     /// and efforts, except where this run named its own. What the last
     /// conversation chose goes back to the configured default. Returns
     /// what the user is told, in order.
-    pub fn take_conversation(
-        &mut self,
-        config: &Config,
-        conversation: &Conversation,
-    ) -> Vec<String> {
+    pub fn take_conversation(&mut self, conversation: &Conversation) -> Vec<String> {
         self.policy.take_conversation(conversation);
         let harnesses: Vec<HarnessId> = self.choices.keys().copied().collect();
         for h in harnesses {
-            let model = self.configured_model(config, h);
-            let effort = config
+            let model = self.configured_model(h);
+            let effort = self
+                .config
                 .harness(h.as_str())
                 .and_then(|s| s.default_effort.clone());
             let Some(state) = self.choices.get_mut(&h) else {
@@ -435,9 +430,9 @@ impl Controller {
     /// What the conversation keeps of the choices. `prompted`: `active`'s
     /// live session was sent something, so the policy in effect is the
     /// one it last ran under.
-    fn sync_choices(&mut self, config: &Config, active: HarnessId, prompted: bool) {
+    fn sync_choices(&mut self, active: HarnessId, prompted: bool) {
         let last = if prompted {
-            self.effective_policy(config, active)
+            self.effective_policy(active)
         } else {
             None
         };

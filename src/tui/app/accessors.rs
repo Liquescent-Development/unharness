@@ -47,7 +47,7 @@ impl App {
 
     pub fn harness_binary(&self) -> Option<PathBuf> {
         let d = self.harness().descriptor();
-        resolve_binary(d, self.config.binary_override(d.id.as_str()))
+        resolve_binary(d, self.controller.config.binary_override(d.id.as_str()))
     }
 
     /// What the status area warns about: a missing sandbox, a degraded policy.

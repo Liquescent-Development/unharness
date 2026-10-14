@@ -10,7 +10,7 @@ impl App {
     /// Write the conversation to disk (`Controller::persist`).
     pub fn persist(&mut self) {
         let prompted = self.session_seen();
-        self.controller.persist(&self.config, self.active, prompted);
+        self.controller.persist(self.active, prompted);
     }
 
     /// Start a new conversation in this workspace, as a fresh launch would,
@@ -40,10 +40,7 @@ impl App {
         }
         // Nothing of it is dropped: one that cannot be saved stays.
         let prompted = self.session_seen();
-        if let Err(e) = self
-            .controller
-            .save_conversation(&self.config, self.active, prompted)
-        {
+        if let Err(e) = self.controller.save_conversation(self.active, prompted) {
             self.controller.conversation.transcript.push_error(format!(
                 "could not save the conversation, so /clear keeps it: {e:#}"
             ));
@@ -133,9 +130,8 @@ impl App {
             self.active
         };
         self.install(conv, active);
-        self.controller.take_conversation_choices(&self.config);
-        self.controller
-            .announce_resume(&self.config, self.active, false);
+        self.controller.take_conversation_choices();
+        self.controller.announce_resume(self.active, false);
         if let Some(w) = self.policy_warning() {
             self.controller.conversation.transcript.push_notice(w);
         }

@@ -251,7 +251,6 @@ pub struct App {
     pub cwd: PathBuf,
     pub workspace_root: Option<PathBuf>,
     pub git_branch: Option<String>,
-    pub config: Config,
 
     pub active: HarnessId,
     pub harness_options: Vec<HarnessOption>,
@@ -611,9 +610,11 @@ impl App {
         } else {
             None
         };
+        let bridge_max_chars = config.bridge_max_chars;
+        let bridge_summary = config.bridge_summary.unwrap_or_default();
         let mut controller = Controller::new(
             registry,
-            &config,
+            config,
             Launch {
                 harness: init.harness,
                 policy: init.policy,
@@ -651,12 +652,11 @@ impl App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
             git_branch,
-            bridge_max_chars: config.bridge_max_chars,
+            bridge_max_chars,
             context_windows: load_context_windows(&context_windows_path),
             context_windows_path,
-            bridge_summary: config.bridge_summary.unwrap_or_default(),
+            bridge_summary,
             handoff: None,
-            config,
             active,
             harness_options,
             controller,
@@ -722,7 +722,7 @@ impl App {
         };
 
         if resumed {
-            app.controller.take_conversation_choices(&app.config);
+            app.controller.take_conversation_choices();
         }
         app.controller.conversation.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
@@ -737,15 +737,14 @@ impl App {
         if let Some(w) = app.sandbox_level().1 {
             app.controller.conversation.transcript.push_notice(w);
         }
-        for problem in app.config.mcp_servers().1 {
+        for problem in app.controller.config.mcp_servers().1 {
             app.controller.conversation.transcript.push_notice(problem);
         }
         if let Some(e) = resume_error {
             app.controller.conversation.transcript.push_error(e);
         }
         if resumed {
-            app.controller
-                .announce_resume(&app.config, app.active, true);
+            app.controller.announce_resume(app.active, true);
         }
         app
     }
@@ -941,9 +940,9 @@ impl App {
             AgentEvent::TurnAnchor { id } => self.controller.turn_anchor(self.active, id),
             AgentEvent::PolicyChanged(p) => self.on_policy_changed(p),
             AgentEvent::CapabilitiesChanged(update) => {
-                let report =
-                    self.controller
-                        .report(&self.config, self.active, update, self.session_alive);
+                let report = self
+                    .controller
+                    .report(self.active, update, self.session_alive);
                 for notice in report.notices {
                     self.controller.conversation.transcript.push_notice(notice);
                 }

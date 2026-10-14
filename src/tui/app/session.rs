@@ -11,7 +11,7 @@ impl App {
     /// The ones it does not take are named once per harness.
     pub fn session_mcp_servers(&mut self) -> Vec<McpServer> {
         let (servers, warnings) = mcp::for_harness(
-            &self.config.mcp_servers().0,
+            &self.controller.config.mcp_servers().0,
             self.caps().mcp,
             self.short_name(),
             &self.harness().own_mcp_servers(),

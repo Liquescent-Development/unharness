@@ -377,22 +377,17 @@ impl Controller {
     /// How the policy wanted of `harness` maps onto what it offers.
     pub fn policy_resolution(
         &self,
-        config: &Config,
         harness: HarnessId,
     ) -> Result<PolicyResolution, PolicyUnavailable> {
         self.policy
-            .resolve(config, harness, &self.policies(harness))
+            .resolve(&self.config, harness, &self.policies(harness))
     }
 
     /// The policy `harness` runs under; `None` until the user chooses,
     /// where the wanted one is not available.
-    pub fn effective_policy(
-        &self,
-        config: &Config,
-        harness: HarnessId,
-    ) -> Option<PermissionPolicy> {
+    pub fn effective_policy(&self, harness: HarnessId) -> Option<PermissionPolicy> {
         self.policy
-            .effective(config, harness, &self.policies(harness))
+            .effective(&self.config, harness, &self.policies(harness))
     }
 
     /// The policies `harness` has, least permissive first.
@@ -412,25 +407,22 @@ impl Controller {
     /// Choose `p` for `harness` (`PolicyState::set`).
     pub fn set_policy(
         &mut self,
-        config: &Config,
         harness: HarnessId,
         p: PermissionPolicy,
         prompted: bool,
     ) -> Result<PolicySet, PolicyUnavailable> {
         let policies = self.policies(harness);
-        self.policy.set(config, harness, p, &policies, prompted)
+        self.policy
+            .set(&self.config, harness, p, &policies, prompted)
     }
 
     /// `harness`'s session runs under `p` now (`PolicyState::on_changed`).
     /// Returns what the user is told when it moved there by itself.
-    pub fn on_policy_changed(
-        &mut self,
-        config: &Config,
-        harness: HarnessId,
-        p: PermissionPolicy,
-    ) -> Option<String> {
+    pub fn on_policy_changed(&mut self, harness: HarnessId, p: PermissionPolicy) -> Option<String> {
         let policies = self.policies(harness);
-        let p = self.policy.on_changed(config, harness, p, &policies)?;
+        let p = self
+            .policy
+            .on_changed(&self.config, harness, p, &policies)?;
         let name = self.display_name(harness);
         Some(match p {
             PermissionPolicy::Plan => {
@@ -452,17 +444,16 @@ impl Controller {
     /// resumed by `--resume`.
     pub fn resumed_under(
         &self,
-        config: &Config,
         harness: HarnessId,
         last: PermissionPolicy,
         at_start: bool,
     ) -> Option<String> {
-        let now = self.effective_policy(config, harness);
+        let now = self.effective_policy(harness);
         if now == Some(last) {
             return None;
         }
         let name = self.short_name(harness);
-        let wanted = self.policy.wanted(config, harness);
+        let wanted = self.policy.wanted(&self.config, harness);
         let why = if now != Some(wanted) {
             format!("{wanted} is not available on {name}")
         } else {
