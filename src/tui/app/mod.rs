@@ -299,9 +299,6 @@ pub struct App {
     /// The id (and model) such a session reported, committed with the
     /// first prompt.
     blank_session: Option<(String, Option<String>)>,
-    /// A choice sent to the session that it takes only between turns,
-    /// until it has said how it took it: prompts typed meanwhile wait.
-    choice_pending: Option<choices::PendingChoice>,
     /// The last session ended by itself or could not start: the next
     /// one waits for the user (a prompt, a switch, a resume).
     idle_start_paused: bool,
@@ -711,7 +708,6 @@ impl App {
             remote: None,
             session_blank: false,
             blank_session: None,
-            choice_pending: None,
             idle_start_paused: false,
             start_held: false,
             store,

@@ -133,7 +133,7 @@ pub struct Capabilities {
     /// The choices the user is offered only between turns, with no subagent
     /// whose end will be told still at work: Claude's and Codex's provider,
     /// Mistral Vibe's model, effort and provider. Read by
-    /// `App::between_turns` alone. How the session takes one is its
+    /// `Controller::between_turns` alone. How the session takes one is its
     /// driver's to say, and nothing is sent after it until it has.
     pub between_turns: Choices,
     /// A stored session of the harness keeps the model and effort it last
@@ -142,10 +142,10 @@ pub struct Capabilities {
     /// one is a stored session nothing was sent to, leaves it for a new
     /// session told the conversation, and none is made while an earlier
     /// CLI of the harness is still exiting (the start that waits for it
-    /// resumes the stored session). Read by `App::stored_session_keeps`
-    /// alone. It stays a flag (#275): it decides before a driver could,
-    /// with none running, or with one the TUI would otherwise start again
-    /// on the stored session, as it ran.
+    /// resumes the stored session). Read by
+    /// `Controller::stored_session_keeps` alone. It stays a flag (#275): it
+    /// decides before a driver could, with none running, or with one the
+    /// TUI would otherwise start again on the stored session, as it ran.
     pub stored_session_keeps: Option<&'static str>,
     /// The agent can ask the user structured questions.
     pub ask_user_question: bool,

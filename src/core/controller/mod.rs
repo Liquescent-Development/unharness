@@ -3,7 +3,10 @@
 //! and in effect ([`PolicyState`]), the provider, model and effort chosen
 //! and where each came from ([`ChoiceState`]) with the lists they are
 //! chosen from, and what its live sessions reported on top of its declared
-//! capabilities ([`Controller::caps_of`]).
+//! capabilities ([`Controller::caps_of`]). For the active harness's
+//! session: when a choice may be made, how it reaches the session
+//! ([`Route`]), and a choice sent that the session has not said how it took
+//! ([`PendingChoice`]), which holds back what follows it.
 //!
 //! The TUI calls into it and reads from it; what it wants shown comes back
 //! as values (notices, refusals) for the TUI to push to the transcript.
@@ -17,13 +20,13 @@ use crate::core::conversations::Conversation;
 use crate::core::registry::Registry;
 use crate::core::{
     Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef, PermissionPolicy,
-    PolicyResolution, PolicySupport, PolicyUnavailable, ProviderId,
+    PolicyResolution, PolicySupport, PolicyUnavailable, ProviderId, SessionCommand,
 };
 
 mod choices;
 mod policy;
 
-pub use choices::ChoiceState;
+pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
 
 /// Where a choice came from.
@@ -89,6 +92,11 @@ pub struct Controller {
     provider_lists: HashMap<HarnessId, Vec<(ProviderId, String)>>,
     /// What live sessions reported on top of the declared capabilities.
     live: HashMap<HarnessId, CapsUpdate>,
+    /// A choice sent to the active harness's session that it takes only
+    /// between turns, until it has said how it took it: prompts typed
+    /// meanwhile wait, and another choice and what would end the session
+    /// are refused.
+    pending: Option<PendingChoice>,
 }
 
 impl Controller {
@@ -156,6 +164,7 @@ impl Controller {
             model_lists: HashMap::new(),
             provider_lists: HashMap::new(),
             live: HashMap::new(),
+            pending: None,
         }
     }
 
@@ -231,6 +240,266 @@ impl Controller {
     /// Choose `effort` for `harness`.
     pub fn choose_effort(&mut self, harness: HarnessId, effort: String) {
         self.choices.entry(harness).or_default().effort = Some(Pick::new(effort, Origin::User));
+    }
+
+    /// Whether `harness` takes `choice` only between turns, with no
+    /// subagent whose end will be told at work: the one reader of
+    /// `Capabilities::between_turns`.
+    pub fn between_turns(&self, harness: HarnessId, choice: Choice) -> bool {
+        let Some(between) = self.caps_of(harness).map(|c| c.between_turns) else {
+            return false;
+        };
+        match choice {
+            Choice::Model => between.model,
+            Choice::Effort => between.effort,
+            Choice::Provider => between.provider,
+        }
+    }
+
+    /// Why `harness`'s stored session cannot take a new model, effort or
+    /// provider, if the conversation has one (`stored`): the one reader of
+    /// `Capabilities::stored_session_keeps`.
+    pub fn stored_session_keeps(&self, harness: HarnessId, stored: bool) -> Option<&'static str> {
+        self.caps_of(harness)?
+            .stored_session_keeps
+            .filter(|_| stored)
+    }
+
+    /// Why a choice leaves the stored session for a new one now, with no
+    /// session to say so: none is live, or the live one was sent nothing
+    /// (it would be started again on the stored session, as it ran). A
+    /// session that was prompted says it itself (`SessionRenewed`).
+    fn renewal_without_session(
+        &self,
+        harness: HarnessId,
+        now: &SessionNow,
+    ) -> Option<&'static str> {
+        if now.prompted {
+            return None;
+        }
+        self.stored_session_keeps(harness, now.stored)
+    }
+
+    /// Why nothing that would start, end or change `harness`'s session is
+    /// made now, if so: its start is held until the CLI before it is gone
+    /// (`start_held`), or it was sent a choice it takes only between turns
+    /// and has not said how it took it (which may leave it for a new
+    /// session, or start its CLI again).
+    pub fn settling(&self, harness: HarnessId, start_held: bool) -> Option<String> {
+        let name = self.short_name(harness);
+        if start_held {
+            return Some(format!(
+                "the previous {name} is still exiting; try again in a moment"
+            ));
+        }
+        self.pending.as_ref().map(|pending| {
+            format!(
+                "{name} is still taking the {} just chosen; try again in a moment",
+                pending.what
+            )
+        })
+    }
+
+    /// Why `choice`, which `harness` takes only between turns, is refused
+    /// now, if it is. Not during a turn, nor while subagents whose end will
+    /// be told are at work (they would end with the session or its
+    /// process), nor, for a stored session that keeps what it ran, while
+    /// the CLI before is still exiting (the start that waits for it resumes
+    /// that session). (No choice is made while the session has not said how
+    /// it took the one before, `pending`: it may be leaving for a new
+    /// session, or starting its CLI again, which would take an effort sent
+    /// meanwhile as a turn.)
+    fn refused_between_turns(
+        &self,
+        harness: HarnessId,
+        choice: Choice,
+        now: &SessionNow,
+    ) -> Option<String> {
+        let what = choice.what();
+        if now.start_held && self.stored_session_keeps(harness, now.stored).is_some() {
+            return self.settling(harness, true);
+        }
+        if !now.alive {
+            return None;
+        }
+        if now.turn {
+            return Some(format!(
+                "finish or interrupt the current turn before changing the {what}"
+            ));
+        }
+        // They would end with the process.
+        let stop = self.caps_of(harness).is_some_and(|c| c.subagents.stop);
+        (now.subagents > 0)
+            .then(|| subagents_refusal(now.subagents, stop, &format!("changing the {what}")))
+    }
+
+    /// Why no choice is made now while one is pending, if one is.
+    fn refused_while_pending(&self, harness: HarnessId, now: &SessionNow) -> Option<String> {
+        self.pending
+            .as_ref()
+            .and_then(|_| self.settling(harness, now.start_held))
+    }
+
+    /// Choose `provider` for `harness`, if it may be chosen now (else why
+    /// not), and say how it reaches the session. A session that takes it
+    /// only between turns is told, and says how it took it (`Route::Hold`);
+    /// where it is the process's, a session nothing was sent to is started
+    /// again on it; a stored session that keeps what it ran is left for a
+    /// new one.
+    pub fn set_provider(
+        &mut self,
+        harness: HarnessId,
+        provider: ProviderId,
+        now: &SessionNow,
+        conversation: &mut Conversation,
+    ) -> Result<Route, String> {
+        if let Some(why) = self.refused_while_pending(harness, now) {
+            return Err(why);
+        }
+        let changed = self.provider(harness) != Some(&provider);
+        let between = self.between_turns(harness, Choice::Provider);
+        if changed
+            && between
+            && let Some(why) = self.refused_between_turns(harness, Choice::Provider, now)
+        {
+            return Err(why);
+        }
+        self.choose_provider(harness, provider.clone(), conversation);
+        let multi = self.caps_of(harness).is_some_and(|c| c.multi_provider);
+        Ok(if !changed {
+            Route::None
+        } else if let Some(why) = self.renewal_without_session(harness, now) {
+            Route::Renew(why)
+        } else if now.alive && !now.prompted && between && multi {
+            // Nothing was sent to it: it starts again on the provider. (A
+            // harness of one provider is not, for a name it does not know.)
+            Route::Restart
+        } else if now.prompted && between {
+            self.hold(Choice::Provider, Some(provider.clone()), now);
+            Route::Hold(SessionCommand::SetProvider(provider))
+        } else if now.prompted {
+            Route::Send(SessionCommand::SetProvider(provider))
+        } else {
+            Route::None
+        })
+    }
+
+    /// Choose `model` for `harness`, if it may be chosen now (else why
+    /// not); returns it and how it reaches the session (`Controller::route`).
+    pub fn set_model(
+        &mut self,
+        harness: HarnessId,
+        model: String,
+        now: &SessionNow,
+    ) -> Result<(ModelRef, Route), String> {
+        if let Some(why) = self.refused_while_pending(harness, now) {
+            return Err(why);
+        }
+        let between = self.between_turns(harness, Choice::Model);
+        if between && let Some(why) = self.refused_between_turns(harness, Choice::Model, now) {
+            return Err(why);
+        }
+        let m = self.choose_model(harness, model);
+        let route = self.route(
+            harness,
+            between,
+            SessionCommand::SetModel(m.clone()),
+            Choice::Model,
+            now,
+        );
+        Ok((m, route))
+    }
+
+    /// Choose `effort` for `harness`, one of the levels it has, if it may be
+    /// chosen now (else why not); returns it and how it reaches the session
+    /// (`Controller::route`).
+    pub fn set_effort(
+        &mut self,
+        harness: HarnessId,
+        effort: String,
+        now: &SessionNow,
+    ) -> Result<(String, Route), String> {
+        let caps = self.caps_of(harness).unwrap_or_default();
+        if caps.effort_levels.is_empty() {
+            return Err(format!(
+                "{} does not expose reasoning effort",
+                self.display_name(harness)
+            ));
+        }
+        let effort = effort.to_lowercase();
+        if !caps.supports_effort(&effort) {
+            return Err(format!(
+                "unknown effort '{}'; {} supports: {}",
+                effort,
+                self.short_name(harness),
+                caps.effort_levels.join(", ")
+            ));
+        }
+        if let Some(why) = self.refused_while_pending(harness, now) {
+            return Err(why);
+        }
+        let between = self.between_turns(harness, Choice::Effort);
+        if between && let Some(why) = self.refused_between_turns(harness, Choice::Effort, now) {
+            return Err(why);
+        }
+        self.choose_effort(harness, effort.clone());
+        let route = self.route(
+            harness,
+            between,
+            SessionCommand::SetEffort(Some(effort.clone())),
+            Choice::Effort,
+            now,
+        );
+        Ok((effort, route))
+    }
+
+    /// How a model or effort just chosen (`cmd`) reaches the session, which
+    /// takes it only `between` turns or any time: a stored session that
+    /// keeps what it ran is left for a new one; one nothing was sent to is
+    /// started again with it (Claude would take an effort as a turn); one
+    /// prompted is told, and says how it took it.
+    fn route(
+        &mut self,
+        harness: HarnessId,
+        between: bool,
+        cmd: SessionCommand,
+        choice: Choice,
+        now: &SessionNow,
+    ) -> Route {
+        if let Some(why) = self.renewal_without_session(harness, now) {
+            Route::Renew(why)
+        } else if !now.alive {
+            // The next session starts with it.
+            Route::None
+        } else if !now.prompted {
+            Route::Restart
+        } else if between {
+            self.hold(choice, None, now);
+            Route::Hold(cmd)
+        } else {
+            Route::Send(cmd)
+        }
+    }
+
+    /// `choice` goes to the session, which says how it took it before what
+    /// is typed after it goes.
+    fn hold(&mut self, choice: Choice, provider: Option<ProviderId>, now: &SessionNow) {
+        self.pending = Some(PendingChoice {
+            queued: now.queued,
+            what: choice.what(),
+            provider,
+        });
+    }
+
+    /// A choice was sent that the session has not said how it took.
+    pub fn choice_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// The choice the session was sent has been answered, or will not be
+    /// (its process is gone): what waited for the answer.
+    pub fn choice_answered(&mut self) -> Option<PendingChoice> {
+        self.pending.take()
     }
 
     /// The models `harness` offers on `provider`, if they were listed.
@@ -646,6 +915,18 @@ impl Controller {
     pub fn overlay(&mut self, harness: HarnessId, update: CapsUpdate) {
         self.live.entry(harness).or_default().merge(update);
     }
+}
+
+/// Why what would end a session with `n` subagents at work, whose end will
+/// be told, is refused for `doing`: they would end with it. Stopping them
+/// is named only where the harness can (`can_stop`).
+pub fn subagents_refusal(n: usize, can_stop: bool, doing: &str) -> String {
+    let stop = if can_stop {
+        " or stop them (Ctrl+S)"
+    } else {
+        ""
+    };
+    format!("{n} subagent(s) still at work would be stopped; wait for them{stop} before {doing}")
 }
 
 #[cfg(test)]

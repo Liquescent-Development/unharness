@@ -222,27 +222,16 @@ impl App {
         self.anchors.retain(|a| a.harness != harness);
     }
 
-    /// True, with an error shown, while the session is settling: its start
-    /// is held until the CLI before it is gone, or it was sent a choice it
-    /// takes only between turns and has not said how it took it (which
-    /// may leave it for a new session, or start its CLI again).
+    /// True, with an error shown, while the session is settling
+    /// (`Controller::settling`).
     pub(super) fn refused_while_settling(&mut self) -> bool {
-        if self.start_held {
-            self.transcript.push_error(format!(
-                "the previous {} is still exiting; try again in a moment",
-                self.short_name()
-            ));
-            return true;
+        match self.controller.settling(self.active, self.start_held) {
+            Some(why) => {
+                self.transcript.push_error(why);
+                true
+            }
+            None => false,
         }
-        if let Some(pending) = &self.choice_pending {
-            self.transcript.push_error(format!(
-                "{} is still taking the {} just chosen; try again in a moment",
-                self.short_name(),
-                pending.what
-            ));
-            return true;
-        }
-        false
     }
 
     /// The session's process is gone, or going: what it was running and

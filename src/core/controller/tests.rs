@@ -374,3 +374,163 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     // The same again changes nothing.
     assert!(!c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
 }
+
+/// When a choice may be made, and how it reaches the session it meets: the
+/// one reader of `between_turns` and of `stored_session_keeps` each, and
+/// the refusals' words.
+#[test]
+fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
+    use crate::harness::vibe::{KEEPS_CHOICES, VibeHarness};
+    const VIBE: HarnessId = HarnessId::VIBE;
+    let config = Config::default();
+    let registry = Arc::new(
+        Registry::empty()
+            .with(Box::new(VibeHarness::new()))
+            .with(Box::new(ClaudeHarness::default())),
+    );
+    let vibe = registry.get(VIBE).unwrap().descriptor().short_name;
+    let mut c = Controller::new(
+        registry,
+        &config,
+        Launch {
+            harness: VIBE,
+            ..launch(None)
+        },
+    );
+    assert!(c.between_turns(VIBE, Choice::Model));
+    assert!(!c.between_turns(CLAUDE, Choice::Effort));
+    assert_eq!(c.stored_session_keeps(VIBE, true), Some(KEEPS_CHOICES));
+    assert_eq!(c.stored_session_keeps(VIBE, false), None);
+    assert_eq!(c.stored_session_keeps(CLAUDE, true), None);
+    let prompted = SessionNow {
+        alive: true,
+        prompted: true,
+        stored: true,
+        ..Default::default()
+    };
+
+    // Mid-turn, or with subagents at work: refused, and nothing chosen.
+    let turn = SessionNow {
+        turn: true,
+        ..prompted
+    };
+    assert_eq!(
+        c.set_model(VIBE, "glm-5-3".into(), &turn).unwrap_err(),
+        "finish or interrupt the current turn before changing the model"
+    );
+    let busy = SessionNow {
+        subagents: 2,
+        ..prompted
+    };
+    assert_eq!(
+        c.set_model(VIBE, "glm-5-3".into(), &busy).unwrap_err(),
+        "2 subagent(s) still at work would be stopped; wait for them before changing the model"
+    );
+    assert_eq!(c.model(VIBE), None);
+
+    // Between turns it is sent, and held until the session says how it
+    // took it; until then another is refused, as is what would end it.
+    let (m, route) = c
+        .set_model(
+            VIBE,
+            "glm-5-3".into(),
+            &SessionNow {
+                queued: 1,
+                ..prompted
+            },
+        )
+        .unwrap();
+    assert_eq!(route, Route::Hold(SessionCommand::SetModel(m)));
+    assert!(c.choice_pending());
+    let taking = format!("{vibe} is still taking the model just chosen; try again in a moment");
+    assert_eq!(c.settling(VIBE, false), Some(taking.clone()));
+    assert_eq!(
+        c.set_provider(VIBE, "lan".into(), &prompted, &mut Conversation::new(VIBE))
+            .unwrap_err(),
+        taking
+    );
+    let answered = c.choice_answered().unwrap();
+    assert_eq!((answered.queued, answered.what), (1, "model"));
+    assert_eq!(c.settling(VIBE, false), None);
+
+    // With none prompted, a stored session keeps what it ran: a new one.
+    // (Its levels are what its sessions report.)
+    c.report(
+        &config,
+        VIBE,
+        CapsUpdate::efforts(vec!["off".into(), "high".into()]),
+        false,
+    );
+    let stored = SessionNow {
+        stored: true,
+        ..Default::default()
+    };
+    let (_, route) = c.set_effort(VIBE, "OFF".into(), &stored).unwrap();
+    assert_eq!(route, Route::Renew(KEEPS_CHOICES));
+    assert_eq!(c.effort(VIBE), Some("off"));
+    // And none is made while the vibe before it is still exiting.
+    let held = SessionNow {
+        start_held: true,
+        ..stored
+    };
+    assert_eq!(
+        c.set_model(VIBE, "mistral-medium-3.5".into(), &held)
+            .unwrap_err(),
+        format!("the previous {vibe} is still exiting; try again in a moment")
+    );
+    // Sent nothing and nothing stored: started again; none live: the next.
+    let blank = SessionNow {
+        alive: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        c.set_model(VIBE, "mistral-medium-3.5".into(), &blank)
+            .unwrap()
+            .1,
+        Route::Restart
+    );
+    assert_eq!(
+        c.set_model(VIBE, "glm-5-3".into(), &SessionNow::default())
+            .unwrap()
+            .1,
+        Route::None
+    );
+
+    // Claude takes its effort any time and its provider between turns,
+    // and a held start does not hold the provider back.
+    assert_eq!(
+        c.set_effort(CLAUDE, "high".into(), &prompted).unwrap().1,
+        Route::Send(SessionCommand::SetEffort(Some("high".into())))
+    );
+    assert!(
+        c.set_effort(CLAUDE, "loud".into(), &prompted)
+            .unwrap_err()
+            .starts_with("unknown effort 'loud'; Claude supports: ")
+    );
+    let mut conv = Conversation::new(CLAUDE);
+    assert_eq!(
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
+            .unwrap(),
+        Route::Hold(SessionCommand::SetProvider("bedrock".into()))
+    );
+    assert_eq!(
+        c.choice_answered().unwrap().provider,
+        Some("bedrock".into())
+    );
+    assert_eq!(
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
+            .unwrap(),
+        Route::None
+    );
+    let held = SessionNow {
+        start_held: true,
+        stored: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        c.set_provider(CLAUDE, "vertex".into(), &held, &mut conv)
+            .unwrap(),
+        Route::None
+    );
+    assert_eq!(c.chosen_provider(CLAUDE), Some(&"vertex".into()));
+}

@@ -2,6 +2,7 @@
 
 use super::{Action, App, SubagentOption, SubagentRow, TranscriptView};
 use crate::core::SessionCommand;
+use crate::core::controller::subagents_refusal;
 use crate::tui::modal::{ListPicker, Modal};
 use crate::tui::transcript::Transcript;
 
@@ -31,14 +32,8 @@ impl App {
         if n == 0 {
             return false;
         }
-        let stop = if self.caps().subagents.stop {
-            " or stop them (Ctrl+S)"
-        } else {
-            ""
-        };
-        self.transcript.push_error(format!(
-            "{n} subagent(s) still at work would be stopped; wait for them{stop} before {doing}"
-        ));
+        self.transcript
+            .push_error(subagents_refusal(n, self.caps().subagents.stop, doing));
         true
     }
 
