@@ -274,9 +274,13 @@ impl Tracking {
         self.asked_planning.remove(id);
     }
 
-    /// Nobody can answer the requests waiting: their session is gone.
+    /// Nobody can answer the requests waiting: their session is gone, and
+    /// which of them were made while planning goes with them. A request
+    /// of a later session may reuse one's id (an ACP agent's start at 0
+    /// again in a new process): it is judged as it is made.
     pub fn drop_waiting(&mut self) {
         self.pending_prompts.clear();
+        self.asked_planning.clear();
     }
 
     /// Deny or dismiss `req`, which only a user could answer, with nobody
@@ -475,8 +479,9 @@ mod tests {
         assert!(t.next_waiting().is_none());
 
         t.wait(shell("r4", "ls"), false);
+        t.wait(shell("r5", "ls"), true);
         t.drop_waiting();
-        assert!(t.pending_prompts.is_empty());
+        assert!(t.pending_prompts.is_empty() && t.asked_planning.is_empty());
     }
 
     /// With nobody to ask, a tool call is denied, a plan is not approved,

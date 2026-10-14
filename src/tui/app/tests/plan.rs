@@ -210,6 +210,45 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
     );
 }
 
+/// A request made while planning that was dropped with its session is
+/// forgotten with it: a later session's request that reuses its id (an
+/// ACP agent's start at 0 again in a new process) is judged as it is
+/// made, not as made while planning.
+#[test]
+fn a_request_dropped_with_its_session_is_not_judged_as_made_while_planning() {
+    let mut app = planning_app();
+    app.controller
+        .tracking
+        .rules
+        .append(Scope::Workspace, &[Rule::edit("**")])
+        .unwrap();
+    let write = AgentEvent::PermissionRequest(PermissionRequest {
+        id: "write".into(),
+        kind: PermissionKind::ToolUse {
+            tool: "Write".into(),
+            input: Value::Null,
+            action: ToolAction::Edit {
+                paths: vec![app.controller.cwd.join("notes.txt")],
+            },
+            description: None,
+        },
+        tool_call_id: None,
+    });
+    app.on_event(plan_request());
+    app.on_event(write.clone());
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 1);
+    app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+    assert!(app.modal.is_none() && app.controller.tracking.pending_prompts.is_empty());
+
+    // The next session runs out of plan mode, and asks under the same id.
+    assert!(app.set_policy(PermissionPolicy::AcceptEdits));
+    app.take_actions();
+    app.controller.session_alive = true;
+    app.on_event(write);
+    assert_eq!(app.take_actions(), vec![allowed("write")]);
+    assert!(app.modal.is_none());
+}
+
 /// Claude reports each mode it is set to; a report that comes after a
 /// later choice is not the agent changing its mind.
 #[test]
