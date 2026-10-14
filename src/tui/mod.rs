@@ -18,7 +18,6 @@ pub mod rows;
 pub mod selection;
 pub mod ui;
 
-use std::collections::{HashMap, VecDeque};
 use std::io::{Stdout, Write, stdout};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,15 +43,13 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::config::Config;
 use crate::core::Rules;
+use crate::core::controller::{self, Ending};
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
 use crate::core::shell;
-use crate::core::{
-    HarnessId, McpServer, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle,
-};
-use crate::harness::resolve_binary;
-use app::{Action, App, AppInit};
+use crate::core::{HarnessId, PermissionPolicy, SessionCommand, SessionHandle};
+use app::{App, AppInit};
 
 pub struct TuiLaunch {
     pub cwd: PathBuf,
@@ -795,249 +792,23 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
     }
 }
 
-/// Sessions asked to end whose CLI may still be running, and the actions
-/// held until one of them is gone.
-struct Ending {
-    running: HashMap<HarnessId, usize>,
-    gone_tx: tokio::sync::mpsc::UnboundedSender<HarnessId>,
-    gone_rx: tokio::sync::mpsc::UnboundedReceiver<HarnessId>,
-    held: VecDeque<Action>,
-    /// How long a CLI asked to end may take before it is killed.
-    patience: Duration,
-}
-
-impl Ending {
-    fn new() -> Self {
-        let (gone_tx, gone_rx) = tokio::sync::mpsc::unbounded_channel();
-        Ending {
-            running: HashMap::new(),
-            gone_tx,
-            gone_rx,
-            held: VecDeque::new(),
-            // Its grace, its kill and its drain are bounded; this is in
-            // case a driver never gets that far (stuck on a write).
-            patience: crate::core::process::END_GRACE
-                + crate::core::process::DRAIN_TIMEOUT
-                + Duration::from_secs(1),
-        }
-    }
-
-    /// Follow `session`, which was asked to end, until its CLI is gone.
-    /// Its events are read, so that the driver sees it to the end as it
-    /// would with the handle kept, and dropped.
-    fn follow(&mut self, session: SessionHandle) {
-        let harness = session.info.harness;
-        *self.running.entry(harness).or_default() += 1;
-        let gone = self.gone_tx.clone();
-        let patience = self.patience;
-        tokio::spawn(async move {
-            // All of it: its command channel closed, the driver would
-            // stop reading the CLI and go.
-            let mut session = session;
-            let process = session.process_slot();
-            let exited = async {
-                while let Some(ev) = session.events.recv().await {
-                    if matches!(ev, crate::core::AgentEvent::ProcessExited { .. }) {
-                        break;
-                    }
-                }
-            };
-            tokio::pin!(exited);
-            if tokio::time::timeout(patience, &mut exited).await.is_err() {
-                // Not to be resumed beside it, whatever its driver does.
-                process.kill();
-                let _ = tokio::time::timeout(
-                    crate::core::process::DRAIN_TIMEOUT + Duration::from_secs(1),
-                    exited,
-                )
-                .await;
-            }
-            let _ = gone.send(harness);
-        });
-    }
-
-    /// Whether a CLI of `harness` asked to end may still be running.
-    fn running(&self, harness: HarnessId) -> bool {
-        self.running.get(&harness).is_some_and(|n| *n > 0)
-    }
-
-    /// The next of them to be gone.
-    async fn recv(&mut self) -> HarnessId {
-        match self.gone_rx.recv().await {
-            Some(harness) => harness,
-            // A sender is kept here.
-            None => std::future::pending().await,
-        }
-    }
-
-    fn gone(&mut self, harness: HarnessId) {
-        if let Some(n) = self.running.get_mut(&harness) {
-            *n = n.saturating_sub(1);
-        }
-    }
-}
-
+/// Carry out what the controller asked for (`controller::run_actions`);
+/// the view then follows what that did.
 async fn run_actions(
     app: &mut App,
     session: &mut Option<SessionHandle>,
     ending: &mut Ending,
     shell: &mut Option<LineProcess>,
 ) {
-    let mut actions = std::mem::take(&mut ending.held);
-    actions.extend(app.take_actions());
-    app.controller.start_held = false;
-    while let Some(action) = actions.pop_front() {
-        match action {
-            Action::RunShell { command } => {
-                // The sandbox the active harness's next process gets: a
-                // command typed here is confined no less than the agent.
-                let started = app
-                    .session_sandbox()
-                    .and_then(|sandbox| shell::spawn(&command, &app.controller.cwd, &sandbox));
-                match started {
-                    Ok(p) => *shell = Some(p),
-                    Err(e) => app.shell_failed(format!("{e:#}")),
-                }
-            }
-            Action::StopShell => {
-                if let Some(p) = shell.as_mut() {
-                    p.kill().await;
-                }
-            }
-            Action::StartSession { resume } => {
-                if session.is_some() {
-                    continue;
-                }
-                // The CLI that ended its session last (a sandbox or
-                // provider change, a switch away, a resume) may still be
-                // writing it, or hold its lock: it is resumed, or forked,
-                // once that one is gone. What follows waits with it.
-                if resume.is_some() && ending.running(app.controller.active) {
-                    // An interrupt can only be for the turn that waits:
-                    // it is not sent at all.
-                    if actions
-                        .iter()
-                        .any(|a| matches!(a, Action::Command(SessionCommand::Interrupt)))
-                    {
-                        actions.retain(|a| {
-                            !matches!(
-                                a,
-                                Action::SendTurn { .. }
-                                    | Action::Command(
-                                        SessionCommand::Interrupt | SessionCommand::Steer { .. }
-                                    )
-                            )
-                        });
-                        app.on_event(crate::core::AgentEvent::TurnCompleted {
-                            stop_reason: crate::core::StopReason::Interrupted,
-                        });
-                    }
-                    app.flash(format!(
-                        "Waiting for the previous {} to exit",
-                        app.short_name()
-                    ));
-                    actions.push_front(Action::StartSession { resume });
-                    ending.held = actions;
-                    app.controller.start_held = true;
-                    return;
-                }
-                let prepared = app.harness().prepare();
-                // After `prepare`, which may itself create a watched file.
-                app.controller.arm_guard();
-                if let Ok(Some(note)) = &prepared {
-                    app.controller
-                        .conversation
-                        .transcript
-                        .push_notice(note.clone());
-                }
-                app.controller.show_session_notice();
-                let mcp_servers = app.controller.session_mcp_servers();
-                match prepared.and_then(|_| start_session(app, resume, mcp_servers)) {
-                    Ok(handle) => {
-                        *session = Some(handle);
-                        app.controller.session_alive = true;
-                        app.controller.session_sandbox_level = Some(app.sandbox_level().0);
-                        let policy = app.effective_policy();
-                        app.controller.policy.started_under(policy);
-                        // Remote Control the user had on, on the process before.
-                        if let Some(cmd) = app.controller.remote_control_resend() {
-                            actions.push_front(Action::Command(cmd));
-                        }
-                    }
-                    Err(e) => {
-                        app.start_failed(format!("could not start {}: {e:#}", app.short_name()));
-                    }
-                }
-            }
-            Action::SendTurn { text, attachments } => {
-                if let Some(s) = session.as_ref() {
-                    if let Err(e) = s.send(SessionCommand::SendTurn { text, attachments }).await {
-                        app.on_event(crate::core::AgentEvent::TurnCompleted {
-                            stop_reason: crate::core::StopReason::Error(e.to_string()),
-                        });
-                    }
-                } else if app.controller.is_generating {
-                    // StartSession failed; the error was already reported.
-                }
-            }
-            Action::Command(cmd) => {
-                if let Some(s) = session.as_ref()
-                    && s.send(cmd).await.is_err()
-                {
-                    app.driver_gone();
-                    *session = None;
-                }
-            }
-            Action::Shutdown => {
-                if let Some(s) = session.take() {
-                    let _ = s.send(SessionCommand::Shutdown).await;
-                    ending.follow(s);
-                }
-                app.controller.session_alive = false;
-            }
-        }
-    }
-}
-
-fn start_session(
-    app: &App,
-    resume: Option<String>,
-    mcp_servers: Vec<McpServer>,
-) -> Result<SessionHandle> {
-    let harness = app.harness();
-    let desc = harness.descriptor();
-    let binary = resolve_binary(
-        desc,
-        app.controller.config.binary_override(desc.id.as_str()),
-    )
-    .with_context(|| format!("{} not found on PATH", desc.binary_names.join("/")))?;
-    let cfg = SessionConfig {
-        binary,
-        cwd: app.controller.cwd.clone(),
-        workspace_root: app.controller.workspace_root.clone(),
-        model: app.current_model().cloned(),
-        provider: app.chosen_provider().cloned(),
-        effort: app.current_effort().map(str::to_string),
-        policy: app
-            .effective_policy()
-            .context("no permission policy is chosen")?,
-        fork: resume.is_some() && app.controller.fork_pending(app.controller.active),
-        resume: if app.caps().resume_by_id {
-            resume
-        } else {
-            None
-        },
-        extra_args: app.controller.config.extra_args(desc.id.as_str()).to_vec(),
-        env: Vec::new(),
-        mcp_servers,
-        sandbox: app.session_sandbox()?,
-    };
-    harness.start_session(cfg)
+    let (controller, mut screen) = app.split();
+    controller::run_actions(controller, &mut screen, session, ending, shell).await;
+    app.settle();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::controller::Action;
     use crate::core::transcript;
     use crate::tui::app::tests::test_app;
 
@@ -1528,38 +1299,6 @@ mod tests {
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
         assert!(session.is_some());
         assert!(ending.held.is_empty() && !app.controller.start_held);
-    }
-
-    // A driver stuck before its CLI ends, holding it: the hold does not
-    // lift with the CLI still there.
-    #[tokio::test]
-    async fn a_cli_that_outlasts_the_hold_is_killed_before_it_lifts() {
-        use crate::core::{SessionInfo, session::ProcessModel};
-        let (handle, _events, _cmds) = SessionHandle::channels(SessionInfo {
-            harness: HarnessId::CLAUDE,
-            process_model: ProcessModel::LongLived,
-        });
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg("exec sleep 30");
-        let mut cli = LineProcess::spawn(cmd, &crate::core::sandbox::Sandbox::off()).unwrap();
-        handle.process_slot().set(&cli);
-        let mut ending = Ending::new();
-        ending.patience = Duration::from_millis(200);
-        ending.follow(handle);
-        let gone = tokio::time::timeout(Duration::from_secs(10), ending.recv())
-            .await
-            .expect("the hold never lifted");
-        assert_eq!(gone, HarnessId::CLAUDE);
-        let exited = tokio::time::timeout(Duration::from_secs(5), async {
-            while let Some(line) = cli.lines.recv().await {
-                if matches!(line, RawLine::Exited(_)) {
-                    return true;
-                }
-            }
-            false
-        })
-        .await;
-        assert_eq!(exited, Ok(true), "the CLI was left running");
     }
 
     #[tokio::test]

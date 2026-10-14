@@ -20,7 +20,9 @@
 //! (`remote.rs`); rewind and fork (`rewind.rs`); the sandbox it runs in
 //! (`sandbox.rs`); the `!` command (`shell_command.rs`); and what each of
 //! its events does (`events.rs`). What that asks of the session and of the
-//! event loop is returned as [`Action`]s.
+//! event loop is returned as [`Action`]s, which [`run_actions`] carries
+//! out against the session, holding a start until the CLI that ended the
+//! session before it is gone ([`Ending`]).
 //!
 //! The TUI calls into it and reads from it. What it says of the
 //! conversation it holds it puts in that conversation's transcript itself;
@@ -56,6 +58,7 @@ mod policy;
 mod remote;
 mod requests;
 mod rewind;
+mod run;
 mod sandbox;
 mod session;
 mod shell_command;
@@ -68,6 +71,7 @@ pub use conversation::{ConversationState, Keeping};
 pub use events::rate_limit_summary;
 pub use front::{Front, PlanAsk, PolicyAsk};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
+pub use run::{Ending, run_actions};
 pub use switch::handoff_prompt;
 pub use turn::STOP_GRACE;
 
@@ -301,7 +305,7 @@ pub struct Controller {
     /// one waits for the user (a prompt, a switch, a resume).
     pub(crate) idle_start_paused: bool,
     /// The session's start waits for the CLI that ended the one before it
-    /// to be gone (`tui::Ending`): what would start another is refused
+    /// to be gone ([`Ending`]): what would start another is refused
     /// meanwhile, as during a turn.
     pub start_held: bool,
 

@@ -102,7 +102,7 @@ pub struct SessionNow {
     /// It was sent something: one started early has seen nothing of the
     /// conversation.
     pub prompted: bool,
-    /// Its start waits for the CLI before it to be gone (`tui::Ending`).
+    /// Its start waits for the CLI before it to be gone (`Ending`).
     pub start_held: bool,
     /// A turn runs.
     pub turn: bool,

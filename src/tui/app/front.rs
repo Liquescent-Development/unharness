@@ -31,7 +31,7 @@ pub struct Screen<'a> {
 
 impl App {
     /// The controller, and the view it reads and changes as it works.
-    pub(super) fn split(&mut self) -> (&mut Controller, Screen<'_>) {
+    pub(crate) fn split(&mut self) -> (&mut Controller, Screen<'_>) {
         let App {
             controller,
             modal,
@@ -78,10 +78,17 @@ impl App {
     pub(super) fn with<R>(&mut self, f: impl FnOnce(&mut Controller, &mut Screen<'_>) -> R) -> R {
         let (controller, mut screen) = self.split();
         let r = f(controller, &mut screen);
+        self.settle();
+        r
+    }
+
+    /// Bring the view up to date with what the controller told it while
+    /// it worked (`App::split`): the suggestions, if the harness's
+    /// commands arrived.
+    pub(crate) fn settle(&mut self) {
         if std::mem::take(&mut self.commands_pending) {
             self.commands_arrived();
         }
-        r
     }
 }
 
