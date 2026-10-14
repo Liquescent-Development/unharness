@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::BridgeSummary;
 use crate::core::controller::Handoff;
+use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::rules::Scope;
 use crate::core::sandbox::SandboxLevel;
 use crate::core::transcript::Transcript;

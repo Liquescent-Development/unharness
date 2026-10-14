@@ -17,9 +17,7 @@ use super::modal::{HarnessOption, Modal};
 use super::selection::{Point, RowCopy, Selection};
 use super::{herdr, markdown};
 use crate::config::Config;
-use crate::core::checkpoints::Checkpoints;
-use crate::core::controller::{Controller, Keeping, Launch};
-use crate::core::conversations::{Conversation, ConversationStore, default_context_windows_path};
+use crate::core::controller::{Controller, Launch, Opening};
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxSetup};
 use crate::core::{
@@ -420,41 +418,11 @@ impl App {
             });
         }
 
-        let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
-        let history = PromptHistory::load(store.history_path());
-        let mut resume_error: Option<String> = None;
-        let mut loaded: Option<Conversation> = None;
-        if let Some(r) = init.resume.as_deref() {
-            let target = if r.is_empty() {
-                store.last().map(|c| c.id)
-            } else {
-                Some(r.to_string())
-            };
-            match target {
-                None => {
-                    resume_error = Some("no saved conversation to resume in this workspace".into())
-                }
-                Some(id) => match store.load(&id) {
-                    Ok(c) => loaded = Some(c),
-                    Err(e) => resume_error = Some(format!("could not resume: {e}")),
-                },
-            }
-        }
-        let checkpoints = if config.file_checkpoints.unwrap_or(true) {
-            let store = init
-                .checkpoint_store
-                .unwrap_or_else(Checkpoints::default_store);
-            init.workspace_root
-                .as_deref()
-                .and_then(|root| Checkpoints::open_in(root, &store))
-        } else {
-            None
-        };
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
-        let mut controller = Controller::new(
+        let (controller, greeting) = Controller::open(Opening {
             registry,
             config,
-            Launch {
+            launch: Launch {
                 harness: init.harness,
                 policy: init.policy,
                 provider: init.provider,
@@ -466,28 +434,12 @@ impl App {
                 sandbox: init.sandbox,
                 rules: init.rules,
             },
-            Keeping {
-                store,
-                checkpoints,
-                context_windows: init
-                    .context_windows
-                    .unwrap_or_else(default_context_windows_path),
-            },
-        );
-        let resumed = loaded.is_some();
-        if let Some(conversation) = loaded {
-            let active = if !init.harness_explicit
-                && controller
-                    .registry()
-                    .get(conversation.active_harness)
-                    .is_some()
-            {
-                conversation.active_harness
-            } else {
-                init.harness
-            };
-            controller.install(conversation, active);
-        }
+            resume: init.resume,
+            harness_explicit: init.harness_explicit,
+            checkpoint_store: init.checkpoint_store,
+            context_windows: init.context_windows,
+        });
+        let history = PromptHistory::load(controller.store.history_path());
 
         let mut app = App {
             git_branch,
@@ -531,33 +483,7 @@ impl App {
             commands_pending: false,
         };
 
-        if resumed {
-            app.controller.take_conversation_choices();
-        }
-        let welcome = format!(
-            "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
-            app.display_name(),
-            app.controller.policy_label(),
-            app.sandbox_level().0
-        );
-        app.controller.conversation.transcript.push_system(welcome);
-        if let Some(w) = app.policy_warning() {
-            app.controller.conversation.transcript.push_notice(w);
-        }
-        app.require_policy();
-        if let Some(w) = app.sandbox_level().1 {
-            app.controller.conversation.transcript.push_notice(w);
-        }
-        for problem in app.controller.config.mcp_servers().1 {
-            app.controller.conversation.transcript.push_notice(problem);
-        }
-        if let Some(e) = resume_error {
-            app.controller.conversation.transcript.push_error(e);
-        }
-        if resumed {
-            let active = app.controller.active;
-            app.controller.announce_resume(active, true);
-        }
+        app.with(|c, screen| c.greet(greeting, screen));
         app
     }
 
