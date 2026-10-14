@@ -992,32 +992,112 @@ mod tests {
         assert!(!alive(&_sleeper));
     }
 
-    /// `sh -c` the script after it, in a session of its own. macOS has no
-    /// `setsid` command; the e2e tests need python3 anyway.
+    /// A script a test's child leaves running in a session of its own,
+    /// where nothing in a test binary ends it (it has no reaper). The
+    /// script stops waiting once `go` is there or its directory is gone,
+    /// or after 600 rounds of 0.05 s should the test binary die; when this
+    /// goes it is let go and waited for, or killed with its group, before
+    /// the directory goes, also when the test failed.
     #[cfg(unix)]
-    const SETSID: &str =
-        r#"python3 -c 'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])'"#;
+    struct Escaped {
+        dir: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl Escaped {
+        fn new() -> Self {
+            Escaped {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.dir.path().join(name).display().to_string()
+        }
+
+        /// `sh -c` that leaves the script behind, which runs `first`, waits
+        /// to be let go and runs `last`, and runs `then` once the script is
+        /// under way: before, the group kill of a child that exits would
+        /// catch it.
+        fn command(&self, first: &str, last: &str, then: &str) -> Command {
+            let dir = self.dir.path().display();
+            let (pid, out) = (self.path("pid"), self.path("out"));
+            let (go, gone) = (self.path("go"), self.path("gone"));
+            // macOS has no `setsid` command; the e2e tests need python3 anyway.
+            let setsid = r#"python3 -c 'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])'"#;
+            // `\$`: the script's, not the child's that starts it.
+            let script = format!(
+                "echo \\$\\$ > {pid}; {first}; touch {out}; i=0; \
+                 while [ -d {dir} ] && [ ! -e {go} ] && [ \\$i -lt 600 ]; \
+                 do sleep 0.05; i=\\$((i + 1)); done; {last}; touch {gone}"
+            );
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                "({setsid} \"{script}\" &); while [ ! -e {out} ]; do sleep 0.05; done; {then}"
+            ));
+            cmd
+        }
+
+        /// Let the script go on to its end.
+        fn go(&self) {
+            std::fs::write(self.path("go"), "").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Escaped {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.path("go"), "");
+            // Not under way: it never started, or stops at once when it
+            // does, on `go` or with its directory gone.
+            if !std::path::Path::new(&self.path("out")).exists() {
+                return;
+            }
+            let gone = std::path::PathBuf::from(self.path("gone"));
+            if within(Duration::from_secs(5), || gone.exists()) {
+                return;
+            }
+            let pid = std::fs::read_to_string(self.path("pid"));
+            let Some(pid) = pid.ok().and_then(|p| p.trim().parse::<libc::pid_t>().ok()) else {
+                return;
+            };
+            // SAFETY: plain syscalls. `pid` leads the script's session and
+            // group, and has not said it is gone; signal 0 only asks
+            // whether it is still there (until what adopted it reaps it).
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let reaped = || unsafe { libc::kill(pid, 0) } != 0;
+            within(Duration::from_secs(5), reaped);
+        }
+    }
+
+    /// Whether `done` holds within `limit`, asked every 20 ms.
+    #[cfg(unix)]
+    fn within(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     // The grandchild left the child's tree and session: nothing kills
     // it, but it no longer has anyone reading its output.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_pipes_are_closed_on_what_escaped_the_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = |name| dir.path().join(name).display().to_string();
-        let (out, go, failed) = (file("out"), file("go"), file("failed"));
-        let escaped = format!(
-            "trap '' PIPE; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done; echo late || touch {failed}"
-        );
-        let mut cmd = Command::new("sh");
-        // The child waits until it is out, or the group kill would catch it.
-        cmd.arg("-c").arg(format!(
-            "({SETSID} \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
-        ));
+        let escaped = Escaped::new();
+        let failed = escaped.path("failed");
+        let last = format!("echo late || touch {failed}");
+        let cmd = escaped.command("trap '' PIPE", &last, ":");
         let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
         let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
         // Let it go first whatever happened: it ends after one line.
-        std::fs::write(&go, "").unwrap();
+        escaped.go();
         assert_eq!(got.unwrap().last(), Some(&RawLine::Exited(Some(0))));
         let failed = std::path::Path::new(&failed);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1032,19 +1112,12 @@ mod tests {
     /// pipes alone, and exits once that one is out, after a line on each.
     #[cfg(unix)]
     async fn lines_with_one_pipe_held(redirect: &str) -> Vec<RawLine> {
-        let dir = tempfile::tempdir().unwrap();
-        let file = |name| dir.path().join(name).display().to_string();
-        let (out, go) = (file("out"), file("go"));
-        let escaped =
-            format!("exec {redirect}; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done");
-        let mut cmd = Command::new("sh");
-        cmd.arg("-c").arg(format!(
-            "({SETSID} \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done; \
-             echo bye; echo bye >&2"
-        ));
+        let escaped = Escaped::new();
+        let first = format!("exec {redirect}");
+        let cmd = escaped.command(&first, ":", "echo bye; echo bye >&2");
         let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
         let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
-        std::fs::write(&go, "").unwrap();
+        // `escaped` is let go and waited for after this, also on a panic.
         got.unwrap()
     }
 
