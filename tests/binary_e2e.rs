@@ -1050,6 +1050,7 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         "[harnesses.gemini]: unknown policy 'always'",
         "[harnesses.nocmd] protocol = \"acp\" but no command",
         "[harnesses.claud] default_policy: unknown policy 'nah'",
+        "[harnesses.claud]: no harness's table is named claud",
         "[harnesses.vibe] not shown: the table is wrong",
         "[harnesses.gemini] not shown: the table is wrong",
         "[harnesses.nocmd] not shown: the table is wrong",
