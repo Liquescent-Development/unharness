@@ -137,21 +137,27 @@ impl HarnessSettings {
     /// `command` and `display_name` are refused too: they say what runs an
     /// agent and the name it is shown by, which only a table that defines
     /// one reads ([`own_of_agent`](Self::own_of_agent)). A harness that
-    /// runs its own CLI under its own name points to `binary`.
+    /// runs its own CLI under its own name points to `binary`, and a table
+    /// that sets `protocol` as well is told an agent needs a name of its
+    /// own ([`AN_AGENT_NEEDS_ITS_OWN_NAME`]).
     ///
     /// `T` is a plain struct, without `#[serde(flatten)]`: its keys are the
     /// field names its derived `Deserialize` hands `deserialize_struct`,
     /// which a struct with a flattened field does not call, and then every
     /// key is refused.
     pub fn own<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
+        let agent = match self.protocol {
+            Some(_) => format!(" ({AN_AGENT_NEEDS_ITS_OWN_NAME})"),
+            None => String::new(),
+        };
         if self.command.is_some() {
             anyhow::bail!(
                 "[harnesses.{name}] command: {name} does not take this key; to run another \
-                 {name} binary, set binary"
+                 {name} binary, set binary{agent}"
             );
         }
         if self.display_name.is_some() {
-            anyhow::bail!("[harnesses.{name}] display_name: {name} does not take this key");
+            anyhow::bail!("[harnesses.{name}] display_name: {name} does not take this key{agent}");
         }
         self.own_of_agent(name)
     }
@@ -187,6 +193,11 @@ impl HarnessSettings {
         })
     }
 }
+
+/// Why a table that sets `protocol` defines no agent when it is a built-in
+/// harness's, or another name for one: said in its error.
+pub const AN_AGENT_NEEDS_ITS_OWN_NAME: &str =
+    "an ACP agent's table needs a name no built-in harness has";
 
 /// Keys a harness table once took that did nothing, and that unharness no
 /// longer takes. Setting one is an error naming it, in any table

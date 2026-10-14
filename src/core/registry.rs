@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::ids::HarnessId;
-use crate::config::{Config, HarnessSettings, REMOVED_KEYS, TableErrors};
+use crate::config::{
+    AN_AGENT_NEEDS_ITS_OWN_NAME, Config, HarnessSettings, REMOVED_KEYS, TableErrors,
+};
 use crate::harness::{Harness, Probe, acp, agy, claude, codex, pi, resolve_binary, vibe};
 
 /// Builds a harness from its `[harnesses.<name>]` table, an empty one when
@@ -340,8 +342,8 @@ fn known_protocol(name: &str, table: &HarnessSettings) -> Result<()> {
 fn unread(name: &str, table: &HarnessSettings) -> String {
     if let Some(id) = HarnessId::parse(name) {
         let agent = match table.protocol {
-            Some(_) => " (an ACP agent's table needs a name no built-in harness has)",
-            None => "",
+            Some(_) => format!(" ({AN_AGENT_NEEDS_ITS_OWN_NAME})"),
+            None => String::new(),
         };
         return format!(
             "[harnesses.{name}]: {name} is another name for {id}; its table is \
@@ -915,6 +917,24 @@ mod tests {
                     "[harnesses.kiro] display_name: kiro does not take this key ({})",
                     acp::DEFINING_AN_AGENT
                 ),
+            ),
+            // A built-in's table that sets `protocol` was to define an
+            // agent, which needs a name of its own.
+            (
+                "[harnesses.pi]\nprotocol = \"acp\"\ncommand = [\"pi-acp\"]\n".to_string(),
+                "pi",
+                format!(
+                    "{} (an ACP agent's table needs a name no built-in harness has)",
+                    binary("pi")
+                ),
+            ),
+            (
+                "[harnesses.claude]\nprotocol = \"acp\"\ndisplay_name = \"Claude (ACP)\"\n"
+                    .to_string(),
+                "claude",
+                "[harnesses.claude] display_name: claude does not take this key (an ACP agent's \
+                 table needs a name no built-in harness has)"
+                    .to_string(),
             ),
         ]);
         for (text, name, said) in cases {
