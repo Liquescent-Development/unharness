@@ -96,8 +96,14 @@ impl Registry {
         let mut errors = policy_errors(config);
         for (name, table) in &config.harnesses {
             if !built.read.contains(name) {
-                errors.push(ConfigError::new(Some(name), unread(name, table)));
-                if let Err(e) = known_protocol(name, table) {
+                // A protocol unharness does not have is why a table under
+                // a name of its own defines no agent, and is said alone.
+                // Another name for a built-in is said to be one first.
+                let protocol = known_protocol(name, table).err();
+                if protocol.is_none() || HarnessId::parse(name).is_some() {
+                    errors.push(ConfigError::new(Some(name), unread(name, table)));
+                }
+                if let Some(e) = protocol {
                     errors.push(ConfigError::new(Some(name), e.to_string()));
                 }
             }
@@ -1019,23 +1025,49 @@ mod tests {
             assert!(Registry::checked(&parse(text)).0.parse(name).is_none());
         }
 
-        // A table no harness reads says so as well.
-        let e = config_errors(&parse(
-            "[harnesses.myagent]\nprotocol = \"acpx\"\ncommand = [\"my-agent\"]\n",
-        ));
+        // Under a name of its own it is why no agent is defined, and what
+        // a run says: also when a workspace's file sets it over an agent
+        // the global one defines.
+        let defined = parse("[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n");
+        for (config, p) in [
+            (
+                parse("[harnesses.myagent]\nprotocol = \"ACP\"\ncommand = [\"my-agent\"]\n"),
+                "ACP",
+            ),
+            (
+                Config::merge(
+                    defined.clone(),
+                    parse("[harnesses.myagent]\nprotocol = \"acpx\"\n"),
+                ),
+                "acpx",
+            ),
+        ] {
+            let e = config_errors(&config);
+            let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+            assert_eq!(said, [wrong("myagent", p)]);
+            assert!(!e[0].left_out);
+            assert_eq!(
+                Registry::from_config(&config).err().unwrap().to_string(),
+                wrong("myagent", p)
+            );
+        }
+        assert!(config_errors(&defined).is_empty());
+        // Another name for a built-in is said to be one first.
+        let alias = parse("[harnesses.claude-code]\nprotocol = \"acpx\"\n");
+        let e = config_errors(&alias);
         let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
         assert_eq!(
             said,
             [
-                format!(
-                    "[harnesses.myagent]: no harness's table is named myagent ({})",
-                    acp::DEFINING_AN_AGENT
-                )
-                .as_str(),
-                wrong("myagent", "acpx").as_str()
+                "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+                 [harnesses.claude] (an ACP agent's table needs a name no built-in harness has)",
+                wrong("claude-code", "acpx").as_str()
             ]
         );
-        assert!(e.iter().all(|e| !e.left_out));
+        assert_eq!(
+            Registry::from_config(&alias).err().unwrap().to_string(),
+            said[0]
+        );
 
         // `acp` on a built-in's table is that built-in's still.
         let reg =
