@@ -55,7 +55,7 @@ fn remote_control_waits_for_the_session_and_pauses_with_its_process() {
 #[test]
 fn a_resume_ends_remote_control() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.submit_prompt("first question".into());
     app.take_actions();
     app.controller.session_alive = true;

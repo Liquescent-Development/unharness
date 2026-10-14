@@ -412,7 +412,7 @@ fn nothing_starts_before_a_policy_is_chosen() {
         crate::harness::codex::CodexHarness::new(crate::harness::codex::CodexTransport::Exec),
     )));
     let mut app = test_app_with(
-        tmp.keep(),
+        tmp.path().to_path_buf(),
         HarnessId::CODEX,
         None,
         false,

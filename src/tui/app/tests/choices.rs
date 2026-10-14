@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.controller.sandbox = SandboxSetup::null(None);
     app.set_provider("bedrock".into());
     app.controller.session_alive = true;
@@ -48,13 +48,13 @@ fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
 
 /// Claude with a binary that exists wherever the test runs; nothing
 /// starts it.
-fn app_with_a_claude_binary() -> App {
+fn app_with_a_claude_binary() -> TestApp {
     app_with_a_binary(HarnessId::CLAUDE)
 }
 
 /// `harness` with a binary that exists wherever the test runs, also
 /// where the CLI is not installed; nothing starts it.
-fn app_with_a_binary(harness: HarnessId) -> App {
+fn app_with_a_binary(harness: HarnessId) -> TestApp {
     let mut config = Config::default();
     config.harnesses.insert(
         harness.as_str().into(),
@@ -64,7 +64,14 @@ fn app_with_a_binary(harness: HarnessId) -> App {
         },
     );
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_with(tmp.keep(), harness, None, false, config, test_registry());
+    let mut app = test_app_with(
+        tmp.path().to_path_buf(),
+        harness,
+        None,
+        false,
+        config,
+        test_registry(),
+    );
     // As in `test_app_in`: a harness without `ask` waits for a choice.
     if app.effective_policy().is_none() {
         app.controller
@@ -72,7 +79,7 @@ fn app_with_a_binary(harness: HarnessId) -> App {
             .choose_for_conversation(harness, PermissionPolicy::AcceptEdits);
         app.modal = None;
     }
-    app
+    TestApp::holding(app, tmp)
 }
 
 fn vertex_models() -> ListResult {

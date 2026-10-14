@@ -134,9 +134,38 @@ fn test_init(
     }
 }
 
-pub(crate) fn test_app(harness: HarnessId) -> App {
+pub(crate) fn test_app(harness: HarnessId) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
-    test_app_in(tmp.keep(), harness, None, false)
+    let app = test_app_in(tmp.path().to_path_buf(), harness, None, false);
+    TestApp::holding(app, tmp)
+}
+
+/// An app and the directory a helper made it in, which goes with it.
+pub(crate) struct TestApp {
+    app: App,
+    /// Removed after the app is dropped (fields are dropped in order).
+    _dir: tempfile::TempDir,
+}
+
+impl TestApp {
+    /// `app`, keeping `dir`, which it was made in, until it is dropped.
+    fn holding(app: App, dir: tempfile::TempDir) -> Self {
+        TestApp { app, _dir: dir }
+    }
+}
+
+impl std::ops::Deref for TestApp {
+    type Target = App;
+
+    fn deref(&self) -> &App {
+        &self.app
+    }
+}
+
+impl std::ops::DerefMut for TestApp {
+    fn deref_mut(&mut self) -> &mut App {
+        &mut self.app
+    }
 }
 
 fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::transcript::AgentRun {

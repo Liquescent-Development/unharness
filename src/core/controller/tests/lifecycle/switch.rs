@@ -150,7 +150,7 @@ fn a_handoff_prompt_forbids_tools_for_its_own_reply_only() {
 #[test]
 fn the_bridge_is_measured_by_the_window_its_harness_reported() {
     let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.keep();
+    let cwd = tmp.path().to_path_buf();
     let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
     assert_eq!(
         app.controller.bridge_budget(HarnessId::CLAUDE),
@@ -187,7 +187,7 @@ fn the_bridge_is_measured_by_the_window_its_harness_reported() {
 #[test]
 fn context_windows_are_not_taken_from_the_workspace_or_out_of_range() {
     let tmp = tempfile::tempdir().unwrap();
-    let cwd = tmp.keep();
+    let cwd = tmp.path().to_path_buf();
     // What an agent could write: a window that would empty the bridge.
     std::fs::create_dir_all(cwd.join(".unharness")).unwrap();
     std::fs::write(
