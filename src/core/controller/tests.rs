@@ -584,6 +584,10 @@ fn saved_conversation() -> Conversation {
             ..Default::default()
         },
     );
+    c.plan.push(crate::core::PlanEntry {
+        text: "write the tests".into(),
+        status: crate::core::PlanStatus::InProgress,
+    });
     c.anchors.push(TurnAnchorRecord {
         block: 0,
         harness: CLAUDE,
@@ -612,6 +616,13 @@ fn a_conversation_installed_is_saved_as_it_came() {
     assert_eq!(state.first_prompt.as_deref(), Some("the task"));
     assert!(state.fork_pending.contains(&CLAUDE) && state.fork_pending.contains(&CODEX));
 
+    // Saved again from what the controller holds, not from the record it
+    // was given: only the conversation's identity is kept from that.
+    c.conversation.record = Conversation {
+        id: saved.id.clone(),
+        created_at: saved.created_at.clone(),
+        ..Conversation::new(CODEX)
+    };
     c.sync_conversation(&config, CODEX, false);
     let again = Conversation {
         updated_at: saved.updated_at.clone(),
