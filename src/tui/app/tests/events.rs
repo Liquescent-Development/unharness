@@ -46,6 +46,32 @@ fn live_capabilities_and_status_events_apply() {
     assert_eq!(app.transcript.blocks.len(), before);
 }
 
+/// What the controller makes of a session's report and of a policy the
+/// session moved to by itself (`Controller::report`,
+/// `Controller::on_policy_changed`) is said in the transcript, in order.
+#[test]
+fn what_a_session_reports_is_said() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.session_alive = true;
+    app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+        effort_levels: Some(vec!["low".into(), "high".into()]),
+        provider: Some("vertex".into()),
+        ..Default::default()
+    }));
+    app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Auto));
+    let said = notices(&app);
+    let at = |text: &str| {
+        said.iter()
+            .position(|n| n == text)
+            .unwrap_or_else(|| panic!("{text:?} not in {said:?}"))
+    };
+    assert!(
+        at("effort levels now: low, high")
+            < at("Claude runs on vertex, chosen by its own configuration")
+    );
+    at("Claude Code (claude) now runs under policy auto");
+}
+
 #[test]
 fn rate_limit_warns_once_when_a_window_runs_high() {
     use crate::core::{RateLimitInfo, RateLimitWindow};
