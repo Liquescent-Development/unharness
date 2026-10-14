@@ -569,12 +569,17 @@ impl StreamProtocol for Claude {
                     command: Box::new(command),
                     then: None,
                 },
+                // No process can be started on it (a provider Claude does not
+                // have): the session ends as a shutdown ends it, as it did
+                // when the TUI ended it to start one.
                 Err(e) => {
                     io.emit(AgentEvent::Error(format!(
                         "could not start claude again: {e:#}"
                     )))
                     .await;
-                    Encoded::Kill
+                    let _ = io.write(&control_request("interrupt", json!({})).1).await;
+                    io.end();
+                    Encoded::Done
                 }
             },
             SessionCommand::RemoteControl { enabled, name } => {

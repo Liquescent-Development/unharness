@@ -374,6 +374,51 @@ async fn claude_starts_again_on_a_new_provider_resumed_and_back_on_remote_contro
     shut_down(&mut handle).await;
 }
 
+/// A provider Claude does not have: no process can be started on it, so
+/// the session ends as a shutdown ends it (`interrupt`, its input closed,
+/// its grace), never killed, and the TUI is told why and `ProcessExited`.
+#[tokio::test]
+async fn claude_ends_as_a_shutdown_does_on_a_provider_it_cannot_start_on() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/provider_vertex.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_LINGER".to_string(), "0.2".to_string()));
+    let mut handle = unharness::harness::claude::ClaudeHarness::default()
+        .start_session(cfg)
+        .unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle
+        .send(SessionCommand::SetProvider("nowhere".into()))
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        let exited = matches!(ev, AgentEvent::ProcessExited { .. });
+        events.push(ev);
+        if exited {
+            break;
+        }
+    }
+    assert!(
+        matches!(&events[..], [.., AgentEvent::Error(e), AgentEvent::ProcessExited { .. }]
+            if e.starts_with("could not start claude again: ")),
+        "{events:?}"
+    );
+    // Its input closed after `interrupt`, it finished by itself.
+    assert_eq!(
+        logged(&fake)[2..],
+        ["interrupt".to_string(), "ended".to_string()],
+        "{:?}",
+        logged(&fake)
+    );
+}
+
 #[tokio::test]
 async fn claude_permission_round_trip_and_question() {
     if !python_available() {
