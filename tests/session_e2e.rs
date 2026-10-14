@@ -1726,7 +1726,7 @@ async fn codex_auto_without_app_server_runs_exec_and_says_what_it_lacks() {
     assert_eq!(
         next_event(&mut handle).await,
         AgentEvent::RewindFailed {
-            reason: "codex cannot rewind its session".into()
+            reason: "not supported".into()
         }
     );
 
@@ -2230,7 +2230,7 @@ async fn acp_answers_a_command_it_cannot_carry_out_once() {
                 )
             },
             AgentEvent::RewindFailed {
-                reason: "fake-acp cannot rewind its session".into()
+                reason: "not supported".into()
             },
             notice("fake-acp cannot stop a subagent"),
             notice("fake-acp cannot go on remote control"),

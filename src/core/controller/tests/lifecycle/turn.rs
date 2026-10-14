@@ -231,7 +231,7 @@ async fn a_compaction_or_rewind_the_driver_refuses_ends_the_wait() {
     answered(&mut app, &mut session).await;
     assert!(has_notice(
         &app,
-        "Codex could not rewind its session (codex cannot rewind its session); it will start a fresh one with the conversation so far"
+        "Codex could not rewind its session (not supported); it will start a fresh one with the conversation so far"
     ));
     assert!(
         !app.controller

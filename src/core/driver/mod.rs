@@ -700,11 +700,11 @@ impl<P: StreamProtocol> Loop<P> {
 }
 
 /// How the driver, of either flavour, answers a command the harness cannot
-/// carry out ([`asks`]): "<harness> cannot <what>", in the event that ends
-/// what the TUI waits on after the command, if it waits on anything.
+/// carry out ([`asks`]): in the event that ends what the TUI waits on after
+/// the command, if it waits on anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {
-    /// Nothing waits on it: a `Notice` says it.
+    /// Nothing waits on it: a `Notice` says "<harness> cannot <what>".
     Notice(&'static str),
     /// A compaction, which the TUI asks for between turns and runs as a
     /// turn of its own (`Controller::compact`): that turn ends, failed.
@@ -715,24 +715,20 @@ enum Refusal {
 }
 
 impl Refusal {
-    /// What the harness is asked to do.
-    fn what(self) -> &'static str {
-        match self {
-            Refusal::Notice(what) => what,
-            Refusal::Compaction => "compact its context on request",
-            Refusal::Rewind => "rewind its session",
-        }
-    }
-
     /// What the TUI is told when `harness` cannot do it.
     fn event(self, harness: HarnessId) -> AgentEvent {
-        let said = format!("{harness} cannot {}", self.what());
         match self {
-            Refusal::Notice(_) => AgentEvent::Notice(said),
+            Refusal::Notice(what) => AgentEvent::Notice(format!("{harness} cannot {what}")),
             Refusal::Compaction => AgentEvent::TurnCompleted {
-                stop_reason: StopReason::Error(said),
+                stop_reason: StopReason::Error(format!(
+                    "{harness} cannot compact its context on request"
+                )),
             },
-            Refusal::Rewind => AgentEvent::RewindFailed { reason: said },
+            // The reason is said inside "<harness> could not rewind its
+            // session (…)".
+            Refusal::Rewind => AgentEvent::RewindFailed {
+                reason: "not supported".into(),
+            },
         }
     }
 }
@@ -1601,7 +1597,7 @@ mod tests {
             [
                 notice("steer a running turn"),
                 AgentEvent::RewindFailed {
-                    reason: "toy cannot rewind its session".into()
+                    reason: "not supported".into()
                 },
                 notice("interrupt a turn"),
                 notice("stop a subagent"),

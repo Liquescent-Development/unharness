@@ -498,7 +498,7 @@ mod tests {
             [
                 notice("steer a running turn"),
                 AgentEvent::RewindFailed {
-                    reason: "codex cannot rewind its session".into()
+                    reason: "not supported".into()
                 },
                 notice("interrupt a turn"),
                 notice("stop a subagent"),
