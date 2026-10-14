@@ -3,8 +3,9 @@
 //! For harnesses whose CLI has no long-lived stdin protocol (codex
 //! `exec`), every turn is a fresh child process resumed by id. The driver still presents the same `SessionHandle`
 //! as the long-lived transports, and answers a command it cannot carry out
-//! as the long-lived loop does: one `Notice`, worded from the harness's
-//! [`Capabilities`].
+//! as the long-lived loop does: one event, worded from the harness's
+//! [`Capabilities`], which ends what the TUI waits on after such a
+//! command (a compaction's turn, a rewind).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,9 +14,9 @@ use anyhow::Result;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{asks, cannot, exited};
+use super::{asks, exited};
 use crate::core::caps::{Capabilities, PermissionPolicy};
-use crate::core::event::{AgentEvent, StopReason};
+use crate::core::event::{AgentEvent, CapsUpdate, StopReason};
 use crate::core::ids::{HarnessId, ModelRef, ProviderId};
 use crate::core::mcp::McpServer;
 use crate::core::parser::Parser;
@@ -61,15 +62,35 @@ pub trait PerTurnProtocol: Send + Sync {
         attachments: &[Attachment],
     ) -> Result<TurnSpec>;
     fn new_parser(&self) -> Box<dyn Parser>;
+
+    /// What the session reports of its capabilities before its first
+    /// turn, on top of what its harness declares (Codex under `transport
+    /// = "auto"` that came to `exec`: what it lacks of app-server's). Told
+    /// again after `Restarted`, with which the TUI forgets the policies a
+    /// session refused, as for a CLI started anew.
+    fn reported_caps(&self) -> Option<CapsUpdate> {
+        None
+    }
 }
 
 /// Drive `protocol` for the session whose handle this returns. `caps` is
 /// what its harness declares.
+///
+/// A CLI run once per turn branches no session: one asked to fork
+/// (`SessionConfig::fork`) starts new, and says so (`SessionReplaced`),
+/// rather than going on in the session it was to branch (Codex `exec`,
+/// where `transport = "auto"` declared app-server's fork).
 pub fn start(
     cfg: SessionConfig,
     caps: &Capabilities,
     protocol: Arc<dyn PerTurnProtocol>,
 ) -> Result<SessionHandle> {
+    let unforked = (cfg.fork && cfg.resume.is_some()).then(|| {
+        format!(
+            "could not fork the session ({} cannot fork one)",
+            protocol.harness()
+        )
+    });
     let state = TurnState {
         binary: cfg.binary,
         cwd: cfg.cwd,
@@ -77,7 +98,7 @@ pub fn start(
         provider: cfg.provider,
         effort: cfg.effort,
         policy: cfg.policy,
-        session_id: cfg.resume,
+        session_id: cfg.resume.filter(|_| unforked.is_none()),
         extra_args: cfg.extra_args,
         env: cfg.env,
         mcp_servers: cfg.mcp_servers,
@@ -96,10 +117,13 @@ pub fn start(
         slot,
         events_tx,
         cmd_rx,
+        unforked,
     ));
     Ok(handle)
 }
 
+/// `unforked`: why the session runs new instead of the fork it was asked
+/// for.
 async fn drive(
     mut state: TurnState,
     caps: Capabilities,
@@ -107,7 +131,17 @@ async fn drive(
     slot: ProcessSlot,
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
+    unforked: Option<String>,
 ) {
+    let reported = protocol.reported_caps();
+    if let Some(update) = &reported {
+        let _ = events
+            .send(AgentEvent::CapabilitiesChanged(update.clone()))
+            .await;
+    }
+    if let Some(reason) = unforked {
+        let _ = events.send(AgentEvent::SessionReplaced { reason }).await;
+    }
     // Announce the resumed session immediately so the TUI can label it.
     if let Some(id) = &state.session_id {
         let _ = events
@@ -129,9 +163,9 @@ async fn drive(
                     if let Some(mut p) = current.take() { p.kill().await; }
                     return;
                 };
-                let (what, offered) = asks(&cmd, &caps);
+                let (refusal, offered) = asks(&cmd, &caps);
                 if !offered {
-                    let _ = events.send(cannot(protocol.harness(), what)).await;
+                    let _ = events.send(refusal.event(protocol.harness())).await;
                     continue;
                 }
                 match cmd {
@@ -143,7 +177,7 @@ async fn drive(
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. }
                     | SessionCommand::RespondPermission { .. } => {
-                        let _ = events.send(cannot(protocol.harness(), what)).await;
+                        let _ = events.send(refusal.event(protocol.harness())).await;
                     }
                     SessionCommand::SendTurn { text, attachments } => {
                         if current.is_some() {
@@ -204,6 +238,11 @@ async fn drive(
                         state.provider = Some(p);
                         state.model = None;
                         let _ = events.send(AgentEvent::Restarted).await;
+                        if let Some(update) = &reported {
+                            let _ = events
+                                .send(AgentEvent::CapabilitiesChanged(update.clone()))
+                                .await;
+                        }
                     }
                     SessionCommand::Shutdown => {
                         if let Some(mut p) = current.take() {
@@ -379,6 +418,13 @@ mod tests {
         }
     }
 
+    async fn next(h: &mut SessionHandle) -> AgentEvent {
+        tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
     async fn collect_turn(h: &mut SessionHandle) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         loop {
@@ -397,9 +443,11 @@ mod tests {
 
     // What a CLI run once per turn cannot do is answered as the long-lived
     // loop answers it, also where the harness declares it, and so is what
-    // the harness does not declare: one notice each, and nothing runs.
+    // the harness does not declare: one event each, and nothing runs. A
+    // compaction ends the turn the TUI runs it as, and a rewind fails
+    // (#288: Codex under `auto` come to `exec` left the TUI compacting).
     #[tokio::test]
-    async fn a_command_it_cannot_carry_out_is_answered_with_one_notice() {
+    async fn a_command_it_cannot_carry_out_is_answered_once() {
         let mut every_but_interrupt = Capabilities {
             steer: true,
             compaction: true,
@@ -433,24 +481,37 @@ mod tests {
         ] {
             h.send(cmd).await.unwrap();
         }
-        let turn = collect_turn(&mut h).await;
-        let said: Vec<&AgentEvent> = turn
-            .iter()
-            .take_while(|ev| **ev != AgentEvent::TurnStarted)
-            .collect();
+        let mut said = Vec::new();
+        loop {
+            let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev == AgentEvent::TurnStarted {
+                break;
+            }
+            said.push(ev);
+        }
         let notice = |what: &str| AgentEvent::Notice(format!("codex cannot {what}"));
         assert_eq!(
             said,
             [
-                &notice("steer a running turn"),
-                &notice("rewind its session"),
-                &notice("interrupt a turn"),
-                &notice("stop a subagent"),
-                &notice("take an answer to a permission request"),
-                &notice("go on remote control"),
-                &notice("compact its context on request"),
+                notice("steer a running turn"),
+                AgentEvent::RewindFailed {
+                    reason: "not supported".into()
+                },
+                notice("interrupt a turn"),
+                notice("stop a subagent"),
+                notice("take an answer to a permission request"),
+                notice("go on remote control"),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(
+                        "codex cannot compact its context on request".into()
+                    )
+                },
             ]
         );
+        let turn = collect_turn(&mut h).await;
         // Nothing reached a CLI before the turn: the first is the turn's.
         assert!(
             turn.contains(&AgentEvent::SessionStarted {
@@ -632,6 +693,90 @@ mod tests {
         let turn = collect_turn(&mut h).await;
         assert!(
             turn.contains(&AgentEvent::TextDelta("llama -".into())),
+            "{turn:?}"
+        );
+    }
+
+    // What the session reports of its capabilities comes before anything
+    // else, and again after it says it was restarted on a provider: the
+    // TUI forgets then what the session before refused (#288).
+    #[tokio::test]
+    async fn what_the_session_reports_of_its_capabilities_comes_first_and_after_a_restart() {
+        struct Lacking;
+        impl PerTurnProtocol for Lacking {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, s: &TurnState, t: &str, a: &[Attachment]) -> Result<TurnSpec> {
+                Echo.build_turn(s, t, a)
+            }
+            fn new_parser(&self) -> Box<dyn Parser> {
+                Box::new(EchoParser)
+            }
+            fn reported_caps(&self) -> Option<CapsUpdate> {
+                Some(CapsUpdate {
+                    refused_policies: Some(vec![PermissionPolicy::Ask]),
+                    ..Default::default()
+                })
+            }
+        }
+        let reported = AgentEvent::CapabilitiesChanged(Lacking.reported_caps().unwrap());
+        let mut resumed = cfg();
+        resumed.resume = Some("t1".into());
+        let mut h = start(resumed, &caps(), Arc::new(Lacking)).unwrap();
+        assert_eq!(next(&mut h).await, reported);
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::SessionStarted { .. }
+        ));
+        h.send(SessionCommand::SetProvider("llama".into()))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut h).await, AgentEvent::Restarted);
+        assert_eq!(next(&mut h).await, reported);
+
+        // A protocol that reports nothing says nothing.
+        let mut h = start(cfg(), &caps(), Arc::new(Echo)).unwrap();
+        h.send(SessionCommand::SetProvider("llama".into()))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut h).await, AgentEvent::Restarted);
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::ProcessExited { .. }
+        ));
+    }
+
+    // A session asked to fork starts new, and says so: its first turn
+    // resumes nothing, rather than going on in the session it was to
+    // branch (Codex `exec`, where `auto` declared app-server's fork).
+    #[tokio::test]
+    async fn a_session_asked_to_fork_runs_new_instead() {
+        let mut forked = cfg();
+        forked.resume = Some("s0".into());
+        forked.fork = true;
+        let mut h = start(forked, &caps(), Arc::new(Echo)).unwrap();
+        assert_eq!(
+            next(&mut h).await,
+            AgentEvent::SessionReplaced {
+                reason: "could not fork the session (codex cannot fork one)".into()
+            }
+        );
+        h.send(SessionCommand::turn("one")).await.unwrap();
+        let turn = collect_turn(&mut h).await;
+        assert_eq!(turn[0], AgentEvent::TurnStarted);
+        assert!(
+            turn.contains(&AgentEvent::SessionStarted {
+                session_id: "s1".into(),
+                model: None
+            }),
+            "{turn:?}"
+        );
+        assert!(
+            !turn
+                .iter()
+                .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.starts_with("resumed"))),
             "{turn:?}"
         );
     }

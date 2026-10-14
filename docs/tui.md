@@ -408,7 +408,9 @@ unchanged. Harnesses that can branch a session do so, and the copy knows
 exactly what the original knew. The others start fresh with the
 transcript as context. An [ACP agent](acp.md#forks) branches only once its
 session has said it can, so one not run since unharness started starts
-fresh.
+fresh. Codex cannot branch a session over `exec`: one forked before its
+session said it runs `exec` (`transport = "auto"`) starts fresh too, and
+says so.
 
 ## Clear
 

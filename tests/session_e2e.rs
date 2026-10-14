@@ -1682,6 +1682,73 @@ async fn codex_exec_per_turn_resumes_by_thread() {
     ));
 }
 
+/// A Codex without `app-server` under `transport = "auto"` (the fake
+/// fails `app-server --help`, having no fixture there): the session runs
+/// `exec`, and says first what it lacks of the app-server capabilities
+/// `auto` declares, so that the TUI stops offering them. A compaction or a
+/// rewind asked all the same reaches no CLI, and is refused in what ends
+/// the TUI's wait on it (#288).
+#[tokio::test]
+async fn codex_auto_without_app_server_runs_exec_and_says_what_it_lacks() {
+    use unharness::core::Ability;
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/exec_resume_command.jsonl");
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::Auto,
+    );
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::AcceptEdits, false))
+        .unwrap();
+
+    let AgentEvent::CapabilitiesChanged(report) = next_event(&mut handle).await else {
+        panic!("the session did not say what it lacks first");
+    };
+    assert_eq!(report.lacks, Some(Ability::ALL.to_vec()));
+    assert_eq!(report.lacks_policies, Some(vec![PermissionPolicy::Ask]));
+    assert_eq!(report.fork, Some(false));
+
+    handle
+        .send(SessionCommand::Compact { instructions: None })
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::Rewind { anchor: "a".into() })
+        .await
+        .unwrap();
+    assert_eq!(
+        next_event(&mut handle).await,
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error("codex cannot compact its context on request".into())
+        }
+    );
+    assert_eq!(
+        next_event(&mut handle).await,
+        AgentEvent::RewindFailed {
+            reason: "not supported".into()
+        }
+    );
+
+    // A turn runs as on `exec`, and is all that reached a CLI.
+    handle.send(SessionCommand::turn("one")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    assert_eq!(std::fs::read_to_string(&fake.log).unwrap(), "one\n");
+
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    assert!(matches!(
+        next_event(&mut handle).await,
+        AgentEvent::ProcessExited { .. }
+    ));
+}
+
 #[tokio::test]
 async fn agy_stream_session_runs_two_turns() {
     if !python_available() {
@@ -2087,10 +2154,11 @@ async fn shut_down(handle: &mut SessionHandle) {
 }
 
 /// What an ACP agent does not offer (`AcpHarness::capabilities`) never
-/// reaches it: each is answered with one notice, in order with what it
-/// takes.
+/// reaches it: each is answered with one event, in order with what it
+/// takes. A compaction ends the turn the TUI runs it as, and a rewind
+/// fails; the rest are notices.
 #[tokio::test]
-async fn acp_answers_a_command_it_cannot_carry_out_with_one_notice() {
+async fn acp_answers_a_command_it_cannot_carry_out_once() {
     if !python_available() {
         return;
     }
@@ -2137,26 +2205,37 @@ async fn acp_answers_a_command_it_cannot_carry_out_with_one_notice() {
     ] {
         handle.send(cmd).await.unwrap();
     }
-    let notices: Vec<String> = events_until(
+    let answers: Vec<AgentEvent> = events_until(
         &mut handle,
         |e| matches!(e, AgentEvent::Notice(n) if n.starts_with("no pending")),
     )
     .await
     .into_iter()
-    .filter_map(|e| match e {
-        AgentEvent::Notice(n) => Some(n),
-        _ => None,
+    .filter(|e| {
+        matches!(
+            e,
+            AgentEvent::Notice(_)
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::RewindFailed { .. }
+        )
     })
     .collect();
+    let notice = |n: &str| AgentEvent::Notice(n.into());
     assert_eq!(
-        notices,
+        answers,
         [
-            "fake-acp cannot steer a running turn",
-            "fake-acp cannot compact its context on request",
-            "fake-acp cannot rewind its session",
-            "fake-acp cannot stop a subagent",
-            "fake-acp cannot go on remote control",
-            "no pending permission request none",
+            notice("fake-acp cannot steer a running turn"),
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(
+                    "fake-acp cannot compact its context on request".into()
+                )
+            },
+            AgentEvent::RewindFailed {
+                reason: "not supported".into()
+            },
+            notice("fake-acp cannot stop a subagent"),
+            notice("fake-acp cannot go on remote control"),
+            notice("no pending permission request none"),
         ]
     );
     assert_eq!(sent_methods(&fake), ["initialize", "session/new"]);

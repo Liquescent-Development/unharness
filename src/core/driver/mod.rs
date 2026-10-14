@@ -9,7 +9,9 @@
 //! is sent first, stdin closed, killed after `END_GRACE`, or killed at
 //! once mid-turn), reading its output until it has exited, what happens
 //! when the TUI drops the handle, and the answer to a command the harness
-//! cannot carry out: one `Notice`, worded from its [`Capabilities`].
+//! cannot carry out: one event, worded from its [`Capabilities`], which
+//! ends what the TUI waits on after such a command (a compaction's turn,
+//! a rewind) and is a `Notice` otherwise.
 //!
 //! A protocol over JSON-RPC (Codex app-server, ACP) sends its requests
 //! through the loop ([`Io::request`]), which numbers and frames them and
@@ -40,7 +42,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use super::caps::Capabilities;
-use super::event::AgentEvent;
+use super::event::{AgentEvent, StopReason};
 use super::ids::HarnessId;
 use super::jsonrpc::{self, RequestId, RpcMessage};
 use super::parser::Parser;
@@ -629,9 +631,9 @@ impl<P: StreamProtocol> Loop<P> {
             waiting.push_back(cmd);
             return;
         }
-        let (what, offered) = asks(&cmd, &self.caps);
+        let (refusal, offered) = asks(&cmd, &self.caps);
         if !offered {
-            self.cannot(what).await;
+            self.refuse(refusal).await;
             return;
         }
         let mut io = Io::new(
@@ -651,7 +653,7 @@ impl<P: StreamProtocol> Loop<P> {
                 }
             }
             Encoded::Done => {}
-            Encoded::Unsupported => self.cannot(what).await,
+            Encoded::Unsupported => self.refuse(refusal).await,
             Encoded::Kill => self.proc.kill().await,
             Encoded::Restart { command, then } => self.restart(*command, then).await,
             Encoded::NewSession { reason } => {
@@ -663,9 +665,9 @@ impl<P: StreamProtocol> Loop<P> {
         }
     }
 
-    /// Tell the TUI the harness cannot `what`.
-    async fn cannot(&mut self, what: &str) {
-        let _ = self.events.send(cannot(self.harness, what)).await;
+    /// Tell the TUI the harness cannot carry out what it was asked.
+    async fn refuse(&mut self, refusal: Refusal) {
+        let _ = self.events.send(refusal.event(self.harness)).await;
     }
 
     /// The TUI dropped the handle while it was told something. It sends
@@ -697,33 +699,64 @@ impl<P: StreamProtocol> Loop<P> {
     }
 }
 
-/// The notice that `harness` cannot `what` ([`asks`]), from either flavour
-/// of the driver.
-fn cannot(harness: HarnessId, what: &str) -> AgentEvent {
-    AgentEvent::Notice(format!("{harness} cannot {what}"))
+/// How the driver, of either flavour, answers a command the harness cannot
+/// carry out ([`asks`]): in the event that ends what the TUI waits on after
+/// the command, if it waits on anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// Nothing waits on it: a `Notice` says "<harness> cannot <what>".
+    Notice(&'static str),
+    /// A compaction, which the TUI asks for between turns and runs as a
+    /// turn of its own (`Controller::compact`): that turn ends, failed.
+    Compaction,
+    /// A rewind, which the TUI takes as done (`Controller::rewind_to`):
+    /// it failed, and the session still holds the turns it was to drop.
+    Rewind,
 }
 
-/// What `cmd` asks of the harness, as the notice that it cannot says it,
-/// and whether its `Capabilities` offer that.
-fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (&'static str, bool) {
+impl Refusal {
+    /// What the TUI is told when `harness` cannot do it.
+    fn event(self, harness: HarnessId) -> AgentEvent {
+        match self {
+            Refusal::Notice(what) => AgentEvent::Notice(format!("{harness} cannot {what}")),
+            Refusal::Compaction => AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(format!(
+                    "{harness} cannot compact its context on request"
+                )),
+            },
+            // The reason is said inside "<harness> could not rewind its
+            // session (…)".
+            Refusal::Rewind => AgentEvent::RewindFailed {
+                reason: "not supported".into(),
+            },
+        }
+    }
+}
+
+/// What `cmd` asks of the harness, as it is refused when the harness cannot
+/// carry it out, and whether its `Capabilities` offer that.
+fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (Refusal, bool) {
+    let notice = Refusal::Notice;
     match cmd {
-        SessionCommand::Steer { .. } => ("steer a running turn", caps.steer),
-        SessionCommand::Compact { .. } => ("compact its context on request", caps.compaction),
-        SessionCommand::Rewind { .. } => ("rewind its session", caps.rewind.conversation),
-        SessionCommand::Interrupt => ("interrupt a turn", caps.interrupt),
-        SessionCommand::StopSubagent { .. } => ("stop a subagent", caps.subagents.stop),
+        SessionCommand::Steer { .. } => (notice("steer a running turn"), caps.steer),
+        SessionCommand::Compact { .. } => (Refusal::Compaction, caps.compaction),
+        SessionCommand::Rewind { .. } => (Refusal::Rewind, caps.rewind.conversation),
+        SessionCommand::Interrupt => (notice("interrupt a turn"), caps.interrupt),
+        SessionCommand::StopSubagent { .. } => (notice("stop a subagent"), caps.subagents.stop),
         SessionCommand::RespondPermission { .. } => (
-            "take an answer to a permission request",
+            notice("take an answer to a permission request"),
             caps.interactive_permissions,
         ),
-        SessionCommand::RemoteControl { .. } => ("go on remote control", caps.remote_control),
+        SessionCommand::RemoteControl { .. } => {
+            (notice("go on remote control"), caps.remote_control)
+        }
         // What every harness takes.
-        SessionCommand::SendTurn { .. } => ("take a turn", true),
-        SessionCommand::SetModel(_) => ("change its model", true),
-        SessionCommand::SetEffort(_) => ("change its effort", true),
-        SessionCommand::SetPolicy(_) => ("change its permission policy", true),
-        SessionCommand::SetProvider(_) => ("change its provider", true),
-        SessionCommand::Shutdown => ("shut down", true),
+        SessionCommand::SendTurn { .. } => (notice("take a turn"), true),
+        SessionCommand::SetModel(_) => (notice("change its model"), true),
+        SessionCommand::SetEffort(_) => (notice("change its effort"), true),
+        SessionCommand::SetPolicy(_) => (notice("change its permission policy"), true),
+        SessionCommand::SetProvider(_) => (notice("change its provider"), true),
+        SessionCommand::Shutdown => (notice("shut down"), true),
     }
 }
 
@@ -1504,9 +1537,12 @@ mod tests {
     }
 
     // What the harness does not offer never reaches its protocol, and
-    // what the protocol refuses is said the same way: one notice each.
+    // what the protocol refuses is said the same way: one event each. A
+    // compaction the TUI runs as a turn ends that turn, and a rewind it
+    // takes as done fails (#288: it was a notice, and the TUI stayed
+    // compacting).
     #[tokio::test]
-    async fn a_command_the_harness_cannot_carry_out_is_answered_with_one_notice() {
+    async fn a_command_the_harness_cannot_carry_out_is_answered_once() {
         let caps = Capabilities {
             compaction: true,
             ..Default::default()
@@ -1547,24 +1583,32 @@ mod tests {
         let mut said = Vec::new();
         loop {
             match next(&mut h).await {
-                AgentEvent::Notice(n) => said.push(n),
                 // Nothing went to the CLI before the turn: it echoes all.
-                ev => {
-                    assert_eq!(ev, AgentEvent::TextDelta("after".into()));
+                AgentEvent::TextDelta(t) => {
+                    assert_eq!(t, "after");
                     break;
                 }
+                ev => said.push(ev),
             }
         }
+        let notice = |what: &str| AgentEvent::Notice(format!("toy cannot {what}"));
         assert_eq!(
             said,
             [
-                "toy cannot steer a running turn",
-                "toy cannot rewind its session",
-                "toy cannot interrupt a turn",
-                "toy cannot stop a subagent",
-                "toy cannot take an answer to a permission request",
-                "toy cannot go on remote control",
-                "toy cannot compact its context on request",
+                notice("steer a running turn"),
+                AgentEvent::RewindFailed {
+                    reason: "not supported".into()
+                },
+                notice("interrupt a turn"),
+                notice("stop a subagent"),
+                notice("take an answer to a permission request"),
+                notice("go on remote control"),
+                // Offered, and refused by the protocol.
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(
+                        "toy cannot compact its context on request".into()
+                    )
+                },
             ]
         );
     }

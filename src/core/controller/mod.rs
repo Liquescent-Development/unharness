@@ -457,7 +457,8 @@ impl Controller {
 
     /// Declared capabilities of `harness` plus what a session of it
     /// reported in this run (an ACP agent says at `initialize` whether it
-    /// can fork); `None` for one not in the registry.
+    /// can fork, a Codex session under `transport = "auto"` that came to
+    /// `exec` what it lacks); `None` for one not in the registry.
     pub fn caps_of(&self, harness: HarnessId) -> Option<Capabilities> {
         let mut caps = self.registry.get(harness)?.capabilities();
         if let Some(update) = self.live.get(&harness) {
@@ -529,9 +530,9 @@ impl Controller {
         self.compacting
     }
 
-    /// `harness`'s live session reported `update`. A policy it refused
-    /// moves the one in effect as an unsupported policy would; a live
-    /// session (`alive`) is told where it went.
+    /// `harness`'s live session reported `update`. A policy it refused or
+    /// lacks moves the one in effect as an unsupported policy would; a
+    /// live session (`alive`) is told where it went.
     pub fn report(&mut self, harness: HarnessId, update: CapsUpdate, alive: bool) -> CapsReport {
         let mut notices = Vec::new();
         if let Some(levels) = &update.effort_levels
@@ -569,7 +570,7 @@ impl Controller {
             self.model_lists.insert((harness, provider), models.clone());
         }
         let commands = update.commands.is_some() || update.slash_commands.is_some();
-        let refusal = update.refused_policies.is_some();
+        let refusal = update.refused_policies.is_some() || update.lacks_policies.is_some();
         let before = self.effective_policy(harness);
         self.live.entry(harness).or_default().merge(update);
         let refused = if refusal {
@@ -590,8 +591,9 @@ impl Controller {
     /// (`CapsUpdate::refused_policies`: a mode that did not take, a
     /// profile shadowed): the next session is asked for the wanted policy
     /// again, and refuses it again if it still cannot hold it. The rest of
-    /// what it reported is the agent's, kept until the next one says.
-    /// Returns whether it had refused any.
+    /// what it reported is the agent's, kept until the next one says, the
+    /// policies it lacks for the run (`CapsUpdate::lacks_policies`) among
+    /// it. Returns whether it had refused any.
     pub fn drop_refusals(&mut self, harness: HarnessId) -> bool {
         self.live
             .get_mut(&harness)

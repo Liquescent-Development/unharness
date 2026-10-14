@@ -195,6 +195,45 @@ pub struct Capabilities {
     pub remote_control: bool,
 }
 
+/// What a harness declares and a live session of it can lack, of what no
+/// other field of a [`CapsUpdate`] says (`CapsUpdate::lacks`): each is
+/// something the TUI offers, or a command the driver would refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Ability {
+    /// [`Capabilities::steer`].
+    Steer,
+    /// [`Capabilities::compaction`].
+    Compaction,
+    /// [`RewindSupport::conversation`].
+    Rewind,
+    /// [`SubagentSupport::stop`].
+    StopSubagent,
+    /// [`Capabilities::interactive_permissions`].
+    InteractivePermissions,
+}
+
+impl Ability {
+    pub const ALL: [Ability; 5] = [
+        Ability::Steer,
+        Ability::Compaction,
+        Ability::Rewind,
+        Ability::StopSubagent,
+        Ability::InteractivePermissions,
+    ];
+
+    /// Its name in `--print`'s `capabilities_changed` and in a fixture's
+    /// `.events`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Ability::Steer => "steer",
+            Ability::Compaction => "compaction",
+            Ability::Rewind => "rewind",
+            Ability::StopSubagent => "stop_subagent",
+            Ability::InteractivePermissions => "interactive_permissions",
+        }
+    }
+}
+
 /// Which of the choices of a model, an effort and a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Choices {
@@ -326,9 +365,72 @@ impl Capabilities {
         if let Some(q) = update.ask_user_question {
             self.ask_user_question = q;
         }
-        if let Some(refused) = &update.refused_policies {
+        for refused in [&update.refused_policies, &update.lacks_policies]
+            .into_iter()
+            .flatten()
+        {
             self.permission_policies
                 .retain(|p| !refused.contains(&p.policy));
+        }
+        if let Some(lacks) = &update.lacks {
+            for ability in lacks {
+                self.withhold(*ability);
+            }
+        }
+    }
+
+    /// Whether it has `ability`.
+    pub fn has(&self, ability: Ability) -> bool {
+        match ability {
+            Ability::Steer => self.steer,
+            Ability::Compaction => self.compaction,
+            Ability::Rewind => self.rewind.conversation,
+            Ability::StopSubagent => self.subagents.stop,
+            Ability::InteractivePermissions => self.interactive_permissions,
+        }
+    }
+
+    fn withhold(&mut self, ability: Ability) {
+        match ability {
+            Ability::Steer => self.steer = false,
+            Ability::Compaction => self.compaction = false,
+            Ability::Rewind => self.rewind.conversation = false,
+            Ability::StopSubagent => self.subagents.stop = false,
+            Ability::InteractivePermissions => self.interactive_permissions = false,
+        }
+    }
+
+    /// The report, on top of these declared capabilities, of a live
+    /// session that can do only what `session` declares, for every session
+    /// of the run: the abilities and policies it lacks (`CapsUpdate::lacks`
+    /// and `lacks_policies`, lists also when it lacks none), and the flags
+    /// of a report that it does not have. Never what it has beyond them:
+    /// such a report only takes away. The effort levels and models a
+    /// session offers are its own to report.
+    pub fn lacking(&self, session: &Capabilities) -> CapsUpdate {
+        let lost = |declared: bool, has: bool| (declared && !has).then_some(false);
+        let lacked: Vec<PermissionPolicy> = self
+            .permission_policies
+            .iter()
+            .map(|p| p.policy)
+            .filter(|p| session.supports_policy(*p).is_none())
+            .collect();
+        CapsUpdate {
+            lacks: Some(
+                Ability::ALL
+                    .into_iter()
+                    .filter(|a| self.has(*a) && !session.has(*a))
+                    .collect(),
+            ),
+            image_input: lost(self.image_input, session.image_input),
+            resume_by_id: lost(self.resume_by_id, session.resume_by_id),
+            fork: lost(self.fork, session.fork),
+            mcp_http: lost(self.mcp.http, session.mcp.http),
+            plan_mode: lost(self.plan_mode, session.plan_mode),
+            slash_commands: lost(self.slash_commands, session.slash_commands),
+            ask_user_question: lost(self.ask_user_question, session.ask_user_question),
+            lacks_policies: Some(lacked),
+            ..Default::default()
         }
     }
 
@@ -505,6 +607,73 @@ mod tests {
 
         let r2 = resolve_policy(&c, AcceptEdits).unwrap();
         assert_eq!(r2.warning.as_deref(), Some("edits are not shown"));
+    }
+
+    /// What a session reports of what it lacks takes that away, and only
+    /// that: what it has beyond the declaration is not said, and applied
+    /// to the declaration the report leaves what both have (#288).
+    #[test]
+    fn a_session_lacking_what_is_declared_only_takes_away() {
+        let mut declared = Capabilities {
+            steer: true,
+            compaction: true,
+            interactive_permissions: true,
+            fork: true,
+            image_input: true,
+            permission_policies: vec![PolicySupport::full(Ask), PolicySupport::full(Bypass)],
+            ..Default::default()
+        };
+        declared.rewind.conversation = true;
+        declared.subagents.stop = true;
+        let mut session = Capabilities {
+            compaction: true,
+            image_input: true,
+            // More than declared: not said.
+            plan_mode: true,
+            remote_control: true,
+            permission_policies: vec![
+                PolicySupport::full(AcceptEdits),
+                PolicySupport::full(Bypass),
+            ],
+            ..Default::default()
+        };
+        session.subagents.stop = true;
+
+        let report = declared.lacking(&session);
+        assert_eq!(
+            report,
+            CapsUpdate {
+                lacks: Some(vec![
+                    Ability::Steer,
+                    Ability::Rewind,
+                    Ability::InteractivePermissions
+                ]),
+                fork: Some(false),
+                lacks_policies: Some(vec![Ask]),
+                ..Default::default()
+            }
+        );
+        let mut now = declared.clone();
+        now.apply(&report);
+        for ability in Ability::ALL {
+            assert_eq!(
+                now.has(ability),
+                declared.has(ability) && session.has(ability),
+                "{ability:?}"
+            );
+        }
+        assert!(!now.fork && now.image_input && !now.plan_mode && !now.remote_control);
+        assert_eq!(now.permission_policies, [PolicySupport::full(Bypass)]);
+
+        // A session with all that is declared lacks nothing, and says so.
+        assert_eq!(
+            declared.lacking(&declared),
+            CapsUpdate {
+                lacks: Some(Vec::new()),
+                lacks_policies: Some(Vec::new()),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
