@@ -235,6 +235,12 @@ pub enum Encoded {
         command: Box<Command>,
         then: Option<SessionCommand>,
     },
+    /// The session cannot take this model, effort or provider (Mistral
+    /// Vibe pins them on its sessions): the TUI is told
+    /// `SessionRenewed { reason }`, and goes on in a new session as after a
+    /// switch. Nothing else is done: the session stays until the TUI ends
+    /// it, which may first ask it for a handoff summary.
+    NewSession { reason: String },
 }
 
 /// How a session's CLI is ended, when it is shut down or its handle is
@@ -646,6 +652,12 @@ impl<P: StreamProtocol> Loop<P> {
             Encoded::Unsupported => self.cannot(what).await,
             Encoded::Kill => self.proc.kill().await,
             Encoded::Restart { command, then } => self.restart(*command, then).await,
+            Encoded::NewSession { reason } => {
+                let _ = self
+                    .events
+                    .send(AgentEvent::SessionRenewed { reason })
+                    .await;
+            }
         }
     }
 
@@ -704,6 +716,7 @@ fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (&'static str, bool) {
         SessionCommand::SetModel(_) => ("change its model", true),
         SessionCommand::SetEffort(_) => ("change its effort", true),
         SessionCommand::SetPolicy(_) => ("change its permission policy", true),
+        SessionCommand::SetProvider(_) => ("change its provider", true),
         SessionCommand::Shutdown => ("shut down", true),
     }
 }
@@ -842,6 +855,9 @@ mod tests {
                 }
                 SessionCommand::Interrupt => Encoded::Kill,
                 SessionCommand::Compact { .. } => Encoded::Unsupported,
+                SessionCommand::SetEffort(e) => Encoded::NewSession {
+                    reason: format!("effort {}", e.unwrap_or_default()),
+                },
                 _ => Encoded::Done,
             }
         }
@@ -1425,6 +1441,28 @@ mod tests {
             until_exited(&mut h).await,
             [AgentEvent::ProcessExited { code: Some(0) }]
         );
+    }
+
+    // A choice the session cannot take is told, and nothing else is done:
+    // the session stays, for the TUI to end (after a handoff summary).
+    #[tokio::test]
+    async fn a_choice_for_a_new_session_is_told_and_the_session_stays() {
+        let mut h = run(ECHO, Toy::new());
+        pid(&mut h).await;
+        assert_eq!(next(&mut h).await, said("hello"));
+        h.send(SessionCommand::SetEffort(Some("off".into())))
+            .await
+            .unwrap();
+        h.send(SessionCommand::turn("summary")).await.unwrap();
+        assert_eq!(
+            next(&mut h).await,
+            AgentEvent::SessionRenewed {
+                reason: "effort off".into()
+            }
+        );
+        assert_eq!(next(&mut h).await, said("summary"));
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        until_exited(&mut h).await;
     }
 
     // What the harness does not offer never reaches its protocol, and

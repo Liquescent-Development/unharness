@@ -80,13 +80,22 @@ pub trait AgentHooks: Send + Sync {
     /// in the environment [`Self::spawn_plan`] gives it, and never with
     /// `session/set_config_option`: for an agent that writes a model or
     /// effort set over the protocol into its own configuration (Mistral
-    /// Vibe, whose sessions also keep the ones they last ran). A change of
-    /// either starts a new process, and a new session once the old one was
-    /// prompted (`Capabilities::model_per_process`); the session's answer
-    /// is compared with the choice, since an agent may run another model
-    /// or level without an error.
+    /// Vibe, whose sessions also keep the ones they last ran). A model,
+    /// effort or provider sent to a session is answered `NewSession`, for
+    /// the reason [`Self::keeps_choices`] gives (the TUI starts a session
+    /// nothing was sent to again with it instead); the session's answer is
+    /// compared with the choice, since an agent may run another model or
+    /// level without an error.
     fn chooses_at_spawn(&self) -> bool {
         false
+    }
+
+    /// Why a session of an agent that chooses at spawn
+    /// ([`Self::chooses_at_spawn`]) cannot take a model, effort or provider
+    /// chosen after it started: said as the conversation goes on in a new
+    /// session.
+    fn keeps_choices(&self) -> &'static str {
+        "its sessions keep the model and effort they last ran"
     }
 
     /// What the agent's process for `cfg` is started with: variables for

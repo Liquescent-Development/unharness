@@ -21,6 +21,20 @@ pub enum AgentEvent {
     SessionReplaced {
         reason: String,
     },
+    /// The session cannot take the model, effort or provider just chosen
+    /// (`reason` names it and says why: Mistral Vibe pins them on the
+    /// session), so the conversation goes on in a new one, told it through
+    /// the bridge, as after a switch. Nothing has ended: the session stays,
+    /// for a handoff summary when the conversation does not fit the bridge,
+    /// until the TUI ends it.
+    SessionRenewed {
+        reason: String,
+    },
+    /// The session's CLI was started again for a choice it takes only that
+    /// way (Claude's and Codex's provider), and the session goes on, resumed,
+    /// in the new process: nothing has been sent to that yet, and what the
+    /// one before was running (requests, hooks, subagents) went with it.
+    Restarted,
     TurnStarted,
     TextDelta(String),
     ThinkingDelta(String),
@@ -525,6 +539,10 @@ impl AgentEvent {
             AgentEvent::SessionReplaced { reason } => {
                 format!("SessionReplaced {:?}", short(reason))
             }
+            AgentEvent::SessionRenewed { reason } => {
+                format!("SessionRenewed {:?}", short(reason))
+            }
+            AgentEvent::Restarted => "Restarted".to_string(),
             AgentEvent::TurnStarted => "TurnStarted".to_string(),
             AgentEvent::TextDelta(t) => format!("TextDelta {:?}", short(t)),
             AgentEvent::ThinkingDelta(t) => format!("ThinkingDelta {:?}", short(t)),

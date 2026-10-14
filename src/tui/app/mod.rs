@@ -913,6 +913,8 @@ impl App {
                 }
             }
             AgentEvent::SessionReplaced { reason } => self.session_replaced(&reason),
+            AgentEvent::SessionRenewed { reason } => self.session_renewed(&reason),
+            AgentEvent::Restarted => self.process_restarted(),
             AgentEvent::TurnStarted => {
                 if !self.is_generating {
                     self.start_generation();

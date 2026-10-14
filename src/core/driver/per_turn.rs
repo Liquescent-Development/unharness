@@ -198,6 +198,13 @@ async fn drive(
                     SessionCommand::SetModel(m) => state.model = Some(m),
                     SessionCommand::SetEffort(e) => state.effort = e,
                     SessionCommand::SetPolicy(p) => state.policy = p,
+                    // The next turn's CLI starts on it: the session goes on
+                    // in a new process, as it does every turn.
+                    SessionCommand::SetProvider(p) => {
+                        state.provider = Some(p);
+                        state.model = None;
+                        let _ = events.send(AgentEvent::Restarted).await;
+                    }
                     SessionCommand::Shutdown => {
                         if let Some(mut p) = current.take() {
                             p.kill().await;
@@ -582,6 +589,51 @@ mod tests {
                 .unwrap(),
             AgentEvent::ProcessExited { .. }
         ) {}
+    }
+
+    // A provider goes on the next turn's CLI, with no model of the one
+    // before: the session goes on in a new process, as it does every turn,
+    // which the TUI is told (`Restarted`) as for a CLI started again.
+    #[tokio::test]
+    async fn a_provider_goes_to_the_next_turn() {
+        struct Says;
+        impl PerTurnProtocol for Says {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg(format!(
+                    "echo {} {}",
+                    s.provider.as_ref().map_or("-", |p| p.as_str()),
+                    s.model.as_ref().map_or("-", |m| m.model.as_str())
+                ));
+                Ok(TurnSpec {
+                    command,
+                    stdin: None,
+                })
+            }
+            fn new_parser(&self) -> Box<dyn Parser> {
+                Box::new(EchoParser)
+            }
+        }
+        let mut cfg = cfg();
+        cfg.model = Some(ModelRef::new(HarnessId::CODEX, "openai", "gpt-5"));
+        let mut h = start(cfg, &caps(), Arc::new(Says)).unwrap();
+        h.send(SessionCommand::SetProvider("llama".into()))
+            .await
+            .unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev, AgentEvent::Restarted);
+        h.send(SessionCommand::turn("x")).await.unwrap();
+        let turn = collect_turn(&mut h).await;
+        assert!(
+            turn.contains(&AgentEvent::TextDelta("llama -".into())),
+            "{turn:?}"
+        );
     }
 
     #[tokio::test]

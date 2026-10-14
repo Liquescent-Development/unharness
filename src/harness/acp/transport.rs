@@ -943,6 +943,16 @@ impl Driver {
         io.respawn(command);
     }
 
+    /// `choice` cannot be taken by this session, which keeps what it last
+    /// ran ([`AgentHooks::chooses_at_spawn`]): the conversation is to go on
+    /// in a new one, and nothing is sent.
+    async fn new_session_for(&mut self, choice: String, io: &mut Io<'_>) -> Encoded {
+        self.settle_anchor(io).await;
+        Encoded::NewSession {
+            reason: format!("{choice}: {}", self.hooks().keeps_choices()),
+        }
+    }
+
     /// What the session runs, against what was chosen for an agent that
     /// chooses at spawn: an agent may fall back to another model, or
     /// reset a level the model does not offer, without an error.
@@ -1379,24 +1389,21 @@ impl StreamProtocol for Driver {
                     Ok(())
                 }
             },
-            // Chosen at spawn: the TUI starts the session again
-            // (`Capabilities::model_per_process`).
+            // Chosen at spawn, and kept by a session as it last ran: the
+            // conversation goes on in a new session, nothing sent here.
             SessionCommand::SetModel(m) if self.hooks().chooses_at_spawn() => {
-                self.cfg.model = Some(m);
-                io.emit(AgentEvent::Notice(format!(
-                    "{harness}'s model is chosen when it starts: it applies from its next start"
-                )))
-                .await;
-                Ok(())
+                return self.new_session_for(format!("model {}", m.model), io).await;
             }
             SessionCommand::SetEffort(e) if self.hooks().chooses_at_spawn() => {
-                self.cfg.effort = e;
-                io.emit(AgentEvent::Notice(format!(
-                    "{harness}'s effort is chosen when it starts: it applies from its next start"
-                )))
-                .await;
-                Ok(())
+                let effort = e.as_deref().unwrap_or("default");
+                return self.new_session_for(format!("effort {effort}"), io).await;
             }
+            SessionCommand::SetProvider(p) if self.hooks().chooses_at_spawn() => {
+                return self.new_session_for(format!("provider {p}"), io).await;
+            }
+            // Only an agent that chooses at spawn runs on a provider of
+            // unharness's (`SpawnPlan::provider`).
+            SessionCommand::SetProvider(_) => Ok(()),
             SessionCommand::SetModel(m) => {
                 self.cfg.model = Some(m.clone());
                 match self

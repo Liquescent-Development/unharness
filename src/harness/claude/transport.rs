@@ -5,7 +5,7 @@
 //! `control_request` lines (because we pass `--permission-prompt-tool stdio`)
 //! and are answered with `control_response` lines.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -333,8 +333,21 @@ pub fn start(
     mcp_config: Option<PathBuf>,
     caps: &Capabilities,
 ) -> Result<SessionHandle> {
+    let cmd = session_command(&cfg, mcp_config.as_deref())?;
+    let sandbox = cfg.sandbox.clone();
+    driver::start(
+        HarnessId::CLAUDE,
+        caps,
+        cmd,
+        &sandbox,
+        Claude::new(cfg, mcp_config),
+    )
+}
+
+/// The process of a session for `cfg`, with the servers in `mcp_config`.
+fn session_command(cfg: &SessionConfig, mcp_config: Option<&Path>) -> Result<Command> {
     let mut cmd = Command::new(&cfg.binary);
-    cmd.args(session_args(&cfg)).current_dir(&cfg.cwd);
+    cmd.args(session_args(cfg)).current_dir(&cfg.cwd);
     // Last: the flag takes every word up to the next flag.
     if let Some(path) = mcp_config {
         cmd.arg("--mcp-config").arg(path);
@@ -353,13 +366,17 @@ pub fn start(
             };
         }
     }
-    driver::start(
-        HarnessId::CLAUDE,
-        caps,
-        cmd,
-        &cfg.sandbox,
-        Claude::new(cfg.provider),
-    )
+    Ok(cmd)
+}
+
+/// The control request that puts the session on Remote Control, or takes
+/// it off: `(request id, line)`.
+fn remote_control_request(enabled: bool, name: Option<String>) -> (String, String) {
+    let mut extra = json!({"enabled": enabled});
+    if let Some(name) = name.filter(|_| enabled) {
+        extra["name"] = json!(name);
+    }
+    control_request("remote_control", extra)
 }
 
 /// How long the answer to `initialize` is waited for before the session
@@ -372,22 +389,72 @@ struct Claude {
     pending: HashMap<String, PendingPermission>,
     /// Our `remote_control` requests: whether each turns it on.
     remote_requests: HashMap<String, bool>,
-    /// The one the user chose, if any.
-    provider: Option<ProviderId>,
     /// Our `initialize` request while it is not answered, and until when
     /// that is waited for.
     awaiting_init: Option<(String, Instant)>,
+    /// What the process is started again with for a new provider: the
+    /// session's configuration, kept as the session changed it since
+    /// (model, effort, policy, the session to resume).
+    cfg: SessionConfig,
+    mcp_config: Option<PathBuf>,
+    /// The session the process runs, as it last said.
+    session_id: Option<String>,
+    /// On Remote Control, under this name: the process started again is
+    /// put back on it.
+    remote: Option<Option<String>>,
+    /// Policies set and not yet reported back: a report of one of them is
+    /// not a change of Claude's own.
+    policies_sent: VecDeque<PermissionPolicy>,
 }
 
 impl Claude {
-    fn new(provider: Option<ProviderId>) -> Self {
+    fn new(cfg: SessionConfig, mcp_config: Option<PathBuf>) -> Self {
         Claude {
             parser: ClaudeParser::new(),
             pending: HashMap::new(),
             remote_requests: HashMap::new(),
-            provider,
             awaiting_init: None,
+            session_id: cfg.resume.clone().filter(|_| !cfg.fork),
+            cfg,
+            mcp_config,
+            remote: None,
+            policies_sent: VecDeque::new(),
         }
+    }
+
+    /// What the session said that a process started again for it needs.
+    fn keep(&mut self, ev: &AgentEvent) {
+        match ev {
+            AgentEvent::SessionStarted { session_id, .. } => {
+                self.session_id = Some(session_id.clone());
+            }
+            AgentEvent::PolicyChanged(p) => match self.policies_sent.iter().position(|s| s == p) {
+                Some(at) => {
+                    self.policies_sent.drain(..=at);
+                }
+                // Its own (plan mode entered or left).
+                None => self.cfg.policy = *p,
+            },
+            AgentEvent::RemoteControl(crate::core::RemoteControl::Failed { .. }) => {
+                self.remote = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// The provider is an environment variable of Claude's process: it is
+    /// started again on `provider`, resuming the session, which keeps its
+    /// conversation (2.1.296). Ended as a shutdown ends it (`interrupt`,
+    /// then its input closed), as the TUI did before this was the driver's.
+    fn restart_on(&mut self, provider: ProviderId) -> Result<Command> {
+        self.cfg.provider = Some(provider);
+        // A model is one of its provider's.
+        self.cfg.model = None;
+        if let Some(id) = &self.session_id {
+            self.cfg.resume = Some(id.clone());
+            self.cfg.fork = false;
+        }
+        session_command(&self.cfg, self.mcp_config.as_deref())
     }
 }
 
@@ -478,22 +545,41 @@ impl StreamProtocol for Claude {
                 }
             },
             SessionCommand::SetModel(m) => {
-                Encoded::Write(control_request("set_model", json!({"model": m.model})).1)
+                let line = control_request("set_model", json!({"model": m.model})).1;
+                self.cfg.model = Some(m);
+                Encoded::Write(line)
             }
             // `-p` mode accepts the slash command as a message.
-            SessionCommand::SetEffort(e) => Encoded::Write(user_message(&format!(
-                "/effort {}",
-                e.unwrap_or_else(|| "high".into())
-            ))),
-            SessionCommand::SetPolicy(p) => Encoded::Write(
-                control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
-            ),
-            SessionCommand::RemoteControl { enabled, name } => {
-                let mut extra = json!({"enabled": enabled});
-                if let Some(name) = name.filter(|_| enabled) {
-                    extra["name"] = json!(name);
+            SessionCommand::SetEffort(e) => {
+                self.cfg.effort = e.clone();
+                Encoded::Write(user_message(&format!(
+                    "/effort {}",
+                    e.unwrap_or_else(|| "high".into())
+                )))
+            }
+            SessionCommand::SetPolicy(p) => {
+                self.cfg.policy = p;
+                self.policies_sent.push_back(p);
+                Encoded::Write(
+                    control_request("set_permission_mode", json!({"mode": policy_mode_name(p)})).1,
+                )
+            }
+            SessionCommand::SetProvider(p) => match self.restart_on(p) {
+                Ok(command) => Encoded::Restart {
+                    command: Box::new(command),
+                    then: None,
+                },
+                Err(e) => {
+                    io.emit(AgentEvent::Error(format!(
+                        "could not start claude again: {e:#}"
+                    )))
+                    .await;
+                    Encoded::Kill
                 }
-                let (id, line) = control_request("remote_control", extra);
+            },
+            SessionCommand::RemoteControl { enabled, name } => {
+                self.remote = enabled.then(|| name.clone());
+                let (id, line) = remote_control_request(enabled, name);
                 self.remote_requests.insert(id, enabled);
                 Encoded::Write(line)
             }
@@ -533,10 +619,9 @@ impl StreamProtocol for Claude {
                         ));
                     }
                     // Only the answer to `initialize` names the account.
-                    if let Some(why) = v
-                        .pointer("/response/response")
-                        .and_then(|answer| super::provider_mismatch(self.provider.as_ref(), answer))
-                    {
+                    if let Some(why) = v.pointer("/response/response").and_then(|answer| {
+                        super::provider_mismatch(self.cfg.provider.as_ref(), answer)
+                    }) {
                         io.emit(AgentEvent::Error(why)).await;
                     }
                 }
@@ -572,9 +657,38 @@ impl StreamProtocol for Claude {
                 self.pending
                     .insert(req.id.clone(), PendingPermission { input, kind });
             }
+            self.keep(&ev);
             io.forward(ev).await?;
         }
         Ok(())
+    }
+
+    /// Started again on a new provider ([`Claude::restart_on`]): the TUI is
+    /// told, and the new process is greeted as a session's is and put back
+    /// on Remote Control if it was on, which the TUI did before this was
+    /// the driver's (the same lines, in the same order).
+    async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+        if let Err(e) = started {
+            io.emit(AgentEvent::Error(format!(
+                "could not start claude again: {e:#}"
+            )))
+            .await;
+            return false;
+        }
+        self.parser = ClaudeParser::new();
+        self.pending.clear();
+        self.remote_requests.clear();
+        self.policies_sent.clear();
+        io.emit(AgentEvent::Restarted).await;
+        self.start(io).await;
+        if let Some(name) = self.remote.clone() {
+            let (id, line) = remote_control_request(true, name);
+            self.remote_requests.insert(id, true);
+            if let Err(e) = io.write(&line).await {
+                io.emit(AgentEvent::Error(format!("claude: {e}"))).await;
+            }
+        }
+        true
     }
 
     /// With only its stdin closed Claude waits for its background tasks (a

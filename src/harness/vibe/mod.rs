@@ -54,6 +54,11 @@ use crate::core::{
 pub const COMMAND: &str = "vibe-acp";
 const DISPLAY_NAME: &str = "Mistral Vibe";
 
+/// Why a session of vibe's cannot take a model, effort or provider chosen
+/// after it started (2.26.1 pins them on the session, and setting them over
+/// ACP writes `config.toml`): said as the conversation goes on in a new one.
+pub const KEEPS_CHOICES: &str = "its sessions keep the model and effort they last ran, and changing them in one would rewrite its own settings";
+
 /// The option that is vibe's reasoning level (category `thinking`, which
 /// the spec does not name).
 pub const EFFORT_OPTION: &str = "thinking";
@@ -584,6 +589,10 @@ struct VibeHooks {
 impl AgentHooks for VibeHooks {
     fn chooses_at_spawn(&self) -> bool {
         true
+    }
+
+    fn keeps_choices(&self) -> &'static str {
+        KEEPS_CHOICES
     }
 
     fn spawn_plan(&self, cfg: &SessionConfig) -> SpawnPlan {

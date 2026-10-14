@@ -208,3 +208,42 @@ fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
         Some(Block::User { text }) if text == "Reply with the single word: pong"
     ));
 }
+
+/// A process its driver started again (Claude on a new provider) is one
+/// nothing was sent to, as one the TUI started again was: the session's id
+/// waits for the next prompt, and Remote Control, which the driver puts the
+/// new process back on, is starting again; nothing is sent from here.
+#[test]
+fn a_process_started_again_by_its_driver_is_a_new_process_of_the_session() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.submit_prompt("hello".into());
+    app.take_actions();
+    app.session_alive = true;
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: None,
+    });
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.handle_slash_command("/rc");
+    app.on_event(AgentEvent::RemoteControl(RemoteControl::On {
+        url: "https://claude.ai/code/session_x".into(),
+    }));
+    app.take_actions();
+    app.on_event(AgentEvent::Restarted);
+    assert!(app.take_actions().is_empty());
+    assert!(app.session_alive && app.session_blank);
+    assert_eq!(app.remote_status().as_deref(), Some("remote: starting"));
+    // Resumed: the same session, which the next prompt commits.
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: None,
+    });
+    app.submit_prompt("again".into());
+    assert!(!app.session_blank);
+    assert_eq!(
+        app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+        Some("claude-1")
+    );
+}

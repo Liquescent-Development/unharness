@@ -999,6 +999,11 @@ pub fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::SessionReplaced { reason } => {
             json!({"type": "session_replaced", "reason": reason})
         }
+        // A choice made during a run, which a `--print` run makes none of.
+        AgentEvent::SessionRenewed { reason } => {
+            json!({"type": "session_renewed", "reason": reason})
+        }
+        AgentEvent::Restarted => json!({"type": "restarted"}),
         AgentEvent::Error(e) => json!({"type": "error", "message": e}),
         AgentEvent::ProcessExited { code } => json!({"type": "process_exited", "code": code}),
     }

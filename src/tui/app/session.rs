@@ -260,19 +260,48 @@ impl App {
     /// Leave the active harness's session for a new one that runs
     /// `choice`: its sessions keep the model and effort they last ran
     /// (Mistral Vibe 2.26.1 pins them, and setting them in the session
-    /// would rewrite its own configuration). The new session is told the
-    /// conversation so far with the next prompt, as a harness switched to
-    /// is, and the one left writes a handoff summary first when the
-    /// conversation does not fit in that bridge.
+    /// would rewrite its own configuration).
     pub(super) fn renew_session(&mut self, choice: &str) {
+        self.session_renewed(&format!(
+            "{choice}: {}",
+            crate::harness::vibe::KEEPS_CHOICES
+        ));
+    }
+
+    /// The active harness's session cannot take a choice, for `reason`
+    /// (`AgentEvent::SessionRenewed`): the conversation goes on in a new
+    /// session, told it with the next prompt as a harness switched to is,
+    /// and the one left writes a handoff summary first when the
+    /// conversation does not fit in that bridge.
+    pub(super) fn session_renewed(&mut self, reason: &str) {
         let name = self.display_name();
         self.transcript.push_notice(format!(
-            "{name} starts a new session for {choice}: its sessions keep the model and effort they last ran, and changing them in one would rewrite its own settings. Your next prompt tells it the conversation so far."
+            "{name} starts a new session for {reason}. Your next prompt tells it the conversation so far."
         ));
         if self.handoff_wanted_for(0, self.bridge_budget(self.active)) {
             self.ask_handoff(self.active, true);
         } else {
             self.renew_now();
+        }
+    }
+
+    /// The session's CLI was started again by its driver, for a choice it
+    /// takes only that way (`AgentEvent::Restarted`): what went with the
+    /// process before goes here too, as when the TUI ended a session and
+    /// started it again, and the session goes on, resumed, in a process
+    /// nothing was sent to yet. Its driver puts it back on Remote Control.
+    pub(super) fn process_restarted(&mut self) {
+        self.policies_sent.clear();
+        self.drop_subagents();
+        self.drop_prompts();
+        self.running_providers.remove(&self.active);
+        self.forget_refusals();
+        self.session_blank = true;
+        self.blank_session = None;
+        self.session_policy = self.effective_policy();
+        if let Some(remote) = self.remote.as_mut() {
+            remote.url = None;
+            remote.state = None;
         }
     }
 

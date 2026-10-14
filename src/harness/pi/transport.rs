@@ -295,6 +295,9 @@ impl StreamProtocol for Pi {
                 self.policy = p;
                 None
             }
+            // Each model names its provider (`set_model`): nothing goes
+            // until one is chosen on it.
+            SessionCommand::SetProvider(_) => None,
             // The driver's (`shutdown`).
             SessionCommand::Shutdown => None,
         };

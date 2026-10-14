@@ -206,6 +206,8 @@ impl StreamProtocol for Agy {
                 self.restart_needed = true;
                 Encoded::Done
             }
+            // One provider (`Capabilities::multi_provider` is not declared).
+            SessionCommand::SetProvider(_) => Encoded::Done,
             // The driver's (`shutdown`).
             SessionCommand::Shutdown => Encoded::Done,
         }
