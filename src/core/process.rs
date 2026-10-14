@@ -1092,11 +1092,53 @@ mod tests {
         }
     }
 
+    /// Whether this process runs the test `name` of this module alone. If
+    /// not, the test is run in a process of its own, where it must pass.
+    ///
+    /// A child another test spawns holds a copy of every descriptor open
+    /// in the test binary from its fork to its exec, and on macOS, where a
+    /// pipe is made close-on-exec only after it is created, also after the
+    /// exec when the fork came in between: meanwhile a pipe the test
+    /// binary has closed is still open.
+    #[cfg(unix)]
+    fn alone(name: &str) -> bool {
+        const ALONE: &str = "UNHARNESS_TEST_ALONE";
+        // As the test harness names it: without the crate.
+        let (_, module) = module_path!().split_once("::").unwrap();
+        let test = format!("{module}::{name}");
+        if std::env::var_os(ALONE).is_some_and(|alone| alone == test.as_str()) {
+            return true;
+        }
+        // Its output goes to a file: read from a pipe, it would not end
+        // while another test's child held a copy of the write end.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let out = std::fs::File::create(&log).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([test.as_str(), "--exact", "--test-threads=1", "--nocapture"])
+            .env(ALONE, &test)
+            .stdin(Stdio::null())
+            .stdout(out.try_clone().unwrap())
+            .stderr(out)
+            .status()
+            .unwrap();
+        let said = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            status.success() && said.contains("test result: ok. 1 passed"),
+            "{said}"
+        );
+        false
+    }
+
     // The grandchild left the child's tree and session: nothing kills
-    // it, but it no longer has anyone reading its output.
+    // it, but it no longer has anyone reading its output. Alone: a copy
+    // of the read end in another test's child would keep it open (#291).
     #[cfg(unix)]
     #[tokio::test]
     async fn the_pipes_are_closed_on_what_escaped_the_tree() {
+        if !alone("the_pipes_are_closed_on_what_escaped_the_tree") {
+            return;
+        }
         let escaped = Escaped::new();
         let failed = escaped.path("failed");
         let last = format!("echo late || touch {failed}");

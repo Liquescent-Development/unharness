@@ -620,7 +620,7 @@ async fn lingering_pi(fake: &Fake) -> (SessionHandle, u32, u32) {
     )
     .unwrap();
     let (cfg, pids) = lingering_config(fake, &fixture, "session", "60");
-    let handle = pi_harness().start_session(cfg).unwrap();
+    let handle = pi_harness(fake).start_session(cfg).unwrap();
     let (cli, child) = background_pids(&pids).await;
     (handle, cli, child)
 }
@@ -762,10 +762,11 @@ async fn a_cli_ending_by_itself_is_not_cut_short_and_its_group_goes_with_it() {
     assert!(gone_within(child, Duration::from_secs(5)).await);
 }
 
-/// pi with its gate extension installed in a scratch directory.
-fn pi_harness() -> unharness::harness::pi::PiHarness {
+/// pi with its gate extension installed in `fake`'s scratch directory,
+/// which goes with it.
+fn pi_harness(fake: &Fake) -> unharness::harness::pi::PiHarness {
     unharness::harness::pi::PiHarness {
-        gate_dir: Some(tempfile::tempdir().unwrap().keep()),
+        gate_dir: Some(fake._tmp.path().join("pi-gate")),
     }
 }
 
@@ -786,7 +787,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
     cfg.resume = Some("3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f62".into());
-    let mut handle = pi_harness().start_session(cfg).unwrap();
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
     handle.send(SessionCommand::turn("hi")).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
     assert!(
@@ -829,7 +830,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
     cfg.resume = Some("s1".into());
-    let handle = pi_harness().start_session(cfg).unwrap();
+    let handle = pi_harness(&fake).start_session(cfg).unwrap();
     handle.send(SessionCommand::turn("hi")).await.unwrap();
     let sent = fake.sent_lines_eventually(4).await;
     assert_eq!(
@@ -866,7 +867,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
         "UNHARNESS_FAKE_GATE".into(),
         gate.to_string_lossy().into_owned(),
     ));
-    let mut handle = pi_harness().start_session(cfg).unwrap();
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
     fake.sent_lines_eventually(3).await;
     handle.send(SessionCommand::turn("hi")).await.unwrap();
     handle.send(SessionCommand::Interrupt).await.unwrap();
@@ -900,7 +901,7 @@ async fn pi_gate_asks_before_a_tool_acts() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/gate.jsonl");
-    let mut handle = pi_harness()
+    let mut handle = pi_harness(&fake)
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
 
@@ -957,7 +958,7 @@ async fn pi_interrupt_closes_an_open_gate_dialog() {
     let fake = Fake::new();
     // As recorded on pi 1.0.4: `abort` while the gate's dialog is open.
     let fixture = repo().join("src/harness/pi/fixtures/gate_abort.jsonl");
-    let mut handle = pi_harness()
+    let mut handle = pi_harness(&fake)
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
     handle.send(SessionCommand::turn("echo hi")).await.unwrap();
@@ -1010,7 +1011,7 @@ async fn pi_gate_is_answered_without_asking_under_bypass() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/gate.jsonl");
-    let mut handle = pi_harness()
+    let mut handle = pi_harness(&fake)
         .start_session(fake.config(&fixture, PermissionPolicy::Bypass, true))
         .unwrap();
     handle
@@ -1040,7 +1041,7 @@ async fn pi_rpc_session_streams_tool_and_text() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/basic_and_bash.jsonl");
-    let harness = pi_harness();
+    let harness = pi_harness(&fake);
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -4143,7 +4144,7 @@ async fn pi_rewind_forks_and_holds_the_next_turn_until_the_fork_is_in_place() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
-    let harness = pi_harness();
+    let harness = pi_harness(&fake);
     let mut handle = harness
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
@@ -4206,7 +4207,7 @@ async fn pi_interrupt_drops_a_turn_held_for_a_fork() {
     }
     let fake = Fake::new();
     let fixture = repo().join("src/harness/pi/fixtures/rewind.jsonl");
-    let mut handle = pi_harness()
+    let mut handle = pi_harness(&fake)
         .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
         .unwrap();
     let mut anchors = Vec::new();
@@ -4640,7 +4641,7 @@ async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
     let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
     cfg.model = None;
     cfg.resume = Some(pi_missing.into());
-    let handle = pi_harness().start_session(cfg).unwrap();
+    let handle = pi_harness(&fake).start_session(cfg).unwrap();
     let mut run = resuming(&fake, unharness::headless::Format::Json, pi_missing);
     tokio::time::timeout(
         Duration::from_secs(10),

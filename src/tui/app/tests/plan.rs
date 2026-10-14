@@ -11,7 +11,7 @@ fn denied(id: &str, reason: &str) -> Action {
 }
 
 /// Claude, live and mid-turn, gone from accept-edits into plan mode.
-fn planning_app() -> App {
+fn planning_app() -> TestApp {
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.submit_prompt("change the greeting".into());
@@ -182,14 +182,13 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
         .append(Scope::Workspace, &[Rule::edit("**")])
         .unwrap();
     app.on_event(plan_request());
+    let notes = app.controller.cwd.join("notes.txt");
     app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
         id: "write".into(),
         kind: PermissionKind::ToolUse {
             tool: "Write".into(),
             input: Value::Null,
-            action: ToolAction::Edit {
-                paths: vec![app.controller.cwd.join("notes.txt")],
-            },
+            action: ToolAction::Edit { paths: vec![notes] },
             description: None,
         },
         tool_call_id: None,
