@@ -71,24 +71,18 @@ impl App {
         }
     }
 
-    /// Choose the active harness's provider. Where the provider is fixed
-    /// when the process starts, a live session is shut down and comes back
-    /// on the new one, resumed.
+    /// Choose the active harness's provider. A session that takes it only
+    /// between turns is told, and says how it took it ([`App::choice_sent`]);
+    /// where it is the process's, a session nothing was sent to is started
+    /// again on it; a stored session that keeps what it ran is left for a
+    /// new one ([`App::renewal_without_session`]).
     pub fn set_provider(&mut self, provider: ProviderId) {
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
         let changed = self.current_provider() != Some(&provider);
-        // Where the model is chosen when the process starts as well
-        // (Mistral Vibe), the provider goes with it.
-        if changed && self.caps().model_per_process && !self.may_restart_for("provider") {
-            return;
-        }
-        let restart = changed && self.session_alive && self.caps().provider_per_process;
-        if restart && self.is_generating {
-            self.transcript
-                .push_error("finish or interrupt the current turn before changing the provider");
-            return;
-        }
-        // They would end with the process.
-        if restart && self.refused_for_subagents("changing the provider") {
+        let between = self.between_turns(Choice::Provider);
+        if changed && between && self.refused_between_turns(Choice::Provider) {
             return;
         }
         if changed {
@@ -101,29 +95,41 @@ impl App {
         self.providers.insert(self.active, provider.clone());
         self.chosen_providers.insert(self.active);
         self.idle_start_paused = false;
-        // A session that was prompted keeps the model it last ran: a new
-        // one runs on the provider, told the conversation (`set_model`).
-        if changed && self.caps().model_per_process && self.renews_for_choice() {
+        let line = provider_line(&provider);
+        if !changed {
+            self.transcript.push_system(line);
+        } else if let Some(why) = self.renewal_without_session() {
+            self.transcript.push_system(line);
+            self.session_renewed(&format!("provider {provider}: {why}"));
+        } else if self.session_alive && self.session_blank && between && self.caps().multi_provider
+        {
+            // Nothing was sent to it: it starts again on the provider. (A
+            // harness of one provider is not, for a name it does not know.)
             self.transcript
-                .push_system(format!("Provider: {provider} (pick a model with Ctrl+M)"));
-            self.renew_session(&format!("provider {provider}"));
-            return;
-        }
-        self.transcript.push_system(if restart {
-            format!(
-                "Provider: {provider} ({} restarts on it; pick a model with Ctrl+M)",
-                self.display_name()
-            )
-        } else {
-            format!("Provider: {provider} (pick a model with Ctrl+M)")
-        });
-        if restart {
+                .push_system(restart_line(&provider, self.display_name()));
             self.shutdown_session();
+        } else if self.session_seen() && between {
+            // Its line says how the session took it, with its answer.
+            self.choice_sent(
+                SessionCommand::SetProvider(provider.clone()),
+                Choice::Provider,
+                Some(provider),
+            );
+        } else {
+            self.transcript.push_system(line);
+            if self.session_seen() {
+                self.actions
+                    .push_back(Action::Command(SessionCommand::SetProvider(provider)));
+            }
         }
     }
 
     pub fn set_model(&mut self, model: String) {
-        if !self.may_restart_for("model") {
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
+        let between = self.between_turns(Choice::Model);
+        if between && self.refused_between_turns(Choice::Model) {
             return;
         }
         let provider = self
@@ -136,51 +142,8 @@ impl App {
         self.run_models.insert(self.active);
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Model: {}", m.label()));
-        if self.renews_for_choice() {
-            self.renew_session(&format!("model {}", m.model));
-            return;
-        }
-        if self.session_alive && self.session_blank {
-            // Nothing was sent to it: it starts again with the model.
-            self.shutdown_session();
-        } else if self.session_alive {
-            self.actions
-                .push_back(Action::Command(SessionCommand::SetModel(m)));
-        }
-    }
-
-    /// Whether a change of the model or effort starts a new session of the
-    /// active harness: its sessions keep the ones they last ran
-    /// (`Capabilities::model_per_process`), and the conversation has one.
-    /// One nothing was sent to yet starts again with the choice instead.
-    fn renews_for_choice(&self) -> bool {
-        self.caps().model_per_process && self.session_ids.contains_key(&self.active)
-    }
-
-    /// Whether the session may be ended for a change of `what` (its model
-    /// or effort) where those are chosen when it starts
-    /// (`Capabilities::model_per_process`); if not, the user is told why.
-    fn may_restart_for(&mut self, what: &str) -> bool {
-        if !self.caps().model_per_process {
-            return true;
-        }
-        if self.refused_while_start_held() {
-            return false;
-        }
-        if !self.session_alive {
-            return true;
-        }
-        if self.is_generating {
-            self.transcript.push_error(format!(
-                "finish or interrupt the current turn before changing the {what}"
-            ));
-            return false;
-        }
-        // They would end with the process.
-        if self.refused_for_subagents(&format!("changing the {what}")) {
-            return false;
-        }
-        true
+        let choice = format!("model {}", m.model);
+        self.apply_choice(between, SessionCommand::SetModel(m), Choice::Model, &choice);
     }
 
     pub fn set_effort(&mut self, effort: String) {
@@ -202,7 +165,11 @@ impl App {
             ));
             return;
         }
-        if !self.may_restart_for("effort") {
+        if self.choice_pending.is_some() && self.refused_while_settling() {
+            return;
+        }
+        let between = self.between_turns(Choice::Effort);
+        if between && self.refused_between_turns(Choice::Effort) {
             return;
         }
         self.efforts.insert(self.active, effort.clone());
@@ -210,17 +177,158 @@ impl App {
         self.run_efforts.insert(self.active);
         self.idle_start_paused = false;
         self.transcript.push_system(format!("Effort: {effort}"));
-        if self.renews_for_choice() {
-            self.renew_session(&format!("effort {effort}"));
-            return;
-        }
-        if self.session_alive && self.session_blank {
-            // Claude would take the change as a turn: it starts again with
-            // the effort instead.
+        let choice = format!("effort {effort}");
+        self.apply_choice(
+            between,
+            SessionCommand::SetEffort(Some(effort)),
+            Choice::Effort,
+            &choice,
+        );
+    }
+
+    /// Carry out a model or effort just chosen (`cmd`, worded `choice`),
+    /// which the session takes only `between` turns or any time: a stored
+    /// session that keeps what it ran is left for a new one; one nothing
+    /// was sent to is started again with it (Claude would take an effort
+    /// as a turn); one prompted is told, and says how it took it.
+    fn apply_choice(&mut self, between: bool, cmd: SessionCommand, kind: Choice, choice: &str) {
+        if let Some(why) = self.renewal_without_session() {
+            self.session_renewed(&format!("{choice}: {why}"));
+        } else if !self.session_alive {
+            // The next session starts with it.
+        } else if self.session_blank {
             self.shutdown_session();
-        } else if self.session_alive {
-            self.actions
-                .push_back(Action::Command(SessionCommand::SetEffort(Some(effort))));
+        } else if between {
+            self.choice_sent(cmd, kind, None);
+        } else {
+            self.actions.push_back(Action::Command(cmd));
+        }
+    }
+
+    /// Whether the active harness takes `choice` only between turns, with
+    /// no subagent whose end will be told at work: the one reader of
+    /// `Capabilities::between_turns`.
+    fn between_turns(&self, choice: Choice) -> bool {
+        let between = self.caps().between_turns;
+        match choice {
+            Choice::Model => between.model,
+            Choice::Effort => between.effort,
+            Choice::Provider => between.provider,
+        }
+    }
+
+    /// Why the active harness's stored session cannot take a new model,
+    /// effort or provider, if the conversation has one: the one reader of
+    /// `Capabilities::stored_session_keeps`.
+    fn stored_session_keeps(&self) -> Option<&'static str> {
+        self.caps()
+            .stored_session_keeps
+            .filter(|_| self.session_ids.contains_key(&self.active))
+    }
+
+    /// Why a choice leaves the stored session for a new one now, with no
+    /// session to say so: none is live, or the live one was sent nothing
+    /// (it would be started again on the stored session, as it ran). A
+    /// session that was prompted says it itself (`SessionRenewed`).
+    fn renewal_without_session(&self) -> Option<&'static str> {
+        if self.session_seen() {
+            return None;
+        }
+        self.stored_session_keeps()
+    }
+
+    /// Whether `choice`, which the active harness takes only between
+    /// turns, is refused now; if so the user is told why. Not during a
+    /// turn, nor while subagents whose end will be told are at work (they
+    /// would end with the session or its process), nor, for a stored
+    /// session that keeps what it ran, while the CLI before is still
+    /// exiting (the start that waits for it resumes that session). (No
+    /// choice is made while the session has not said how it took the one
+    /// before, `choice_pending`: it may be leaving for a new session, or
+    /// starting its CLI again, which would take an effort sent meanwhile
+    /// as a turn.)
+    fn refused_between_turns(&mut self, choice: Choice) -> bool {
+        let what = choice.what();
+        if self.start_held && self.stored_session_keeps().is_some() && self.refused_while_settling()
+        {
+            return true;
+        }
+        if !self.session_alive {
+            return false;
+        }
+        if self.is_generating {
+            self.transcript.push_error(format!(
+                "finish or interrupt the current turn before changing the {what}"
+            ));
+            return true;
+        }
+        // They would end with the process.
+        self.refused_for_subagents(&format!("changing the {what}"))
+    }
+
+    /// Send `cmd`, a choice the session takes only between turns, and hold
+    /// what is typed after it until the session has said how it took it
+    /// (`Restarted`, `SessionRenewed`). Its process may be started again by
+    /// its driver: as before the TUI starts one, what the session changed
+    /// since its last turn is told now, its harness is prepared, and the
+    /// next process is watched from its start.
+    fn choice_sent(&mut self, cmd: SessionCommand, kind: Choice, provider: Option<ProviderId>) {
+        self.check_guard();
+        match self.harness().prepare() {
+            Ok(Some(note)) => self.transcript.push_notice(note),
+            Ok(None) => {}
+            Err(e) => self
+                .transcript
+                .push_error(format!("{}: {e:#}", self.short_name())),
+        }
+        self.arm_guard();
+        self.choice_pending = Some(PendingChoice {
+            queued: self.queued.len(),
+            what: kind.what(),
+            provider,
+        });
+        self.actions.push_back(Action::Command(cmd));
+    }
+
+    /// The choice the session was sent has been answered, or will not be
+    /// (its process is gone): what waited for the answer. A provider's line
+    /// is said here, as `taken` words it.
+    pub(super) fn choice_answered(
+        &mut self,
+        taken: impl FnOnce(&ProviderId) -> String,
+    ) -> Option<PendingChoice> {
+        let pending = self.choice_pending.take()?;
+        if let Some(provider) = &pending.provider {
+            self.transcript.push_system(taken(provider));
+        }
+        Some(pending)
+    }
+
+    /// The choice the session was sent will not be answered: it is ending,
+    /// or gone. A stored session that keeps what it ran is forgotten, as
+    /// its answer would have had it, so that it is not resumed as it ran;
+    /// what was typed after the choice waits for Enter.
+    pub(super) fn choice_unanswered(&mut self) {
+        let Some(pending) = self.choice_answered(provider_line) else {
+            return;
+        };
+        if self.stored_session_keeps().is_some() {
+            self.forget_ids(self.active);
+        }
+        if self.queued.len() > pending.queued {
+            self.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
+    }
+
+    /// The choice the session was sent is taken: the first prompt typed
+    /// after it goes now, as it would have had it been typed then; those
+    /// held before it still wait.
+    pub(super) fn send_typed_after(&mut self, pending: &PendingChoice) {
+        if self.queued.len() > pending.queued {
+            self.send_queued(pending.queued);
         }
     }
 
@@ -490,4 +598,46 @@ impl App {
             .and_then(|e| levels.iter().position(|l| l == e));
         self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
     }
+}
+
+/// A choice of the active harness's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Choice {
+    Model,
+    Effort,
+    Provider,
+}
+
+impl Choice {
+    fn what(self) -> &'static str {
+        match self {
+            Choice::Model => "model",
+            Choice::Effort => "effort",
+            Choice::Provider => "provider",
+        }
+    }
+}
+
+/// A choice sent to a session that takes it only between turns, until the
+/// session has said how it took it: prompts typed meanwhile are queued.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PendingChoice {
+    /// The prompts queued when it was sent: any after them were typed
+    /// after it, and go when it has been taken.
+    pub queued: usize,
+    /// What was chosen: `model`, `effort`, `provider`.
+    pub what: &'static str,
+    /// A provider's line, which says how the session took it, waits for
+    /// the answer.
+    pub provider: Option<ProviderId>,
+}
+
+/// What is said of a provider chosen.
+pub(super) fn provider_line(provider: &ProviderId) -> String {
+    format!("Provider: {provider} (pick a model with Ctrl+M)")
+}
+
+/// What is said of a provider whose harness's process starts again on it.
+pub(super) fn restart_line(provider: &ProviderId, name: &str) -> String {
+    format!("Provider: {provider} ({name} restarts on it; pick a model with Ctrl+M)")
 }

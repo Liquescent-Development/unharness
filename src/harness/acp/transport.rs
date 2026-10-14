@@ -912,8 +912,15 @@ impl Driver {
     /// [`AgentHooks::respawn_plan`]), once. `Some` is the plan to start it
     /// again with.
     fn learn_from_session(&mut self) -> Option<SpawnPlan> {
-        self.hooks()
-            .learn(&self.spawning.plan, &self.options, &self.cfg);
+        let options = std::mem::take(&mut self.options);
+        let plan = self.learn_from(&options);
+        self.options = options;
+        plan
+    }
+
+    /// What [`Driver::learn_from_session`] does, with what `options` say.
+    fn learn_from(&mut self, options: &SessionOptions) -> Option<SpawnPlan> {
+        self.hooks().learn(&self.spawning.plan, options, &self.cfg);
         if self.restarted {
             return None;
         }
@@ -934,6 +941,16 @@ impl Driver {
         self.reapply = false;
         self.parser.set_replaying(false);
         io.respawn(command);
+    }
+
+    /// `choice` cannot be taken by this session, which keeps what it last
+    /// ran ([`AgentHooks::chooses_at_spawn`]): the conversation is to go on
+    /// in a new one, and nothing is sent.
+    async fn new_session_for(&mut self, choice: String, io: &mut Io<'_>) -> Encoded {
+        self.settle_anchor(io).await;
+        Encoded::NewSession {
+            reason: format!("{choice}: {}", self.hooks().keeps_choices()),
+        }
     }
 
     /// What the session runs, against what was chosen for an agent that
@@ -1372,24 +1389,21 @@ impl StreamProtocol for Driver {
                     Ok(())
                 }
             },
-            // Chosen at spawn: the TUI starts the session again
-            // (`Capabilities::model_per_process`).
+            // Chosen at spawn, and kept by a session as it last ran: the
+            // conversation goes on in a new session, nothing sent here.
             SessionCommand::SetModel(m) if self.hooks().chooses_at_spawn() => {
-                self.cfg.model = Some(m);
-                io.emit(AgentEvent::Notice(format!(
-                    "{harness}'s model is chosen when it starts: it applies from its next start"
-                )))
-                .await;
-                Ok(())
+                return self.new_session_for(format!("model {}", m.model), io).await;
             }
             SessionCommand::SetEffort(e) if self.hooks().chooses_at_spawn() => {
-                self.cfg.effort = e;
-                io.emit(AgentEvent::Notice(format!(
-                    "{harness}'s effort is chosen when it starts: it applies from its next start"
-                )))
-                .await;
-                Ok(())
+                let effort = e.as_deref().unwrap_or("default");
+                return self.new_session_for(format!("effort {effort}"), io).await;
             }
+            SessionCommand::SetProvider(p) if self.hooks().chooses_at_spawn() => {
+                return self.new_session_for(format!("provider {p}"), io).await;
+            }
+            // Only an agent that chooses at spawn runs on a provider of
+            // unharness's (`SpawnPlan::provider`).
+            SessionCommand::SetProvider(_) => Ok(()),
             SessionCommand::SetModel(m) => {
                 self.cfg.model = Some(m.clone());
                 match self
@@ -1650,9 +1664,19 @@ impl Driver {
                     .await;
             }
             // The source is open now: fork it again. Its answer (its
-            // modes, its options) is not this session's.
+            // modes, its options) is not this session's, but the fork runs
+            // the source's model and level: what it says of them is learned
+            // now, so that a process to be started again for it (#164) is,
+            // before it forks; a fork made first would be left behind in
+            // the agent's store (#222).
             (Some(Outstanding::ForkSource), None) => {
                 self.parser.set_replaying(false);
+                if let Some(options) = self.parser.session_options(result.get("configOptions"))
+                    && let Some(plan) = self.learn_from(&options)
+                {
+                    self.restart_with(plan, io);
+                    return Ok(());
+                }
                 let source = self.cfg.resume.clone().unwrap_or_default();
                 return self.fork(&source, true, io).await;
             }

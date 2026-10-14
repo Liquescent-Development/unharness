@@ -1304,6 +1304,7 @@ mod tests {
             id: "spawn".into(),
             description: "look around".into(),
             kind: None,
+            unreported_end: false,
         });
         // Esc clears a draft and then does nothing more, however often.
         type_text(&mut app, "draft");
@@ -1337,6 +1338,7 @@ mod tests {
                 id: id.into(),
                 description: format!("task {id}"),
                 kind: None,
+                unreported_end: false,
             });
         }
         // In a prompt of two rows, Down first moves within the prompt.
@@ -1401,6 +1403,7 @@ mod tests {
                 id: id.into(),
                 description: format!("task {id}"),
                 kind: None,
+                unreported_end: false,
             });
         }
         type_text(&mut app, "draft");

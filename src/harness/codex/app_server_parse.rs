@@ -213,6 +213,7 @@ impl CodexAppServerParser {
             id,
             description: self.child_names.get(thread).cloned().unwrap_or_default(),
             kind: None,
+            unreported_end: false,
         }]
     }
 
@@ -528,6 +529,7 @@ impl CodexAppServerParser {
                         id,
                         description: name,
                         kind: None,
+                        unreported_end: false,
                     });
                 }
             }

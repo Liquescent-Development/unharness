@@ -29,7 +29,7 @@
 
 pub mod per_turn;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::time::Duration;
 
@@ -220,15 +220,27 @@ pub enum Encoded {
     /// Kill the CLI now, with what it started (agy, which has no
     /// interrupt).
     Kill,
-    /// Kill the CLI and start `command` in its place, in the session's
-    /// sandbox, then take `then` (agy, whose model and policy are flags).
-    /// [`StreamProtocol::restarted`] is told how that went. The new CLI is
-    /// a new connection: its requests are numbered from 1 again, and no
-    /// answer is routed for a request the old one was sent.
+    /// End the CLI as [`StreamProtocol::shutdown`] says (what a shutdown
+    /// sends it first, stdin closed, `END_GRACE` to exit by itself), and
+    /// once it has exited start `command` in its place, in the session's
+    /// sandbox (agy, whose model and policy are flags). As for
+    /// [`Io::respawn`], what the old CLI says meanwhile is not told, nor its
+    /// exit, and [`StreamProtocol::respawned`] greets the new one; then
+    /// `then`, if any, is carried out, and the commands that came
+    /// meanwhile, which wait for it (a `Shutdown` does not: it ends the
+    /// session instead). The new CLI is a new connection: its requests are
+    /// numbered from 1 again, and no answer is routed for a request the old
+    /// one was sent.
     Restart {
         command: Box<Command>,
-        then: SessionCommand,
+        then: Option<SessionCommand>,
     },
+    /// The session cannot take this model, effort or provider (Mistral
+    /// Vibe pins them on its sessions): the TUI is told
+    /// `SessionRenewed { reason }`, and goes on in a new session as after a
+    /// switch. Nothing else is done: the session stays until the TUI ends
+    /// it, which may first ask it for a handoff summary.
+    NewSession { reason: String },
 }
 
 /// How a session's CLI is ended, when it is shut down or its handle is
@@ -343,18 +355,12 @@ pub trait StreamProtocol: Send + 'static {
         async {}
     }
 
-    /// How the restart of an [`Encoded::Restart`] went: the new CLI is
-    /// running (and the loop goes on with `then`), or it could not be
-    /// started (and `then` is dropped).
-    fn restarted(&mut self, _result: Result<()>) -> Vec<AgentEvent> {
-        Vec::new()
-    }
-
-    /// The CLI an [`Io::respawn`] ended has exited, and `started` says
-    /// whether the one in its place is running: what that one is sent first
-    /// (ACP: `initialize` again). `false` ends the session, as a start that
-    /// failed does: what is running is killed, and the TUI is told
-    /// `ProcessExited` after what this told it.
+    /// The CLI an [`Io::respawn`] or an [`Encoded::Restart`] ended has
+    /// exited, and `started` says whether the one in its place is running:
+    /// what that one is sent first (ACP: `initialize` again). `false` ends
+    /// the session, as a start that failed does: what is running is
+    /// killed, the commands that waited for it are dropped, and the TUI is
+    /// told `ProcessExited` after what this told it.
     fn respawned(
         &mut self,
         started: Result<()>,
@@ -392,6 +398,7 @@ pub fn start<P: StreamProtocol>(
         requests: Requests::default(),
         asked: None,
         respawning: None,
+        waiting: None,
         closing: None,
         shutting_down: false,
     };
@@ -412,8 +419,12 @@ struct Loop<P> {
     /// What the protocol asked of `proc` through [`Io`] and the loop has
     /// not taken in yet ([`Loop::take_asked`]).
     asked: Option<Asked>,
-    /// `proc` is ending to be started again as this ([`Io::respawn`]).
+    /// `proc` is ending to be started again as this ([`Io::respawn`],
+    /// [`Encoded::Restart`]).
     respawning: Option<Box<Command>>,
+    /// For an [`Encoded::Restart`]: the commands carried out once the new
+    /// CLI is running, its `then` first, and those that came meanwhile.
+    waiting: Option<VecDeque<SessionCommand>>,
     /// `proc` was ended with a [`Shutdown::Request`].
     closing: Option<Closing>,
     /// What a restarted CLI is confined by: the session's.
@@ -455,8 +466,7 @@ impl<P: StreamProtocol> Loop<P> {
                     self.command(cmd).await;
                 }
                 raw = self.proc.lines.recv() => match raw {
-                    // A CLI ending to be started again says nothing more.
-                    Some(RawLine::Stdout(_) | RawLine::Stderr(_)) if self.respawning.is_some() => {}
+                    Some(RawLine::Stderr(_)) if self.respawning.is_some() => {}
                     Some(RawLine::Exited(_)) if self.respawning.is_some() && !self.shutting_down => {
                         if !self.respawn().await {
                             return;
@@ -472,6 +482,10 @@ impl<P: StreamProtocol> Loop<P> {
                             if self.stop_waiting() {
                                 self.proc.end();
                             }
+                            continue;
+                        }
+                        // A CLI ending to be started again says nothing more.
+                        if self.respawning.is_some() {
                             continue;
                         }
                         let mut io = Io::new(&mut self.proc, &self.events, &mut self.requests, &mut self.asked);
@@ -504,7 +518,9 @@ impl<P: StreamProtocol> Loop<P> {
         if self.stop_waiting() {
             // Its grace starts now rather than with the answer.
             self.proc.end();
-        } else if !self.shutting_down {
+        } else if !self.shutting_down && self.waiting.is_none() {
+            // A CLI ending for a restart was ended as a shutdown ends it:
+            // it keeps its grace, and nothing is started in its place.
             self.proc.kill().await;
         }
     }
@@ -562,12 +578,40 @@ impl<P: StreamProtocol> Loop<P> {
             return false;
         }
         self.take_asked();
+        // What waited for a restart: carried out in order, until one of
+        // them restarts the CLI again, which the rest then waits for.
+        let mut waiting = self.waiting.take().unwrap_or_default();
+        while let Some(cmd) = waiting.pop_front() {
+            self.command(cmd).await;
+            if let Some(next) = self.waiting.as_mut() {
+                next.append(&mut waiting);
+                break;
+            }
+        }
         true
+    }
+
+    /// End the CLI as the protocol's [`StreamProtocol::shutdown`] says, to
+    /// start `command` in its place once it has exited, and `then` after it
+    /// ([`Encoded::Restart`]).
+    async fn restart(&mut self, command: Command, then: Option<SessionCommand>) {
+        let how = self.protocol.shutdown();
+        if let Some(closing) = end(&mut self.proc, &mut self.requests, how).await {
+            self.closing = Some(closing);
+        }
+        self.respawning = Some(Box::new(command));
+        self.waiting = Some(then.into_iter().collect());
     }
 
     /// Carry out `cmd`, and what it led to.
     async fn command(&mut self, cmd: SessionCommand) {
         if cmd == SessionCommand::Shutdown {
+            // Ended already, as a shutdown ends it, for a restart: it is not
+            // started again, and what waited for that is dropped.
+            if self.waiting.take().is_some() {
+                self.shutting_down = true;
+                return;
+            }
             // It ends with that answer, or when it is not answered in time.
             if self.closing.as_ref().is_some_and(|c| c.by.is_some()) {
                 return;
@@ -580,49 +624,41 @@ impl<P: StreamProtocol> Loop<P> {
             }
             return;
         }
-        let mut next = Some(cmd);
-        while let Some(cmd) = next.take() {
-            let (what, offered) = asks(&cmd, &self.caps);
-            if !offered {
-                self.cannot(what).await;
-                continue;
-            }
-            let mut io = Io::new(
-                &mut self.proc,
-                &self.events,
-                &mut self.requests,
-                &mut self.asked,
-            );
-            let encoded = self.protocol.encode(cmd, &mut io).await;
-            self.take_asked();
-            match encoded {
-                Encoded::Write(line) => {
-                    if let Err(e) = self.proc.write_line(&line).await {
-                        for ev in self.protocol.write_failed(e) {
-                            let _ = self.events.send(ev).await;
-                        }
-                    }
-                }
-                Encoded::Done => {}
-                Encoded::Unsupported => self.cannot(what).await,
-                Encoded::Kill => self.proc.kill().await,
-                Encoded::Restart { command, then } => {
-                    self.proc.kill().await;
-                    let started = match LineProcess::spawn(*command, &self.sandbox) {
-                        Ok(proc) => {
-                            self.proc = proc;
-                            self.slot.set(&self.proc);
-                            self.requests = Requests::default();
-                            self.closing = None;
-                            next = Some(then);
-                            Ok(())
-                        }
-                        Err(e) => Err(e),
-                    };
-                    for ev in self.protocol.restarted(started) {
+        // The CLI is being started again: the command waits for it.
+        if let Some(waiting) = self.waiting.as_mut() {
+            waiting.push_back(cmd);
+            return;
+        }
+        let (what, offered) = asks(&cmd, &self.caps);
+        if !offered {
+            self.cannot(what).await;
+            return;
+        }
+        let mut io = Io::new(
+            &mut self.proc,
+            &self.events,
+            &mut self.requests,
+            &mut self.asked,
+        );
+        let encoded = self.protocol.encode(cmd, &mut io).await;
+        self.take_asked();
+        match encoded {
+            Encoded::Write(line) => {
+                if let Err(e) = self.proc.write_line(&line).await {
+                    for ev in self.protocol.write_failed(e) {
                         let _ = self.events.send(ev).await;
                     }
                 }
+            }
+            Encoded::Done => {}
+            Encoded::Unsupported => self.cannot(what).await,
+            Encoded::Kill => self.proc.kill().await,
+            Encoded::Restart { command, then } => self.restart(*command, then).await,
+            Encoded::NewSession { reason } => {
+                let _ = self
+                    .events
+                    .send(AgentEvent::SessionRenewed { reason })
+                    .await;
             }
         }
     }
@@ -637,6 +673,10 @@ impl<P: StreamProtocol> Loop<P> {
     /// behind what was being told: the CLI is then ended as asked, and
     /// killed otherwise.
     async fn gone(&mut self) {
+        // Ended already, as a shutdown ends it, for a restart.
+        if self.waiting.is_some() {
+            return;
+        }
         if self.shutting_down {
             // Nothing will wait for an answer now: its grace starts.
             if self.stop_waiting() {
@@ -682,6 +722,7 @@ fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (&'static str, bool) {
         SessionCommand::SetModel(_) => ("change its model", true),
         SessionCommand::SetEffort(_) => ("change its effort", true),
         SessionCommand::SetPolicy(_) => ("change its permission policy", true),
+        SessionCommand::SetProvider(_) => ("change its provider", true),
         SessionCommand::Shutdown => ("shut down", true),
     }
 }
@@ -771,8 +812,12 @@ mod tests {
         /// Ended with `End` and these lines first, else with `EndOrKill`.
         end_with: Option<Vec<String>>,
         restart: Option<fn() -> Command>,
+        /// A script to restart as, instead of `restart`.
+        restart_as: Option<String>,
         /// `on_deadline` says so once, then.
         deadline: Option<Instant>,
+        /// How often it was asked how its CLI ends.
+        shutdowns: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl Toy {
@@ -782,7 +827,9 @@ mod tests {
                 turn_open: false,
                 end_with: None,
                 restart: None,
+                restart_as: None,
                 deadline: None,
+                shutdowns: Default::default(),
             }
         }
     }
@@ -804,15 +851,22 @@ mod tests {
                     self.turn_open = true;
                     Encoded::Write(text)
                 }
-                SessionCommand::SetModel(_) => match self.restart {
-                    Some(command) => Encoded::Restart {
-                        command: Box::new(command()),
-                        then: SessionCommand::turn("again"),
-                    },
-                    None => Encoded::Done,
-                },
+                SessionCommand::SetModel(_) => {
+                    let command = match (&self.restart_as, self.restart) {
+                        (Some(script), _) => sh(script),
+                        (None, Some(command)) => command(),
+                        (None, None) => return Encoded::Done,
+                    };
+                    Encoded::Restart {
+                        command: Box::new(command),
+                        then: Some(SessionCommand::turn("again")),
+                    }
+                }
                 SessionCommand::Interrupt => Encoded::Kill,
                 SessionCommand::Compact { .. } => Encoded::Unsupported,
+                SessionCommand::SetEffort(e) => Encoded::NewSession {
+                    reason: format!("effort {}", e.unwrap_or_default()),
+                },
                 _ => Encoded::Done,
             }
         }
@@ -847,6 +901,8 @@ mod tests {
         }
 
         fn shutdown(&mut self) -> Shutdown {
+            self.shutdowns
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             match &self.end_with {
                 Some(first) => Shutdown::End {
                     first: first.clone(),
@@ -866,11 +922,14 @@ mod tests {
             io.emit(AgentEvent::Notice("waited".into())).await;
         }
 
-        fn restarted(&mut self, result: Result<()>) -> Vec<AgentEvent> {
-            vec![AgentEvent::Notice(match result {
+        async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+            self.turn_open = false;
+            io.emit(AgentEvent::Notice(match &started {
                 Ok(()) => "restarted".into(),
                 Err(e) => format!("restart failed: {e}"),
-            })]
+            }))
+            .await;
+            started.is_ok()
         }
     }
 
@@ -889,6 +948,8 @@ mod tests {
         at_start: bool,
         restart: Option<fn() -> Command>,
         respawn: Option<fn() -> Command>,
+        /// A line of the CLI's asked for the CLI started again.
+        respawning: bool,
         close: Option<Duration>,
     }
 
@@ -900,6 +961,7 @@ mod tests {
                 at_start: false,
                 restart: None,
                 respawn: None,
+                respawning: false,
                 close: None,
             }
         }
@@ -936,7 +998,7 @@ mod tests {
                 SessionCommand::SetModel(_) => match self.restart {
                     Some(command) => Encoded::Restart {
                         command: Box::new(command()),
-                        then: SessionCommand::turn("again"),
+                        then: Some(SessionCommand::turn("again")),
                     },
                     None => Encoded::Done,
                 },
@@ -955,20 +1017,26 @@ mod tests {
         async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
             io.forward(AgentEvent::TextDelta(line.to_string())).await?;
             match line {
-                "respawn" => io.respawn(self.respawn.expect("no respawn")()),
+                "respawn" => {
+                    self.respawning = true;
+                    io.respawn(self.respawn.expect("no respawn")());
+                }
                 "end" => io.end(),
                 _ => {}
             }
             Ok(())
         }
 
+        // The old CLI's requests went with it. One started again for a
+        // line of the old one's is greeted.
         async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
             self.open.clear();
             match started {
-                Ok(()) => {
+                Ok(()) if std::mem::take(&mut self.respawning) => {
                     self.send("hello", io).await;
                     true
                 }
+                Ok(()) => true,
                 Err(e) => {
                     io.emit(AgentEvent::Notice(format!("respawn failed: {e}")))
                         .await;
@@ -1001,12 +1069,6 @@ mod tests {
                 },
                 None => Shutdown::EndOrKill { turn_open: false },
             }
-        }
-
-        // The old CLI's requests went with it.
-        fn restarted(&mut self, _result: Result<()>) -> Vec<AgentEvent> {
-            self.open.clear();
-            Vec::new()
         }
     }
 
@@ -1337,6 +1399,108 @@ mod tests {
             panic!("the failure was not told");
         };
         assert!(said.starts_with("restart failed: "), "{said}");
+    }
+
+    // The CLI is ended as a shutdown ends it (what it is sent first, its
+    // input closed, its grace), and the next starts only once it has
+    // exited (#286: it was killed, and the next started beside it). A
+    // command sent meanwhile goes to the new one, after the restart's own.
+    #[tokio::test]
+    async fn a_restart_ends_the_cli_as_a_shutdown_does_and_starts_the_next_once_it_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("log");
+        let toy = Toy {
+            end_with: Some(vec!["bye".into()]),
+            restart_as: Some(format!(
+                r#"echo new >> {log}; while read l; do echo "$l"; done"#,
+                log = log.display()
+            )),
+            ..Toy::new()
+        };
+        let old = format!(
+            r#"while read l; do echo "$l" >> {log}; done; sleep 0.3; echo gone >> {log}"#,
+            log = log.display()
+        );
+        let mut h = run(&old, toy);
+        h.send(opus()).await.unwrap();
+        h.send(SessionCommand::turn("after")).await.unwrap();
+        assert_eq!(next(&mut h).await, AgentEvent::Notice("restarted".into()));
+        assert_eq!(next(&mut h).await, AgentEvent::TextDelta("again".into()));
+        assert_eq!(next(&mut h).await, AgentEvent::TextDelta("after".into()));
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap(),
+            "hello\nbye\ngone\nnew\n"
+        );
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        until_exited(&mut h).await;
+    }
+
+    // A shutdown while the CLI ends for a restart ends the session: no CLI
+    // is started again, what waited for the restart is dropped, and the
+    // CLI, ended already as a shutdown ends it, is not ended a second time
+    // (what it is sent first would go to its closed input).
+    #[tokio::test]
+    async fn a_shutdown_during_a_restart_starts_nothing_again() {
+        let toy = Toy {
+            restart: Some(|| sh("echo started; cat >/dev/null")),
+            ..Toy::new()
+        };
+        let shutdowns = toy.shutdowns.clone();
+        let mut h = run("echo $$; cat >/dev/null; sleep 0.3", toy);
+        pid(&mut h).await;
+        h.send(opus()).await.unwrap();
+        h.send(SessionCommand::turn("after")).await.unwrap();
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert_eq!(
+            until_exited(&mut h).await,
+            [AgentEvent::ProcessExited { code: Some(0) }]
+        );
+        assert_eq!(shutdowns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // The handle dropped while the CLI ends for a restart: it keeps its
+    // grace, as a CLI shut down does, and none is started in its place.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_handle_dropped_during_a_restart_leaves_the_cli_its_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = dir.path().join("started");
+        let toy = Toy {
+            restart_as: Some(format!("touch {}; cat >/dev/null", started.display())),
+            ..Toy::new()
+        };
+        let mut h = run(DEAF, toy);
+        let cli = pid(&mut h).await;
+        h.send(opus()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(h);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(crate::core::process::running(cli), "killed, not ended");
+        assert!(gone_within(cli, END_GRACE + Duration::from_secs(2)).await);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!started.exists(), "started again with no session");
+    }
+
+    // A choice the session cannot take is told, and nothing else is done:
+    // the session stays, for the TUI to end (after a handoff summary).
+    #[tokio::test]
+    async fn a_choice_for_a_new_session_is_told_and_the_session_stays() {
+        let mut h = run(ECHO, Toy::new());
+        pid(&mut h).await;
+        assert_eq!(next(&mut h).await, said("hello"));
+        h.send(SessionCommand::SetEffort(Some("off".into())))
+            .await
+            .unwrap();
+        h.send(SessionCommand::turn("summary")).await.unwrap();
+        assert_eq!(
+            next(&mut h).await,
+            AgentEvent::SessionRenewed {
+                reason: "effort off".into()
+            }
+        );
+        assert_eq!(next(&mut h).await, said("summary"));
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        until_exited(&mut h).await;
     }
 
     // What the harness does not offer never reaches its protocol, and

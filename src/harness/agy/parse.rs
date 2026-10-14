@@ -363,6 +363,7 @@ impl AgyParser {
                 role.to_string()
             },
             kind: (!kind.is_empty()).then(|| kind.to_string()),
+            unreported_end: false,
         });
     }
 }

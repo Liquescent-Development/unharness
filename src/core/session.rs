@@ -187,6 +187,10 @@ pub enum SessionCommand {
     SetModel(ModelRef),
     SetEffort(Option<String>),
     SetPolicy(PermissionPolicy),
+    /// The provider the session runs on (`Capabilities::multi_provider`).
+    /// A model is one of its provider's, so none is chosen on the new one
+    /// until a `SetModel`.
+    SetProvider(ProviderId),
     /// Put the session on the vendor's remote control, or take it off
     /// (`Capabilities::remote_control`); `name` names it there.
     RemoteControl {

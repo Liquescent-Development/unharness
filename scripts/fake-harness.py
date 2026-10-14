@@ -35,7 +35,8 @@ until the driver has seen something first.
 
 $UNHARNESS_FAKE_ENV names variables (comma-separated) whose values the
 fake logs as it starts, as `{"env": {name: value or null}}`, for a test of
-what the driver put in the agent's environment.
+what the driver put in the agent's environment. $UNHARNESS_FAKE_ARGV=1
+logs its arguments after that, as `{"argv": [...]}`.
 
 $UNHARNESS_FAKE_PROBE makes the fake try the filesystem before it replays,
 for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
@@ -77,6 +78,9 @@ def main() -> int:
     if log and os.environ.get("UNHARNESS_FAKE_ENV"):
         names = filter(None, os.environ["UNHARNESS_FAKE_ENV"].split(","))
         log.write(json.dumps({"env": {n: os.environ.get(n) for n in names}}) + "\n")
+        log.flush()
+    if log and os.environ.get("UNHARNESS_FAKE_ARGV") == "1":
+        log.write(json.dumps({"argv": sys.argv[1:]}) + "\n")
         log.flush()
     if log and os.environ.get("UNHARNESS_FAKE_PROBE"):
         probe(os.environ["UNHARNESS_FAKE_PROBE"], log)

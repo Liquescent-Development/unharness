@@ -231,7 +231,7 @@ impl App {
                 .push_error("finish or interrupt the current turn before clearing");
             return;
         }
-        if self.refused_while_start_held() {
+        if self.refused_while_settling() {
             return;
         }
         // They would end with the session, and report into the new one.
@@ -325,7 +325,7 @@ impl App {
                 .push_error("finish or interrupt the current turn before resuming");
             return;
         }
-        if self.refused_while_start_held() {
+        if self.refused_while_settling() {
             return;
         }
         let conv = match self.store.load(&id_or_prefix) {

@@ -209,8 +209,10 @@ once (the remote side may show the request until then).
 
 A new Claude process (a sandbox or provider change, the next prompt after
 Claude exited) is put on Remote Control again, with the same link where
-Claude resumes the session; meanwhile the status bar says `remote:
-paused`. Turned on before the session has started, it goes on once it has.
+Claude resumes the session. Meanwhile the status bar says `remote:
+paused`, or, for a provider change, `remote` until the new process has
+started and then `remote: starting` until it is on again. Turned on
+before the session has started, it goes on once it has.
 A switch to another harness, a fork, `/resume`, `/clear` and quitting take
 it off. Elsewhere `/rc` is the agent's own command, if it has one.
 It is not offered in `--print` or `--no-tui` (where Claude's own `/rc`

@@ -249,6 +249,176 @@ async fn claude_reports_running_on_another_provider() {
     }
 }
 
+/// What the fake logged, a word each: its environment and arguments as it
+/// started (`env …`, `argv`), a control request by its subtype (with `on`
+/// or `off` for Remote Control), a JSON-RPC request by its method, `user`
+/// for a turn, `ended` once its input closed.
+fn logged(fake: &Fake) -> Vec<String> {
+    fake.sent_lines()
+        .iter()
+        .map(|v| {
+            if let Some(env) = v.get("env") {
+                format!("env {env}")
+            } else if v.get("argv").is_some() {
+                "argv".into()
+            } else if v.get("ended").is_some() {
+                "ended".into()
+            } else if let Some(subtype) = v.pointer("/request/subtype").and_then(Value::as_str) {
+                match v.pointer("/request/enabled").and_then(Value::as_bool) {
+                    Some(true) => format!("{subtype} on"),
+                    Some(false) => format!("{subtype} off"),
+                    None => subtype.to_string(),
+                }
+            } else if let Some(method) = v["method"].as_str() {
+                method.to_string()
+            } else {
+                v["type"].as_str().unwrap_or("?").to_string()
+            }
+        })
+        .collect()
+}
+
+/// The arguments each process of the fake was started with.
+fn argvs(fake: &Fake) -> Vec<Vec<String>> {
+    fake.sent_lines()
+        .iter()
+        .filter_map(|v| v.get("argv")?.as_array().cloned())
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
+        .collect()
+}
+
+/// Claude takes its provider from its environment: its driver ends the
+/// process as a shutdown does (`interrupt`, then its input closed), starts
+/// it again once it is gone, resuming the session on the new provider with
+/// no model, greets it as a session's and puts it back on Remote Control,
+/// and tells the TUI `Restarted` (#275: before, the TUI ended the session
+/// and started it again, which sent the same lines).
+#[tokio::test]
+async fn claude_starts_again_on_a_new_provider_resumed_and_back_on_remote_control() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/remote_control_prompt.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env.extend([
+        ("UNHARNESS_FAKE_ARGV".to_string(), "1".to_string()),
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "CLAUDE_CODE_USE_BEDROCK".to_string(),
+        ),
+        ("UNHARNESS_FAKE_LINGER".to_string(), "0.2".to_string()),
+    ]);
+    let mut handle = unharness::harness::claude::ClaudeHarness::default()
+        .start_session(cfg)
+        .unwrap();
+    handle
+        .send(SessionCommand::RemoteControl {
+            enabled: true,
+            name: Some("unharness-rec".into()),
+        })
+        .await
+        .unwrap();
+    handle
+        .send(SessionCommand::turn("Reply with the single word: ready."))
+        .await
+        .unwrap();
+    // The local turn, then the remote one.
+    let mut turns = 0;
+    while turns < 2 {
+        if matches!(
+            next_event(&mut handle).await,
+            AgentEvent::TurnCompleted { .. }
+        ) {
+            turns += 1;
+        }
+    }
+    handle
+        .send(SessionCommand::SetProvider("bedrock".into()))
+        .await
+        .unwrap();
+    while next_event(&mut handle).await != AgentEvent::Restarted {}
+    let sent = fake.sent_lines_eventually(11).await;
+    assert_eq!(
+        logged(&fake),
+        [
+            r#"env {"CLAUDE_CODE_USE_BEDROCK":null}"#,
+            "argv",
+            "initialize",
+            "remote_control on",
+            "user",
+            "interrupt",
+            "ended",
+            r#"env {"CLAUDE_CODE_USE_BEDROCK":"1"}"#,
+            "argv",
+            "initialize",
+            "remote_control on",
+        ],
+        "{sent:?}"
+    );
+    let argvs = argvs(&fake);
+    let has = |argv: &[String], flag: &str| argv.iter().any(|a| a == flag);
+    assert!(has(&argvs[0], "--model") && !has(&argvs[0], "--resume"));
+    let resume = argvs[1].iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(argvs[1][resume + 1], "4d8c8163-a279-4dd8-8d61-ed5ec4f6c939");
+    assert!(!has(&argvs[1], "--model") && !has(&argvs[1], "--fork-session"));
+    let named = sent
+        .iter()
+        .filter(|v| v.pointer("/request/name") == Some(&serde_json::json!("unharness-rec")))
+        .count();
+    assert_eq!(named, 2);
+    shut_down(&mut handle).await;
+}
+
+/// A provider Claude does not have: no process can be started on it, so
+/// the session ends as a shutdown ends it (`interrupt`, its input closed,
+/// its grace), never killed, and the TUI is told why and `ProcessExited`.
+#[tokio::test]
+async fn claude_ends_as_a_shutdown_does_on_a_provider_it_cannot_start_on() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/provider_vertex.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_LINGER".to_string(), "0.2".to_string()));
+    let mut handle = unharness::harness::claude::ClaudeHarness::default()
+        .start_session(cfg)
+        .unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle
+        .send(SessionCommand::SetProvider("nowhere".into()))
+        .await
+        .unwrap();
+    let mut events = Vec::new();
+    loop {
+        let ev = next_event(&mut handle).await;
+        let exited = matches!(ev, AgentEvent::ProcessExited { .. });
+        events.push(ev);
+        if exited {
+            break;
+        }
+    }
+    assert!(
+        matches!(&events[..], [.., AgentEvent::Error(e), AgentEvent::ProcessExited { .. }]
+            if e.starts_with("could not start claude again: ")),
+        "{events:?}"
+    );
+    // Its input closed after `interrupt`, it finished by itself.
+    assert_eq!(
+        logged(&fake)[2..],
+        ["interrupt".to_string(), "ended".to_string()],
+        "{:?}",
+        logged(&fake)
+    );
+}
+
 #[tokio::test]
 async fn claude_permission_round_trip_and_question() {
     if !python_available() {
@@ -1073,6 +1243,70 @@ async fn codex_app_server_reports_its_provider() {
     }
 }
 
+/// Codex's app-server takes its provider on its command line and a thread
+/// on `thread/resume`: its driver ends the server as a shutdown does (its
+/// input closed), starts it again once it is gone on the new provider,
+/// resuming the thread, and tells the TUI `Restarted` (#275: before, the
+/// TUI ended the session and started it again, which sent the same lines).
+#[tokio::test]
+async fn codex_app_server_starts_again_on_a_new_provider_resuming_its_thread() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_two_turns.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env.extend([
+        ("UNHARNESS_FAKE_ARGV".to_string(), "1".to_string()),
+        ("UNHARNESS_FAKE_LINGER".to_string(), "0.2".to_string()),
+    ]);
+    let mut handle = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    )
+    .start_session(cfg)
+    .unwrap();
+    handle.send(SessionCommand::turn("pong?")).await.unwrap();
+    run_turn(&mut handle, |_| None).await;
+    handle
+        .send(SessionCommand::SetProvider("llama".into()))
+        .await
+        .unwrap();
+    while next_event(&mut handle).await != AgentEvent::Restarted {}
+    let sent = fake.sent_lines_eventually(12).await;
+    assert_eq!(
+        logged(&fake),
+        [
+            "argv",
+            "initialize",
+            "initialized",
+            "thread/start",
+            "skills/list",
+            "turn/start",
+            "ended",
+            "argv",
+            "initialize",
+            "initialized",
+            "thread/resume",
+            "skills/list",
+        ],
+        "{sent:?}"
+    );
+    let argvs = argvs(&fake);
+    let chosen = r#"model_provider="llama""#;
+    assert!(!argvs[0].iter().any(|a| a == chosen));
+    assert!(argvs[1].iter().any(|a| a == chosen), "{:?}", argvs[1]);
+    let resume = sent
+        .iter()
+        .find(|v| v["method"] == "thread/resume")
+        .unwrap();
+    assert_eq!(
+        resume["params"],
+        serde_json::json!({"threadId": "01a10023-e1c2-7e82-a9e5-4d53ffccb2be", "modelProvider": "llama"})
+    );
+    shut_down(&mut handle).await;
+}
+
 #[tokio::test]
 async fn codex_app_server_asks_before_an_mcp_tool_call() {
     if !python_available() {
@@ -1505,8 +1739,9 @@ async fn agy_stream_session_runs_two_turns() {
 }
 
 /// agy's model is a flag: the turn after a change goes to a new process,
-/// which the session's process slot names from then on, and the one it
-/// replaced is gone.
+/// which the session's process slot names from then on, and which starts
+/// only once the one it replaces is gone (#286: that one was killed, and
+/// the new one started beside it).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
@@ -1517,10 +1752,16 @@ async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
     let fixture = repo().join("src/harness/agy/fixtures/turn.jsonl");
     let pids = fake._tmp.path().join("pids");
     let mut cfg = fake.config(&fixture, PermissionPolicy::AcceptEdits, true);
-    cfg.env.push((
-        "UNHARNESS_FAKE_BACKGROUND".into(),
-        format!("group:{}", pids.display()),
-    ));
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_BACKGROUND".into(),
+            format!("group:{}", pids.display()),
+        ),
+        // Each process says when it starts, and one whose input closed
+        // takes a while to finish.
+        ("UNHARNESS_FAKE_ARGV".into(), "1".into()),
+        ("UNHARNESS_FAKE_LINGER".into(), "0.5".into()),
+    ]);
     let mut handle = unharness::harness::agy::AgyHarness
         .start_session(cfg)
         .unwrap();
@@ -1553,7 +1794,14 @@ async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
     ));
     let (second, _) = background_pids(&pids).await;
     assert_ne!(first, second);
-    assert!(gone_within(first, Duration::from_secs(5)).await);
+    assert!(!running(first), "started beside the process it replaces");
+    // The first was ended (its input closed), not killed, and had finished
+    // before the second started.
+    let started: Vec<String> = logged(&fake)
+        .into_iter()
+        .filter(|l| l == "argv" || l == "ended")
+        .collect();
+    assert_eq!(started, ["argv", "ended", "argv"]);
     let turns: Vec<Value> = fake
         .sent_lines()
         .into_iter()
@@ -5021,8 +5269,11 @@ async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
             "session/prompt",
         ]
     );
-    // A change sent to the running session is not passed on: the TUI
-    // starts the session again for it (`model_per_process`).
+    // A change sent to the running session is not passed on: the session
+    // keeps what it last ran, so the conversation is to go on in a new one
+    // (`SessionRenewed`), and nothing goes to vibe (#275: before, the TUI
+    // decided this, and the driver only said it applied from the next
+    // start).
     handle
         .send(SessionCommand::SetEffort(Some("high".into())))
         .await
@@ -5035,17 +5286,105 @@ async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
         )))
         .await
         .unwrap();
-    for _ in 0..2 {
-        assert!(matches!(
+    handle
+        .send(SessionCommand::SetProvider("lan".into()))
+        .await
+        .unwrap();
+    let why = unharness::harness::vibe::KEEPS_CHOICES;
+    for choice in ["effort high", "model other", "provider lan"] {
+        assert_eq!(
             next_event(&mut handle).await,
-            AgentEvent::Notice(_)
-        ));
+            AgentEvent::SessionRenewed {
+                reason: format!("{choice}: {why}")
+            }
+        );
     }
+    let sent = fake.sent_lines();
     assert!(
-        !fake
-            .sent_lines()
+        !sent
             .iter()
             .any(|v| v["params"]["configId"] == "model" || v["params"]["configId"] == "thinking")
+    );
+    assert_eq!(sent.last().unwrap()["method"], "session/prompt");
+    shut_down(&mut handle).await;
+}
+
+/// A fork (#160) whose first process is started again for its level
+/// (#164): the reattached source's answer names the model, which is learned
+/// before the fork is made, so that only the process started again forks.
+/// Before #222 the first process forked too, and its fork was left in
+/// vibe's store, never closed.
+#[tokio::test]
+async fn vibe_forks_only_in_the_process_started_again_for_its_level() {
+    if !python_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let vibe = vibe_harness_recorded_in_ask(&home.path().join("uh-profiles"));
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_fork.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = Some(ModelRef::new(
+        HarnessId::VIBE,
+        "agent",
+        "mistral-medium-3.5",
+    ));
+    cfg.effort = Some("off".into());
+    cfg.resume = Some(VIBE_FORK_SOURCE.into());
+    cfg.fork = true;
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "VIBE_ACTIVE_MODEL,VIBE_MODELS".to_string(),
+        ),
+        (
+            "VIBE_HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        ),
+    ]);
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("What was the code word?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::SessionStarted { session_id, .. } => Some(session_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [VIBE_FORK]);
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, "pineapple", "{events:?}");
+
+    let entry = r#"[{"alias":"mistral-medium-3.5","name":"mistral-vibe-cli-latest","provider":"mistral","thinking":"off"}]"#;
+    let with_entry = format!(
+        r#"env {{"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":{}}}"#,
+        serde_json::to_string(entry).unwrap()
+    );
+    assert_eq!(
+        env_and_methods(&fake),
+        [
+            r#"env {"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":null}"#,
+            "initialize",
+            "session/fork",
+            "session/load",
+            &with_entry,
+            "initialize",
+            "session/fork",
+            "session/load",
+            "session/fork",
+            "session/set_config_option \"mode\"",
+            "session/prompt",
+        ]
     );
     shut_down(&mut handle).await;
 }

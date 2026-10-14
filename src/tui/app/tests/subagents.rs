@@ -258,6 +258,7 @@ fn a_subagents_own_subagent_outlives_it() {
         id: "inner".into(),
         description: "look".into(),
         kind: None,
+        unreported_end: false,
     });
     let ended = |app: &mut App, id: &str| {
         app.on_event(AgentEvent::SubagentEnded {
@@ -306,6 +307,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
             id: "deep".into(),
             description: "deeper".into(),
             kind: None,
+            unreported_end: false,
         },
     ));
     app.on_event(sub("deep", read_call("d1", "c.txt")));
@@ -580,7 +582,18 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
 fn vibe_with_unseen_child(app: &mut App) {
     use crate::harness::vibe::subagents::UNSEEN_END;
     prompted_vibe(app);
-    spawn(app, "s1", "scribe", Some("scribe"));
+    app.on_event(AgentEvent::ToolCallStarted {
+        id: "s1".into(),
+        name: "Agent".into(),
+        input: serde_json::json!({ "description": "scribe" }),
+    });
+    // As vibe's reader says it (`vibe::subagents`).
+    app.on_event(AgentEvent::SubagentStarted {
+        id: "s1".into(),
+        description: "scribe".into(),
+        kind: Some("scribe".into()),
+        unreported_end: true,
+    });
     app.on_event(AgentEvent::SubagentProgress {
         id: "s1".into(),
         activity: UNSEEN_END.into(),
@@ -592,15 +605,16 @@ fn vibe_with_unseen_child(app: &mut App) {
     app.take_actions();
 }
 
-/// A subagent whose end may never be told (`unreported_ends`) stays
-/// listed at work with its note, but keeps nothing busy and holds back
-/// nothing that would end the session; it goes with the session.
+/// A subagent whose end may never be told (its start says so,
+/// `unreported_end`) stays listed at work with its note, but keeps nothing
+/// busy and holds back nothing that would end the session; it goes with
+/// the session.
 #[test]
 fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     use crate::core::SubagentStatus;
     use crate::harness::vibe::subagents::UNSEEN_END;
     let (mut app, _cwd) = vibe_app();
-    assert!(app.caps().subagents.unreported_ends && !app.caps().subagents.stop);
+    assert!(!app.caps().subagents.stop);
     vibe_with_unseen_child(&mut app);
     let rows = app.subagent_rows();
     assert_eq!(rows.len(), 1);
@@ -622,6 +636,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     // An effort change starts a new session, and the subagent goes
     // with the old one.
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_effort(), Some("off"));
     assert!(app.subagents.is_empty());
@@ -635,6 +651,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let (mut app, _cwd) = vibe_app();
     vibe_with_unseen_child(&mut app);
     app.set_model("glm-5-3".into());
+    app.take_actions();
+    vibe_renews(&mut app, "model glm-5-3");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_model().unwrap().model, "glm-5-3");
 
@@ -650,6 +668,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let (mut app, _cwd) = vibe_app_with_provider();
     vibe_with_unseen_child(&mut app);
     app.set_provider("lan".into());
+    app.take_actions();
+    vibe_renews(&mut app, "provider lan");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.chosen_provider(), Some(&"lan".into()));
 
@@ -664,6 +684,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     });
     app.take_actions();
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     let ask = sent_turn(&mut app);
     assert!(ask.contains("new session of yours"), "{ask}");
 }
@@ -675,7 +697,7 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
 fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.sandbox = SandboxSetup::null(None);
-    assert!(app.caps().subagents.stop && !app.caps().subagents.unreported_ends);
+    assert!(app.caps().subagents.stop);
     app.bridge_max_chars = Some(300);
     app.submit_prompt("delegate".into());
     app.take_actions();
@@ -726,7 +748,7 @@ fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     // Antigravity tells the end but cannot stop one: the user is only
     // told to wait.
     let mut app = test_app(HarnessId::AGY);
-    assert!(app.caps().subagents.reported && !app.caps().subagents.unreported_ends);
+    assert!(app.caps().subagents.reported);
     assert!(!app.caps().subagents.stop);
     app.submit_prompt("delegate".into());
     app.take_actions();

@@ -45,8 +45,9 @@ impl App {
         }
         // A picker the user asked for and moved on from stays shut.
         self.open_when_listed = None;
-        if self.shell.is_some() || !self.require_policy() {
-            // Kept until the `!` command has ended, or a policy is chosen.
+        if self.shell.is_some() || self.choice_pending.is_some() || !self.require_policy() {
+            // Kept until the `!` command has ended, the session has taken
+            // the choice it was sent, or a policy is chosen.
             self.queued.push_back(QueuedPrompt {
                 text,
                 attachments: std::mem::take(&mut self.attachments),
@@ -169,10 +170,20 @@ impl App {
 
     /// Send the oldest queued prompt, if idle. Returns whether one was sent.
     pub fn send_next_queued(&mut self) -> bool {
-        if self.is_generating || self.shell.is_some() || self.effective_policy().is_none() {
+        self.send_queued(0)
+    }
+
+    /// Send the queued prompt at `at`, if idle; the others keep their
+    /// places. Returns whether one was sent.
+    pub(super) fn send_queued(&mut self, at: usize) -> bool {
+        if self.is_generating
+            || self.shell.is_some()
+            || self.choice_pending.is_some()
+            || self.effective_policy().is_none()
+        {
             return false;
         }
-        let Some(q) = self.queued.pop_front() else {
+        let Some(q) = self.queued.remove(at) else {
             return false;
         };
         // Whether it runs as a command depends on the harness: one typed
@@ -193,7 +204,7 @@ impl App {
                 format!("{}\n{}", q.text, self.input)
             };
             self.attachments.extend(q.attachments);
-            return self.send_next_queued();
+            return self.send_queued(at);
         }
         let pending = std::mem::replace(&mut self.attachments, q.attachments);
         self.submit_prompt(q.text);
@@ -299,12 +310,20 @@ impl App {
     }
 
     /// The CLI did not stop when asked: end its process and the turn. The
-    /// next prompt starts it again on the same session.
+    /// next prompt starts it again on the same session, unless the turn
+    /// was a handoff summary: the switch it was for goes ahead, or the new
+    /// session it was for starts, told the conversation (#226).
     fn end_stuck_turn(&mut self) {
-        self.transcript.push_notice(format!(
-            "{} did not stop, so its process was ended; the next prompt resumes the session",
-            self.short_name()
-        ));
+        let name = self.short_name();
+        self.transcript.push_notice(match self.handoff {
+            None => format!(
+                "{name} did not stop, so its process was ended; the next prompt resumes the session"
+            ),
+            Some(h) if h.renew => format!(
+                "{name} did not stop, so its process was ended; a new session starts with the change, and your next prompt tells it the conversation so far"
+            ),
+            Some(_) => format!("{name} did not stop, so its process was ended"),
+        });
         // What the turn changed is told before the next process is watched.
         self.check_guard();
         self.shutdown_session();

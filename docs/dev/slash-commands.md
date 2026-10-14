@@ -61,9 +61,11 @@ listed until the next process).
 ## Sessions started before the first prompt
 
 The TUI starts the active harness's session whenever it is idle with
-none and a policy is chosen (launch, a switch, a resume, a sandbox or
-provider change), not with the first prompt, so that the list is there
-before it (#118). Until a prompt goes to it the session is not the
+none and a policy is chosen (launch, a switch, a resume, a sandbox
+change, a provider changed before anything was sent), not with the first
+prompt, so that the list is there
+before it (#118). (A provider changed after a prompt is the driver's:
+it starts its CLI again itself, #275.) Until a prompt goes to it the session is not the
 conversation's (the field `App::session_blank`: nothing saved, its id held back,
 the bridge sent whole); a model, effort or policy chosen meanwhile
 starts it again with the choice, and one that exits, fails to start or

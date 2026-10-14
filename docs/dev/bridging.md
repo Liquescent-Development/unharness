@@ -17,6 +17,25 @@ between 8,000 and 2,000,000 tokens. Unverified: a
 summary turn on pi, agy or an ACP agent, and one in which the agent
 asks for a tool anyway.
 
+## A new session for a choice
+
+A model, effort or provider the session cannot take (Mistral Vibe pins
+them on its sessions) is the driver's to say (#275): it answers
+`Encoded::NewSession`, the loop tells `AgentEvent::SessionRenewed`, and
+the TUI goes on in a new session of the same harness as after a switch
+(`App::session_renewed`): over the budget the session left, still live,
+writes a handoff summary first (`renew_handoff_prompt`), then it is
+forgotten and shut down, and the next prompt bridges the conversation to
+the new one. A prompt typed between the choice and that answer waits for
+it, and goes once the choice is taken (prompts held before it still
+wait for Enter); another such choice, and what would end the session,
+is refused until then; a session that ends first is forgotten as the
+answer would have had it. With no prompted session to say so (none live, or a stored one
+started before the first prompt), the harness's declaration does
+(`Capabilities::stored_session_keeps`). A turn that does not stop while
+the summary is written is ended with its process, and the notice says
+that a new session starts with the change (#226).
+
 ## Sessions in place of one not resumed or forked
 
 A session that a harness runs in place of one it could not resume or

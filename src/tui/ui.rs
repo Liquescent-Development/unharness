@@ -4179,6 +4179,7 @@ mod tests {
             id: "spawn".into(),
             description: "look around".into(),
             kind: Some("Explore".into()),
+            unreported_end: false,
         });
         check(&mut app, 70, "subagent started");
         app.on_event(crate::core::AgentEvent::ToolCallResult {
@@ -4213,6 +4214,7 @@ mod tests {
             id: "spawn".into(),
             description: "look around".into(),
             kind: Some("Explore".into()),
+            unreported_end: false,
         });
         check(&mut app, 70, "subagent back at work");
         app.on_event(crate::core::AgentEvent::SubagentEnded {
@@ -4316,6 +4318,7 @@ mod tests {
             id: "spawn".into(),
             description: "look around".into(),
             kind: Some("Explore".into()),
+            unreported_end: false,
         });
         app.on_event(crate::core::AgentEvent::ToolCallResult {
             id: "spawn".into(),
@@ -4412,6 +4415,7 @@ mod tests {
                 id: id.into(),
                 description: description.into(),
                 kind: Some("Explore".into()),
+                unreported_end: false,
             });
             app.on_event(crate::core::AgentEvent::ToolCallResult {
                 id: id.into(),
@@ -4534,6 +4538,7 @@ mod tests {
                 id: id.clone(),
                 description: format!("task {i}"),
                 kind: Some("Explore".into()),
+                unreported_end: false,
             });
             app.on_event(crate::core::AgentEvent::ToolCallResult {
                 id,
@@ -4653,6 +4658,7 @@ mod tests {
             id: "s5".into(),
             description: "task 5".into(),
             kind: Some("Explore".into()),
+            unreported_end: false,
         });
         let rows = list(&mut app);
         assert!(rows[0].contains("Subagents · 1 running"), "{rows:#?}");
@@ -4951,6 +4957,7 @@ mod tests {
             id: "spawn".into(),
             description: "look around".into(),
             kind: Some("Explore".into()),
+            unreported_end: false,
         });
         app.open_subagent_picker();
         assert!(matches!(app.modal, Some(Modal::Subagents(_))));

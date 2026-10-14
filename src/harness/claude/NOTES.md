@@ -105,6 +105,23 @@ choice; a switch in the settings' `env` cannot be overridden. Without
 credentials Vertex and Foundry listed their models at once, Bedrock
 after 60 s, and a Vertex turn failed after two `api_retry` with
 `cloud_credential_error` (`fixtures/provider_vertex.jsonl`).
+The switch is in Claude's environment, so a provider chosen after a
+prompt has the driver start Claude again on it (#275; before, the TUI
+ended the session and started it): `interrupt`, its input closed, and
+once it is gone `--resume` of the session with no model, greeted with
+`initialize` and put back on Remote Control if it was on, the lines the
+TUI's restart sent (`claude_starts_again_on_a_new_provider_resumed_and_back_on_remote_control`,
+e2e, not run live); the TUI is told `Restarted`. It is offered only
+between turns (`Capabilities::between_turns`). Since the TUI no longer
+ends the session for it, the "Waiting for the previous Claude to exit"
+flash and the refusal of a switch, resume, fork, rewind or `/clear`
+while the old process exits are gone: the driver keeps what is sent
+meanwhile for the new process, and a `Shutdown` meanwhile ends the
+session instead. Until Claude has been started again (`Restarted`) the
+TUI holds prompts, and refuses another provider and what would end the
+session ("is still taking the provider just chosen"). A provider Claude
+does not have (`/provider nowhere`) ends the session as a shutdown does,
+with the error, as the failed start did before.
 Unverified: a turn on any of them with credentials, `_MANTLE` beside
 `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
 `CLAUDE_CODE_USE_GATEWAY` (left alone).

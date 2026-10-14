@@ -8,10 +8,10 @@
 //! (`AgentHooks::chooses_at_spawn`): the transport then never sends the
 //! model or effort option, puts the environment of the hooks' plan
 //! ([`SpawnPlan`], `AgentHooks::spawn_plan`) in the agent's process, and a
-//! change of either starts a new process, and a new session once the old
-//! one was prompted (`Capabilities::model_per_process`): vibe pins a
-//! session's model and level at every turn, and the pins outrank its
-//! environment when the session is loaded.
+//! change of either sent to a session is answered `NewSession`: vibe pins
+//! a session's model and level at every turn, and the pins outrank its
+//! environment when the session is loaded. (One made before anything was
+//! sent starts the process again with it, the TUI's.)
 //!
 //! What the environment has to say can depend on what only a session
 //! tells (vibe's thinking level goes in a whole model entry, which needs

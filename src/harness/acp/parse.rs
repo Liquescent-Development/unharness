@@ -1439,7 +1439,7 @@ mod tests {
         let events = vibe_events("vibe_acp_subagent");
         let at = |want: &dyn Fn(&AgentEvent) -> bool| events.iter().position(want).unwrap();
         let started = at(&|e| {
-            matches!(e, AgentEvent::SubagentStarted { id, description, kind }
+            matches!(e, AgentEvent::SubagentStarted { id, description, kind, .. }
                 if id == spawn && description == "scribe" && kind.as_deref() == Some("scribe"))
         });
         let asked = at(&|e| {

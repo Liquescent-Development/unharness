@@ -21,8 +21,8 @@ pub mod session;
 pub mod testing;
 
 pub use caps::{
-    Capabilities, McpChannel, McpSupport, PermissionPolicy, PolicyResolution, PolicySupport,
-    PolicyUnavailable, RewindSupport, SubagentSupport, resolve_policy,
+    Capabilities, Choices, McpChannel, McpSupport, PermissionPolicy, PolicyResolution,
+    PolicySupport, PolicyUnavailable, RewindSupport, SubagentSupport, resolve_policy,
 };
 pub use event::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HookOutcome, PermissionDecision,

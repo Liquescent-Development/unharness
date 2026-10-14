@@ -21,7 +21,11 @@ fails the session, and merges the given fields over the model's own
 the model option's `description`, so a run's first process that has a
 level and does not know it yet is started again once its session has
 answered (`AgentHooks::learn` and `respawn_plan`), before anything is
-sent (the second process is numbered from id 1 again); the provider is
+sent (the second process is numbered from id 1 again). A fork learns it
+from the answer of the source it reattached, before it forks, so that
+only the process started again makes one (#222: the first process's
+fork had been left in vibe's store, never closed; an e2e test replaying
+`vibe_acp_fork.jsonl`, not run live). The provider is
 read, never written, from the user's `config.toml` entry for the alias,
 else `mistral`. With a level and no model chosen, the model the last
 session ran is pinned with it: in a scratch `VIBE_HOME` the first
@@ -38,10 +42,30 @@ session restarted with `thinking: high` in `VIBE_MODELS` loaded at `off`,
 and with `VIBE_ACTIVE_MODEL=glm-5-3` on `mistral-medium-3.5`. ACP has no
 write scoped to a session (`ext_method`, `agent.py:1140`). So, as
 Richard decided, a change before the first prompt starts vibe again
-with it, and after one the session is forgotten and a new one started
-(`App::renew_session`, `Capabilities::model_per_process`), told the
-conversation by the bridge with its budget and, over it, a handoff
-summary from the old session as for a switch. After every session
+with it, and after one the session is forgotten and a new one started,
+told the conversation by the bridge with its budget and, over it, a
+handoff summary from the old session as for a switch. Since #275 that is
+the driver's to say: a model, effort or provider sent to a session that
+was prompted is answered `NewSession` (`AgentHooks::chooses_at_spawn`,
+the reason `vibe::KEEPS_CHOICES`), which the TUI hears as
+`SessionRenewed` and renews from as for a switch (`App::session_renewed`:
+the handoff summary asked of the old session, still live, then the
+session forgotten and shut down); nothing is sent to vibe, and a prompt
+typed before the answer waits for it, while another choice and what
+would end the session (a switch, resume, fork, rewind, `/clear`) are
+refused until then; a session that ends before it answers (quit, its
+process gone) is forgotten all the same, as the answer would have had
+it, so that `--resume` does not bring it back as it ran. The choices are offered only
+between turns (`Capabilities::between_turns`: all three for vibe). Where
+no prompted session can say it, the static declaration does
+(`Capabilities::stored_session_keeps`, one reader,
+`App::stored_session_keeps`): a choice made with no vibe session live, or
+with the live one a stored session started before the first prompt
+(after `--resume`), leaves the stored session for a new one at once, and
+none is made while the vibe before it is still exiting. It stays a flag:
+it decides before a driver could (none is running), or for a session
+the TUI would otherwise start again on the stored session, as it ran.
+After every session
 answer the driver compares `model` and `thinking` with the choice and
 says when they differ (vibe falls back to its default for an alias it
 lacks and resets a level the model does not offer, silently).
@@ -276,8 +300,10 @@ interrupt", recorded; a timeout or a child's failed turn, read in
 child's answer into the parent model's input
 (`_subagents/_notifications.py`) and the client hears nothing, so a
 row the agent did not wait for stays at work until the session ends,
-saying that its end shows only when the agent waits for it. Under
-`unreported_ends` such a row (`App::awaited_subagents`) does not keep
+saying that its end shows only when the agent waits for it. Its start
+says so (`SubagentStarted::unreported_end`, set by vibe's reader; until
+#275 a harness flag, `SubagentSupport::unreported_ends`, which the TUI
+and `--print` both read), and such a row (`App::awaited_subagents`) does not keep
 the TUI busy (status rule, herdr; its own spinner and time still run,
 `has_running_subagents`) and holds back
 neither `/clear`, a model, effort or provider change
@@ -304,8 +330,9 @@ ACP has no method for it, `session/cancel` while the parent waited
 failed the wait and the child ran on and answered (a discovery
 recording, not committed), and only the model can (`subagent.stop`,
 `.interrupt`); so no `stop`. `--print` cannot wait for an end that may
-never be sent: `SubagentSupport::unreported_ends` ends the run with the
-turn and says how many subagents it did not wait for, and the session,
+never be sent: a subagent whose start says its end may go unreported
+(`unreported_end`) is not waited for, so the run ends with the turn and
+says how many subagents it did not wait for, and the session,
 vibe's children with it, goes with the run
 (`fixtures/vibe_acp_subagent_background.jsonl`, an e2e test; live, the
 child answered into the parent's turn and still no end came). Checked
@@ -374,9 +401,10 @@ and name the model's, the level in the entry of the one that runs) and
 parse fails vibe's environment layer. Only the key's variable is named.
 The session lists vibe's own models beside the provider's, and the
 transport reports only the provider's, as its (`SpawnPlan::restrict`).
-`multi_provider` and `provider_per_process` are declared only with a
-provider defined; a change after a prompt starts a new bridged session,
-as a model change does. Recorded (`fixtures/vibe_acp_provider.jsonl`,
+`multi_provider` is declared only with a provider defined, and only then
+does a provider change start a session nothing was sent to again; a
+change after a prompt starts a new bridged session, as a model change
+does (`NewSession`, above). Recorded (`fixtures/vibe_acp_provider.jsonl`,
 `scripts/record-acp.py`, the environment as the driver sets it, the
 server redacted to `https://LOCAL-LLM`): an OpenAI-compatible server
 needing no key, `session/new` listing `mistral-medium-3.5`, `glm-5-3`

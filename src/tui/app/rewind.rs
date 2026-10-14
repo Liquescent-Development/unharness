@@ -102,7 +102,7 @@ impl App {
     /// first put back to how it was before that turn.
     pub fn rewind_to(&mut self, block: usize, restore_files: bool) {
         // A rewind may start a session, which needs a policy.
-        if self.is_generating || self.refused_while_start_held() || !self.require_policy() {
+        if self.is_generating || self.refused_while_settling() || !self.require_policy() {
             return;
         }
         let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
@@ -245,7 +245,7 @@ impl App {
                 .push_error("finish or interrupt the current turn before forking");
             return;
         }
-        if self.refused_while_start_held() {
+        if self.refused_while_settling() {
             return;
         }
         if !self.conversation.has_content() {

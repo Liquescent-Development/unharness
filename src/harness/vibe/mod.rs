@@ -54,6 +54,11 @@ use crate::core::{
 pub const COMMAND: &str = "vibe-acp";
 const DISPLAY_NAME: &str = "Mistral Vibe";
 
+/// Why a session of vibe's cannot take a model, effort or provider chosen
+/// after it started (2.26.1 pins them on the session, and setting them over
+/// ACP writes `config.toml`): said as the conversation goes on in a new one.
+pub const KEEPS_CHOICES: &str = "its sessions keep the model and effort they last ran, and changing them in one would rewrite its own settings";
+
 /// The option that is vibe's reasoning level (category `thinking`, which
 /// the spec does not name).
 pub const EFFORT_OPTION: &str = "thinking";
@@ -584,6 +589,10 @@ struct VibeHooks {
 impl AgentHooks for VibeHooks {
     fn chooses_at_spawn(&self) -> bool {
         true
+    }
+
+    fn keeps_choices(&self) -> &'static str {
+        KEEPS_CHOICES
     }
 
     fn spawn_plan(&self, cfg: &SessionConfig) -> SpawnPlan {
@@ -1192,9 +1201,10 @@ impl Harness for VibeHarness {
     /// `[harnesses.vibe.providers]` more than one, chosen when vibe starts.
     ///
     /// The ACP agent's, with its subagents (`subagents.rs`): a start and,
-    /// when the agent waits for one, its end and report. Nothing stops one
-    /// from outside (no client method; `session/cancel` leaves it running),
-    /// and nothing reports one between turns.
+    /// when the agent waits for one, its end and report (whose start says
+    /// that its end may never be told otherwise). Nothing stops one from
+    /// outside (no client method; `session/cancel` leaves it running), and
+    /// nothing reports one between turns.
     fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities {
             subagents: SubagentSupport {
@@ -1202,13 +1212,11 @@ impl Harness for VibeHarness {
                 described: false,
                 stop: false,
                 report_turn: false,
-                unreported_ends: true,
             },
             ..self.acp.capabilities()
         };
         if !self.providers.is_empty() {
             caps.multi_provider = true;
-            caps.provider_per_process = true;
         }
         caps
     }
@@ -1778,7 +1786,10 @@ provider = "mine"
         assert_eq!(h.descriptor().id, HarnessId::VIBE);
         assert_eq!(h.descriptor().binary_names, [COMMAND]);
         let caps = h.capabilities();
-        assert!(caps.model_per_process);
+        // Chosen at spawn and kept by a session: offered between turns, and
+        // a stored session is left for a new one.
+        assert_eq!(caps.between_turns, crate::core::Choices::ALL);
+        assert_eq!(caps.stored_session_keeps, Some(KEEPS_CHOICES));
         for p in [
             PermissionPolicy::Ask,
             PermissionPolicy::AcceptEdits,
@@ -1811,7 +1822,7 @@ provider = "mine"
         // Started and, when waited for, ended (`subagents.rs`); never
         // stopped from here, and nothing waits for an end that may not come.
         let subagents = caps.subagents;
-        assert!(subagents.reported && subagents.unreported_ends);
+        assert!(subagents.reported);
         assert!(!subagents.stop && !subagents.report_turn);
         assert_eq!(h.min_version(), Some(MIN_VERSION));
         assert_eq!(MIN_VERSION.to_string(), "2.26.1");
@@ -1829,7 +1840,8 @@ provider = "mine"
         assert_eq!(h.descriptor().binary_names, ["/opt/vibe/bin/vibe-acp"]);
         assert_eq!(h.descriptor().display_name, "Vibe (mine)");
         let caps = h.capabilities();
-        assert!(caps.model_per_process);
+        assert_eq!(caps.between_turns, crate::core::Choices::ALL);
+        assert_eq!(caps.stored_session_keeps, Some(KEEPS_CHOICES));
         assert!(caps.supports_policy(PermissionPolicy::Ask).is_none());
         let bad = HarnessSettings {
             rest: toml::toml! { modes = { sometimes = "ask" } },
@@ -2689,7 +2701,8 @@ models = ["qwen3.8-q5kxl-x2", "gemma-4"]
         let cfg: crate::config::Config = toml::from_str(LAN).unwrap();
         let vibe = VibeHarness::from_settings(&cfg.harnesses["vibe"]).unwrap();
         let caps = vibe.capabilities();
-        assert!(caps.multi_provider && caps.provider_per_process && caps.model_per_process);
+        assert!(caps.multi_provider && caps.between_turns.provider);
+        assert!(caps.stored_session_keeps.is_some());
         let listed: Vec<String> = vibe
             .list_providers(bin, &sandbox)
             .unwrap()

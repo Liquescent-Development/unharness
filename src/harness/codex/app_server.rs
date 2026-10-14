@@ -14,8 +14,8 @@ use crate::core::jsonrpc::{self, RequestId, RpcMessage};
 use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelRef, Parser,
-    PermissionDecision, PermissionKind, PermissionPolicy, SessionCommand, SessionConfig,
-    SessionHandle, StopReason,
+    PermissionDecision, PermissionKind, PermissionPolicy, ProviderId, SessionCommand,
+    SessionConfig, SessionHandle, StopReason,
 };
 
 /// `turn/start` input items: the text, then each image by path (codex reads the file).
@@ -175,6 +175,13 @@ pub fn encode_decision(kind: &PermissionKind, decision: &PermissionDecision) -> 
 
 /// `caps` is what the harness declares for app-server.
 pub fn start(cfg: SessionConfig, caps: &Capabilities) -> Result<SessionHandle> {
+    let cmd = server_command(&cfg);
+    let sandbox = cfg.sandbox.clone();
+    driver::start(HarnessId::CODEX, caps, cmd, &sandbox, AppServer::new(cfg))
+}
+
+/// The app-server process of a session for `cfg`.
+fn server_command(cfg: &SessionConfig) -> Command {
     let mut cmd = Command::new(&cfg.binary);
     cmd.arg("app-server").current_dir(&cfg.cwd);
     if cfg.sandbox.is_active() {
@@ -194,8 +201,7 @@ pub fn start(cfg: SessionConfig, caps: &Capabilities) -> Result<SessionHandle> {
     for (k, v) in &cfg.env {
         cmd.env(k, v);
     }
-    let sandbox = cfg.sandbox.clone();
-    driver::start(HarnessId::CODEX, caps, cmd, &sandbox, AppServer::new(cfg))
+    cmd
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +292,24 @@ impl AppServer {
         self.skills_pending = true;
         let params = json!({"cwds": [self.cfg.cwd]});
         io.request_named(SKILLS_ID, "skills/list", params).await
+    }
+
+    /// The provider is chosen on the server's command line
+    /// (`-c model_provider`) and for a thread on `thread/resume`: the server
+    /// is started again on `provider`, resuming the thread, as the TUI
+    /// started it again before this was the driver's (the same command line
+    /// and requests). A model is one of its provider's: none is chosen.
+    fn restart_on(&mut self, provider: ProviderId) -> Command {
+        self.cfg.provider = Some(provider);
+        self.cfg.model = None;
+        self.model = None;
+        self.cfg.effort = self.effort.clone();
+        self.cfg.policy = self.policy;
+        if let Some(thread) = &self.thread_id {
+            self.cfg.resume = Some(thread.clone());
+            self.cfg.fork = false;
+        }
+        server_command(&self.cfg)
     }
 
     /// A turn's input items; `/name` for a skill goes as Codex's own
@@ -493,7 +517,9 @@ impl AppServer {
                 Ok(())
             }
             // Not sent here: `encode`'s and the driver's (`shutdown`).
-            SessionCommand::RemoteControl { .. } | SessionCommand::Shutdown => Ok(()),
+            SessionCommand::RemoteControl { .. }
+            | SessionCommand::SetProvider(_)
+            | SessionCommand::Shutdown => Ok(()),
         }
     }
 
@@ -678,13 +704,19 @@ impl StreamProtocol for AppServer {
     }
 
     async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
-        // Codex has none, and does not declare it.
-        if matches!(cmd, SessionCommand::RemoteControl { .. }) {
-            return Encoded::Unsupported;
+        match cmd {
+            // Codex has none, and does not declare it.
+            SessionCommand::RemoteControl { .. } => Encoded::Unsupported,
+            SessionCommand::SetProvider(p) => Encoded::Restart {
+                command: Box::new(self.restart_on(p)),
+                then: None,
+            },
+            cmd => {
+                let res = self.command(cmd, io).await;
+                report(io, res).await;
+                Encoded::Done
+            }
         }
-        let res = self.command(cmd, io).await;
-        report(io, res).await;
-        Encoded::Done
     }
 
     fn write_failed(&mut self, error: anyhow::Error) -> Vec<AgentEvent> {
@@ -797,6 +829,22 @@ impl StreamProtocol for AppServer {
         Shutdown::EndOrKill {
             turn_open: self.turn_open(),
         }
+    }
+
+    /// Started again on a new provider ([`AppServer::restart_on`]): the TUI
+    /// is told, and the new server is greeted as a session's is.
+    async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+        if let Err(e) = started {
+            io.emit(AgentEvent::Error(format!(
+                "could not start codex again: {e:#}"
+            )))
+            .await;
+            return false;
+        }
+        *self = AppServer::new(self.cfg.clone());
+        io.emit(AgentEvent::Restarted).await;
+        self.start(io).await;
+        true
     }
 }
 
