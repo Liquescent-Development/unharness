@@ -177,6 +177,11 @@ impl Controller {
         }
     }
 
+    /// The harnesses whose capabilities it reads.
+    pub fn registry(&self) -> &Arc<Registry> {
+        &self.registry
+    }
+
     /// Declared capabilities of `harness` plus what a session of it
     /// reported in this run (an ACP agent says at `initialize` whether it
     /// can fork); `None` for one not in the registry.

@@ -66,7 +66,7 @@ impl App {
         if next == self.active {
             return;
         }
-        if self.registry.get(next).is_none() {
+        if self.registry().get(next).is_none() {
             self.transcript
                 .push_error(format!("harness '{next}' is not available"));
             return;
@@ -146,7 +146,7 @@ impl App {
     /// What the next session is called in a handoff's messages.
     fn handoff_target(&self, next: HarnessId, renew: bool) -> String {
         let name = self
-            .registry
+            .registry()
             .get(next)
             .map_or("another agent", |h| h.descriptor().short_name);
         if renew {

@@ -192,7 +192,7 @@ impl App {
             self.transcript.push_notice(format!(
                 "'{}' was typed for {}; it is back in the prompt box",
                 q.text.lines().next().unwrap_or_default(),
-                self.registry
+                self.registry()
                     .get(q.harness)
                     .map_or(q.harness.as_str(), |h| h.descriptor().short_name)
             ));

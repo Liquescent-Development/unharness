@@ -250,7 +250,6 @@ pub struct App {
     pub cwd: PathBuf,
     pub workspace_root: Option<PathBuf>,
     pub git_branch: Option<String>,
-    pub registry: Arc<Registry>,
     pub config: Config,
 
     pub active: HarnessId,
@@ -614,7 +613,7 @@ impl App {
         }
 
         let controller = Controller::new(
-            registry.clone(),
+            registry,
             &config,
             Launch {
                 harness: init.harness,
@@ -650,7 +649,10 @@ impl App {
         let conversation = loaded.unwrap_or_else(|| Conversation::new(init.harness));
         let active = if resumed
             && !init.harness_explicit
-            && registry.get(conversation.active_harness).is_some()
+            && controller
+                .registry()
+                .get(conversation.active_harness)
+                .is_some()
         {
             conversation.active_harness
         } else {
@@ -684,7 +686,6 @@ impl App {
             cwd: init.cwd,
             workspace_root: init.workspace_root,
             git_branch,
-            registry,
             bridge_max_chars: config.bridge_max_chars,
             context_windows: load_context_windows(&context_windows_path),
             context_windows_path,

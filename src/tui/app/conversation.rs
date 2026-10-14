@@ -232,7 +232,7 @@ impl App {
         }
         self.idle_start_paused = false;
         self.persist();
-        let active = if self.registry.get(conv.active_harness).is_some() {
+        let active = if self.registry().get(conv.active_harness).is_some() {
             conv.active_harness
         } else {
             self.active

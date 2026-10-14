@@ -288,7 +288,7 @@ impl App {
                 self.lists_pending.insert(request.clone());
                 self.list_jobs.push(ListJob {
                     request,
-                    registry: self.registry.clone(),
+                    registry: self.registry().clone(),
                     binary,
                     cwd: self.cwd.clone(),
                     sandbox,
@@ -310,7 +310,7 @@ impl App {
         // has none of the harness's commands.
         if let ListRequest::Commands(harness) = request {
             let name = self
-                .registry
+                .registry()
                 .get(harness)
                 .map_or("the harness", |h| h.descriptor().short_name);
             self.transcript

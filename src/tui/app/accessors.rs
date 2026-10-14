@@ -1,8 +1,10 @@
 //! The active harness, what it can do, and what the header and status rule show.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{Action, App};
+use crate::core::registry::Registry;
 use crate::core::{Capabilities, HarnessCommand};
 use crate::harness::{Harness, resolve_binary};
 use crate::tui::modal::Modal;
@@ -10,8 +12,14 @@ use crate::tui::modal::Modal;
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 impl App {
+    /// The harnesses of this run: the controller's, the one its
+    /// capabilities are read from.
+    pub fn registry(&self) -> &Arc<Registry> {
+        self.controller.registry()
+    }
+
     pub fn harness(&self) -> &dyn Harness {
-        self.registry
+        self.registry()
             .get(self.active)
             .expect("active harness is registered")
     }

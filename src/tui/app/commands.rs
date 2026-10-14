@@ -102,7 +102,7 @@ impl App {
         let rest = cmd.trim_start().strip_prefix(name).unwrap_or("").trim();
         match name {
             "/switch" | "/harness" => match arg {
-                Some(a) => match self.registry.parse(&a).map(|h| h.descriptor().id) {
+                Some(a) => match self.registry().parse(&a).map(|h| h.descriptor().id) {
                     // Refused as the picker greys it out.
                     Some(id) if !self.harness_installed(id) => self
                         .transcript
