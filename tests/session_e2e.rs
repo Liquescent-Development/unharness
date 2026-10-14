@@ -5050,6 +5050,86 @@ async fn vibe_chooses_model_and_effort_at_spawn_never_by_option() {
     shut_down(&mut handle).await;
 }
 
+/// A fork (#160) whose first process is started again for its level
+/// (#164): the reattached source's answer names the model, which is learned
+/// before the fork is made, so that only the process started again forks.
+/// Before #222 the first process forked too, and its fork was left in
+/// vibe's store, never closed.
+#[tokio::test]
+async fn vibe_forks_only_in_the_process_started_again_for_its_level() {
+    if !python_available() {
+        return;
+    }
+    let home = tempfile::tempdir().unwrap();
+    let vibe = vibe_harness_recorded_in_ask(&home.path().join("uh-profiles"));
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_fork.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = Some(ModelRef::new(
+        HarnessId::VIBE,
+        "agent",
+        "mistral-medium-3.5",
+    ));
+    cfg.effort = Some("off".into());
+    cfg.resume = Some(VIBE_FORK_SOURCE.into());
+    cfg.fork = true;
+    cfg.env.extend([
+        (
+            "UNHARNESS_FAKE_ENV".to_string(),
+            "VIBE_ACTIVE_MODEL,VIBE_MODELS".to_string(),
+        ),
+        (
+            "VIBE_HOME".to_string(),
+            home.path().to_string_lossy().into_owned(),
+        ),
+    ]);
+    let mut handle = vibe.start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("What was the code word?"))
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::SessionStarted { session_id, .. } => Some(session_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [VIBE_FORK]);
+    let said: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TextDelta(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, "pineapple", "{events:?}");
+
+    let entry = r#"[{"alias":"mistral-medium-3.5","name":"mistral-vibe-cli-latest","provider":"mistral","thinking":"off"}]"#;
+    let with_entry = format!(
+        r#"env {{"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":{}}}"#,
+        serde_json::to_string(entry).unwrap()
+    );
+    assert_eq!(
+        env_and_methods(&fake),
+        [
+            r#"env {"VIBE_ACTIVE_MODEL":"mistral-medium-3.5","VIBE_MODELS":null}"#,
+            "initialize",
+            "session/fork",
+            "session/load",
+            &with_entry,
+            "initialize",
+            "session/fork",
+            "session/load",
+            "session/fork",
+            "session/set_config_option \"mode\"",
+            "session/prompt",
+        ]
+    );
+    shut_down(&mut handle).await;
+}
+
 /// vibe-acp 2.26.1's subagents through the built-in harness under `ask`
 /// (#170): the spawn starts one, the child's write, asked about by an id
 /// no update named, reaches the user as a request no rule can know, and

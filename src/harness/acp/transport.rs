@@ -912,8 +912,15 @@ impl Driver {
     /// [`AgentHooks::respawn_plan`]), once. `Some` is the plan to start it
     /// again with.
     fn learn_from_session(&mut self) -> Option<SpawnPlan> {
-        self.hooks()
-            .learn(&self.spawning.plan, &self.options, &self.cfg);
+        let options = std::mem::take(&mut self.options);
+        let plan = self.learn_from(&options);
+        self.options = options;
+        plan
+    }
+
+    /// What [`Driver::learn_from_session`] does, with what `options` say.
+    fn learn_from(&mut self, options: &SessionOptions) -> Option<SpawnPlan> {
+        self.hooks().learn(&self.spawning.plan, options, &self.cfg);
         if self.restarted {
             return None;
         }
@@ -1650,9 +1657,19 @@ impl Driver {
                     .await;
             }
             // The source is open now: fork it again. Its answer (its
-            // modes, its options) is not this session's.
+            // modes, its options) is not this session's, but the fork runs
+            // the source's model and level: what it says of them is learned
+            // now, so that a process to be started again for it (#164) is,
+            // before it forks; a fork made first would be left behind in
+            // the agent's store (#222).
             (Some(Outstanding::ForkSource), None) => {
                 self.parser.set_replaying(false);
+                if let Some(options) = self.parser.session_options(result.get("configOptions"))
+                    && let Some(plan) = self.learn_from(&options)
+                {
+                    self.restart_with(plan, io);
+                    return Ok(());
+                }
                 let source = self.cfg.resume.clone().unwrap_or_default();
                 return self.fork(&source, true, io).await;
             }

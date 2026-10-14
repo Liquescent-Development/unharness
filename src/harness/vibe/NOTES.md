@@ -21,7 +21,11 @@ fails the session, and merges the given fields over the model's own
 the model option's `description`, so a run's first process that has a
 level and does not know it yet is started again once its session has
 answered (`AgentHooks::learn` and `respawn_plan`), before anything is
-sent (the second process is numbered from id 1 again); the provider is
+sent (the second process is numbered from id 1 again). A fork learns it
+from the answer of the source it reattached, before it forks, so that
+only the process started again makes one (#222: the first process's
+fork had been left in vibe's store, never closed; an e2e test replaying
+`vibe_acp_fork.jsonl`, not run live). The provider is
 read, never written, from the user's `config.toml` entry for the alias,
 else `mistral`. With a level and no model chosen, the model the last
 session ran is pinned with it: in a scratch `VIBE_HOME` the first
