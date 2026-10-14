@@ -122,8 +122,9 @@ fn app_with_a_binary(harness: HarnessId) -> App {
     let mut app = test_app_with(tmp.keep(), harness, None, false, config, test_registry());
     // As in `test_app_in`: a harness without `ask` waits for a choice.
     if app.effective_policy().is_none() {
-        app.policy_choice
-            .insert(harness, PermissionPolicy::AcceptEdits);
+        app.controller
+            .policy
+            .choose_for_conversation(harness, PermissionPolicy::AcceptEdits);
         app.modal = None;
     }
     app
@@ -141,7 +142,8 @@ fn vertex_models() -> ListResult {
 #[test]
 fn completion_asks_for_a_list_once() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.input = "/model ha".into();
     app.update_suggestions();
@@ -173,7 +175,8 @@ fn completion_asks_for_a_list_once() {
 #[test]
 fn a_list_the_user_moved_on_from_does_not_open() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let vertex = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.open_model_picker();
     app.set_provider("bedrock".into());
@@ -182,8 +185,9 @@ fn a_list_the_user_moved_on_from_does_not_open() {
     assert!(app.modal.is_none());
 
     // Nor over a prompt being typed: it is offered instead.
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
-    app.model_cache.clear();
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
+    app.controller.forget_model_lists();
     app.open_model_picker();
     app.input = "half a prompt".into();
     app.on_list(vertex, vertex_models());
@@ -193,7 +197,8 @@ fn a_list_the_user_moved_on_from_does_not_open() {
 #[test]
 fn model_lists_arrive_without_holding_the_screen() {
     let mut app = app_with_a_claude_binary();
-    app.providers.insert(HarnessId::CLAUDE, "vertex".into());
+    app.controller
+        .put_provider(HarnessId::CLAUDE, "vertex".into());
     let wanted = ListRequest::Models(HarnessId::CLAUDE, "vertex".into());
     app.open_model_picker();
     assert!(app.modal.is_none());
@@ -666,6 +671,31 @@ fn a_second_vibe_choice_before_the_answer_is_refused() {
         1,
         "{actions:?}"
     );
+}
+
+/// A driver that answers one choice twice, the second time while the
+/// session writes the handoff summary its first answer asked for: the
+/// summary goes on, and no second one or renewal is started.
+#[test]
+fn a_second_renewal_during_the_summary_changes_nothing() {
+    let (mut app, _cwd) = vibe_app();
+    app.bridge_max_chars = Some(300);
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
+    assert!(sent_turn(&mut app).contains("new session of yours"));
+    let said = app.transcript.blocks.len();
+    vibe_renews(&mut app, "effort off");
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.transcript.blocks.len(), said);
+    assert!(app.is_generating);
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
 }
 
 /// Quitting before vibe has answered a choice: the stored session, which

@@ -1,28 +1,5 @@
 use super::*;
 
-#[test]
-fn policy_resolution_per_harness() {
-    // As with `--policy auto`: agy, which has no `auto`, runs the nearest
-    // less permissive policy and says so.
-    let mut app = test_app(HarnessId::CLAUDE);
-    app.policy_explicit = Some(PermissionPolicy::Auto);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
-    assert!(app.policy_warning().is_none());
-    app.switch_harness(HarnessId::AGY);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
-    assert!(app.policy_warning().unwrap().contains("less permissive"));
-
-    // A policy chosen in the TUI is for the harness it was chosen on.
-    assert!(app.set_policy(PermissionPolicy::Bypass));
-    app.on_event(AgentEvent::TurnCompleted {
-        stop_reason: StopReason::Done,
-    });
-    app.switch_harness(HarnessId::CLAUDE);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Auto));
-    app.switch_harness(HarnessId::AGY);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-}
-
 /// A session that cannot hold a policy (an ACP agent's mode did not
 /// take) takes it out of what is offered: the nearest less permissive
 /// one takes its place and the session is told, or, with none left at
@@ -337,40 +314,6 @@ fn changing_the_policy_does_not_send_a_held_prompt() {
 }
 
 #[test]
-fn a_harness_default_policy_stays_with_its_harness() {
-    let mut config = Config::default();
-    config.harnesses.insert(
-        "agy".into(),
-        crate::config::HarnessSettings {
-            default_policy: Some("bypass".into()),
-            ..Default::default()
-        },
-    );
-    let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_with(
-        tmp.keep(),
-        HarnessId::AGY,
-        None,
-        false,
-        config,
-        test_registry(),
-    );
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-    app.switch_harness(HarnessId::CLAUDE);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
-    app.switch_harness(HarnessId::AGY);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-
-    // A policy set in the TUI is for the harness it was set on.
-    app.switch_harness(HarnessId::CLAUDE);
-    assert!(app.set_policy(PermissionPolicy::AcceptEdits));
-    app.switch_harness(HarnessId::AGY);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-    app.switch_harness(HarnessId::CLAUDE);
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
-}
-
-#[test]
 fn a_choice_made_for_want_of_a_policy_outlives_changes_elsewhere() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
@@ -475,7 +418,7 @@ fn the_policy_picker_saves_a_harness_default() {
         Some("bypass")
     );
     assert_eq!(
-        crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
     assert!(!dir.join("config.toml").exists());
@@ -503,7 +446,7 @@ fn the_policy_picker_saves_a_harness_default() {
             .any(|n| n == "this workspace's settings make bypass pi's default here")
     );
     assert_eq!(
-        crate::runner::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
 

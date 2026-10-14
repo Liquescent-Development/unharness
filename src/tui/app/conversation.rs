@@ -1,10 +1,8 @@
 //! The conversation: saving it, starting a new one, resuming a saved one.
 
-use std::collections::{HashMap, HashSet};
-
 use super::App;
 use crate::core::conversations::{Conversation, now_rfc3339, truncate_title};
-use crate::core::{ContextUsage, HarnessId, ModelRef, Usage};
+use crate::core::{ContextUsage, Usage};
 use crate::tui::modal::{ListPicker, Modal};
 use crate::tui::transcript::Transcript;
 
@@ -40,23 +38,12 @@ impl App {
         c.checkpoints = self.file_checkpoints.clone();
         c.fork_pending = self.fork_pending.iter().copied().collect();
         c.fork_pending.sort_by_key(|h| h.as_str());
-        c.policy = self.policy_explicit;
-        c.policy_choices = self.policy_choice.clone();
-        for h in &self.chosen_models {
-            if let Some(m) = self.models.get(h) {
-                c.models.insert(*h, m.clone());
-            }
-        }
-        for h in &self.chosen_efforts {
-            if let Some(e) = self.efforts.get(h) {
-                c.efforts.insert(*h, e.clone());
-            }
-        }
-        if self.session_seen()
-            && let Some(p) = self.effective_policy()
-        {
-            self.conversation.last_policies.insert(self.active, p);
-        }
+        self.controller.sync_conversation(
+            &self.config,
+            self.active,
+            self.session_seen(),
+            &mut self.conversation,
+        );
         let c = &mut self.conversation;
         if c.title.is_empty()
             && let Some(p) = &self.first_prompt
@@ -87,86 +74,14 @@ impl App {
     }
 
     /// Take what the resumed conversation was run with, its policy, models
-    /// and efforts, except where this run named its own. What the last
-    /// conversation chose goes back to the configured default.
+    /// and efforts, except where this run named its own
+    /// (`Controller::take_conversation`).
     pub(super) fn take_conversation_choices(&mut self) {
-        let conv = &self.conversation;
-        self.policy_explicit = self.run_policy.or(conv.policy);
-        // A policy named in this run for every harness holds over what the
-        // conversation chose for each, also when it is the one the
-        // conversation was named; what this run chose holds over both.
-        self.policy_choice = if self.run_policy.is_none() {
-            conv.policy_choices.clone()
-        } else {
-            HashMap::new()
-        };
-        self.policy_choice.extend(&self.run_choices);
-
-        for h in std::mem::take(&mut self.chosen_models) {
-            if self.run_models.contains(&h) {
-                self.chosen_models.insert(h);
-            } else {
-                match self.configured_model(h) {
-                    Some(m) => self.models.insert(h, m),
-                    None => self.models.remove(&h),
-                };
-            }
-        }
-        for h in std::mem::take(&mut self.chosen_efforts) {
-            if self.run_efforts.contains(&h) {
-                self.chosen_efforts.insert(h);
-            } else {
-                match self.configured_effort(h) {
-                    Some(e) => self.efforts.insert(h, e),
-                    None => self.efforts.remove(&h),
-                };
-            }
-        }
-
-        let mut models: Vec<(HarnessId, ModelRef)> = self
-            .conversation
-            .models
-            .iter()
-            .map(|(h, m)| (*h, m.clone()))
-            .collect();
-        models.sort_by_key(|(h, _)| h.as_str());
-        // An effort is for the model it was chosen with.
-        let mut left = HashSet::new();
-        for (h, m) in models {
-            let Some(harness) = self.registry.get(h) else {
-                continue;
-            };
-            if self.run_models.contains(&h) {
-                continue;
-            }
-            match self.providers.get(&h) {
-                Some(p) if *p != m.provider => {
-                    let name = harness.descriptor().short_name;
-                    self.transcript.push_notice(format!(
-                        "the model chosen for {name} in this conversation ({}) is not used: {name} is on {p} now",
-                        m.label(),
-                    ));
-                    left.insert(h);
-                }
-                _ => {
-                    self.models.insert(h, m);
-                    self.chosen_models.insert(h);
-                }
-            }
-        }
-        let efforts: Vec<(HarnessId, String)> = self
-            .conversation
-            .efforts
-            .iter()
-            .map(|(h, e)| (*h, e.clone()))
-            .collect();
-        for (h, e) in efforts {
-            if self.run_efforts.contains(&h) || left.contains(&h) || self.registry.get(h).is_none()
-            {
-                continue;
-            }
-            self.efforts.insert(h, e);
-            self.chosen_efforts.insert(h);
+        for notice in self
+            .controller
+            .take_conversation(&self.config, &self.conversation)
+        {
+            self.transcript.push_notice(notice);
         }
     }
 
@@ -188,37 +103,12 @@ impl App {
         let Some(last) = self.conversation.last_policies.get(&self.active).copied() else {
             return;
         };
-        let now = self.effective_policy();
-        if now == Some(last) {
-            return;
+        if let Some(notice) =
+            self.controller
+                .resumed_under(&self.config, self.active, last, at_start)
+        {
+            self.transcript.push_notice(notice);
         }
-        let name = self.short_name();
-        let wanted = self.wanted_policy();
-        let why = if now != Some(wanted) {
-            format!("{wanted} is not available on {name}")
-        } else if self.run_choices.contains_key(&self.active) {
-            "chosen in this run".to_string()
-        } else if self.policy_choice.contains_key(&self.active) {
-            format!("chosen for {name} in this conversation")
-        } else if self.run_policy.is_some() {
-            if at_start {
-                "named with --policy".to_string()
-            } else {
-                "named in this run".to_string()
-            }
-        } else if self.policy_explicit.is_some() {
-            "the policy named for this conversation".to_string()
-        } else {
-            "the configured default".to_string()
-        };
-        self.transcript.push_notice(match now {
-            Some(now) => format!(
-                "{name} last ran this conversation under {last}; it continues under {now} ({why})"
-            ),
-            None => format!(
-                "{name} last ran this conversation under {last}; it waits for a policy ({why})"
-            ),
-        });
     }
 
     /// Start a new conversation in this workspace, as a fresh launch would,
@@ -271,7 +161,7 @@ impl App {
         let told = self.transcript.blocks.split_off(said);
         self.idle_start_paused = false;
         self.conversation = self.successor();
-        self.pre_plan.clear();
+        self.controller.policy.forget_plans();
         self.transcript = Transcript::default();
         self.session_ids.clear();
         self.last_active_index.clear();
@@ -342,7 +232,7 @@ impl App {
         }
         self.idle_start_paused = false;
         self.persist();
-        let active = if self.registry.get(conv.active_harness).is_some() {
+        let active = if self.registry().get(conv.active_harness).is_some() {
             conv.active_harness
         } else {
             self.active
@@ -365,7 +255,7 @@ impl App {
         self.pending_prompts.clear();
         self.active = active;
         self.conversation = conv;
-        self.pre_plan.clear();
+        self.controller.policy.forget_plans();
         self.take_conversation_choices();
         self.announce_resume(false);
         if let Some(w) = self.policy_warning() {

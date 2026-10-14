@@ -45,7 +45,7 @@ impl App {
         }
         // A picker the user asked for and moved on from stays shut.
         self.open_when_listed = None;
-        if self.shell.is_some() || self.choice_pending.is_some() || !self.require_policy() {
+        if self.shell.is_some() || self.controller.choice_pending() || !self.require_policy() {
             // Kept until the `!` command has ended, the session has taken
             // the choice it was sent, or a policy is chosen.
             self.queued.push_back(QueuedPrompt {
@@ -178,7 +178,7 @@ impl App {
     pub(super) fn send_queued(&mut self, at: usize) -> bool {
         if self.is_generating
             || self.shell.is_some()
-            || self.choice_pending.is_some()
+            || self.controller.choice_pending()
             || self.effective_policy().is_none()
         {
             return false;
@@ -192,7 +192,7 @@ impl App {
             self.transcript.push_notice(format!(
                 "'{}' was typed for {}; it is back in the prompt box",
                 q.text.lines().next().unwrap_or_default(),
-                self.registry
+                self.registry()
                     .get(q.harness)
                     .map_or(q.harness.as_str(), |h| h.descriptor().short_name)
             ));

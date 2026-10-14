@@ -207,7 +207,7 @@ fn a_policy_named_on_resume_holds_over_every_choice_even_the_same() {
     // `--policy ask`, the policy it was named: `ask` everywhere, so agy
     // waits for a choice and Claude does not run under `bypass`.
     let mut app = resume_with(tmp.path(), Some(PermissionPolicy::Ask));
-    assert_eq!(app.policy_choice, HashMap::new());
+    assert_eq!(app.controller.policy.chosen(), HashMap::new());
     assert_eq!(app.effective_policy(), None);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
     app.modal = None;
@@ -241,7 +241,9 @@ fn resume_codex_with(cwd: &Path, model: Option<&str>, effort: Option<&str>, prov
 }
 
 fn codex_model(app: &App) -> Option<&str> {
-    app.models.get(&HarnessId::CODEX).map(|m| m.model.as_str())
+    app.controller
+        .model(HarnessId::CODEX)
+        .map(|m| m.model.as_str())
 }
 
 /// A turn on Codex after `/model` and `/effort` where given, then quit.
@@ -266,38 +268,14 @@ fn codex_turn_choosing(cwd: &Path, model: Option<&str>, effort: Option<&str>) {
     app.quit();
 }
 
+/// What resuming says of the choices it did not take reaches the
+/// transcript (`Controller::take_conversation` decides it, the TUI pushes
+/// it).
 #[test]
-fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
-    let tmp = tempfile::tempdir().unwrap();
-    codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
-    let app = resume_codex_with(tmp.path(), None, None, "openai");
-    assert_eq!(codex_model(&app), Some("gpt-chosen"));
-    assert_eq!(app.current_effort(), Some("high"));
-
-    // Named on the command line, they win.
-    let app = resume_codex_with(tmp.path(), Some("gpt-flag"), Some("low"), "openai");
-    assert_eq!(codex_model(&app), Some("gpt-flag"));
-    assert_eq!(app.current_effort(), Some("low"));
-}
-
-#[test]
-fn a_configured_model_is_not_kept_with_the_conversation() {
-    let tmp = tempfile::tempdir().unwrap();
-    codex_turn_choosing(tmp.path(), None, None);
-    let app = resume_codex_with(tmp.path(), None, None, "openai");
-    assert!(app.conversation.models.is_empty());
-    assert!(app.conversation.efforts.is_empty());
-    assert_eq!(codex_model(&app), Some("configured-model"));
-}
-
-#[test]
-fn a_model_chosen_on_another_provider_is_left() {
+fn a_model_left_on_resume_is_said() {
     let tmp = tempfile::tempdir().unwrap();
     codex_turn_choosing(tmp.path(), Some("gpt-chosen"), Some("high"));
     let app = resume_codex_with(tmp.path(), None, None, "ollama");
-    assert_eq!(codex_model(&app), Some("configured-model"));
-    // Its effort was for it.
-    assert_eq!(app.current_effort(), None);
     assert!(notices(&app).iter().any(|n| n
         == "the model chosen for Codex in this conversation (openai/gpt-chosen) is not used: Codex is on ollama now"));
 }

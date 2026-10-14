@@ -272,7 +272,7 @@ impl App {
             // What its last session in this run reported counts: an ACP
             // agent declares no fork until it says it can. One not run here
             // since launch starts fresh.
-            match self.caps_of(h) {
+            match self.controller.caps_of(h) {
                 Some(c) if c.fork && c.resume_by_id => {
                     self.fork_pending.insert(h);
                     if !c.rewind.anchors_survive_fork {

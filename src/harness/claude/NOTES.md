@@ -114,14 +114,16 @@ TUI's restart sent (`claude_starts_again_on_a_new_provider_resumed_and_back_on_r
 e2e, not run live); the TUI is told `Restarted`. It is offered only
 between turns (`Capabilities::between_turns`). Since the TUI no longer
 ends the session for it, the "Waiting for the previous Claude to exit"
-flash and the refusal of a switch, resume, fork, rewind or `/clear`
-while the old process exits are gone: the driver keeps what is sent
-meanwhile for the new process, and a `Shutdown` meanwhile ends the
-session instead. Until Claude has been started again (`Restarted`) the
-TUI holds prompts, and refuses another provider and what would end the
-session ("is still taking the provider just chosen"). A provider Claude
-does not have (`/provider nowhere`) ends the session as a shutdown does,
-with the error, as the failed start did before.
+flash is gone: the driver keeps what is sent meanwhile for the new
+process, and a `Shutdown` meanwhile ends the session instead. Until
+Claude has been started again (`Restarted`) the TUI holds prompts, and
+still refuses a switch, resume, fork, rewind or `/clear`, now worded
+"Claude is still taking the provider just chosen; try again in a
+moment" (`Controller::settling`) where it was "the previous Claude is
+still exiting", and refuses another provider, a model and an effort
+the same way. A provider Claude does not have (`/provider nowhere`)
+ends the session as a shutdown does, with the error, as the failed
+start did before.
 Unverified: a turn on any of them with credentials, `_MANTLE` beside
 `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
 `CLAUDE_CODE_USE_GATEWAY` (left alone).

@@ -222,27 +222,16 @@ impl App {
         self.anchors.retain(|a| a.harness != harness);
     }
 
-    /// True, with an error shown, while the session is settling: its start
-    /// is held until the CLI before it is gone, or it was sent a choice it
-    /// takes only between turns and has not said how it took it (which
-    /// may leave it for a new session, or start its CLI again).
+    /// True, with an error shown, while the session is settling
+    /// (`Controller::settling`).
     pub(super) fn refused_while_settling(&mut self) -> bool {
-        if self.start_held {
-            self.transcript.push_error(format!(
-                "the previous {} is still exiting; try again in a moment",
-                self.short_name()
-            ));
-            return true;
+        match self.controller.settling(self.active, self.start_held) {
+            Some(why) => {
+                self.transcript.push_error(why);
+                true
+            }
+            None => false,
         }
-        if let Some(pending) = &self.choice_pending {
-            self.transcript.push_error(format!(
-                "{} is still taking the {} just chosen; try again in a moment",
-                self.short_name(),
-                pending.what
-            ));
-            return true;
-        }
-        false
     }
 
     /// The session's process is gone, or going: what it was running and
@@ -266,12 +255,11 @@ impl App {
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
-        self.policies_sent.clear();
         self.idle_start_paused = false;
         self.drop_subagents();
         self.drop_prompts();
         // The next session reports where it runs.
-        self.running_providers.remove(&self.active);
+        self.controller.process_ended(self.active);
         self.forget_refusals();
         self.actions.push_back(Action::Shutdown);
         // A choice it was sent will not be answered now.
@@ -280,15 +268,19 @@ impl App {
 
     /// The active harness's session cannot take a choice, for `reason`
     /// (`AgentEvent::SessionRenewed`, or its stored session keeps what it
-    /// ran with none live to say so, `App::renewal_without_session`): the
-    /// conversation goes on in a new session, told it with the next prompt
-    /// as a harness switched to is, and the one left writes a handoff
-    /// summary first when the conversation does not fit in that bridge.
-    /// What was typed after the choice goes after that, as if typed then.
+    /// ran with none live to say so, `Route::Renew`): the conversation goes
+    /// on in a new session, told it with the next prompt as a harness
+    /// switched to is, and the one left writes a handoff summary first when
+    /// the conversation does not fit in that bridge. What was typed after
+    /// the choice goes after that, as if typed then.
     pub(super) fn session_renewed(&mut self, reason: &str) {
         let pending = self.choice_answered(super::choices::provider_line);
-        // One is under way already (a second answer of a session told two
-        // choices): this one only takes its own.
+        // A guard, not a path the TUI takes: no second choice goes to the
+        // session before it has answered the first (`Controller::settling`)
+        // nor during the summary's turn, so only a driver answering one
+        // choice twice comes here with a renewal under way. That answer
+        // takes only its own pending choice; a second summary or a
+        // renewal in the middle of the first is not started.
         if self.handoff.is_some_and(|h| h.renew) {
             return;
         }
@@ -323,14 +315,14 @@ impl App {
             self.finish_generation();
             self.transcript.push_system("Turn interrupted.");
         }
-        self.policies_sent.clear();
         self.drop_subagents();
         self.drop_prompts();
-        self.running_providers.remove(&self.active);
+        self.controller.process_ended(self.active);
         self.forget_refusals();
         self.session_blank = true;
         self.blank_session = None;
-        self.session_policy = self.effective_policy();
+        let policy = self.effective_policy();
+        self.controller.policy.started_under(policy);
         if let Some(remote) = self.remote.as_mut() {
             remote.url = None;
             remote.state = None;

@@ -327,7 +327,7 @@ every question answered), and an elicitation scoped to a request
 Forks (#160, `Driver::fork`): `sessionCapabilities.fork` at
 `initialize` reports `CapsUpdate::fork`, and the TUI's `/fork` branches
 an ACP agent's session only when its last session in this run said so
-(`App::caps_of`); one not run since launch, or that does not advertise
+(`Controller::caps_of`); one not run since launch, or that does not advertise
 it, starts fresh with the transcript. vibe-acp 2.26.1, codex-acp 2.1.1
 and claude-agent-acp 0.85.1 all advertise it, and need different things
 around it, so the driver, given `fork` and the stored id, sends

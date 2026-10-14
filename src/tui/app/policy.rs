@@ -1,43 +1,37 @@
 //! The permission policy: requested, chosen, in effect, refused and saved.
+//! The state is the controller's (`core::controller::PolicyState`); this
+//! is what the TUI shows of it and asks of the user.
 
 use std::path::Path;
 
 use super::{Action, App};
 use crate::config::Config;
+use crate::core::controller::Refused;
 use crate::core::rules::Scope;
-use crate::core::{
-    PermissionPolicy, PolicyResolution, PolicyUnavailable, SessionCommand, resolve_policy,
-};
+use crate::core::{PermissionPolicy, PolicyResolution, PolicyUnavailable, SessionCommand};
 use crate::tui::modal::{ListPicker, Modal, PolicyPicker};
 
 impl App {
     /// The policy the user asked for on the active harness: the one named
     /// for the run, or this harness's configured default.
     pub fn policy_requested(&self) -> PermissionPolicy {
-        self.policy_explicit.unwrap_or_else(|| {
-            // The config was checked at startup; `ask` if it changed since.
-            crate::runner::configured_policy(&self.config, self.active)
-                .unwrap_or(PermissionPolicy::Ask)
-        })
+        self.controller.policy.requested(&self.config, self.active)
     }
 
     /// The policy asked of the active harness: what the user chose for it,
     /// else the requested one.
     pub fn wanted_policy(&self) -> PermissionPolicy {
-        self.policy_choice
-            .get(&self.active)
-            .copied()
-            .unwrap_or_else(|| self.policy_requested())
+        self.controller.policy.wanted(&self.config, self.active)
     }
 
     fn policy_resolution(&self) -> Result<PolicyResolution, PolicyUnavailable> {
-        resolve_policy(&self.caps().permission_policies, self.wanted_policy())
+        self.controller.policy_resolution(&self.config, self.active)
     }
 
     /// `None` until the user chooses, where the requested policy is not
     /// available: a more permissive one is never taken for them.
     pub fn effective_policy(&self) -> Option<PermissionPolicy> {
-        self.policy_resolution().ok().map(|r| r.effective)
+        self.controller.effective_policy(&self.config, self.active)
     }
 
     /// The effective policy for a message.
@@ -65,22 +59,16 @@ impl App {
         false
     }
 
-    /// The active harness's session is gone. What it refused was for it
-    /// (`CapsUpdate::refused_policies`: a mode that did not take, a
-    /// profile shadowed): the next session is asked for the wanted policy
-    /// again, and refuses it again if it still cannot hold it. The rest of
-    /// what it reported is the agent's, kept until the next one says.
+    /// The active harness's session is gone, and what it refused with it
+    /// (`Controller::forget_refusals`). A policy picker open on what the
+    /// session offered is redone, or, where it waited for a policy and one
+    /// is in effect again, closed: what waited for it is the user's to
+    /// send.
     pub(super) fn forget_refusals(&mut self) {
         let before = self.effective_policy();
-        let Some(update) = self.live_caps.get_mut(&self.active) else {
-            return;
-        };
-        if update.refused_policies.take().is_none() {
+        if !self.controller.forget_refusals(self.active) {
             return;
         }
-        // A policy picker open on what the session offered is redone, or,
-        // where it waited for a policy and one is in effect again, closed:
-        // what waited for it is the user's to send.
         if matches!(&self.modal, Some(Modal::Policy(p)) if p.save.is_none()) {
             if before.is_none() && self.effective_policy().is_some() {
                 self.modal = None;
@@ -101,105 +89,68 @@ impl App {
 
     /// The active harness's session refused a policy.
     pub(super) fn session_refused(&self) -> bool {
-        self.live_caps
-            .get(&self.active)
-            .and_then(|u| u.refused_policies.as_ref())
-            .is_some_and(|r| !r.is_empty())
+        self.controller.refused_policies(self.active)
     }
 
     /// Returns whether `p` could be set on the active harness. Only a
     /// policy it has can be: what the user picks is what runs.
     pub fn set_policy(&mut self, p: PermissionPolicy) -> bool {
-        let Some(res) = self.offered(p) else {
-            return false;
-        };
-        let before = self.effective_policy();
-        if res.effective == PermissionPolicy::Plan
-            && let Some(was) = before
-            && was != PermissionPolicy::Plan
+        let prompted = self.session_seen();
+        let set = match self
+            .controller
+            .set_policy(&self.config, self.active, p, prompted)
         {
-            self.pre_plan.insert(self.active, was);
-        }
-        // Only a prompt that waited for this choice is sent by it.
-        let was_waiting = before.is_none();
-        // For this harness only: the others keep theirs.
-        self.policy_choice.insert(self.active, p);
-        self.run_choices.insert(self.active, p);
+            Ok(set) => set,
+            Err(e) => {
+                self.transcript.push_error(e.to_string());
+                return false;
+            }
+        };
         self.transcript
-            .push_system(format!("Permission policy: {}", res.effective));
-        if let Some(w) = res.warning {
+            .push_system(format!("Permission policy: {}", set.effective));
+        if let Some(w) = set.warning {
             self.transcript.push_notice(w);
         }
         self.idle_start_paused = false;
         if self.session_alive && self.session_blank {
             // Started with the policy it had: started again with this one.
             self.shutdown_session();
-        } else if self.session_alive && before != Some(res.effective) {
-            // Sent only as a change, so that each is reported back once.
-            self.policies_sent.push_back(res.effective);
+        } else if set.send {
             self.actions
-                .push_back(Action::Command(SessionCommand::SetPolicy(res.effective)));
+                .push_back(Action::Command(SessionCommand::SetPolicy(set.effective)));
         }
-        if was_waiting {
+        // Only a prompt that waited for this choice is sent by it.
+        if set.was_waiting {
             self.send_next_queued();
         }
         true
     }
 
-    /// The session runs under `p` now. One it moved to by itself (the
-    /// agent went into plan mode, or left a mode it could not keep) becomes
-    /// the harness's policy, so that what is shown, saved and started again
-    /// is what runs.
+    /// The session runs under `p` now; one it moved to by itself is said.
     pub(super) fn on_policy_changed(&mut self, p: PermissionPolicy) {
-        // The report of a change we sent, maybe after a later one: the
-        // policy shown is already the newest choice.
-        if let Some(at) = self.policies_sent.iter().position(|s| *s == p) {
-            self.policies_sent.drain(..=at);
-            return;
-        }
-        let was = self.effective_policy();
-        if was == Some(p) {
-            return;
-        }
-        if p == PermissionPolicy::Plan
-            && let Some(was) = was
+        if let Some(notice) = self
+            .controller
+            .on_policy_changed(&self.config, self.active, p)
         {
-            self.pre_plan.insert(self.active, was);
+            self.transcript.push_notice(notice);
         }
-        self.policy_choice.insert(self.active, p);
-        self.run_choices.insert(self.active, p);
-        let name = self.display_name();
-        self.transcript.push_notice(match p {
-            PermissionPolicy::Plan => {
-                format!(
-                    "{name} went into plan mode: it asks you to approve its plan before it acts"
-                )
-            }
-            _ => format!("{name} now runs under policy {p}"),
-        });
     }
 
     /// The session took a policy out of what it offers (an ACP agent whose
-    /// mode for it did not take; the driver said why). One in effect gives
-    /// way as an unsupported policy does: to the nearest less permissive
-    /// one, which the session is told, or, with none, to the user's choice.
-    pub(super) fn policy_refused(&mut self, before: Option<PermissionPolicy>) {
-        let now = self.effective_policy();
-        if now == before {
-            return;
-        }
-        match now {
-            Some(p) => {
+    /// mode for it did not take; the driver said why), and the one in
+    /// effect gave way (`PolicyState::on_refused`).
+    pub(super) fn policy_refused(&mut self, refused: Refused) {
+        match refused {
+            Refused::GaveWay { now, send } => {
                 if let Some(w) = self.policy_warning() {
                     self.transcript.push_notice(w);
                 }
-                if self.session_alive {
-                    self.policies_sent.push_back(p);
+                if send {
                     self.actions
-                        .push_back(Action::Command(SessionCommand::SetPolicy(p)));
+                        .push_back(Action::Command(SessionCommand::SetPolicy(now)));
                 }
             }
-            None => {
+            Refused::Waits => {
                 self.transcript.push_notice(format!(
                     "{} waits for another policy (Ctrl+P)",
                     self.display_name()
@@ -209,19 +160,9 @@ impl App {
         }
     }
 
-    /// The policies a plan can be carried out under: those the harness has,
-    /// but bypass only in a session started under it, since Claude refuses
-    /// to switch to it in one that was not (`bypass_not_launched`, 2.1.296).
+    /// The policies a plan can be carried out under (`PolicyState::plan_policies`).
     pub(super) fn plan_policies(&self) -> Vec<PermissionPolicy> {
-        let bypass = self.session_policy == Some(PermissionPolicy::Bypass);
-        self.offered_policies()
-            .into_iter()
-            .filter(|p| match p {
-                PermissionPolicy::Plan => false,
-                PermissionPolicy::Bypass => bypass,
-                _ => true,
-            })
-            .collect()
+        self.controller.plan_policies(self.active)
     }
 
     /// Save `p` as the active harness's default policy in the settings of
@@ -294,13 +235,9 @@ impl App {
     /// How `p` resolves on the active harness, if it offers it; otherwise
     /// the user is told which it does offer.
     fn offered(&mut self, p: PermissionPolicy) -> Option<PolicyResolution> {
-        match resolve_policy(&self.caps().permission_policies, p) {
-            Ok(res) if res.effective == p => Some(res),
-            _ => {
-                let e = PolicyUnavailable {
-                    requested: p,
-                    supported: self.offered_policies(),
-                };
+        match self.controller.offered(self.active, p) {
+            Ok(res) => Some(res),
+            Err(e) => {
                 self.transcript.push_error(e.to_string());
                 None
             }
@@ -309,11 +246,7 @@ impl App {
 
     /// The policies the active harness has, least permissive first.
     pub fn offered_policies(&self) -> Vec<PermissionPolicy> {
-        let caps = self.caps();
-        PermissionPolicy::ALL
-            .into_iter()
-            .filter(|p| caps.supports_policy(*p).is_some())
-            .collect()
+        self.controller.offered_policies(self.active)
     }
 
     /// Every policy is listed; one the harness does not have cannot be

@@ -422,7 +422,9 @@ the context meter start from zero; a harness used before the clear
 starts afresh too when you switch to it. Prompts held after a turn that
 did not finish stay queued. `/clear` is refused until the turn, the
 subagents at work and a running `!` command are done (not for a Mistral
-Vibe subagent, below).
+Vibe subagent, below), while the agent's previous process is still
+exiting, and until the agent has taken a provider, model or effort you
+just chose.
 
 ## Hooks
 

@@ -44,10 +44,13 @@ fn prompts_held_before_a_handoff_stay_held_after_it() {
 fn no_handoff_is_asked_of_a_session_that_cannot_be_resumed() {
     let mut app = over_budget_app();
     app.session_alive = false;
-    app.live_caps
-        .entry(HarnessId::CLAUDE)
-        .or_default()
-        .resume_by_id = Some(false);
+    app.controller.overlay(
+        HarnessId::CLAUDE,
+        CapsUpdate {
+            resume_by_id: Some(false),
+            ..Default::default()
+        },
+    );
     app.switch_harness(HarnessId::CODEX);
     assert_eq!(app.active, HarnessId::CODEX);
     assert!(app.take_actions().is_empty());
@@ -239,10 +242,10 @@ fn the_bridge_is_measured_by_the_window_its_harness_reported() {
     // Kept for the next run, by model.
     let mut again = test_app_in(cwd, HarnessId::CLAUDE, None, false);
     assert_eq!(again.bridge_budget(HarnessId::CLAUDE), 200_000);
-    again.models.insert(
-        HarnessId::CLAUDE,
-        ModelRef::new(HarnessId::CLAUDE, ProviderId::new("anthropic"), "opus"),
-    );
+    // On anthropic, the provider it guessed.
+    again
+        .controller
+        .choose_model(HarnessId::CLAUDE, "opus".into());
     assert_eq!(
         again.bridge_budget(HarnessId::CLAUDE),
         DEFAULT_BRIDGE_MAX_CHARS

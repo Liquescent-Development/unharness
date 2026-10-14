@@ -303,7 +303,9 @@ fn fork_branches_an_acp_session_once_the_agent_says_it_can() {
             registry,
         );
         if app.effective_policy().is_none() {
-            app.policy_choice.insert(acp, PermissionPolicy::Bypass);
+            app.controller
+                .policy
+                .choose_for_conversation(acp, PermissionPolicy::Bypass);
             app.modal = None;
         }
         app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {

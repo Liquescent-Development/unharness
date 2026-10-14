@@ -1,7 +1,8 @@
 use super::*;
 use crate::core::rules::Scope;
 use crate::core::{
-    Parser, PermissionDecision, PermissionKind, Question, QuestionOption, Rule, ToolAction,
+    CapsUpdate, ModelRef, Parser, PermissionDecision, PermissionKind, Question, QuestionOption,
+    Rule, ToolAction,
 };
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
@@ -50,8 +51,9 @@ pub(crate) fn test_app_in(
     // A harness without `ask` waits for a choice; most tests are not
     // about that.
     if app.effective_policy().is_none() {
-        app.policy_choice
-            .insert(harness, PermissionPolicy::AcceptEdits);
+        app.controller
+            .policy
+            .choose_for_conversation(harness, PermissionPolicy::AcceptEdits);
         app.modal = None;
     }
     app

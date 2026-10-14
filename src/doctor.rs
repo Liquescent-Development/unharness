@@ -7,6 +7,7 @@ use colored::*;
 
 use crate::config::Config;
 use crate::core::Rules;
+use crate::core::controller::configured_policy;
 use crate::core::conversations::ConversationStore;
 use crate::core::mcp;
 use crate::core::registry::Registry;
@@ -19,7 +20,7 @@ use crate::core::{
     resolve_policy,
 };
 use crate::harness::{MinVersion, parse_version};
-use crate::runner::{binary_overrides, configured_policy};
+use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
 use crate::skills_import::installed_plugins;

@@ -3,6 +3,7 @@
 
 pub mod caps;
 pub mod checkpoints;
+pub mod controller;
 pub mod conversations;
 pub mod driver;
 pub mod event;

@@ -59,7 +59,7 @@ it, so that `--resume` does not bring it back as it ran. The choices are offered
 between turns (`Capabilities::between_turns`: all three for vibe). Where
 no prompted session can say it, the static declaration does
 (`Capabilities::stored_session_keeps`, one reader,
-`App::stored_session_keeps`): a choice made with no vibe session live, or
+`Controller::stored_session_keeps`): a choice made with no vibe session live, or
 with the live one a stored session started before the first prompt
 (after `--resume`), leaves the stored session for a new one at once, and
 none is made while the vibe before it is still exiting. It stays a flag:

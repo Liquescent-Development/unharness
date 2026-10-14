@@ -1,17 +1,25 @@
 //! The active harness, what it can do, and what the header and status rule show.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::{Action, App};
-use crate::core::{Capabilities, HarnessCommand, HarnessId};
+use crate::core::registry::Registry;
+use crate::core::{Capabilities, HarnessCommand};
 use crate::harness::{Harness, resolve_binary};
 use crate::tui::modal::Modal;
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 impl App {
+    /// The harnesses of this run: the controller's, the one its
+    /// capabilities are read from.
+    pub fn registry(&self) -> &Arc<Registry> {
+        self.controller.registry()
+    }
+
     pub fn harness(&self) -> &dyn Harness {
-        self.registry
+        self.registry()
             .get(self.active)
             .expect("active harness is registered")
     }
@@ -26,27 +34,15 @@ impl App {
 
     /// The commands of its own the active harness's session listed.
     pub fn harness_commands(&self) -> &[HarnessCommand] {
-        self.live_caps
-            .get(&self.active)
-            .and_then(|u| u.commands.as_deref())
-            .unwrap_or_default()
+        self.controller.harness_commands(self.active)
     }
 
-    /// Declared capabilities of the active harness plus what its session reported.
+    /// Declared capabilities of the active harness plus what its session
+    /// reported (`Controller::caps_of`).
     pub fn caps(&self) -> Capabilities {
-        self.caps_of(self.active)
+        self.controller
+            .caps_of(self.active)
             .unwrap_or_else(|| self.harness().capabilities())
-    }
-
-    /// Declared capabilities of `harness` plus what a session of it
-    /// reported in this run (an ACP agent says at `initialize` whether it
-    /// can fork); `None` for one not in the registry.
-    pub(super) fn caps_of(&self, harness: HarnessId) -> Option<Capabilities> {
-        let mut caps = self.registry.get(harness)?.capabilities();
-        if let Some(update) = self.live_caps.get(&harness) {
-            caps.apply(update);
-        }
-        Some(caps)
     }
 
     pub fn harness_binary(&self) -> Option<PathBuf> {
@@ -57,7 +53,7 @@ impl App {
     /// What the status area warns about: a missing sandbox, a degraded policy.
     pub fn status_warning(&self) -> Option<String> {
         let sandbox = self.sandbox_level().1.map(|s| format!("{s} (/sandbox)"));
-        let provider = self.running_providers.get(&self.active).map(|runs_on| {
+        let provider = self.controller.runs_on(self.active).map(|runs_on| {
             format!(
                 "runs on {runs_on}, not the chosen {} (/provider)",
                 self.current_provider()
