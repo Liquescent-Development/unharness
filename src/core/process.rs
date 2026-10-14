@@ -135,8 +135,12 @@ impl LineProcess {
         let (tx, rx) = mpsc::channel(LINE_CHANNEL_CAPACITY);
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
 
+        // A set, so that a reader done before the drain is cut short is
+        // not waited for again: a task's handle must not be polled after
+        // it has given its output.
+        let mut readers = tokio::task::JoinSet::new();
         let tx_out = tx.clone();
-        let out_task = tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::with_capacity(64 * 1024, stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 // Read to the end when nobody listens, so that a CLI
@@ -146,7 +150,7 @@ impl LineProcess {
         });
 
         let tx_err = tx.clone();
-        let err_task = tokio::spawn(async move {
+        readers.spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 let _ = tx_err.send(RawLine::Stderr(truncate(line))).await;
@@ -158,19 +162,13 @@ impl LineProcess {
         let mut owned = Owned::new(child);
         tokio::spawn(async move {
             let code = watch(&mut owned, stop_rx).await;
-            let (mut out_task, mut err_task) = (out_task, err_task);
-            let drain = async {
-                let _ = (&mut out_task).await;
-                let _ = (&mut err_task).await;
-            };
+            let drain = async { while readers.join_next().await.is_some() {} };
             if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
                 // Something out of reach (a double fork, a session of its
-                // own when the child exited by itself) holds the pipes:
-                // they are closed on it, and it gets EPIPE from now on.
-                out_task.abort();
-                err_task.abort();
-                let _ = out_task.await;
-                let _ = err_task.await;
+                // own when the child exited by itself) holds a pipe: the
+                // readers still at it are stopped and waited for, which
+                // closes it on that, and it gets EPIPE from now on.
+                readers.shutdown().await;
             }
             drop(owned);
             let _ = tx.send(RawLine::Exited(code)).await;
@@ -994,28 +992,119 @@ mod tests {
         assert!(!alive(&_sleeper));
     }
 
+    /// A script a test's child leaves running in a session of its own,
+    /// where nothing in a test binary ends it (it has no reaper). The
+    /// script stops waiting once `go` is there or its directory is gone,
+    /// or after 600 rounds of 0.05 s should the test binary die; when this
+    /// goes it is let go and waited for, or killed with its group, before
+    /// the directory goes, also when the test failed.
+    #[cfg(unix)]
+    struct Escaped {
+        dir: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl Escaped {
+        fn new() -> Self {
+            Escaped {
+                dir: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn path(&self, name: &str) -> String {
+            self.dir.path().join(name).display().to_string()
+        }
+
+        /// `sh -c` that leaves the script behind, which runs `first`, waits
+        /// to be let go and runs `last`, and runs `then` once the script is
+        /// under way: before, the group kill of a child that exits would
+        /// catch it.
+        fn command(&self, first: &str, last: &str, then: &str) -> Command {
+            let dir = self.dir.path().display();
+            let (pid, out) = (self.path("pid"), self.path("out"));
+            let (go, gone) = (self.path("go"), self.path("gone"));
+            // macOS has no `setsid` command; the e2e tests need python3 anyway.
+            let setsid = r#"python3 -c 'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])'"#;
+            // `\$`: the script's, not the child's that starts it.
+            let script = format!(
+                "echo \\$\\$ > {pid}; {first}; touch {out}; i=0; \
+                 while [ -d {dir} ] && [ ! -e {go} ] && [ \\$i -lt 600 ]; \
+                 do sleep 0.05; i=\\$((i + 1)); done; {last}; touch {gone}"
+            );
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(format!(
+                "({setsid} \"{script}\" &); while [ ! -e {out} ]; do sleep 0.05; done; {then}"
+            ));
+            cmd
+        }
+
+        /// Let the script go on to its end.
+        fn go(&self) {
+            std::fs::write(self.path("go"), "").unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Escaped {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.path("go"), "");
+            // Not under way: it never started, or stops at once when it
+            // does, on `go` or with its directory gone.
+            if !std::path::Path::new(&self.path("out")).exists() {
+                return;
+            }
+            let gone = std::path::PathBuf::from(self.path("gone"));
+            if within(Duration::from_secs(5), || gone.exists()) {
+                return;
+            }
+            let pid = std::fs::read_to_string(self.path("pid"));
+            // Only a pid that can lead the script's group: as `-pid`, 0
+            // would name this binary's own group, 1 every process it may
+            // signal, and a negative one the process of that number.
+            let Some(pid) = pid
+                .ok()
+                .and_then(|p| p.trim().parse::<libc::pid_t>().ok())
+                .filter(|p| *p > 1)
+            else {
+                return;
+            };
+            // SAFETY: plain syscalls. `pid` leads the script's session and
+            // group, and has not said it is gone; signal 0 only asks
+            // whether it is still there (until what adopted it reaps it).
+            unsafe { libc::kill(-pid, libc::SIGKILL) };
+            let reaped = || unsafe { libc::kill(pid, 0) } != 0;
+            within(Duration::from_secs(5), reaped);
+        }
+    }
+
+    /// Whether `done` holds within `limit`, asked every 20 ms.
+    #[cfg(unix)]
+    fn within(limit: Duration, done: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if done() {
+                return true;
+            }
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     // The grandchild left the child's tree and session: nothing kills
     // it, but it no longer has anyone reading its output.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_pipes_are_closed_on_what_escaped_the_tree() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = |name| dir.path().join(name).display().to_string();
-        let (out, go, failed) = (file("out"), file("go"), file("failed"));
-        let escaped = format!(
-            "trap '' PIPE; touch {out}; while [ ! -e {go} ]; do sleep 0.05; done; echo late || touch {failed}"
-        );
-        // macOS has no `setsid` command; the e2e tests need python3 anyway.
-        let setsid = r#"python3 -c 'import os, sys; os.setsid(); os.execvp("sh", ["sh", "-c", sys.argv[1]])'"#;
-        let mut cmd = Command::new("sh");
-        // The child waits until it is out, or the group kill would catch it.
-        cmd.arg("-c").arg(format!(
-            "({setsid} \"{escaped}\" &); while [ ! -e {out} ]; do sleep 0.05; done"
-        ));
+        let escaped = Escaped::new();
+        let failed = escaped.path("failed");
+        let last = format!("echo late || touch {failed}");
+        let cmd = escaped.command("trap '' PIPE", &last, ":");
         let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
         let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
         // Let it go first whatever happened: it ends after one line.
-        std::fs::write(&go, "").unwrap();
+        escaped.go();
         assert_eq!(got.unwrap().last(), Some(&RawLine::Exited(Some(0))));
         let failed = std::path::Path::new(&failed);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1023,6 +1112,41 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(failed.exists(), "its output was still read");
+    }
+
+    /// The lines of a child that leaves, in a session of its own, a
+    /// process with `redirect` applied, so that it holds one of the two
+    /// pipes alone, and exits once that one is out, after a line on each.
+    #[cfg(unix)]
+    async fn lines_with_one_pipe_held(redirect: &str) -> Vec<RawLine> {
+        let escaped = Escaped::new();
+        let first = format!("exec {redirect}");
+        let cmd = escaped.command(&first, ":", "echo bye; echo bye >&2");
+        let mut p = LineProcess::spawn_no_input(cmd, &Sandbox::off()).unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(10), drain(&mut p)).await;
+        // `escaped` is let go and waited for after this, also on a panic.
+        got.unwrap()
+    }
+
+    // One pipe read to its end and the other's drain cut short: each
+    // reader is waited for once, and `Exited` still comes (the watcher
+    // had polled stdout's again after it was done, and panicked).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_comes_when_only_stderr_is_held_past_the_drain() {
+        let got = lines_with_one_pipe_held(">/dev/null").await;
+        assert!(got.contains(&RawLine::Stdout("bye".into())), "{got:?}");
+        assert!(got.contains(&RawLine::Stderr("bye".into())), "{got:?}");
+        assert_eq!(got.last(), Some(&RawLine::Exited(Some(0))), "{got:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exited_comes_when_only_stdout_is_held_past_the_drain() {
+        let got = lines_with_one_pipe_held("2>/dev/null").await;
+        assert!(got.contains(&RawLine::Stdout("bye".into())), "{got:?}");
+        assert!(got.contains(&RawLine::Stderr("bye".into())), "{got:?}");
+        assert_eq!(got.last(), Some(&RawLine::Exited(Some(0))), "{got:?}");
     }
 
     #[tokio::test]
