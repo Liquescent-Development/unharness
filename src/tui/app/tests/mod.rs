@@ -156,6 +156,7 @@ fn spawn(app: &mut App, id: &str, description: &str, kind: Option<&str>) {
         id: id.into(),
         description: description.into(),
         kind: kind.map(str::to_string),
+        unreported_end: false,
     });
 }
 

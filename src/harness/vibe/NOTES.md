@@ -296,8 +296,10 @@ interrupt", recorded; a timeout or a child's failed turn, read in
 child's answer into the parent model's input
 (`_subagents/_notifications.py`) and the client hears nothing, so a
 row the agent did not wait for stays at work until the session ends,
-saying that its end shows only when the agent waits for it. Under
-`unreported_ends` such a row (`App::awaited_subagents`) does not keep
+saying that its end shows only when the agent waits for it. Its start
+says so (`SubagentStarted::unreported_end`, set by vibe's reader; until
+#275 a harness flag, `SubagentSupport::unreported_ends`, which the TUI
+and `--print` both read), and such a row (`App::awaited_subagents`) does not keep
 the TUI busy (status rule, herdr; its own spinner and time still run,
 `has_running_subagents`) and holds back
 neither `/clear`, a model, effort or provider change
@@ -324,8 +326,9 @@ ACP has no method for it, `session/cancel` while the parent waited
 failed the wait and the child ran on and answered (a discovery
 recording, not committed), and only the model can (`subagent.stop`,
 `.interrupt`); so no `stop`. `--print` cannot wait for an end that may
-never be sent: `SubagentSupport::unreported_ends` ends the run with the
-turn and says how many subagents it did not wait for, and the session,
+never be sent: a subagent whose start says its end may go unreported
+(`unreported_end`) is not waited for, so the run ends with the turn and
+says how many subagents it did not wait for, and the session,
 vibe's children with it, goes with the run
 (`fixtures/vibe_acp_subagent_background.jsonl`, an e2e test; live, the
 child answered into the parent's turn and still no end came). Checked

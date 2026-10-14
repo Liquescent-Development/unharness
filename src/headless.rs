@@ -70,9 +70,6 @@ pub struct Headless<O: Write, E: Write> {
     name: String,
     /// `SubagentSupport::report_turn` of the harness.
     report_turn: bool,
-    /// `SubagentSupport::unreported_ends`: a subagent still at work when
-    /// the turn ends is not waited for.
-    unreported_ends: bool,
     pub out: O,
     pub err: E,
     harness: String,
@@ -91,6 +88,9 @@ pub struct Headless<O: Write, E: Write> {
     owed: u32,
     /// Subagents that have started and not ended, at any depth.
     running: HashSet<String>,
+    /// Those of them whose end may never be told
+    /// (`SubagentStarted::unreported_end`): not waited for.
+    unawaited: HashSet<String>,
     /// The tool call that spawned a subagent's subagent → the subagent
     /// that made it.
     spawned_by: HashMap<String, String>,
@@ -143,7 +143,6 @@ impl<O: Write, E: Write> Headless<O, E> {
             cwd,
             name: name.to_string(),
             report_turn: subagents.report_turn,
-            unreported_ends: subagents.unreported_ends,
             out,
             err,
             harness: String::new(),
@@ -155,6 +154,7 @@ impl<O: Write, E: Write> Headless<O, E> {
             turns: 0,
             owed: 0,
             running: HashSet::new(),
+            unawaited: HashSet::new(),
             spawned_by: HashMap::new(),
             owing: HashSet::new(),
             settled: false,
@@ -192,15 +192,18 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// Whether the answer is complete: the turn is over, and so is every
     /// subagent and every turn that reports one. An error or an interrupt
     /// ends the run at once. A subagent whose end may never be told is not
-    /// waited for (`SubagentSupport::unreported_ends`).
+    /// waited for (`SubagentStarted::unreported_end`).
     pub fn is_done(&self) -> bool {
         match &self.stop {
             None => false,
-            Some(StopReason::Done) => {
-                self.owed == 0 && (self.running.is_empty() || self.unreported_ends)
-            }
+            Some(StopReason::Done) => self.owed == 0 && self.awaited() == 0,
             Some(_) => true,
         }
+    }
+
+    /// The subagents at work whose end will be told.
+    fn awaited(&self) -> usize {
+        self.running.len() - self.unawaited.len()
     }
 
     /// Nothing more the session sends counts: it is being shut down.
@@ -293,8 +296,15 @@ impl<O: Write, E: Write> Headless<O, E> {
             AgentEvent::PolicyChanged(p) if main => {
                 self.planning = *p == PermissionPolicy::Plan;
             }
-            AgentEvent::SubagentStarted { id, .. } => {
+            AgentEvent::SubagentStarted {
+                id, unreported_end, ..
+            } => {
                 self.running.insert(id.clone());
+                if *unreported_end {
+                    self.unawaited.insert(id.clone());
+                } else {
+                    self.unawaited.remove(id);
+                }
             }
             AgentEvent::SubagentEnded { id, status, .. } => {
                 // Its report may come in a second end of the same id; only
@@ -309,6 +319,7 @@ impl<O: Write, E: Write> Headless<O, E> {
                     .spawned_by
                     .get(id)
                     .is_some_and(|p| self.running.contains(p));
+                self.unawaited.remove(id);
                 if self.running.remove(id)
                     && self.report_turn
                     && *status != SubagentStatus::Cancelled
@@ -372,15 +383,12 @@ impl<O: Write, E: Write> Headless<O, E> {
                 } else {
                     stop_reason.clone()
                 });
-                let n = self.running.len();
-                if self.unreported_ends
-                    && self.is_done()
-                    && n > 0
-                    && self.format != Format::StreamJson
-                {
+                let unseen = self.unawaited.len();
+                let n = self.awaited();
+                if self.is_done() && unseen > 0 && self.format != Format::StreamJson {
                     // Ended or not: the session goes with the run.
                     self.note(&format!(
-                        "not waiting for {n} subagent(s): {} tells a subagent's end only when the agent waits for it",
+                        "not waiting for {unseen} subagent(s): {} tells a subagent's end only when the agent waits for it",
                         self.name
                     ));
                 } else if !self.is_done() && self.format != Format::StreamJson {
@@ -927,6 +935,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             id,
             description,
             kind,
+            ..
         } => json!({
             "type": "subagent_started",
             "id": id,
@@ -1485,6 +1494,7 @@ mod tests {
             id: "t1".into(),
             description: "read a file".into(),
             kind: None,
+            unreported_end: false,
         };
         let ended = |result: Option<&str>| AgentEvent::SubagentEnded {
             id: "t1".into(),

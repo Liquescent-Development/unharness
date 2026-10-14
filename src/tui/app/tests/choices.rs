@@ -93,6 +93,7 @@ fn a_chosen_provider_survives_a_session_that_runs_elsewhere() {
         id: "t1".into(),
         description: "look around".into(),
         kind: None,
+        unreported_end: false,
     });
     assert!(!app.subagents.is_empty());
     app.set_provider("vertex".into());

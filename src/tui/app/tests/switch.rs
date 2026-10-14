@@ -10,6 +10,7 @@ fn no_handoff_is_asked_for_while_subagents_are_at_work() {
         id: "agent-1".into(),
         description: "look around".into(),
         kind: None,
+        unreported_end: false,
     });
     app.switch_harness(HarnessId::CODEX);
     assert_eq!(app.active, HarnessId::CODEX);

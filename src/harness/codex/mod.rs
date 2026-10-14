@@ -316,7 +316,6 @@ impl Harness for CodexHarness {
                 stop: app_server,
                 // Nothing follows on the main thread when one ends.
                 report_turn: false,
-                unreported_ends: false,
             },
             steer: app_server,
             compaction: app_server,

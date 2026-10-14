@@ -625,6 +625,7 @@ impl ClaudeParser {
                     id,
                     description: str_at(val, "description").to_string(),
                     kind: opt_str(val, "subagent_type"),
+                    unreported_end: false,
                 });
             }
             "task_progress" => {

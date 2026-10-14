@@ -84,6 +84,7 @@ impl Subagents {
                 id: call.id.to_string(),
                 description: name.or(task).unwrap_or("subagent").to_string(),
                 kind: field("agent").map(str::to_string),
+                unreported_end: true,
             },
             AgentEvent::SubagentProgress {
                 id: call.id.to_string(),
@@ -169,6 +170,28 @@ mod tests {
             m["child_session_id"] = json!(c);
         }
         m
+    }
+
+    // vibe tells a child's end only when the agent waits for it: its
+    // start says so, and nothing waits for it.
+    #[test]
+    fn a_child_starts_with_its_end_unreported() {
+        let mut s = Subagents::default();
+        let input = json!({});
+        let call = ToolView {
+            id: "e1",
+            title: "Starting lister",
+            input: &input,
+        };
+        let u = update("e1", "completed", spawn_meta(Some("child-1")), json!({}));
+        let started = s.tool_update(call, &u);
+        assert!(matches!(
+            &started[0],
+            AgentEvent::SubagentStarted {
+                unreported_end: true,
+                ..
+            }
+        ));
     }
 
     #[test]

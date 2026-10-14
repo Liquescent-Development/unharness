@@ -177,6 +177,9 @@ pub struct RunningSubagent {
     /// Tool calls it has made.
     pub tools: usize,
     pub started: Instant,
+    /// Its end may never be told (`AgentEvent::SubagentStarted`): it holds
+    /// nothing back (`App::awaited_subagents`).
+    unreported_end: bool,
 }
 
 /// A prompt waiting for the running turn to finish.
@@ -1004,6 +1007,7 @@ impl App {
                 id,
                 description,
                 kind,
+                unreported_end,
             } => {
                 self.transcript
                     .agent_started(&id, &description, kind.as_deref());
@@ -1016,6 +1020,7 @@ impl App {
                     described: false,
                     tools: 0,
                     started: Instant::now(),
+                    unreported_end,
                 });
             }
             AgentEvent::SubagentProgress { id, activity } => {

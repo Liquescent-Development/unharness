@@ -10,14 +10,11 @@ impl App {
     /// keep the status rule and herdr at work, hold back what would end
     /// the session (`refused_for_subagents`) and a handoff summary. One
     /// whose end may never be told (Mistral Vibe's, until its agent waits
-    /// for it) would hold them until the session ends: it stays listed
-    /// at work with its note, and goes with the session.
+    /// for it; `SubagentStarted::unreported_end`) would hold them until
+    /// the session ends: it stays listed at work with its note, and goes
+    /// with the session.
     pub(super) fn awaited_subagents(&self) -> usize {
-        if self.subagents.is_empty() || self.caps().subagents.unreported_ends {
-            0
-        } else {
-            self.subagents.len()
-        }
+        self.subagents.iter().filter(|a| !a.unreported_end).count()
     }
 
     /// Any subagent is listed at work, whether or not its end will be
@@ -54,13 +51,12 @@ impl App {
         }
     }
 
-    /// How long the longest-running subagent has been at work.
+    /// How long the longest-running subagent whose end will be told has
+    /// been at work.
     pub fn subagents_elapsed_secs(&self) -> f32 {
-        if self.awaited_subagents() == 0 {
-            return 0.0;
-        }
         self.subagents
             .iter()
+            .filter(|a| !a.unreported_end)
             .map(|a| a.started.elapsed().as_secs_f32())
             .fold(0.0, f32::max)
     }

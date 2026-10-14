@@ -84,6 +84,11 @@ pub enum AgentEvent {
         description: String,
         /// The kind of agent (`Explore`, `general-purpose`...), where the harness has kinds.
         kind: Option<String>,
+        /// Its end may never be told (Mistral Vibe tells it only when the
+        /// agent waits for the subagent): nothing waits for it, neither a
+        /// `--print` run nor what would end the session, and it goes with
+        /// the session. Not in the `.events` summary.
+        unreported_end: bool,
     },
     /// What a running subagent is doing now, in the harness's words.
     SubagentProgress {
@@ -639,6 +644,7 @@ impl AgentEvent {
                 id,
                 description,
                 kind,
+                ..
             } => format!(
                 "SubagentStarted id={} kind={} {:?}",
                 id,
@@ -808,6 +814,7 @@ mod tests {
                 id: "t1".into(),
                 description: "read a file".into(),
                 kind: Some("Explore".into()),
+                unreported_end: false,
             }
             .summary(),
             "SubagentStarted id=t1 kind=Explore \"read a file\""

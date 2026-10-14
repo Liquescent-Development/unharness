@@ -1201,9 +1201,10 @@ impl Harness for VibeHarness {
     /// `[harnesses.vibe.providers]` more than one, chosen when vibe starts.
     ///
     /// The ACP agent's, with its subagents (`subagents.rs`): a start and,
-    /// when the agent waits for one, its end and report. Nothing stops one
-    /// from outside (no client method; `session/cancel` leaves it running),
-    /// and nothing reports one between turns.
+    /// when the agent waits for one, its end and report (whose start says
+    /// that its end may never be told otherwise). Nothing stops one from
+    /// outside (no client method; `session/cancel` leaves it running), and
+    /// nothing reports one between turns.
     fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities {
             subagents: SubagentSupport {
@@ -1211,7 +1212,6 @@ impl Harness for VibeHarness {
                 described: false,
                 stop: false,
                 report_turn: false,
-                unreported_ends: true,
             },
             ..self.acp.capabilities()
         };
@@ -1822,7 +1822,7 @@ provider = "mine"
         // Started and, when waited for, ended (`subagents.rs`); never
         // stopped from here, and nothing waits for an end that may not come.
         let subagents = caps.subagents;
-        assert!(subagents.reported && subagents.unreported_ends);
+        assert!(subagents.reported);
         assert!(!subagents.stop && !subagents.report_turn);
         assert_eq!(h.min_version(), Some(MIN_VERSION));
         assert_eq!(MIN_VERSION.to_string(), "2.26.1");

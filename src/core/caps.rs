@@ -279,10 +279,6 @@ pub struct SubagentSupport {
     /// turn will come is known of the harness (Claude Code), not said on
     /// its stream before the turn starts.
     pub report_turn: bool,
-    /// The end of one can go unreported (Mistral Vibe tells it only when
-    /// the agent waits for the subagent), so a print run does not wait
-    /// for it.
-    pub unreported_ends: bool,
 }
 
 /// How a harness can go back to an earlier turn of its own session. (Files
