@@ -36,8 +36,21 @@ src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                effort, where each came from, what live sessions reported
                on top of the declared capabilities, and when a choice may
                be made; the TUI and headless runs resolve policy through
-               it; and the conversation it runs, installed as one, saved,
-               with the rewind anchors and file checkpoints it records),
+               it; the conversation it runs, installed as one, saved,
+               with the rewind anchors and file checkpoints it records;
+               the active harness's session as it goes: started,
+               committed, replaced, renewed and ended, its turns and the
+               prompts queued behind one, a switch and its handoff
+               summary, its permission requests, subagents, Remote
+               Control, rewind and fork, the `!` command, and what each
+               of its events does; it reads and changes the view only
+               through a narrow Front, and returns Actions that run.rs
+               carries out, holding a start until the CLI before it is
+               gone (Ending); and what any front end tracks of a
+               session's events, with or without that lifecycle
+               (tracking.rs: subagents and the turn ends owed for them,
+               the session's id, model and usage, who answers a
+               permission request, also with nobody to ask)),
                the conversation as blocks (transcript.rs), what another
                harness is told of it (bridge.rs), the `!` command (shell.rs:
                telling it from a prompt, running it, and what an agent is
@@ -56,12 +69,17 @@ src/harness/   one module per harness: descriptor, capabilities, probe,
   agy/         stream-json protocol (on the driver's loop) + parser + fixtures/
   acp/         generic Agent Client Protocol client (on the driver's loop):
                one instance per configured agent
-src/tui/       App state (pure), modals, rendering, event loop
-  app/         App: its struct, types, `new` and `on_event` in mod.rs, the rest
-               one file per concern (session, policy, switch, rewind, ...),
-               and their tests the same way under tests/; what decides how
-               a harness runs, and the conversation it shows, it reads
-               from and asks of core's controller
+src/tui/       App (the view and its controller), modals, rendering, the
+               event loop (it draws, reads input and forwards to the App
+               and the controller's run_actions)
+  app/         App: the view (input, cursor, scroll, selection, modal,
+               suggestions, flash, the lists its pickers are fetched for)
+               and the controller it shows; its struct, types, `new` and
+               `on_event` (the controller takes the event) in mod.rs,
+               Screen (front.rs: the view as the controller's Front), the
+               rest one file per concern (input, mouse, suggestions, modal
+               keys, the pickers), each forwarding to the controller what
+               is its; their tests the same way under tests/
 src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays

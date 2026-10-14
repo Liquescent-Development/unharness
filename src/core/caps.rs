@@ -183,7 +183,7 @@ pub struct Capabilities {
     /// nothing behind, so the TUI starts it as soon as it is idle without
     /// one, to have what it reports (its commands) before the first prompt.
     ///
-    /// Read by `App::start_when_idle` alone. It stays a flag (#275): it
+    /// Read by `Controller::start_when_idle` alone. It stays a flag (#275): it
     /// decides whether a process is started at all before the first
     /// prompt, when there is no driver yet to decide anything (agy 1.3.2
     /// writes a conversation for every process it starts,

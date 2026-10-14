@@ -66,7 +66,7 @@ change, a provider changed before anything was sent), not with the first
 prompt, so that the list is there
 before it (#118). (A provider changed after a prompt is the driver's:
 it starts its CLI again itself, #275.) Until a prompt goes to it the session is not the
-conversation's (the field `App::session_blank`: nothing saved, its id held back,
+conversation's (the field `Controller::session_blank`: nothing saved, its id held back,
 the bridge sent whole); a model, effort or policy chosen meanwhile
 starts it again with the choice, and one that exits, fails to start or
 fails its handshake waits for the user. Checked in the TUI (pty, Claude
