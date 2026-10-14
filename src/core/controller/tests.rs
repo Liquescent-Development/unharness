@@ -9,6 +9,8 @@ use crate::harness::claude::ClaudeHarness;
 use crate::harness::codex::{CodexHarness, CodexTransport};
 use crate::harness::pi::PiHarness;
 
+mod lifecycle;
+
 const AGY: HarnessId = HarnessId::AGY;
 const CLAUDE: HarnessId = HarnessId::CLAUDE;
 const CODEX: HarnessId = HarnessId::CODEX;

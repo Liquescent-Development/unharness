@@ -273,7 +273,7 @@ fn a_session_notice_is_said_once() {
 
 #[test]
 fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
-    use super::super::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller.config.mcp_servers.insert(
         "files".into(),
@@ -282,7 +282,7 @@ fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
             ..Default::default()
         },
     );
-    let notices = |app: &App| {
+    let notices = |app: &TestApp| {
         app.controller
             .conversation
             .transcript
@@ -494,7 +494,7 @@ fn an_agent_that_is_not_signed_in_is_told_once_and_waits_for_the_user() {
     let why = "vibe is not signed in (Missing API key for mistral provider). It offers: \
                \"Sign in through Mistral AI Studio\". unharness does not sign agents in: \
                run `vibe --setup` in a terminal, then try again";
-    let told = |app: &App| {
+    let told = |app: &TestApp| {
         let notices = notices(app);
         assert!(!notices.iter().any(|n| n.contains("exited")), "{notices:?}");
         notices
