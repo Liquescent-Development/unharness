@@ -673,6 +673,31 @@ fn a_second_vibe_choice_before_the_answer_is_refused() {
     );
 }
 
+/// A driver that answers one choice twice, the second time while the
+/// session writes the handoff summary its first answer asked for: the
+/// summary goes on, and no second one or renewal is started.
+#[test]
+fn a_second_renewal_during_the_summary_changes_nothing() {
+    let (mut app, _cwd) = vibe_app();
+    app.bridge_max_chars = Some(300);
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
+    assert!(sent_turn(&mut app).contains("new session of yours"));
+    let said = app.transcript.blocks.len();
+    vibe_renews(&mut app, "effort off");
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.transcript.blocks.len(), said);
+    assert!(app.is_generating);
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+}
+
 /// Quitting before vibe has answered a choice: the stored session, which
 /// keeps what it last ran, is forgotten as the answer would have had it,
 /// so that a resume does not bring it back as it ran.

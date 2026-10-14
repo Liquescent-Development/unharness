@@ -268,15 +268,19 @@ impl App {
 
     /// The active harness's session cannot take a choice, for `reason`
     /// (`AgentEvent::SessionRenewed`, or its stored session keeps what it
-    /// ran with none live to say so, `App::renewal_without_session`): the
-    /// conversation goes on in a new session, told it with the next prompt
-    /// as a harness switched to is, and the one left writes a handoff
-    /// summary first when the conversation does not fit in that bridge.
-    /// What was typed after the choice goes after that, as if typed then.
+    /// ran with none live to say so, `Route::Renew`): the conversation goes
+    /// on in a new session, told it with the next prompt as a harness
+    /// switched to is, and the one left writes a handoff summary first when
+    /// the conversation does not fit in that bridge. What was typed after
+    /// the choice goes after that, as if typed then.
     pub(super) fn session_renewed(&mut self, reason: &str) {
         let pending = self.choice_answered(super::choices::provider_line);
-        // One is under way already (a second answer of a session told two
-        // choices): this one only takes its own.
+        // A guard, not a path the TUI takes: no second choice goes to the
+        // session before it has answered the first (`Controller::settling`)
+        // nor during the summary's turn, so only a driver answering one
+        // choice twice comes here with a renewal under way. That answer
+        // takes only its own pending choice; a second summary or a
+        // renewal in the middle of the first is not started.
         if self.handoff.is_some_and(|h| h.renew) {
             return;
         }
