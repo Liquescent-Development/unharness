@@ -1058,7 +1058,14 @@ mod tests {
                 return;
             }
             let pid = std::fs::read_to_string(self.path("pid"));
-            let Some(pid) = pid.ok().and_then(|p| p.trim().parse::<libc::pid_t>().ok()) else {
+            // Only a pid that can lead the script's group: as `-pid`, 0
+            // would name this binary's own group, 1 every process it may
+            // signal, and a negative one the process of that number.
+            let Some(pid) = pid
+                .ok()
+                .and_then(|p| p.trim().parse::<libc::pid_t>().ok())
+                .filter(|p| *p > 1)
+            else {
                 return;
             };
             // SAFETY: plain syscalls. `pid` leads the script's session and
