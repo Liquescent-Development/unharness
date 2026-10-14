@@ -26,7 +26,7 @@ use crate::core::{
 };
 use crate::harness::ModelInfo;
 
-pub use crate::core::controller::{Action, QueuedPrompt, RunningSubagent, ShellRun};
+pub use crate::core::controller::Action;
 
 // The files below, and their tests, reach these through this module
 // (`super::transcript`, `super::shell`, ...), as when they were one file.

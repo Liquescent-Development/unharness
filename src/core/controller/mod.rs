@@ -288,10 +288,10 @@ pub struct Controller {
     pub(crate) session_blank: bool,
     /// The id (and model) such a session reported, committed with the
     /// first prompt.
-    pub(crate) blank_session: Option<(String, Option<String>)>,
+    blank_session: Option<(String, Option<String>)>,
     /// The last session ended by itself or could not start: the next
     /// one waits for the user (a prompt, a switch, a resume).
-    pub(crate) idle_start_paused: bool,
+    idle_start_paused: bool,
     /// The session's start waits for the CLI that ended the one before it
     /// to be gone ([`Ending`]): what would start another is refused
     /// meanwhile, as during a turn.
@@ -311,7 +311,7 @@ pub struct Controller {
     pub queued: VecDeque<QueuedPrompt>,
     /// The `!` command running now.
     pub shell: Option<ShellRun>,
-    pub(crate) compacting: bool,
+    compacting: bool,
     /// The harnesses already told which MCP servers they do not get.
     mcp_warned: HashSet<HarnessId>,
     /// The harnesses whose [`Harness::session_notice`] was shown.
@@ -325,7 +325,9 @@ impl Controller {
     /// its own, and its configured model and effort; the run's harness with
     /// what `launch` names. A configured model of a harness whose provider
     /// is not known is given to the run's harness only. It runs a new
-    /// conversation, kept and checkpointed as `keeping` says.
+    /// conversation, kept and checkpointed as `keeping` says, on the run's
+    /// harness, in its directory, under its sandbox and allow rules, with
+    /// no session yet.
     pub fn new(registry: Arc<Registry>, config: Config, launch: Launch, keeping: Keeping) -> Self {
         let mut choices: HashMap<HarnessId, ChoiceState> = HashMap::new();
         for h in registry.all() {

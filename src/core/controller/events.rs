@@ -5,6 +5,8 @@ use super::{Controller, Front};
 use crate::core::{AgentEvent, RateLimitInfo, StopReason};
 
 impl Controller {
+    /// The active harness's session reported `ev`. What it changes on
+    /// screen part of the way through goes through `front`.
     pub fn on_event(&mut self, ev: AgentEvent, front: &mut dyn Front) {
         let sender = self.short_name().to_string();
         match ev {
