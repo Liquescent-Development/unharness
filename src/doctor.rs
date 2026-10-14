@@ -19,7 +19,7 @@ use crate::core::{
     Capabilities, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport,
     resolve_policy,
 };
-use crate::harness::{MinVersion, parse_version};
+use crate::harness::{MinVersion, acp, parse_version};
 use crate::runner::binary_overrides;
 use crate::skills::{discover_skills_in_dir, global_skills_dir, workspace_skills_dir};
 use crate::skills_cmd::SkillsCli;
@@ -329,10 +329,20 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
             for k in config.harnesses.keys() {
                 // A table with an error, one no harness reads among them,
                 // is named under Config.
-                if registry.parse(k).is_none()
-                    && !config_errors.iter().any(|e| e.table.as_deref() == Some(k))
+                if registry.parse(k).is_some()
+                    || config_errors.iter().any(|e| e.table.as_deref() == Some(k))
                 {
-                    println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k);
+                    continue;
+                }
+                // A preset is offered only when its binary is on PATH.
+                match acp::PRESETS.iter().find(|(name, ..)| name == k) {
+                    Some((_, display, command)) => println!(
+                        "  {} [harnesses.{k}]: the {display} preset is not installed (binary \
+                         '{}' not found on PATH)",
+                        "[-]".dimmed(),
+                        command[0]
+                    ),
+                    None => println!("  {} unknown harness '{}' in the config", "[!]".yellow(), k),
                 }
             }
         }

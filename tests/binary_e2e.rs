@@ -1070,11 +1070,14 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
     assert!(stdout.contains("Workspace Context:\n  Root:"), "{stdout}");
 
     // With the tables fixed doctor shows vibe and the agent and ends well.
+    // A preset's table whose binary is not on PATH is for that preset,
+    // not for an unknown harness.
     std::fs::write(
         tmp.path().join("config/unharness/config.toml"),
         "[harnesses.vibe]\ncommand = [\"/opt/my-vibe-acp\"]\n\
          [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
-         display_name = \"My Gemini\"\n",
+         display_name = \"My Gemini\"\n\
+         [harnesses.opencode]\ndefault_model = \"m\"\n",
     )
     .unwrap();
     let out = unharness_in(tmp.path(), &["doctor"]);
@@ -1084,6 +1087,13 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         stdout.contains("Mistral Vibe")
             && stdout.contains("My Gemini")
             && !stdout.contains("will not start"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "[harnesses.opencode]: the OpenCode preset is not installed (binary 'opencode' \
+             not found on PATH)"
+        ) && !stdout.contains("unknown harness"),
         "{stdout}"
     );
 }
