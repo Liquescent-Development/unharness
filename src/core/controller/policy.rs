@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 
 use anyhow::Result;
 
-use super::{Origin, Pick};
+use super::{Controller, Origin, Pick};
 use crate::config::Config;
 use crate::core::conversations::Conversation;
 use crate::core::{
@@ -368,5 +368,124 @@ impl PolicyState {
     #[cfg(test)]
     pub fn chosen(&self) -> HashMap<HarnessId, PermissionPolicy> {
         self.chosen.iter().map(|(h, p)| (*h, p.value)).collect()
+    }
+}
+
+/// The policy of each harness as what it offers stands, with what its
+/// sessions refused taken out.
+impl Controller {
+    /// How the policy wanted of `harness` maps onto what it offers.
+    pub fn policy_resolution(
+        &self,
+        config: &Config,
+        harness: HarnessId,
+    ) -> Result<PolicyResolution, PolicyUnavailable> {
+        self.policy
+            .resolve(config, harness, &self.policies(harness))
+    }
+
+    /// The policy `harness` runs under; `None` until the user chooses,
+    /// where the wanted one is not available.
+    pub fn effective_policy(
+        &self,
+        config: &Config,
+        harness: HarnessId,
+    ) -> Option<PermissionPolicy> {
+        self.policy
+            .effective(config, harness, &self.policies(harness))
+    }
+
+    /// The policies `harness` has, least permissive first.
+    pub fn offered_policies(&self, harness: HarnessId) -> Vec<PermissionPolicy> {
+        PolicyState::listed(&self.policies(harness))
+    }
+
+    /// How `p` resolves on `harness`, if it offers it.
+    pub fn offered(
+        &self,
+        harness: HarnessId,
+        p: PermissionPolicy,
+    ) -> Result<PolicyResolution, PolicyUnavailable> {
+        PolicyState::offered(&self.policies(harness), p)
+    }
+
+    /// Choose `p` for `harness` (`PolicyState::set`).
+    pub fn set_policy(
+        &mut self,
+        config: &Config,
+        harness: HarnessId,
+        p: PermissionPolicy,
+        prompted: bool,
+    ) -> Result<PolicySet, PolicyUnavailable> {
+        let policies = self.policies(harness);
+        self.policy.set(config, harness, p, &policies, prompted)
+    }
+
+    /// `harness`'s session runs under `p` now (`PolicyState::on_changed`).
+    /// Returns what the user is told when it moved there by itself.
+    pub fn on_policy_changed(
+        &mut self,
+        config: &Config,
+        harness: HarnessId,
+        p: PermissionPolicy,
+    ) -> Option<String> {
+        let policies = self.policies(harness);
+        let p = self.policy.on_changed(config, harness, p, &policies)?;
+        let name = self.display_name(harness);
+        Some(match p {
+            PermissionPolicy::Plan => {
+                format!(
+                    "{name} went into plan mode: it asks you to approve its plan before it acts"
+                )
+            }
+            _ => format!("{name} now runs under policy {p}"),
+        })
+    }
+
+    /// The policies a plan of `harness` can be carried out under.
+    pub fn plan_policies(&self, harness: HarnessId) -> Vec<PermissionPolicy> {
+        self.policy.plan_policies(self.offered_policies(harness))
+    }
+
+    /// What a resumed conversation says of `harness`'s policy, when it runs
+    /// under another than `last`, the one it last ran under. `at_start`:
+    /// resumed by `--resume`.
+    pub fn resumed_under(
+        &self,
+        config: &Config,
+        harness: HarnessId,
+        last: PermissionPolicy,
+        at_start: bool,
+    ) -> Option<String> {
+        let now = self.effective_policy(config, harness);
+        if now == Some(last) {
+            return None;
+        }
+        let name = self.short_name(harness);
+        let wanted = self.policy.wanted(config, harness);
+        let why = if now != Some(wanted) {
+            format!("{wanted} is not available on {name}")
+        } else {
+            match self.policy.source(harness) {
+                PolicySource::ChosenInRun => "chosen in this run".to_string(),
+                PolicySource::ChosenForConversation => {
+                    format!("chosen for {name} in this conversation")
+                }
+                PolicySource::NamedInRun if at_start => "named with --policy".to_string(),
+                PolicySource::NamedInRun => "named in this run".to_string(),
+                PolicySource::NamedForConversation => {
+                    "the policy named for this conversation".to_string()
+                }
+                PolicySource::Configured => "the configured default".to_string(),
+            }
+        };
+        Some(match now {
+            Some(now) => format!(
+                "{name} last ran this conversation under {last}; it continues under {now} ({why})"
+            ),
+            None => format!(
+                "{name} last ran this conversation under {last}; it waits for a policy ({why})"
+            ),
+        })
     }
 }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::core::PermissionPolicy::{self, *};
+use crate::core::SessionCommand;
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
 use crate::harness::codex::{CodexHarness, CodexTransport};
