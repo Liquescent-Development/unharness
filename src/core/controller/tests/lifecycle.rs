@@ -130,6 +130,9 @@ impl Front for Recording {
 struct TestApp {
     controller: Controller,
     front: Recording,
+    /// The directory a helper opened it in, removed after the controller
+    /// is dropped (fields are dropped in order).
+    dir: Option<tempfile::TempDir>,
 }
 
 impl TestApp {
@@ -139,9 +142,16 @@ impl TestApp {
         let mut app = TestApp {
             controller,
             front: Recording::default(),
+            dir: None,
         };
         app.with(|c, front| c.greet(greeting, front));
         app
+    }
+
+    /// This, keeping `dir`, which it was opened in, until it is dropped.
+    fn holding(mut self, dir: tempfile::TempDir) -> Self {
+        self.dir = Some(dir);
+        self
     }
 
     fn with<R>(&mut self, f: impl FnOnce(&mut Controller, &mut Recording) -> R) -> R {
@@ -385,7 +395,7 @@ fn test_init(
 
 fn test_app(harness: HarnessId) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
-    test_app_in(tmp.keep(), harness, None, false)
+    test_app_in(tmp.path().to_path_buf(), harness, None, false).holding(tmp)
 }
 
 fn spawn_block<'a>(app: &'a TestApp, want: &str) -> &'a crate::core::transcript::AgentRun {

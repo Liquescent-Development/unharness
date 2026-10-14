@@ -2806,7 +2806,7 @@ pub fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::tests::test_app;
+    use crate::tui::app::tests::{TestApp, test_app};
     use crossterm::event::KeyEvent;
     use ratatui::{Terminal, backend::TestBackend};
 
@@ -2943,7 +2943,7 @@ mod tests {
         (rows, (cursor.x, cursor.y))
     }
 
-    fn question_app(questions: Vec<crate::core::Question>) -> App {
+    fn question_app(questions: Vec<crate::core::Question>) -> TestApp {
         use crate::core::{AgentEvent, PermissionRequest};
         let mut app = test_app(HarnessId::CLAUDE);
         app.controller.session_alive = true;

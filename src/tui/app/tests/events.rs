@@ -4,7 +4,7 @@ use super::*;
 fn herdr_hears_working_blocked_and_idle() {
     use crate::tui::herdr::State;
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     assert_eq!(app.herdr_report().state, State::Idle);
 
     app.controller.is_generating = true;
@@ -43,7 +43,7 @@ fn herdr_hears_a_session_held_for_a_policy_as_blocked() {
     use crate::tui::herdr::State;
     let tmp = tempfile::tempdir().unwrap();
     // agy has no `ask`, and nothing below it.
-    let app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+    let app = test_app_asking(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
     let report = app.herdr_report();
     assert_eq!(report.state, State::Blocked);

@@ -7,7 +7,7 @@ use super::*;
 #[test]
 fn a_policy_the_session_refuses_gives_way_as_an_unsupported_one() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.controller.session_alive = true;
     app.take_actions();
@@ -61,7 +61,7 @@ fn a_policy_the_session_refuses_gives_way_as_an_unsupported_one() {
 #[test]
 fn a_refused_policy_is_offered_again_once_the_session_ends() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     let start = |app: &mut App, id: &str| {
         blank_session(app);
@@ -156,7 +156,7 @@ fn a_refused_policy_is_offered_again_once_the_session_ends() {
 fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
     use crate::tui::herdr::State;
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     let start = |app: &mut App, id: &str| {
         blank_session(app);
         app.on_event(AgentEvent::SessionStarted {
@@ -217,7 +217,7 @@ fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
 fn a_policy_that_is_not_available_waits_for_a_choice() {
     let tmp = tempfile::tempdir().unwrap();
     // agy has no `ask`, and nothing below it.
-    let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+    let mut app = test_app_asking(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
     assert_eq!(app.effective_policy(), None);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
     assert!(
@@ -268,7 +268,7 @@ fn a_policy_that_is_not_available_waits_for_a_choice() {
 #[test]
 fn prompts_held_for_a_policy_keep_their_order() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+    let mut app = test_app_asking(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
     for text in ["first", "second"] {
         app.modal = None;
         app.submit_prompt(text.into());
@@ -296,7 +296,7 @@ fn prompts_held_for_a_policy_keep_their_order() {
 #[test]
 fn a_choice_made_for_want_of_a_policy_outlives_changes_elsewhere() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_asking(tmp.keep(), HarnessId::AGY, None, false);
+    let mut app = test_app_asking(tmp.path().to_path_buf(), HarnessId::AGY, None, false);
     assert!(app.set_policy(PermissionPolicy::Bypass));
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
     // Other policies are chosen on Claude: agy keeps its own.
@@ -316,7 +316,7 @@ fn codex_exec_has_no_ask() {
     )));
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_with(
-        tmp.keep(),
+        tmp.path().to_path_buf(),
         HarnessId::CODEX,
         None,
         false,
@@ -373,7 +373,7 @@ fn a_policy_the_harness_lacks_cannot_be_chosen() {
 #[test]
 fn the_policy_picker_saves_a_harness_default() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::PI, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::PI, None, false);
     let dir = app.controller.cwd.join(".unharness/test-config");
     let saving = |app: &App| match &app.modal {
         Some(Modal::Policy(p)) => p.save,
@@ -444,7 +444,7 @@ fn the_policy_picker_saves_a_harness_default() {
 #[test]
 fn saving_over_a_workspace_default_for_every_harness_says_so() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     let dir = app.controller.cwd.join(".unharness/test-config");
     let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.controller.cwd)).unwrap();
     std::fs::create_dir_all(local.parent().unwrap()).unwrap();
@@ -464,7 +464,7 @@ fn saving_over_a_workspace_default_for_every_harness_says_so() {
 #[test]
 fn the_policy_picker_starts_on_the_policy_in_effect() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     assert!(app.set_policy(PermissionPolicy::Auto));
     app.switch_harness(HarnessId::PI);
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));

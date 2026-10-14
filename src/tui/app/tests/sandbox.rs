@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn the_sandbox_level_is_chosen_for_the_run() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
     app.controller.sandbox = SandboxSetup::null(None);
     assert_eq!(app.sandbox_level().0, SandboxLevel::WorkspaceWrite);
 
