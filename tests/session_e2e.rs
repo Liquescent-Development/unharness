@@ -1505,8 +1505,9 @@ async fn agy_stream_session_runs_two_turns() {
 }
 
 /// agy's model is a flag: the turn after a change goes to a new process,
-/// which the session's process slot names from then on, and the one it
-/// replaced is gone.
+/// which the session's process slot names from then on, and which starts
+/// only once the one it replaces is gone (#286: that one was killed, and
+/// the new one started beside it).
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
@@ -1553,7 +1554,7 @@ async fn agy_starts_again_for_a_new_model_and_its_slot_names_the_new_process() {
     ));
     let (second, _) = background_pids(&pids).await;
     assert_ne!(first, second);
-    assert!(gone_within(first, Duration::from_secs(5)).await);
+    assert!(!running(first), "started beside the process it replaces");
     let turns: Vec<Value> = fake
         .sent_lines()
         .into_iter()

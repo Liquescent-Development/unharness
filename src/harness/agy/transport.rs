@@ -173,7 +173,7 @@ impl StreamProtocol for Agy {
                 self.cfg.resume = self.session_id.clone();
                 Encoded::Restart {
                     command: Box::new(stream_command(&self.cfg)),
-                    then: SessionCommand::SendTurn { text, attachments },
+                    then: Some(SessionCommand::SendTurn { text, attachments }),
                 }
             }
             SessionCommand::SendTurn { text, .. } => {
@@ -211,17 +211,25 @@ impl StreamProtocol for Agy {
         }
     }
 
-    fn restarted(&mut self, result: Result<()>) -> Vec<AgentEvent> {
-        match result {
+    /// The process before was ended between turns and has exited (#286:
+    /// before, it was killed and the next started beside it).
+    async fn respawned(&mut self, started: Result<()>, io: &mut Io<'_>) -> bool {
+        match started {
             Ok(()) => {
                 self.parser = AgyParser::new(self.session_id.clone());
-                vec![AgentEvent::Notice(
+                io.emit(AgentEvent::Notice(
                     "agy restarted with the new settings".into(),
-                )]
+                ))
+                .await;
+                true
             }
-            Err(e) => vec![AgentEvent::TurnCompleted {
-                stop_reason: StopReason::Error(format!("agy restart failed: {e}")),
-            }],
+            Err(e) => {
+                io.emit(AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(format!("agy restart failed: {e}")),
+                })
+                .await;
+                false
+            }
         }
     }
 

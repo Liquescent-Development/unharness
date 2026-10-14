@@ -149,9 +149,11 @@ async fn drive(
                         if current.is_some() {
                             if turn_completed {
                                 // The parser saw the turn end but the child has
-                                // not been reaped yet; finish it off.
+                                // not been reaped yet; finish it off, and
+                                // start the next once it is gone (#286).
                                 if let Some(mut p) = current.take() {
                                     p.kill().await;
+                                    exited(&mut p).await;
                                 }
                             } else {
                                 let _ = events
@@ -518,6 +520,68 @@ mod tests {
             .unwrap();
         assert!(matches!(ev, AgentEvent::ProcessExited { .. }), "{ev:?}");
         assert!(!crate::core::process::running(pid));
+    }
+
+    // The next turn's CLI starts only once the one before it is gone, also
+    // when the parser saw that turn end before its CLI exited (#286: it was
+    // killed, and the next started beside it).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_next_turn_starts_once_the_cli_before_it_is_gone() {
+        struct Ends;
+        impl Parser for Ends {
+            fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
+                match line {
+                    "done" => vec![AgentEvent::TurnCompleted {
+                        stop_reason: StopReason::Done,
+                    }],
+                    pid => vec![AgentEvent::TextDelta(pid.to_string())],
+                }
+            }
+        }
+        struct Lingers;
+        impl PerTurnProtocol for Lingers {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, _s: &TurnState, _t: &str, _a: &[Attachment]) -> Result<TurnSpec> {
+                // Ends its turn, and has not exited when the next is asked for.
+                let mut command = Command::new("sh");
+                command.arg("-c").arg("echo $$; echo done; exec sleep 30");
+                Ok(TurnSpec {
+                    command,
+                    stdin: None,
+                })
+            }
+            fn new_parser(&self) -> Box<dyn Parser> {
+                Box::new(Ends)
+            }
+        }
+        let mut h = start(cfg(), &caps(), Arc::new(Lingers)).unwrap();
+        h.send(SessionCommand::turn("one")).await.unwrap();
+        let first = collect_turn(&mut h).await;
+        let pid: u32 = first
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::TextDelta(p) => p.parse().ok(),
+                _ => None,
+            })
+            .unwrap();
+        h.send(SessionCommand::turn("two")).await.unwrap();
+        let ev = tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ev, AgentEvent::TurnStarted);
+        assert!(!crate::core::process::running(pid), "started beside it");
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        while !matches!(
+            tokio::time::timeout(Duration::from_secs(10), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            AgentEvent::ProcessExited { .. }
+        ) {}
     }
 
     #[tokio::test]
