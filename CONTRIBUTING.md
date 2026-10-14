@@ -36,13 +36,14 @@ src/core/      HarnessId/ProviderId/ModelRef, Capabilities + PermissionPolicy,
                effort, where each came from, what live sessions reported
                on top of the declared capabilities, and when a choice may
                be made; the TUI and headless runs resolve policy through
-               it), the conversation as blocks (transcript.rs), what
-               another harness is told of it (bridge.rs) and of the `!`
-               commands run (shell.rs), file checkpoints, allow rules
-               (rules.rs), who answers a permission request
-               (permissions.rs), the sandbox
-               (sandbox/: levels, profile, Landlock and Seatbelt backends)
-               and the watch on vendor config (guard.rs)
+               it; and the conversation it runs, installed as one, saved,
+               with its rewind anchors and file checkpoints), the
+               conversation as blocks (transcript.rs), what another
+               harness is told of it (bridge.rs) and of the `!` commands
+               run (shell.rs), file checkpoints, allow rules (rules.rs),
+               who answers a permission request (permissions.rs), the
+               sandbox (sandbox/: levels, profile, Landlock and Seatbelt
+               backends) and the watch on vendor config (guard.rs)
 src/harness/   one module per harness: descriptor, capabilities, probe,
                list_models, start_session, build_print_command, and what
                the sandbox must leave writable and watch for it
@@ -57,7 +58,8 @@ src/tui/       App state (pure), modals, rendering, event loop
   app/         App: its struct, types, `new` and `on_event` in mod.rs, the rest
                one file per concern (session, policy, switch, rewind, ...),
                and their tests the same way under tests/; what decides how
-               a harness runs it reads from and asks of core's controller
+               a harness runs, and the conversation it shows, it reads
+               from and asks of core's controller
 src/headless.rs  `--print`: one prompt through a session, written as text,
                json or stream-json (schema in docs/headless.md)
 scripts/       record-*.py capture real vendor sessions; fake-harness.py replays
