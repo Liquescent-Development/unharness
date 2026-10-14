@@ -36,18 +36,26 @@ fn launch(policy: Option<PermissionPolicy>) -> Launch {
     }
 }
 
-/// Where these tests keep conversations: nowhere, since none is saved
-/// (a save would fail there rather than land anywhere).
-fn keeping() -> Keeping {
+/// Where a test keeps conversations: in `dir`, a directory of its own, so
+/// that one which saves writes nowhere else.
+fn keeping(dir: &tempfile::TempDir) -> Keeping {
     Keeping {
-        store: ConversationStore::at("/nonexistent/unharness-controller-tests".into()),
+        store: ConversationStore::at(dir.path().to_path_buf()),
         checkpoints: None,
     }
 }
 
-/// A controller as a run starts, with `policy` named for every harness.
-fn controller(policy: Option<PermissionPolicy>) -> Controller {
-    Controller::new(registry(), &Config::default(), launch(policy), keeping())
+/// A controller as a run starts, with `policy` named for every harness,
+/// and the directory it keeps conversations in.
+fn controller(policy: Option<PermissionPolicy>) -> (tempfile::TempDir, Controller) {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Controller::new(
+        registry(),
+        &Config::default(),
+        launch(policy),
+        keeping(&dir),
+    );
+    (dir, c)
 }
 
 fn warning(c: &Controller, config: &Config, harness: HarnessId) -> Option<String> {
@@ -59,7 +67,7 @@ fn policy_resolution_per_harness() {
     // As with `--policy auto`: agy, which has no `auto`, runs the nearest
     // less permissive policy and says so.
     let config = Config::default();
-    let mut c = controller(Some(Auto));
+    let (_dir, mut c) = controller(Some(Auto));
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(Auto));
     assert!(warning(&c, &config, CLAUDE).is_none());
     assert_eq!(c.effective_policy(&config, AGY), Some(AcceptEdits));
@@ -85,7 +93,7 @@ fn a_harness_default_policy_stays_with_its_harness() {
             ..Default::default()
         },
     );
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     assert_eq!(c.effective_policy(&config, AGY), Some(Bypass));
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(Ask));
     assert_eq!(c.effective_policy(&config, AGY), Some(Bypass));
@@ -101,7 +109,7 @@ fn a_harness_default_policy_stays_with_its_harness() {
 #[test]
 fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
     let config = Config::default();
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     let e = c.set_policy(&config, PI, Auto, true).unwrap_err();
     assert_eq!(e.supported, vec![Ask, Bypass]);
 
@@ -126,7 +134,7 @@ fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
 #[test]
 fn a_mode_the_agent_goes_into_is_its_policy() {
     let config = Config::default();
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     c.set_policy(&config, CLAUDE, AcceptEdits, true).unwrap();
     c.on_policy_changed(&config, CLAUDE, AcceptEdits);
     assert_eq!(
@@ -159,7 +167,7 @@ fn a_mode_the_agent_goes_into_is_its_policy() {
 #[test]
 fn a_refused_policy_gives_way_until_the_session_ends() {
     let config = Config::default();
-    let mut c = controller(Some(AcceptEdits));
+    let (_dir, mut c) = controller(Some(AcceptEdits));
     let refuse = |c: &mut Controller, policies: &[PermissionPolicy], alive| {
         c.report(
             &config,
@@ -203,7 +211,7 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     conv.policy_choices.insert(AGY, AcceptEdits);
     conv.policy_choices.insert(CLAUDE, Bypass);
 
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     c.set_policy(&config, PI, Bypass, false).unwrap();
     c.take_conversation(&config, &conv);
     assert_eq!(c.effective_policy(&config, AGY), Some(AcceptEdits));
@@ -222,7 +230,7 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     assert_eq!(saved.last_policies[&CLAUDE], Bypass);
 
     // `--policy accept-edits`: over every choice of the conversation's.
-    let mut c = controller(Some(AcceptEdits));
+    let (_dir, mut c) = controller(Some(AcceptEdits));
     c.take_conversation(&config, &conv);
     assert_eq!(c.policy.chosen(), HashMap::new());
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(AcceptEdits));
@@ -272,7 +280,8 @@ fn codex_run(model: Option<&str>, effort: Option<&str>, provider: &str) -> (Conf
 /// `effort` where given.
 fn codex_conversation(model: Option<&str>, effort: Option<&str>) -> Conversation {
     let (config, launch) = codex_run(None, None, "openai");
-    let mut c = Controller::new(registry(), &config, launch, keeping());
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(registry(), &config, launch, keeping(&dir));
     if let Some(m) = model {
         c.choose_model(CODEX, m.into());
     }
@@ -289,11 +298,12 @@ fn resume_codex(
     model: Option<&str>,
     effort: Option<&str>,
     provider: &str,
-) -> (Controller, Vec<String>) {
+) -> (tempfile::TempDir, Controller, Vec<String>) {
     let (config, launch) = codex_run(model, effort, provider);
-    let mut c = Controller::new(registry(), &config, launch, keeping());
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(registry(), &config, launch, keeping(&dir));
     let notices = c.take_conversation(&config, conversation);
-    (c, notices)
+    (dir, c, notices)
 }
 
 fn codex_model(c: &Controller) -> Option<&str> {
@@ -303,12 +313,12 @@ fn codex_model(c: &Controller) -> Option<&str> {
 #[test]
 fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
     let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
-    let (c, _) = resume_codex(&conv, None, None, "openai");
+    let (_dir, c, _) = resume_codex(&conv, None, None, "openai");
     assert_eq!(codex_model(&c), Some("gpt-chosen"));
     assert_eq!(c.effort(CODEX), Some("high"));
 
     // Named on the command line, they win.
-    let (c, _) = resume_codex(&conv, Some("gpt-flag"), Some("low"), "openai");
+    let (_dir, c, _) = resume_codex(&conv, Some("gpt-flag"), Some("low"), "openai");
     assert_eq!(codex_model(&c), Some("gpt-flag"));
     assert_eq!(c.effort(CODEX), Some("low"));
 }
@@ -316,7 +326,7 @@ fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
 #[test]
 fn a_configured_model_is_not_kept_with_the_conversation() {
     let conv = codex_conversation(None, None);
-    let (c, _) = resume_codex(&conv, None, None, "openai");
+    let (_dir, c, _) = resume_codex(&conv, None, None, "openai");
     assert!(conv.models.is_empty());
     assert!(conv.efforts.is_empty());
     assert_eq!(codex_model(&c), Some("configured-model"));
@@ -325,7 +335,7 @@ fn a_configured_model_is_not_kept_with_the_conversation() {
 #[test]
 fn a_model_chosen_on_another_provider_is_left() {
     let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
-    let (c, notices) = resume_codex(&conv, None, None, "ollama");
+    let (_dir, c, notices) = resume_codex(&conv, None, None, "ollama");
     assert_eq!(codex_model(&c), Some("configured-model"));
     // Its effort was for it.
     assert_eq!(c.effort(CODEX), None);
@@ -338,6 +348,7 @@ fn a_model_chosen_on_another_provider_is_left() {
 #[test]
 fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     let config = Config::default();
+    let dir = tempfile::tempdir().unwrap();
     let mut c = Controller::new(
         registry(),
         &config,
@@ -346,7 +357,7 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
             default_providers: [(CLAUDE, "anthropic".into())].into(),
             ..launch(None)
         },
-        keeping(),
+        keeping(&dir),
     );
     assert_eq!(c.chosen_provider(CLAUDE), None);
     let report = |c: &mut Controller, provider: &str| {
@@ -401,6 +412,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             .with(Box::new(ClaudeHarness::default())),
     );
     let vibe = registry.get(VIBE).unwrap().descriptor().short_name;
+    let dir = tempfile::tempdir().unwrap();
     let mut c = Controller::new(
         registry,
         &config,
@@ -408,7 +420,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             harness: VIBE,
             ..launch(None)
         },
-        keeping(),
+        keeping(&dir),
     );
     assert!(c.between_turns(VIBE, Choice::Model));
     assert!(!c.between_turns(CLAUDE, Choice::Effort));
@@ -591,7 +603,7 @@ fn saved_conversation() -> Conversation {
 fn a_conversation_installed_is_saved_as_it_came() {
     let config = Config::default();
     let saved = saved_conversation();
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     c.install(saved.clone(), CODEX);
     let state = &c.conversation;
     assert_eq!(state.session_ids, saved.sessions);
