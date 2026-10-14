@@ -4,7 +4,7 @@
 //! including when nobody is there to ask. None of it starts, ends or
 //! prompts a session: that lifecycle is the TUI's controller's alone. The
 //! controller keeps one ([`Controller::tracking`]); a run with no one to
-//! ask (`--print`) can keep one without it.
+//! ask (`--print`, `headless::Headless`) keeps one without it.
 //!
 //! Whether the agent plans is not kept here: each front end knows it its
 //! own way (the TUI from the policy in effect, `--print` from the main
