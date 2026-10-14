@@ -11,12 +11,14 @@ impl App {
     pub fn run_shell(&mut self, command: &str) {
         let typed = format!("!{command}");
         if command.is_empty() {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_notice("nothing to run after `!` (`\\!` sends a prompt that starts with !)");
             return;
         }
         if self.is_generating || self.shell.is_some() {
-            self.transcript.push_notice(if self.is_generating {
+            self.controller.conversation.transcript.push_notice(if self.is_generating {
                 "a `!` command cannot run during a turn; it is back in the prompt"
             } else {
                 "a `!` command is already running (Esc stops it); this one is back in the prompt"
@@ -26,7 +28,10 @@ impl App {
             }
             return;
         }
-        self.transcript.shell_started(command);
+        self.controller
+            .conversation
+            .transcript
+            .shell_started(command);
         self.shell = Some(ShellRun {
             started: Instant::now(),
             stopping: false,
@@ -49,7 +54,7 @@ impl App {
 
     pub fn shell_output(&mut self, line: &str) {
         if self.shell.is_some() {
-            self.transcript.shell_output(line);
+            self.controller.conversation.transcript.shell_output(line);
         }
     }
 
@@ -58,11 +63,14 @@ impl App {
         let Some(run) = self.shell.take() else {
             return;
         };
-        self.transcript.shell_ended(match code {
-            Some(code) => ShellStatus::Exited { code },
-            None if run.stopping => ShellStatus::Killed,
-            None => ShellStatus::Signalled,
-        });
+        self.controller
+            .conversation
+            .transcript
+            .shell_ended(match code {
+                Some(code) => ShellStatus::Exited { code },
+                None if run.stopping => ShellStatus::Killed,
+                None => ShellStatus::Signalled,
+            });
         self.after_shell();
     }
 
@@ -71,7 +79,10 @@ impl App {
         if self.shell.take().is_none() {
             return;
         }
-        self.transcript.shell_ended(ShellStatus::Failed { error });
+        self.controller
+            .conversation
+            .transcript
+            .shell_ended(ShellStatus::Failed { error });
         self.after_shell();
     }
 

@@ -50,13 +50,19 @@ impl App {
     /// nothing when its live session saw it all, everything on its first
     /// visit.
     pub(super) fn bridge_start(&self, harness: HarnessId) -> usize {
-        let visited = self.session_ids.contains_key(&harness)
+        let visited = self
+            .controller
+            .conversation
+            .session_ids
+            .contains_key(&harness)
             || (harness == self.active && self.session_seen());
         if visited {
-            self.last_active_index
+            self.controller
+                .conversation
+                .last_active_index
                 .get(&harness)
                 .copied()
-                .unwrap_or(self.transcript.blocks.len())
+                .unwrap_or(self.controller.conversation.transcript.blocks.len())
         } else {
             0
         }
@@ -67,12 +73,16 @@ impl App {
             return;
         }
         if self.registry().get(next).is_none() {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("harness '{next}' is not available"));
             return;
         }
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn before switching harness");
             return;
         }
@@ -99,13 +109,24 @@ impl App {
     pub(super) fn handoff_wanted_for(&self, from: usize, budget: usize) -> bool {
         self.bridge_summary == BridgeSummary::Auto
             && (self.session_seen()
-                || (self.session_ids.contains_key(&self.active) && self.caps().resume_by_id))
+                || (self
+                    .controller
+                    .conversation
+                    .session_ids
+                    .contains_key(&self.active)
+                    && self.caps().resume_by_id))
             && self.awaited_subagents() == 0
-            && self.bridge_start(self.active) >= self.transcript.blocks.len()
+            && self.bridge_start(self.active)
+                >= self.controller.conversation.transcript.blocks.len()
             && self.shell.is_none()
             && self.effective_policy().is_some()
             && super::bridge::needs_summary(
-                self.transcript.blocks.get(from..).unwrap_or_default(),
+                self.controller
+                    .conversation
+                    .transcript
+                    .blocks
+                    .get(from..)
+                    .unwrap_or_default(),
                 budget,
             )
     }
@@ -117,14 +138,14 @@ impl App {
     /// (`session_renewed`), not `next`'s.
     pub(super) fn ask_handoff(&mut self, next: HarnessId, renew: bool) {
         let to = self.handoff_target(next, renew);
-        self.transcript.push_system(format!(
+        self.controller.conversation.transcript.push_system(format!(
             "The conversation is longer than the bridge to {to}: asking {} for a handoff summary first (Esc {} without one)",
             self.short_name(),
             if renew { "goes on" } else { "switches" }
         ));
         self.handoff = Some(Handoff {
             to: next,
-            start: self.transcript.blocks.len(),
+            start: self.controller.conversation.transcript.blocks.len(),
             held: !self.queued.is_empty(),
             renew,
             blind: false,
@@ -162,8 +183,15 @@ impl App {
             return;
         };
         let to = self.handoff_target(h.to, h.renew);
-        if !(done && !h.blind && self.transcript.mark_handoff(h.start, &to)) {
-            self.transcript.push_notice(format!(
+        if !(done
+            && !h.blind
+            && self
+                .controller
+                .conversation
+                .transcript
+                .mark_handoff(h.start, &to))
+        {
+            self.controller.conversation.transcript.push_notice(format!(
                 "no handoff summary; {to} gets the conversation as it is"
             ));
         }
@@ -189,31 +217,42 @@ impl App {
         // What this harness saw: everything but the `!` commands run since
         // its last prompt, which it is told about when it comes back.
         let seen = self
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
             .position(|b| matches!(b, super::transcript::Block::Shell { sent: false, .. }))
-            .unwrap_or(self.transcript.blocks.len());
+            .unwrap_or(self.controller.conversation.transcript.blocks.len());
         // Context held back for this harness (by a command sent alone) is
         // still to be told.
         let seen = self
+            .controller
+            .conversation
             .last_active_index
             .get(&self.active)
             .map_or(seen, |held| seen.min(*held));
-        self.last_active_index.insert(self.active, seen);
-        self.sync_conversation();
-        self.active = next;
-        self.session_usage = self
+        self.controller
             .conversation
+            .last_active_index
+            .insert(self.active, seen);
+        let prompted = self.session_seen();
+        self.controller
+            .sync_conversation(&self.config, self.active, prompted);
+        self.active = next;
+        self.controller.conversation.session_usage = self
+            .controller
+            .conversation
+            .record
             .usage
             .get(&next)
             .cloned()
             .unwrap_or_default();
-        self.turn_usage = Usage::default();
-        self.context = ContextUsage::default();
-        self.anchor_pending.clear();
+        self.controller.conversation.turn_usage = Usage::default();
+        self.controller.conversation.context = ContextUsage::default();
+        self.controller.conversation.anchor_pending.clear();
         self.persist();
-        self.transcript.push_system(format!(
+        self.controller.conversation.transcript.push_system(format!(
             "Switched to {} (model: {}, effort: {}, policy: {}, sandbox: {})",
             self.display_name(),
             self.model_label(),
@@ -222,7 +261,7 @@ impl App {
             self.sandbox_level().0
         ));
         if let Some(w) = self.policy_warning() {
-            self.transcript.push_notice(w);
+            self.controller.conversation.transcript.push_notice(w);
         }
         self.require_policy();
     }

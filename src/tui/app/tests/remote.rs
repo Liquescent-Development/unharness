@@ -10,13 +10,17 @@ fn remote_control_is_offered_only_where_declared() {
     app.handle_slash_command("/rc now");
     assert!(app.remote.is_none());
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Notice(n) if n.contains("passed to pi as typed")))
     );
     assert!(
-        !app.transcript
+        !app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Notice(n) if n.contains("does not see what")))
@@ -41,6 +45,8 @@ fn remote_control_taken_off_before_it_answers_says_off_once() {
     }));
     app.on_event(AgentEvent::RemoteControl(RemoteControl::Off));
     let said: Vec<&str> = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -92,7 +98,7 @@ fn a_resume_ends_remote_control() {
         stop_reason: StopReason::Done,
     });
     app.persist();
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/rc");
     app.take_actions();
     app.resume_conversation(id);
@@ -110,8 +116,13 @@ fn a_resume_ends_remote_control() {
 #[test]
 fn a_remote_first_prompt_leaves_the_bridge_owed_and_titles_the_conversation() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.transcript.push_user("asked on codex");
-    app.transcript
+    app.controller
+        .conversation
+        .transcript
+        .push_user("asked on codex");
+    app.controller
+        .conversation
+        .transcript
         .append_assistant("Codex", "answered on codex");
     app.session_alive = true;
     app.session_blank = true;
@@ -124,7 +135,10 @@ fn a_remote_first_prompt_leaves_the_bridge_owed_and_titles_the_conversation() {
     });
     // The next prompt typed here still tells Claude what it missed.
     assert_eq!(app.bridge_start(HarnessId::CLAUDE), 0);
-    assert_eq!(app.first_prompt.as_deref(), Some("typed remotely"));
+    assert_eq!(
+        app.controller.conversation.first_prompt.as_deref(),
+        Some("typed remotely")
+    );
 }
 
 #[test]
@@ -200,11 +214,15 @@ fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
     });
     assert!(!app.session_blank);
     assert_eq!(
-        app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CLAUDE)
+            .map(String::as_str),
         Some("claude-1")
     );
     assert!(matches!(
-        app.transcript.blocks.last(),
+        app.controller.conversation.transcript.blocks.last(),
         Some(Block::User { text }) if text == "Reply with the single word: pong"
     ));
 }
@@ -243,7 +261,11 @@ fn a_process_started_again_by_its_driver_is_a_new_process_of_the_session() {
     app.submit_prompt("again".into());
     assert!(!app.session_blank);
     assert_eq!(
-        app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CLAUDE)
+            .map(String::as_str),
         Some("claude-1")
     );
 }

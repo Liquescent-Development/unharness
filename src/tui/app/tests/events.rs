@@ -17,7 +17,7 @@ fn live_capabilities_and_status_events_apply() {
         used: Some(10),
         window: Some(100),
     }));
-    assert_eq!(app.context.percent(), Some(10));
+    assert_eq!(app.controller.conversation.context.percent(), Some(10));
     app.on_event(AgentEvent::PlanUpdated {
         entries: vec![PlanEntry {
             text: "step".into(),
@@ -25,16 +25,16 @@ fn live_capabilities_and_status_events_apply() {
         }],
         explanation: None,
     });
-    assert_eq!(app.plan.len(), 1);
+    assert_eq!(app.controller.conversation.plan.len(), 1);
 
     // Nothing a subagent does lands in the main transcript, least of
     // all when the call that spawned it is unknown.
-    let before = app.transcript.blocks.len();
+    let before = app.controller.conversation.transcript.blocks.len();
     app.on_event(AgentEvent::Sub {
         parent: "p".into(),
         event: Box::new(AgentEvent::TextDelta("inner".into())),
     });
-    assert_eq!(app.transcript.blocks.len(), before);
+    assert_eq!(app.controller.conversation.transcript.blocks.len(), before);
     app.on_event(AgentEvent::Sub {
         parent: "p".into(),
         event: Box::new(AgentEvent::ToolCallStarted {
@@ -43,7 +43,7 @@ fn live_capabilities_and_status_events_apply() {
             input: serde_json::json!({"command": "ls"}),
         }),
     });
-    assert_eq!(app.transcript.blocks.len(), before);
+    assert_eq!(app.controller.conversation.transcript.blocks.len(), before);
 }
 
 /// What the controller makes of a session's report and of a policy the
@@ -86,12 +86,15 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
         })
     };
     let mut app = test_app(HarnessId::CLAUDE);
-    let base = app.transcript.blocks.len();
+    let base = app.controller.conversation.transcript.blocks.len();
     app.on_event(limit(20.0));
-    assert_eq!(app.transcript.blocks.len(), base);
+    assert_eq!(app.controller.conversation.transcript.blocks.len(), base);
     app.on_event(limit(85.0));
     app.on_event(limit(90.0));
-    assert_eq!(app.transcript.blocks.len(), base + 1);
+    assert_eq!(
+        app.controller.conversation.transcript.blocks.len(),
+        base + 1
+    );
     assert_eq!(
         rate_limit_summary(app.rate_limit.as_ref().unwrap()),
         "five_hour 90% used"
@@ -103,7 +106,9 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
 fn hooks_still_running_end_as_unknown() {
     use super::super::transcript::{Block, HookState};
     let state = |app: &App, n: usize| {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .filter_map(|b| match b {
@@ -221,12 +226,12 @@ fn usage_accumulates() {
         output: 1,
         ..Default::default()
     }));
-    assert_eq!(app.turn_usage.input, 1);
-    assert_eq!(app.session_usage.input, 11);
+    assert_eq!(app.controller.conversation.turn_usage.input, 1);
+    assert_eq!(app.controller.conversation.session_usage.input, 11);
     app.on_event(AgentEvent::Usage(Usage {
         input: 100,
         cumulative: true,
         ..Default::default()
     }));
-    assert_eq!(app.session_usage.input, 100);
+    assert_eq!(app.controller.conversation.session_usage.input, 100);
 }

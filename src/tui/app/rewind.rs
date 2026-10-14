@@ -1,75 +1,23 @@
-//! Rewind and fork: turn anchors, file checkpoints and their restore.
+//! Rewind and fork: the picker, and what a rewind or a fork does to the
+//! sessions. The anchors, file checkpoints and their restore are the
+//! controller's (`core::controller::ConversationState`).
 
 use super::{Action, App};
-use crate::core::conversations::CheckpointRecord;
 use crate::core::{HarnessId, SessionCommand};
 use crate::tui::modal::{ListPicker, Modal, RewindOption};
 
 impl App {
-    /// Record the working tree as it is before the turn at `block` runs.
-    pub(super) fn checkpoint_files(&mut self, block: usize) {
-        let Some(cp) = self.checkpoints.clone() else {
-            return;
-        };
-        match cp.snapshot(&self.checkpoint_name(&block.to_string())) {
-            Ok(commit) => {
-                self.file_checkpoints.retain(|c| c.block != block);
-                self.file_checkpoints
-                    .push(CheckpointRecord { block, commit });
-            }
-            Err(e) if !self.checkpoint_failed => {
-                self.checkpoint_failed = true;
-                self.transcript.push_notice(format!(
-                    "could not checkpoint files (rewind will not be able to restore them): {e:#}"
-                ));
-            }
-            Err(_) => {}
-        }
-    }
-
-    /// The harness's own id for the user turn at `block`, when its session
-    /// (running or resumable) can be rewound to it.
-    fn native_anchor(&self, block: usize) -> Option<&str> {
-        if !self.caps().rewind.conversation || !self.session_ids.contains_key(&self.active) {
-            return None;
-        }
-        // Going back to before the session's first turn leaves nothing of
-        // it: a fresh session is the same thing, and Claude refuses to
-        // rewind to its first message ("stale target").
-        let mut mine = self.anchors.iter().filter(|a| a.harness == self.active);
-        if !mine.clone().any(|a| a.block < block) {
-            return None;
-        }
-        mine.find(|a| a.block == block).map(|a| a.id.as_str())
-    }
-
-    /// The file checkpoint taken just before the user block at `block`.
-    fn checkpoint_at(&self, block: usize) -> Option<&str> {
-        self.file_checkpoints
-            .iter()
-            .find(|c| c.block == block)
-            .map(|c| c.commit.as_str())
-    }
-
-    /// Name of a checkpoint ref for this conversation (see `core::checkpoints`).
-    fn checkpoint_name(&self, suffix: &str) -> String {
-        let id = &self.conversation.id;
-        format!("{}/{suffix}", &id[..8.min(id.len())])
-    }
-
-    /// Whether the active harness's next session must branch the stored
-    /// session id (it belongs to the conversation this one was forked from).
-    pub fn fork_pending(&self) -> bool {
-        self.fork_pending.contains(&self.active)
-    }
-
     pub fn open_rewind_picker(&mut self) {
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn before rewinding");
             return;
         }
         let items: Vec<RewindOption> = self
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
@@ -78,14 +26,17 @@ impl App {
                 super::transcript::Block::User { text } => Some(RewindOption {
                     block,
                     text: text.clone(),
-                    native: self.native_anchor(block).is_some(),
-                    files: self.checkpoint_at(block).is_some(),
+                    native: self.controller.native_anchor(self.active, block).is_some(),
+                    files: self.controller.checkpoint_at(block).is_some(),
                 }),
                 _ => None,
             })
             .collect();
         if items.is_empty() {
-            self.transcript.push_notice("nothing to rewind to yet");
+            self.controller
+                .conversation
+                .transcript
+                .push_notice("nothing to rewind to yet");
             return;
         }
         let last = items.len() - 1;
@@ -105,7 +56,8 @@ impl App {
         if self.is_generating || self.refused_while_settling() || !self.require_policy() {
             return;
         }
-        let Some(super::transcript::Block::User { text }) = self.transcript.blocks.get(block)
+        let Some(super::transcript::Block::User { text }) =
+            self.controller.conversation.transcript.blocks.get(block)
         else {
             return;
         };
@@ -119,34 +71,19 @@ impl App {
         // Files first: if they cannot be restored, nothing else changes.
         let mut files_note = "files on disk are unchanged".to_string();
         if restore_files {
-            let (Some(cp), Some(commit)) = (
-                self.checkpoints.clone(),
-                self.checkpoint_at(block).map(str::to_string),
-            ) else {
-                self.transcript
-                    .push_error("there is no file checkpoint for that prompt");
-                return;
-            };
-            self.restore_seq += 1;
-            let undo_name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
-            match cp.restore(&commit, &undo_name) {
-                Ok(report) => {
-                    files_note = format!(
-                        "{} file(s) put back to how they were before that prompt (/undo-restore reverses this)",
-                        report.changed
-                    );
-                    self.restore_undo = Some(report.undo);
-                }
-                Err(e) => {
-                    self.transcript.push_error(format!(
-                        "could not restore files, nothing was rewound: {e:#}"
-                    ));
+            match self.controller.restore_files(block) {
+                Ok(note) => files_note = note,
+                Err(why) => {
+                    self.controller.conversation.transcript.push_error(why);
                     return;
                 }
             }
         }
 
-        let native = self.native_anchor(block).map(str::to_string);
+        let native = self
+            .controller
+            .native_anchor(self.active, block)
+            .map(str::to_string);
         let active = self.active;
         match &native {
             Some(anchor) => {
@@ -165,6 +102,8 @@ impl App {
         // Other harnesses that were active after the rewind point saw turns
         // that no longer exist.
         let stale: Vec<HarnessId> = self
+            .controller
+            .conversation
             .last_active_index
             .iter()
             .filter(|(h, seen)| **h != active && **seen > block)
@@ -174,14 +113,11 @@ impl App {
             self.forget_session(h);
         }
 
-        self.transcript.blocks.truncate(block);
-        self.anchors.retain(|a| a.block < block);
-        self.file_checkpoints.retain(|c| c.block < block);
-        self.anchor_pending.clear();
+        self.controller.rewind_conversation(block);
         self.queued.clear();
         self.cursor = prompt.chars().count();
         self.input = prompt;
-        self.transcript.push_system(match native {
+        self.controller.conversation.transcript.push_system(match native {
             Some(_) => format!(
                 "Rewound. {} forgot the later turns; {files_note}.",
                 self.short_name()
@@ -208,31 +144,16 @@ impl App {
         }
     }
 
-    /// Reverse the last file restore (itself reversible the same way).
+    /// Reverse the last file restore (`Controller::undo_restore`).
     pub fn undo_restore(&mut self) {
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn first");
             return;
         }
-        let (Some(cp), Some(undo)) = (self.checkpoints.clone(), self.restore_undo.clone()) else {
-            self.transcript.push_notice("no file restore to undo");
-            return;
-        };
-        self.restore_seq += 1;
-        let name = self.checkpoint_name(&format!("undo-{}", self.restore_seq));
-        match cp.restore(&undo, &name) {
-            Ok(report) => {
-                self.restore_undo = Some(report.undo);
-                self.transcript.push_system(format!(
-                    "{} file(s) put back to how they were before the restore.",
-                    report.changed
-                ));
-            }
-            Err(e) => self
-                .transcript
-                .push_error(format!("could not undo the restore: {e:#}")),
-        }
+        self.controller.undo_restore();
     }
 
     /// Continue in a copy of this conversation. Each harness's session is
@@ -241,56 +162,31 @@ impl App {
     /// as context. The original and its sessions are left untouched.
     pub fn fork_conversation(&mut self) {
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn before forking");
             return;
         }
         if self.refused_while_settling() {
             return;
         }
-        if !self.conversation.has_content() {
-            self.transcript.push_notice("nothing to fork yet");
+        if !self.controller.conversation.record.has_content() {
+            self.controller
+                .conversation
+                .transcript
+                .push_notice("nothing to fork yet");
             return;
         }
         self.persist();
-        let original = self.conversation.id.clone();
+        let original = self.controller.conversation.record.id.clone();
         self.end_remote_control();
         if self.session_alive {
             self.shutdown_session();
         }
         self.idle_start_paused = false;
-        // A copy ran where the original ran.
-        let mut fork = self.successor();
-        fork.title = self.conversation.title.clone();
-        fork.last_policies = self.conversation.last_policies.clone();
-        self.conversation = fork;
-
-        let mut branched = Vec::new();
-        let mut fresh = Vec::new();
-        let harnesses: Vec<HarnessId> = self.session_ids.keys().copied().collect();
-        for h in harnesses {
-            // What its last session in this run reported counts: an ACP
-            // agent declares no fork until it says it can. One not run here
-            // since launch starts fresh.
-            match self.controller.caps_of(h) {
-                Some(c) if c.fork && c.resume_by_id => {
-                    self.fork_pending.insert(h);
-                    if !c.rewind.anchors_survive_fork {
-                        self.anchors.retain(|a| a.harness != h);
-                    }
-                    branched.push(h.as_str());
-                }
-                _ => {
-                    self.session_ids.remove(&h);
-                    self.last_active_index.remove(&h);
-                    self.anchors.retain(|a| a.harness != h);
-                    fresh.push(h.as_str());
-                }
-            }
-        }
-        branched.sort_unstable();
-        fresh.sort_unstable();
-        self.reset_usage();
+        let (branched, fresh) = self.controller.fork(self.active);
+        self.controller.reset_usage();
         let mut note = format!(
             "Forked from conversation {}; the original is unchanged.",
             &original[..8.min(original.len())]
@@ -304,7 +200,7 @@ impl App {
                 fresh.join(", ")
             ));
         }
-        self.transcript.push_system(note);
+        self.controller.conversation.transcript.push_system(note);
         self.persist();
     }
 }

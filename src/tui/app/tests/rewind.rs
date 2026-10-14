@@ -19,6 +19,8 @@ fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
     app.session_alive = false;
     app.take_actions();
     let two = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -29,13 +31,26 @@ fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
     assert!(matches!(held[0], Action::StartSession { .. }), "{held:?}");
 
     app.drop_held(held);
-    assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
     // Without a rewind among them, nothing is forgotten.
-    app.session_ids.insert(HarnessId::CLAUDE, "s2".into());
+    app.controller
+        .conversation
+        .session_ids
+        .insert(HarnessId::CLAUDE, "s2".into());
     app.drop_held([Action::StartSession {
         resume: Some("s2".into()),
     }]);
-    assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
 }
 
 #[test]
@@ -58,7 +73,9 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
     }
     app.take_actions();
     let block_of = |app: &App, want: &str| {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .position(|b| matches!(b, Block::User { text } if text == want))
@@ -75,14 +92,21 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
         })]
     );
     assert_eq!(app.input, "three");
-    assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
     assert!(
-        !app.transcript
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
+    assert!(
+        !app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::User { text } if text == "three"))
     );
-    assert_eq!(app.anchors.len(), 2);
+    assert_eq!(app.controller.conversation.anchors.len(), 2);
     app.take_input();
 
     // The session is not running: it is reattached, then rewound.
@@ -110,7 +134,12 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
         reason: "stale target".into(),
     });
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
 
     // Back to before a session's first turn nothing of it remains, so a
     // fresh session is used rather than a native rewind.
@@ -127,7 +156,12 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
     let one = block_of(&app, "one");
     app.rewind_to(one, false);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
 
     // A harness that cannot rewind at all goes straight to the fallback.
     let mut app = test_app(HarnessId::AGY);
@@ -141,7 +175,12 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
     let one = block_of(&app, "one");
     app.rewind_to(one, false);
     assert!(app.take_actions().is_empty());
-    assert!(!app.session_ids.contains_key(&HarnessId::AGY));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::AGY)
+    );
 }
 
 #[test]
@@ -156,7 +195,7 @@ fn rewind_drops_sessions_that_saw_the_removed_turns() {
         model: None,
     });
     app.on_event(done());
-    let after_one = app.transcript.blocks.len();
+    let after_one = app.controller.conversation.transcript.blocks.len();
     app.switch_harness(HarnessId::CODEX);
     app.submit_prompt("two".into());
     app.on_event(AgentEvent::SessionStarted {
@@ -172,6 +211,8 @@ fn rewind_drops_sessions_that_saw_the_removed_turns() {
     // Rewinding to before "two": Codex saw it and is reset; Claude's
     // session ended before it and stays.
     let two = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -179,8 +220,18 @@ fn rewind_drops_sessions_that_saw_the_removed_turns() {
         .unwrap();
     assert!(two >= after_one);
     app.rewind_to(two, false);
-    assert!(app.session_ids.contains_key(&HarnessId::CLAUDE));
-    assert!(!app.session_ids.contains_key(&HarnessId::CODEX));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CODEX)
+    );
 }
 
 #[test]
@@ -203,6 +254,8 @@ fn anchors_attach_in_order_even_when_they_arrive_late() {
     app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
     app.on_event(AgentEvent::TurnAnchor { id: String::new() });
     let ids: Vec<(&str, usize)> = app
+        .controller
+        .conversation
         .anchors
         .iter()
         .map(|a| (a.id.as_str(), a.block))
@@ -236,22 +289,38 @@ fn fork_branches_sessions_where_the_harness_can() {
     app.take_actions();
     app.session_alive = false;
 
-    let original = app.conversation.id.clone();
+    let original = app.controller.conversation.record.id.clone();
     app.fork_conversation();
-    assert_ne!(app.conversation.id, original);
+    assert_ne!(app.controller.conversation.record.id, original);
     // Claude can branch a session: the id is kept, to be forked on next
     // use. Its rewind ids do not carry over into a branch. Antigravity
     // cannot, so the copy starts it fresh.
-    assert_eq!(app.session_ids.get(&HarnessId::CLAUDE).unwrap(), "claude-1");
-    assert!(app.fork_pending());
-    assert!(app.anchors.is_empty());
-    assert!(!app.session_ids.contains_key(&HarnessId::AGY));
+    assert_eq!(
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CLAUDE)
+            .unwrap(),
+        "claude-1"
+    );
+    assert!(app.controller.fork_pending(app.active));
+    assert!(app.controller.conversation.anchors.is_empty());
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::AGY)
+    );
 
     // The original is on disk untouched; the copy remembers what is pending.
-    let saved = app.store.load(&original).unwrap();
+    let saved = app.controller.store.load(&original).unwrap();
     assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
     assert!(saved.fork_pending.is_empty());
-    let copy = app.store.load(&app.conversation.id).unwrap();
+    let copy = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
 
     // The branch knows the whole conversation: nothing is re-sent as text.
@@ -270,8 +339,11 @@ fn fork_branches_sessions_where_the_harness_can() {
         session_id: "claude-2".into(),
         model: None,
     });
-    assert!(!app.fork_pending());
-    assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-2");
+    assert!(!app.controller.fork_pending(app.active));
+    assert_eq!(
+        app.controller.conversation.session_ids[&HarnessId::CLAUDE],
+        "claude-2"
+    );
 }
 
 /// An ACP agent declares no fork until its session says it can
@@ -324,7 +396,10 @@ fn fork_branches_an_acp_session_once_the_agent_says_it_can() {
         app.take_actions();
         app.session_alive = false;
         app.fork_conversation();
-        (app.session_ids.get(&acp).cloned(), app.fork_pending())
+        (
+            app.controller.conversation.session_ids.get(&acp).cloned(),
+            app.controller.fork_pending(app.active),
+        )
     };
     assert_eq!(forked(Some(true)), (Some("acp-1".to_string()), true));
     for reported in [None, Some(false)] {
@@ -406,9 +481,16 @@ fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
         model: None,
     });
     // The branch is not taken until something is sent to it.
-    assert!(app.fork_pending());
-    assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-1");
-    let copy = app.store.load(&app.conversation.id).unwrap();
+    assert!(app.controller.fork_pending(app.active));
+    assert_eq!(
+        app.controller.conversation.session_ids[&HarnessId::CLAUDE],
+        "claude-1"
+    );
+    let copy = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     assert_eq!(copy.sessions[&HarnessId::CLAUDE], "claude-1");
     assert_eq!(copy.fork_pending, vec![HarnessId::CLAUDE]);
     // Started again, it branches again from the original.
@@ -427,8 +509,11 @@ fn a_fork_started_before_the_first_prompt_is_not_the_conversation_s() {
         model: None,
     });
     app.submit_prompt("two".into());
-    assert!(!app.fork_pending());
-    assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-3");
+    assert!(!app.controller.fork_pending(app.active));
+    assert_eq!(
+        app.controller.conversation.session_ids[&HarnessId::CLAUDE],
+        "claude-3"
+    );
 }
 
 #[test]
@@ -454,6 +539,8 @@ fn a_rewound_session_is_the_conversation_s() {
     app.take_actions();
     app.session_alive = true;
     let two = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()

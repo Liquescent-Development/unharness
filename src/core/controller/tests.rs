@@ -36,9 +36,18 @@ fn launch(policy: Option<PermissionPolicy>) -> Launch {
     }
 }
 
+/// Where these tests keep conversations: nowhere, since none is saved
+/// (a save would fail there rather than land anywhere).
+fn keeping() -> Keeping {
+    Keeping {
+        store: ConversationStore::at("/nonexistent/unharness-controller-tests".into()),
+        checkpoints: None,
+    }
+}
+
 /// A controller as a run starts, with `policy` named for every harness.
 fn controller(policy: Option<PermissionPolicy>) -> Controller {
-    Controller::new(registry(), &Config::default(), launch(policy))
+    Controller::new(registry(), &Config::default(), launch(policy), keeping())
 }
 
 fn warning(c: &Controller, config: &Config, harness: HarnessId) -> Option<String> {
@@ -203,12 +212,13 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     assert_eq!(c.policy.source(CLAUDE), PolicySource::ChosenForConversation);
     assert_eq!(c.policy.source(PI), PolicySource::ChosenInRun);
     assert_eq!(c.policy.source(CODEX), PolicySource::NamedForConversation);
-    let mut saved = Conversation::new(CLAUDE);
-    c.sync_conversation(&config, CLAUDE, false, &mut saved);
+    c.sync_conversation(&config, CLAUDE, false);
+    let saved = &c.conversation.record;
     assert_eq!(saved.policy, Some(Ask));
     assert_eq!(saved.policy_choices.len(), 3);
     assert!(saved.last_policies.is_empty());
-    c.sync_conversation(&config, CLAUDE, true, &mut saved);
+    c.sync_conversation(&config, CLAUDE, true);
+    let saved = &c.conversation.record;
     assert_eq!(saved.last_policies[&CLAUDE], Bypass);
 
     // `--policy accept-edits`: over every choice of the conversation's.
@@ -262,16 +272,15 @@ fn codex_run(model: Option<&str>, effort: Option<&str>, provider: &str) -> (Conf
 /// `effort` where given.
 fn codex_conversation(model: Option<&str>, effort: Option<&str>) -> Conversation {
     let (config, launch) = codex_run(None, None, "openai");
-    let mut c = Controller::new(registry(), &config, launch);
+    let mut c = Controller::new(registry(), &config, launch, keeping());
     if let Some(m) = model {
         c.choose_model(CODEX, m.into());
     }
     if let Some(e) = effort {
         c.choose_effort(CODEX, e.into());
     }
-    let mut conv = Conversation::new(CODEX);
-    c.sync_conversation(&config, CODEX, true, &mut conv);
-    conv
+    c.sync_conversation(&config, CODEX, true);
+    c.conversation.record.clone()
 }
 
 /// `conversation` resumed by a run as `codex_run` has it, and what it says.
@@ -282,7 +291,7 @@ fn resume_codex(
     provider: &str,
 ) -> (Controller, Vec<String>) {
     let (config, launch) = codex_run(model, effort, provider);
-    let mut c = Controller::new(registry(), &config, launch);
+    let mut c = Controller::new(registry(), &config, launch, keeping());
     let notices = c.take_conversation(&config, conversation);
     (c, notices)
 }
@@ -337,6 +346,7 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
             default_providers: [(CLAUDE, "anthropic".into())].into(),
             ..launch(None)
         },
+        keeping(),
     );
     assert_eq!(c.chosen_provider(CLAUDE), None);
     let report = |c: &mut Controller, provider: &str| {
@@ -359,11 +369,12 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     assert_eq!(c.model(CLAUDE).unwrap().label(), "vertex/opus");
     assert_eq!(c.chosen_provider(CLAUDE), None);
 
-    let mut conv = Conversation::new(CLAUDE);
-    conv.models
+    c.conversation
+        .record
+        .models
         .insert(CLAUDE, ModelRef::new(CLAUDE, "vertex", "opus"));
-    assert!(c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
-    assert!(conv.models.is_empty() && c.model(CLAUDE).is_none());
+    assert!(c.choose_provider(CLAUDE, "bedrock".into()));
+    assert!(c.conversation.record.models.is_empty() && c.model(CLAUDE).is_none());
     assert!(report(&mut c, "anthropic").is_empty());
     assert_eq!(c.runs_on(CLAUDE), Some(&"anthropic".into()));
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"bedrock".into()));
@@ -373,7 +384,7 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     c.process_ended(CLAUDE);
     assert_eq!(c.runs_on(CLAUDE), None);
     // The same again changes nothing.
-    assert!(!c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
+    assert!(!c.choose_provider(CLAUDE, "bedrock".into()));
 }
 
 /// When a choice may be made, and how it reaches the session it meets: the
@@ -397,6 +408,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             harness: VIBE,
             ..launch(None)
         },
+        keeping(),
     );
     assert!(c.between_turns(VIBE, Choice::Model));
     assert!(!c.between_turns(CLAUDE, Choice::Effort));
@@ -446,8 +458,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     let taking = format!("{vibe} is still taking the model just chosen; try again in a moment");
     assert_eq!(c.settling(VIBE, false), Some(taking.clone()));
     assert_eq!(
-        c.set_provider(VIBE, "lan".into(), &prompted, &mut Conversation::new(VIBE))
-            .unwrap_err(),
+        c.set_provider(VIBE, "lan".into(), &prompted).unwrap_err(),
         taking
     );
     let answered = c.choice_answered().unwrap();
@@ -508,10 +519,8 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             .unwrap_err()
             .starts_with("unknown effort 'loud'; Claude supports: ")
     );
-    let mut conv = Conversation::new(CLAUDE);
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
         Route::Hold(SessionCommand::SetProvider("bedrock".into()))
     );
     assert_eq!(
@@ -519,8 +528,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         Some("bedrock".into())
     );
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
         Route::None
     );
     let held = SessionNow {
@@ -529,8 +537,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..Default::default()
     };
     assert_eq!(
-        c.set_provider(CLAUDE, "vertex".into(), &held, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "vertex".into(), &held).unwrap(),
         Route::None
     );
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"vertex".into()));

@@ -71,7 +71,7 @@ fn a_conversation_on_the_default_follows_the_config() {
     let tmp = tempfile::tempdir().unwrap();
     claude_turn_under(tmp.path(), None);
     let app = resume_with(tmp.path(), None);
-    assert_eq!(app.conversation.policy, None);
+    assert_eq!(app.controller.conversation.record.policy, None);
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::AcceptEdits));
 
     // The default changed since: the conversation follows, and says so.

@@ -47,7 +47,9 @@ fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
         app.display_name()
     );
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, super::super::transcript::Block::System(s) if *s == restarts))
@@ -358,7 +360,12 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     );
     assert_eq!(app.current_effort(), Some("off"));
     // The session is left only once its driver says so.
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     vibe_renews(&mut app, "effort off");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert!(
@@ -367,8 +374,19 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
             .any(|n| n.contains("starts a new session"))
     );
     // The conversation no longer names the old session.
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
-    assert!(!app.conversation.sessions.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
+    assert!(
+        !app.controller
+            .conversation
+            .record
+            .sessions
+            .contains_key(&HarnessId::VIBE)
+    );
 
     app.start_when_idle();
     assert_eq!(
@@ -389,7 +407,11 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     assert!(sent.contains("noted"), "{sent}");
     assert!(sent.ends_with("which word?"));
     assert_eq!(
-        app.session_ids.get(&HarnessId::VIBE).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::VIBE)
+            .map(String::as_str),
         Some("v2")
     );
     app.on_event(AgentEvent::TurnCompleted {
@@ -419,7 +441,12 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     };
     assert!(text.contains("remember the word kumquat") && text.contains("which word?"));
     assert!(text.ends_with("and now?"), "{text}");
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
 }
 
 /// A stored vibe session the TUI started before the first prompt, or none
@@ -443,7 +470,12 @@ fn a_choice_for_a_stored_vibe_session_with_none_prompted_starts_a_new_one() {
             .iter()
             .any(|n| n.contains("starts a new session for effort off"))
     );
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
 
     // None live: the same, before anything starts.
     let (mut app, _cwd) = vibe_app();
@@ -452,7 +484,12 @@ fn a_choice_for_a_stored_vibe_session_with_none_prompted_starts_a_new_one() {
     app.take_actions();
     app.set_model("glm-5-3".into());
     assert!(app.take_actions().is_empty());
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     app.start_when_idle();
     assert_eq!(
         app.take_actions(),
@@ -499,14 +536,26 @@ fn a_vibe_provider_goes_with_the_model() {
             .iter()
             .any(|n| n.contains("starts a new session for provider agent"))
     );
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     // Said with the answer, before the new session's notice.
     let said = |b: &super::super::transcript::Block| match b {
         super::super::transcript::Block::System(s) => s.starts_with("Provider: agent"),
         super::super::transcript::Block::Notice(n) => n.contains("for provider agent"),
         _ => false,
     };
-    let lines: Vec<_> = app.transcript.blocks.iter().filter(|b| said(b)).collect();
+    let lines: Vec<_> = app
+        .controller
+        .conversation
+        .transcript
+        .blocks
+        .iter()
+        .filter(|b| said(b))
+        .collect();
     assert!(
         matches!(
             lines[..],
@@ -538,14 +587,24 @@ fn a_new_session_for_a_choice_gets_a_handoff_when_over_budget() {
     assert!(ask.contains("new session of yours"), "{ask}");
     assert!(app.is_generating);
     // The old session is still the one asked.
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     app.on_event(AgentEvent::TextDelta("Goal: remember kumquat.".into()));
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
     assert!(app.take_actions().contains(&Action::Shutdown));
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
-    assert!(app.transcript.blocks.iter().any(|b| matches!(
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
+    assert!(app.controller.conversation.transcript.blocks.iter().any(|b| matches!(
         b,
         super::super::transcript::Block::Handoff { to, .. } if to == "a new Mistral Vibe session"
     )));
@@ -690,12 +749,17 @@ fn a_second_renewal_during_the_summary_changes_nothing() {
     app.take_actions();
     vibe_renews(&mut app, "effort off");
     assert!(sent_turn(&mut app).contains("new session of yours"));
-    let said = app.transcript.blocks.len();
+    let said = app.controller.conversation.transcript.blocks.len();
     vibe_renews(&mut app, "effort off");
     assert!(app.take_actions().is_empty());
-    assert_eq!(app.transcript.blocks.len(), said);
+    assert_eq!(app.controller.conversation.transcript.blocks.len(), said);
     assert!(app.is_generating);
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
 }
 
 /// Quitting before vibe has answered a choice: the stored session, which
@@ -709,12 +773,26 @@ fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
         stop_reason: StopReason::Done,
     });
     app.take_actions();
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     app.set_effort("off".into());
     app.take_actions();
     app.quit();
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
-    let saved = app.store.load(&app.conversation.id).unwrap();
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
+    let saved = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     assert!(!saved.sessions.contains_key(&HarnessId::VIBE));
     assert_eq!(app.current_effort(), Some("off"));
 
@@ -727,7 +805,12 @@ fn a_vibe_session_left_before_it_answers_a_choice_is_forgotten() {
     app.set_model("glm-5-3".into());
     app.submit_prompt("and now?".into());
     app.on_event(AgentEvent::ProcessExited { code: Some(1) });
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     // What was typed after it waits for Enter.
     assert_eq!(app.queued.len(), 1);
     assert!(
@@ -786,7 +869,12 @@ fn a_choice_waits_for_the_cli_before_only_where_the_stored_session_keeps_it() {
             .iter()
             .any(|n| n.ends_with("is still exiting; try again in a moment"))
     );
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
 
     let mut app = claude_taking_bedrock();
     app.on_event(AgentEvent::Restarted);

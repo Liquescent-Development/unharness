@@ -31,10 +31,10 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    let conv_id = app.conversation.id.clone();
+    let conv_id = app.controller.conversation.record.id.clone();
     app.quit();
 
-    let rows = app.store.list();
+    let rows = app.controller.store.list();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].id, conv_id);
     assert_eq!(rows[0].harnesses, vec![HarnessId::CLAUDE, HarnessId::CODEX]);
@@ -42,20 +42,29 @@ fn conversation_persists_across_harness_switch_and_resumes() {
 
     let mut again = test_app_in(cwd.clone(), HarnessId::CLAUDE, Some(String::new()), false);
     assert_eq!(again.active, HarnessId::CODEX);
-    assert_eq!(again.conversation.id, conv_id);
+    assert_eq!(again.controller.conversation.record.id, conv_id);
     assert_eq!(
         again
+            .controller
+            .conversation
             .session_ids
             .get(&HarnessId::CLAUDE)
             .map(String::as_str),
         Some("claude-1")
     );
     assert_eq!(
-        again.session_ids.get(&HarnessId::CODEX).map(String::as_str),
+        again
+            .controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CODEX)
+            .map(String::as_str),
         Some("codex-1")
     );
     assert!(
         again
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
@@ -63,6 +72,8 @@ fn conversation_persists_across_harness_switch_and_resumes() {
     );
     assert!(
         again
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
@@ -105,7 +116,7 @@ fn conversation_persists_across_harness_switch_and_resumes() {
 
     let forced = test_app_in(cwd, HarnessId::PI, Some(conv_id[..8].to_string()), true);
     assert_eq!(forced.active, HarnessId::PI);
-    assert_eq!(forced.session_ids.len(), 2);
+    assert_eq!(forced.controller.conversation.session_ids.len(), 2);
 }
 
 /// `/clear` starts a new conversation: the old one is saved as it was,
@@ -142,24 +153,24 @@ fn clear_starts_a_new_conversation() {
     app.on_event(done());
     app.take_actions();
     app.session_alive = true;
-    assert!(!app.last_active_index.is_empty());
+    assert!(!app.controller.conversation.last_active_index.is_empty());
 
-    let old = app.conversation.id.clone();
+    let old = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_ne!(app.conversation.id, old);
-    assert!(app.session_ids.is_empty());
-    assert!(app.last_active_index.is_empty());
-    assert_eq!(app.session_usage, Usage::default());
-    assert_eq!(app.context, ContextUsage::default());
+    assert_ne!(app.controller.conversation.record.id, old);
+    assert!(app.controller.conversation.session_ids.is_empty());
+    assert!(app.controller.conversation.last_active_index.is_empty());
+    assert_eq!(app.controller.conversation.session_usage, Usage::default());
+    assert_eq!(app.controller.conversation.context, ContextUsage::default());
     assert_eq!(app.active, HarnessId::CLAUDE);
     assert_eq!(
         app.controller.model(HarnessId::CLAUDE).unwrap().model,
         "opus"
     );
     // No harness has run in it yet.
-    assert!(app.conversation.last_policies.is_empty());
+    assert!(app.controller.conversation.record.last_policies.is_empty());
     assert_eq!(
-        app.transcript.blocks.len(),
+        app.controller.conversation.transcript.blocks.len(),
         1,
         "only the new conversation's notice"
     );
@@ -174,7 +185,7 @@ fn clear_starts_a_new_conversation() {
     );
 
     // The old conversation is in the store as it was.
-    let saved = app.store.load(&old).unwrap();
+    let saved = app.controller.store.load(&old).unwrap();
     assert_eq!(saved.sessions[&HarnessId::CLAUDE], "claude-1");
     assert_eq!(saved.sessions[&HarnessId::CODEX], "codex-1");
     assert!(saved.last_policies.contains_key(&HarnessId::CLAUDE));
@@ -197,12 +208,12 @@ fn clear_starts_a_new_conversation() {
 #[test]
 fn clear_of_nothing_saves_nothing() {
     let mut app = test_app(HarnessId::CLAUDE);
-    let old = app.conversation.id.clone();
+    let old = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_ne!(app.conversation.id, old);
-    assert!(app.store.list().is_empty());
+    assert_ne!(app.controller.conversation.record.id, old);
+    assert!(app.controller.store.list().is_empty());
     assert!(matches!(
-        app.transcript.blocks.as_slice(),
+        app.controller.conversation.transcript.blocks.as_slice(),
         [super::super::transcript::Block::System(s)] if s == "New conversation."
     ));
 }
@@ -222,10 +233,16 @@ fn clear_keeps_a_session_that_knows_nothing() {
     assert!(app.session_alive);
     // Its id is the new conversation's once something is sent.
     app.submit_prompt("hello".into());
-    assert_eq!(app.session_ids[&HarnessId::CLAUDE], "claude-1");
+    assert_eq!(
+        app.controller.conversation.session_ids[&HarnessId::CLAUDE],
+        "claude-1"
+    );
 
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_ids.insert(HarnessId::CLAUDE, "claude-0".into());
+    app.controller
+        .conversation
+        .session_ids
+        .insert(HarnessId::CLAUDE, "claude-0".into());
     blank_session(&mut app);
     app.handle_slash_command("/clear");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
@@ -264,12 +281,12 @@ fn clear_keeps_a_conversation_it_cannot_save() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    let dir = app.store.root().join("conversations");
+    let dir = app.controller.store.root().join("conversations");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::write(&dir, "in the way").unwrap();
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     assert!(
         notices(&app)
             .last()
@@ -305,9 +322,9 @@ fn clear_keeps_held_prompts() {
 fn clear_is_refused_while_busy() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.submit_prompt("one".into());
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     assert!(notices(&app).last().unwrap().contains("current turn"));
 
     spawn(&mut app, "spawn", "look around", None);
@@ -315,7 +332,7 @@ fn clear_is_refused_while_busy() {
         stop_reason: StopReason::Done,
     });
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     assert!(
         notices(&app)
             .last()
@@ -326,14 +343,14 @@ fn clear_is_refused_while_busy() {
     app.subagents.clear();
     app.run_shell("sleep 5");
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     assert!(notices(&app).last().unwrap().contains("! command"));
 }
 
 #[test]
 fn exit_summary_only_when_saved() {
     let mut app = test_app(HarnessId::CLAUDE);
-    assert!(app.exit_summary().is_none());
+    assert!(app.controller.exit_summary().is_none());
     app.submit_prompt("hello".into());
     app.take_actions();
     app.session_alive = true;
@@ -341,9 +358,9 @@ fn exit_summary_only_when_saved() {
         session_id: "s1".into(),
         model: None,
     });
-    let line = app.exit_summary().unwrap();
+    let line = app.controller.exit_summary().unwrap();
     assert!(line.contains("unharness --resume"));
-    assert!(line.contains(&app.conversation.id[..8]));
+    assert!(line.contains(&app.controller.conversation.record.id[..8]));
     assert!(line.contains("(claude)"));
 }
 
@@ -353,7 +370,9 @@ fn resume_errors_are_reported_not_fatal() {
     let tmp = tempfile::tempdir().unwrap();
     let app = test_app_in(tmp.keep(), HarnessId::CLAUDE, Some("nope".into()), false);
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Error(e) if e.contains("could not resume")))

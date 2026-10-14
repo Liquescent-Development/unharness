@@ -53,7 +53,11 @@ impl App {
             start_held: self.start_held,
             turn: self.is_generating,
             subagents: self.awaited_subagents(),
-            stored: self.session_ids.contains_key(&self.active),
+            stored: self
+                .controller
+                .conversation
+                .session_ids
+                .contains_key(&self.active),
             queued: self.queued.len(),
         }
     }
@@ -61,15 +65,13 @@ impl App {
     /// Choose the active harness's provider (`Controller::set_provider`).
     pub fn set_provider(&mut self, provider: ProviderId) {
         let now = self.session_now();
-        let route = match self.controller.set_provider(
-            self.active,
-            provider.clone(),
-            &now,
-            &mut self.conversation,
-        ) {
+        let route = match self
+            .controller
+            .set_provider(self.active, provider.clone(), &now)
+        {
             Ok(route) => route,
             Err(why) => {
-                self.transcript.push_error(why);
+                self.controller.conversation.transcript.push_error(why);
                 return;
             }
         };
@@ -77,21 +79,23 @@ impl App {
         let line = provider_line(&provider);
         match route {
             Route::Renew(why) => {
-                self.transcript.push_system(line);
+                self.controller.conversation.transcript.push_system(line);
                 self.session_renewed(&format!("provider {provider}: {why}"));
             }
             Route::Restart => {
-                self.transcript
+                self.controller
+                    .conversation
+                    .transcript
                     .push_system(restart_line(&provider, self.display_name()));
                 self.shutdown_session();
             }
             // Its line says how the session took it, with its answer.
             Route::Hold(cmd) => self.choice_sent(cmd),
             Route::Send(cmd) => {
-                self.transcript.push_system(line);
+                self.controller.conversation.transcript.push_system(line);
                 self.actions.push_back(Action::Command(cmd));
             }
-            Route::None => self.transcript.push_system(line),
+            Route::None => self.controller.conversation.transcript.push_system(line),
         }
     }
 
@@ -100,12 +104,15 @@ impl App {
         let (m, route) = match self.controller.set_model(self.active, model, &now) {
             Ok(set) => set,
             Err(why) => {
-                self.transcript.push_error(why);
+                self.controller.conversation.transcript.push_error(why);
                 return;
             }
         };
         self.idle_start_paused = false;
-        self.transcript.push_system(format!("Model: {}", m.label()));
+        self.controller
+            .conversation
+            .transcript
+            .push_system(format!("Model: {}", m.label()));
         self.apply_choice(route, &format!("model {}", m.model));
     }
 
@@ -114,12 +121,15 @@ impl App {
         let (effort, route) = match self.controller.set_effort(self.active, effort, &now) {
             Ok(set) => set,
             Err(why) => {
-                self.transcript.push_error(why);
+                self.controller.conversation.transcript.push_error(why);
                 return;
             }
         };
         self.idle_start_paused = false;
-        self.transcript.push_system(format!("Effort: {effort}"));
+        self.controller
+            .conversation
+            .transcript
+            .push_system(format!("Effort: {effort}"));
         self.apply_choice(route, &format!("effort {effort}"));
     }
 
@@ -146,9 +156,11 @@ impl App {
     fn choice_sent(&mut self, cmd: SessionCommand) {
         self.check_guard();
         match self.harness().prepare() {
-            Ok(Some(note)) => self.transcript.push_notice(note),
+            Ok(Some(note)) => self.controller.conversation.transcript.push_notice(note),
             Ok(None) => {}
             Err(e) => self
+                .controller
+                .conversation
                 .transcript
                 .push_error(format!("{}: {e:#}", self.short_name())),
         }
@@ -165,7 +177,10 @@ impl App {
     ) -> Option<PendingChoice> {
         let pending = self.controller.choice_answered()?;
         if let Some(provider) = &pending.provider {
-            self.transcript.push_system(taken(provider));
+            self.controller
+                .conversation
+                .transcript
+                .push_system(taken(provider));
         }
         Some(pending)
     }
@@ -178,16 +193,20 @@ impl App {
         let Some(pending) = self.choice_answered(provider_line) else {
             return;
         };
-        let stored = self.session_ids.contains_key(&self.active);
+        let stored = self
+            .controller
+            .conversation
+            .session_ids
+            .contains_key(&self.active);
         if self
             .controller
             .stored_session_keeps(self.active, stored)
             .is_some()
         {
-            self.forget_ids(self.active);
+            self.controller.forget_ids(self.active);
         }
         if self.queued.len() > pending.queued {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} queued prompt(s) held; press Enter to send the next",
                 self.queued.len()
             ));
@@ -205,7 +224,7 @@ impl App {
 
     pub fn open_provider_picker(&mut self) {
         if !self.caps().multi_provider {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} has a single provider ({}); use /harness to change agents or /model to change models",
                 self.short_name(),
                 self.current_provider()
@@ -224,12 +243,17 @@ impl App {
         let providers = match providers {
             Ok(p) if !p.is_empty() => p,
             Ok(_) => {
-                self.transcript
+                self.controller
+                    .conversation
+                    .transcript
                     .push_notice("this harness reports no providers");
                 return;
             }
             Err(e) => {
-                self.transcript.push_error(format!("list providers: {e}"));
+                self.controller
+                    .conversation
+                    .transcript
+                    .push_error(format!("list providers: {e}"));
                 return;
             }
         };
@@ -265,7 +289,9 @@ impl App {
         self.lists_failed.remove(&request);
         self.open_when_listed = Some(request.clone());
         if self.request_list(request) {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_notice(format!("Asking {} for its {what}…", self.short_name()));
         }
     }
@@ -313,17 +339,22 @@ impl App {
                 .registry()
                 .get(harness)
                 .map_or("the harness", |h| h.descriptor().short_name);
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_notice(format!("{name}'s commands could not be listed: {why}"));
             return;
         }
         if self.open_when_listed.as_ref() == Some(&request) {
             self.open_when_listed = None;
-            self.transcript.push_error(match request {
-                ListRequest::Providers(_) => format!("list providers: {why}"),
-                ListRequest::Models(..) => format!("list models: {why}"),
-                ListRequest::Commands(_) => format!("list commands: {why}"),
-            });
+            self.controller
+                .conversation
+                .transcript
+                .push_error(match request {
+                    ListRequest::Providers(_) => format!("list providers: {why}"),
+                    ListRequest::Models(..) => format!("list models: {why}"),
+                    ListRequest::Commands(_) => format!("list commands: {why}"),
+                });
         }
     }
 
@@ -400,11 +431,14 @@ impl App {
             return false;
         }
         if !self.input.is_empty() {
-            self.transcript.push_notice(match request {
-                ListRequest::Providers(_) => "The providers are here: /provider".to_string(),
-                ListRequest::Models(_, p) => format!("The models on {p} are here: Ctrl+M"),
-                ListRequest::Commands(_) => return false,
-            });
+            self.controller
+                .conversation
+                .transcript
+                .push_notice(match request {
+                    ListRequest::Providers(_) => "The providers are here: /provider".to_string(),
+                    ListRequest::Models(_, p) => format!("The models on {p} are here: Ctrl+M"),
+                    ListRequest::Commands(_) => return false,
+                });
             return false;
         }
         true
@@ -415,7 +449,9 @@ impl App {
             if self.caps().multi_provider {
                 self.open_provider_picker();
             } else {
-                self.transcript
+                self.controller
+                    .conversation
+                    .transcript
                     .push_notice("no provider configured for this harness");
             }
             return;
@@ -434,17 +470,21 @@ impl App {
                     .and_then(|m| models.iter().position(|i| i.model_ref.model == m.model));
                 self.modal = Some(Modal::Model(ListPicker::new(models).with_selected(idx)));
             }
-            Ok(_) => self.transcript.push_notice(format!(
+            Ok(_) => self.controller.conversation.transcript.push_notice(format!(
                 "no models reported for {provider}; use /model <name> to set one directly"
             )),
-            Err(e) => self.transcript.push_error(format!("list models: {e}")),
+            Err(e) => self
+                .controller
+                .conversation
+                .transcript
+                .push_error(format!("list models: {e}")),
         }
     }
 
     pub fn open_effort_picker(&mut self) {
         let levels = self.caps().effort_levels;
         if levels.is_empty() {
-            self.transcript.push_error(format!(
+            self.controller.conversation.transcript.push_error(format!(
                 "{} does not expose reasoning effort",
                 self.display_name()
             ));

@@ -27,28 +27,35 @@ impl App {
     /// where the harness can.
     pub fn set_sandbox(&mut self, level: SandboxLevel) -> bool {
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn before changing the sandbox");
             return false;
         }
         if let Err(why) = &self.sandbox.backend
             && level != SandboxLevel::Off
         {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("sandbox '{level}' is unavailable: {why}"));
             return false;
         }
         self.sandbox.explicit = Some(level);
         self.idle_start_paused = false;
         let restart = self.session_alive && self.session_sandbox_level != Some(level);
-        self.transcript.push_system(if restart {
-            format!(
-                "Sandbox: {level} ({} restarts under it)",
-                self.display_name()
-            )
-        } else {
-            format!("Sandbox: {level}")
-        });
+        self.controller
+            .conversation
+            .transcript
+            .push_system(if restart {
+                format!(
+                    "Sandbox: {level} ({} restarts under it)",
+                    self.display_name()
+                )
+            } else {
+                format!("Sandbox: {level}")
+            });
         if restart {
             self.shutdown_session();
         }

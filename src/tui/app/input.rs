@@ -32,7 +32,9 @@ impl App {
             .partition(|a| caps.accepts(a));
         for a in &dropped {
             let why = self.refusal(a);
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("{} not sent: {why}", a.label()));
         }
         for a in &sent {
@@ -53,7 +55,9 @@ impl App {
     }
 
     fn push_attachment(&mut self, a: Attachment) {
-        self.transcript
+        self.controller
+            .conversation
+            .transcript
             .push_system(format!("Attached {} to the next prompt.", a.label()));
         self.attachments.push(a);
     }
@@ -66,13 +70,15 @@ impl App {
             None => self.cwd.join(path),
         };
         if !path.is_file() {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("no such file: {}", path.display()));
             return;
         }
         match self.attachable(&path) {
             Ok(a) => self.push_attachment(a),
-            Err(why) => self.transcript.push_error(why),
+            Err(why) => self.controller.conversation.transcript.push_error(why),
         }
     }
 
@@ -84,7 +90,9 @@ impl App {
             match self.attachable(path) {
                 Ok(a) => self.push_attachment(a),
                 Err(why) => {
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_notice(format!("{} not attached: {why}", path.display()));
                     refused.push(path.display().to_string());
                 }
@@ -221,14 +229,18 @@ impl App {
                         "{} does not accept images with the current model",
                         self.short_name()
                     );
-                    return self.transcript.push_error(why);
+                    return self.controller.conversation.transcript.push_error(why);
                 }
                 match clipboard::save_image(dir, extension, &bytes) {
                     Ok(path) => match self.attachable(&path) {
                         Ok(a) => self.push_attachment(a),
-                        Err(why) => self.transcript.push_error(why),
+                        Err(why) => self.controller.conversation.transcript.push_error(why),
                     },
-                    Err(e) => self.transcript.push_error(format!("not pasted: {e:#}")),
+                    Err(e) => self
+                        .controller
+                        .conversation
+                        .transcript
+                        .push_error(format!("not pasted: {e:#}")),
                 }
             }
             Ok(Pasted::Files(paths)) => {
@@ -236,12 +248,18 @@ impl App {
                     match self.attachable(&path) {
                         Ok(a) => self.push_attachment(a),
                         Err(why) => self
+                            .controller
+                            .conversation
                             .transcript
                             .push_error(format!("{} not attached: {why}", path.display())),
                     }
                 }
             }
-            Err(e) => self.transcript.push_error(format!("not pasted: {e:#}")),
+            Err(e) => self
+                .controller
+                .conversation
+                .transcript
+                .push_error(format!("not pasted: {e:#}")),
         }
     }
 

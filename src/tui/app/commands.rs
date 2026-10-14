@@ -105,10 +105,16 @@ impl App {
                 Some(a) => match self.registry().parse(&a).map(|h| h.descriptor().id) {
                     // Refused as the picker greys it out.
                     Some(id) if !self.harness_installed(id) => self
+                        .controller
+                        .conversation
                         .transcript
                         .push_error(format!("{id} is not installed (not found on PATH)")),
                     Some(id) => self.switch_harness(id),
-                    None => self.transcript.push_error(format!("unknown harness '{a}'")),
+                    None => self
+                        .controller
+                        .conversation
+                        .transcript
+                        .push_error(format!("unknown harness '{a}'")),
                 },
                 None => self.open_harness_picker(),
             },
@@ -132,7 +138,9 @@ impl App {
                     None => {
                         let offered: Vec<&str> =
                             self.offered_policies().iter().map(|p| p.as_str()).collect();
-                        self.transcript
+                        self.controller
+                            .conversation
+                            .transcript
                             .push_error(format!("unknown policy '{a}' ({})", offered.join(", ")));
                     }
                 },
@@ -149,7 +157,7 @@ impl App {
                             .iter()
                             .map(|l| l.as_str())
                             .collect();
-                        self.transcript.push_error(format!(
+                        self.controller.conversation.transcript.push_error(format!(
                             "unknown sandbox level '{a}' ({})",
                             levels.join(", ")
                         ));
@@ -162,9 +170,12 @@ impl App {
                 None => self.open_resume_picker(),
             },
             "/conversations" | "/sessions" => {
-                let rows = self.store.list();
+                let rows = self.controller.store.list();
                 if rows.is_empty() {
-                    self.transcript.push_notice("no saved conversations");
+                    self.controller
+                        .conversation
+                        .transcript
+                        .push_notice("no saved conversations");
                 } else {
                     let lines: Vec<String> = rows
                         .iter()
@@ -182,7 +193,7 @@ impl App {
                             )
                         })
                         .collect();
-                    self.transcript.push_system(format!(
+                    self.controller.conversation.transcript.push_system(format!(
                         "Saved conversations ({}):\n{}",
                         rows.len(),
                         lines.join("\n")
@@ -190,9 +201,9 @@ impl App {
                 }
             }
             "/usage" => {
-                let t = &self.turn_usage;
-                let s = &self.session_usage;
-                self.transcript.push_system(format!(
+                let t = &self.controller.conversation.turn_usage;
+                let s = &self.controller.conversation.session_usage;
+                self.controller.conversation.transcript.push_system(format!(
                     "Last turn: {}↑ {}↓ (cache read {}, write {}){}\nSession: {} tokens{}",
                     t.input,
                     t.output,
@@ -202,19 +213,28 @@ impl App {
                     s.total_tokens(),
                     s.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
                 ));
-                if let (Some(used), Some(window)) = (self.context.used, self.context.window) {
-                    self.transcript.push_system(format!(
+                if let (Some(used), Some(window)) = (
+                    self.controller.conversation.context.used,
+                    self.controller.conversation.context.window,
+                ) {
+                    self.controller.conversation.transcript.push_system(format!(
                         "Context: {used} of {window} tokens ({}%)",
-                        self.context.percent().unwrap_or(0)
+                        self.controller.conversation.context.percent().unwrap_or(0)
                     ));
                 }
                 if let Some(r) = &self.rate_limit {
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_system(format!("Rate limits: {}", rate_limit_summary(r)));
                 }
             }
             "/steer" => match rest {
-                "" => self.transcript.push_notice("usage: /steer <message>"),
+                "" => self
+                    .controller
+                    .conversation
+                    .transcript
+                    .push_notice("usage: /steer <message>"),
                 text => self.steer(text.to_string()),
             },
             "/rewind" => self.open_rewind_picker(),
@@ -224,28 +244,39 @@ impl App {
             "/remote-control" | "/rc" => self.remote_control_command(cmd, rest),
             "/attach" => match rest {
                 path if !path.is_empty() => self.attach(path),
-                _ if self.attachments.is_empty() => {
-                    self.transcript.push_notice("usage: /attach <path>")
-                }
+                _ if self.attachments.is_empty() => self
+                    .controller
+                    .conversation
+                    .transcript
+                    .push_notice("usage: /attach <path>"),
                 _ => {
                     let names: Vec<String> = self.attachments.iter().map(|a| a.label()).collect();
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_system(format!("Attached: {}", names.join(", ")));
                 }
             },
             "/paste" => self.request_clipboard(),
             "/detach" => {
                 self.attachments.clear();
-                self.transcript.push_system("Attachments cleared.");
+                self.controller
+                    .conversation
+                    .transcript
+                    .push_system("Attachments cleared.");
             }
             "/subagents" => self.open_subagent_picker(),
             "/plan" => {
                 self.show_plan = !self.show_plan;
-                if self.plan.is_empty() {
-                    self.transcript
+                if self.controller.conversation.plan.is_empty() {
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_notice("the agent has not shared a plan");
                 } else if !self.show_plan {
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_system("Plan hidden (/plan shows it again).");
                 }
             }
@@ -268,12 +299,12 @@ impl App {
                     .collect();
                 let files = format!("Kept in (edit to change or remove):\n{}", files.join("\n"));
                 if list.is_empty() {
-                    self.transcript.push_system(format!(
+                    self.controller.conversation.transcript.push_system(format!(
                         "Nothing is allowed without asking yet. Answering a \
                          permission request with `a` adds a rule.\n{files}"
                     ));
                 } else {
-                    self.transcript.push_system(format!(
+                    self.controller.conversation.transcript.push_system(format!(
                         "Allowed without asking ({}):\n{}\n{files}",
                         list.len(),
                         list.join("\n")
@@ -295,10 +326,12 @@ impl App {
                     }
                 }
                 if list.is_empty() {
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_notice("no skills in .agents/skills (try `unharness skills add`)");
                 } else {
-                    self.transcript.push_system(format!(
+                    self.controller.conversation.transcript.push_system(format!(
                         "Skills ({}):\n{}",
                         list.len(),
                         list.join("\n")
@@ -314,7 +347,7 @@ impl App {
                 help.push_str(
                     "Shortcuts: Ctrl+H harness · Ctrl+M model · Ctrl+E effort · Ctrl+P policy · Ctrl+R resume · Ctrl+O expand the last tool call (click any call to expand that one, Ctrl+T for all) · Esc/Ctrl+C interrupt or quit\nSubagents: listed above the prompt while they work, also after their turn has ended · listed under the prompt while they work · what each one does is in a transcript of its own · Down from the prompt goes into the list, Enter opens the one chosen, Delete takes a finished one off the list (so does Ctrl+S, /subagents, or a click on the call that spawned it) · there: s stops it where the agent can, Tab goes to the next, Esc comes back · a prompt sent meanwhile goes straight to the agent\nPrompt: Ctrl+J newline (Shift+Enter too where the terminal can tell it from Enter) · Up/Down move between lines, then through earlier prompts · Home/End (Ctrl+A) line start/end · Ctrl+U clear · Ctrl+G edit in $EDITOR · Ctrl+V attach the clipboard's image (/paste)\nAgent commands: a /command unharness does not have goes to the agent where it runs commands of its own (Claude Code, pi, ACP agents), and the / list offers the ones it reports · \\/command sends one unharness also has (\\/clear, \\/model) or sends a prompt that starts with / to any agent\nShell: !command runs it yourself, in the session's directory and sandbox, with no input; its output is shown here and goes to the agent in front of your next prompt · Esc stops it · not during a turn · \\!text sends a prompt that starts with !\nTranscript: PageUp/PageDown, Shift+Up/Down, the mouse wheel or the scrollbar scroll · click \"Jump to bottom\" or press End (empty prompt) to go back to the end · drag to select and copy the text (double click a word, triple a line) · right click a block to copy all of it, or a code block its code\nDuring a turn: Enter queues the prompt · Alt+Enter steers the running turn · Alt+Up edits the last queued prompt",
                 );
-                self.transcript.push_system(help);
+                self.controller.conversation.transcript.push_system(help);
             }
             "/quit" | "/exit" => self.quit(),
             _ => self.pass_command(cmd, false),
@@ -332,7 +365,7 @@ impl App {
             if forced {
                 self.queue_prompt(text.to_string());
             } else {
-                self.transcript.push_error(format!(
+                self.controller.conversation.transcript.push_error(format!(
                     "unknown command '{name}'; /help lists commands ({harness} has not \
                      said it runs commands from a prompt; \\{name} sends it as text)"
                 ));
@@ -340,7 +373,9 @@ impl App {
             return;
         }
         if name == "/" {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("unknown command '/'; /help lists commands");
             return;
         }
@@ -349,15 +384,20 @@ impl App {
             .iter()
             .find(|c| c.answers_to(name))
             .map(|c| format!("/{}", c.name));
-        self.transcript.push_notice(match &listed {
-            Some(_) => format!("{name} is {harness}'s own command: passed on"),
-            None => format!("'{name}' is not an unharness command: passed to {harness} as typed"),
-        });
+        self.controller
+            .conversation
+            .transcript
+            .push_notice(match &listed {
+                Some(_) => format!("{name} is {harness}'s own command: passed on"),
+                None => {
+                    format!("'{name}' is not an unharness command: passed to {harness} as typed")
+                }
+            });
         // One that does what one of unharness's does changes the session
         // behind unharness's back.
         if self.owns_command(name) || listed.as_deref().is_some_and(|l| self.owns_command(l)) {
             let clears = name == "/clear" || listed.as_deref() == Some("/clear");
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "unharness does not see what {harness}'s {name} changes: the model, \
                  transcript and context shown may no longer match its session{}",
                 if clears {

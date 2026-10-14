@@ -18,6 +18,8 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
         vec![allowed("claude"), allowed("codex"), allowed("acp")]
     );
     let said = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -32,7 +34,9 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     app.on_event(cargo_test_requests("cargo test && git push").remove(0));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Notice(n)
@@ -89,7 +93,9 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
 fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
     use crate::core::transcript::Block;
     let notices = |app: &App| -> Vec<String> {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .filter_map(|b| match b {
@@ -333,6 +339,8 @@ fn a_withdrawn_request_closes_unanswered() {
     // Nothing was answered for the user.
     assert_eq!(app.take_actions(), vec![]);
     let said = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -371,7 +379,9 @@ fn a_rule_that_cannot_be_saved_still_allows_this_once() {
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "not toml [");
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Error(e) if e.contains("could not be saved")))
@@ -393,6 +403,8 @@ fn allow_lists_the_rules_and_where_they_are_kept() {
         .unwrap();
     app.handle_slash_command("/allow");
     let said: Vec<&str> = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()

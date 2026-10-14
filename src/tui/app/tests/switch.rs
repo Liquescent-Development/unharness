@@ -95,7 +95,9 @@ fn a_handoff_from_a_replaced_session_is_no_summary() {
     });
     assert_eq!(app.active, HarnessId::CODEX);
     assert!(
-        !app.transcript
+        !app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Handoff { .. }))
@@ -104,7 +106,12 @@ fn a_handoff_from_a_replaced_session_is_no_summary() {
         &app,
         "no handoff summary; Codex gets the conversation as it is"
     ));
-    assert!(!app.session_ids.contains_key(&HarnessId::CLAUDE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::CLAUDE)
+    );
     assert_eq!(app.bridge_start(HarnessId::CLAUDE), 0);
 }
 
@@ -122,7 +129,9 @@ fn steering_a_handoff_summary_queues_the_message_for_the_next_harness() {
     });
     assert_eq!(app.active, HarnessId::CODEX);
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Handoff { text, .. } if text == "Goal: the task."))
@@ -181,7 +190,11 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
     assert_eq!(app.active, HarnessId::CODEX);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     app.session_alive = false;
-    let saved = app.store.load(&app.conversation.id).unwrap();
+    let saved = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     assert!(saved.blocks.iter().any(
         |b| matches!(b, BlockRecord::Handoff { to, sender, .. } if to == "Codex" && sender == "Claude")
     ));
@@ -207,7 +220,7 @@ fn a_switch_over_the_bridge_budget_asks_for_a_handoff_first() {
         stop_reason: StopReason::Interrupted,
     });
     assert_eq!(app.active, HarnessId::CLAUDE);
-    assert!(app.transcript.blocks.iter().any(
+    assert!(app.controller.conversation.transcript.blocks.iter().any(
         |b| matches!(b, Block::Notice(n) if n == "no handoff summary; Claude gets the conversation as it is")
     ));
     app.take_actions();
@@ -354,7 +367,7 @@ fn a_harness_that_is_not_installed_cannot_be_chosen() {
     app.set_input("");
     app.handle_slash_command("/switch codex");
     assert_eq!(app.active, HarnessId::CLAUDE);
-    assert!(app.transcript.blocks.iter().any(|b| matches!(
+    assert!(app.controller.conversation.transcript.blocks.iter().any(|b| matches!(
         b,
         crate::core::transcript::Block::Error(e) if e == "codex is not installed (not found on PATH)"
     )));
@@ -405,7 +418,10 @@ fn held_context_survives_a_switch_away_and_back() {
 #[test]
 fn a_switch_starts_the_next_harness_on_its_session() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_ids.insert(HarnessId::CODEX, "codex-1".into());
+    app.controller
+        .conversation
+        .session_ids
+        .insert(HarnessId::CODEX, "codex-1".into());
     blank_session(&mut app);
     app.switch_harness(HarnessId::CODEX);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);

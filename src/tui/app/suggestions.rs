@@ -95,7 +95,7 @@ impl App {
                     }
                 }
                 ("/resume", Some(s)) => {
-                    for r in self.store.list() {
+                    for r in self.controller.store.list() {
                         if r.id.starts_with(s) || r.title.to_lowercase().contains(s) {
                             out.push((
                                 format!("/resume {}", &r.id[..8.min(r.id.len())]),

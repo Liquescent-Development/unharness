@@ -14,10 +14,10 @@ impl App {
     pub(super) fn start_generation(&mut self) {
         self.is_generating = true;
         self.interrupted = None;
-        self.transcript.begin_turn();
+        self.controller.conversation.transcript.begin_turn();
         self.generation_start = Some(Instant::now());
-        self.generation_duration = None;
-        self.turn_usage = Usage::default();
+        self.controller.conversation.generation_duration = None;
+        self.controller.conversation.turn_usage = Usage::default();
         self.auto_scroll = true;
     }
 
@@ -33,8 +33,8 @@ impl App {
             .take()
             .map(|s| s.elapsed())
             .unwrap_or_default();
-        self.generation_duration = Some(dur);
-        self.transcript.finish_turn(dur);
+        self.controller.conversation.generation_duration = Some(dur);
+        self.controller.conversation.transcript.finish_turn(dur);
     }
 
     /// Send the prompt box contents as a turn.
@@ -55,8 +55,8 @@ impl App {
             });
             return;
         }
-        if self.first_prompt.is_none() {
-            self.first_prompt = Some(text.clone());
+        if self.controller.conversation.first_prompt.is_none() {
+            self.controller.conversation.first_prompt = Some(text.clone());
         }
 
         // A command the harness runs has to start the message, so it goes
@@ -67,24 +67,34 @@ impl App {
         // was last active, or everything on its first visit. Nothing when the
         // live session already saw the whole transcript.
         let from = self.bridge_start(self.active);
-        let bridge = if from >= self.transcript.blocks.len() {
+        let bridge = if from >= self.controller.conversation.transcript.blocks.len() {
             None
         } else {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .bridge_text(from, self.bridge_budget(self.active))
         };
         if alone && bridge.is_some() {
-            self.last_active_index.insert(self.active, from);
+            self.controller
+                .conversation
+                .last_active_index
+                .insert(self.active, from);
         } else {
-            self.last_active_index.remove(&self.active);
+            self.controller
+                .conversation
+                .last_active_index
+                .remove(&self.active);
         }
         let unsent_shell = self
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, super::transcript::Block::Shell { sent: false, .. }));
         if alone && (bridge.is_some() || unsent_shell) {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} is told what it has not seen yet with your next prompt: a command has to start its message",
                 self.short_name()
             ));
@@ -93,7 +103,14 @@ impl App {
         // `!` commands no agent has been told about yet (the bridge has
         // only those one has).
         let mut shells = Vec::new();
-        for b in self.transcript.blocks.iter_mut().filter(|_| !alone) {
+        for b in self
+            .controller
+            .conversation
+            .transcript
+            .blocks
+            .iter_mut()
+            .filter(|_| !alone)
+        {
             if let super::transcript::Block::Shell {
                 command,
                 output,
@@ -116,12 +133,12 @@ impl App {
 
         let mut shown = text.clone();
         let attachments = self.take_attachments(&mut shown);
-        self.transcript.push_user(shown);
-        let block = self.transcript.blocks.len() - 1;
+        self.controller.conversation.transcript.push_user(shown);
+        let block = self.controller.conversation.transcript.blocks.len() - 1;
         if self.caps().rewind.conversation {
-            self.anchor_pending.push_back(block);
+            self.controller.conversation.anchor_pending.push_back(block);
         }
-        self.checkpoint_files(block);
+        self.controller.checkpoint_files(block);
         self.start_generation();
 
         let context: Vec<String> = bridge
@@ -189,7 +206,7 @@ impl App {
         // Whether it runs as a command depends on the harness: one typed
         // for another goes back to the prompt box instead.
         if q.text.starts_with('/') && q.harness != self.active {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "'{}' was typed for {}; it is back in the prompt box",
                 q.text.lines().next().unwrap_or_default(),
                 self.registry()
@@ -237,7 +254,7 @@ impl App {
             return;
         }
         if !self.caps().steer || !self.session_alive {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} cannot be steered mid-turn; queued for when it finishes",
                 self.short_name()
             ));
@@ -246,7 +263,7 @@ impl App {
         }
         let mut shown = text.clone();
         let attachments = self.take_attachments(&mut shown);
-        self.transcript.push_user(shown);
+        self.controller.conversation.transcript.push_user(shown);
         self.actions
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
     }
@@ -254,17 +271,23 @@ impl App {
     /// Ask the harness to summarise its context now.
     pub fn compact(&mut self, instructions: Option<String>) {
         if self.is_generating {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("finish or interrupt the current turn before compacting");
             return;
         }
         if !self.caps().compaction {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("{} cannot compact on request", self.short_name()));
             return;
         }
         if !self.session_seen() {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_notice("no live session to compact; send a prompt first");
             return;
         }
@@ -284,7 +307,10 @@ impl App {
             None => {
                 self.actions
                     .push_back(Action::Command(SessionCommand::Interrupt));
-                self.transcript.push_system("Interrupting…");
+                self.controller
+                    .conversation
+                    .transcript
+                    .push_system("Interrupting…");
                 self.interrupted = Some((Instant::now(), false));
             }
             // Said before the process is ended, however long the wait.
@@ -301,7 +327,7 @@ impl App {
                         self.short_name()
                     )
                 };
-                self.transcript.push_notice(notice);
+                self.controller.conversation.transcript.push_notice(notice);
                 self.interrupted = Some((at, true));
             }
             Some((at, true)) if at.elapsed() < STOP_GRACE => {}
@@ -315,7 +341,7 @@ impl App {
     /// session it was for starts, told the conversation (#226).
     fn end_stuck_turn(&mut self) {
         let name = self.short_name();
-        self.transcript.push_notice(match self.handoff {
+        self.controller.conversation.transcript.push_notice(match self.handoff {
             None => format!(
                 "{name} did not stop, so its process was ended; the next prompt resumes the session"
             ),
@@ -330,13 +356,16 @@ impl App {
         // Not started again before the next prompt.
         self.idle_start_paused = true;
         self.process_gone();
-        self.transcript.end_running_tools();
+        self.controller.conversation.transcript.end_running_tools();
         self.finish_generation();
-        self.transcript.push_system("Turn interrupted.");
+        self.controller
+            .conversation
+            .transcript
+            .push_system("Turn interrupted.");
         self.finish_handoff(false);
         self.persist();
         if !self.queued.is_empty() {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} queued prompt(s) held; press Enter to send the next",
                 self.queued.len()
             ));
