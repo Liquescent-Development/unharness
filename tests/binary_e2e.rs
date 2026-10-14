@@ -1134,3 +1134,58 @@ fn switch_and_models_fail_on_a_wrong_harness_table_as_a_run_does() {
         "{stderr}"
     );
 }
+
+/// A table under another name for a harness, a key unharness no longer
+/// takes, and `command` or `display_name` where nothing reads them, in
+/// the global file and a workspace's: `doctor` names each and exits 1,
+/// and a run, `switch` and `models` stop on the first (#281).
+#[test]
+fn tables_and_keys_nothing_reads_stop_a_run() {
+    let tmp = scratch_with_config(
+        "[harnesses.claude]\npersist_sessions = true\n\
+         [harnesses.codex]\ncommand = [\"/opt/codex\"]\n",
+    );
+    let store = tmp.path().join("config/unharness/workspaces");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(
+        unharness::config::Config::workspace_path_in(&store, &tmp.path().join("ws")),
+        "[harnesses.claude-code]\nrelocate_config = false\n\
+         [harnesses.pi]\ndisplay_name = \"My pi\"\n",
+    )
+    .unwrap();
+    // In the order of their tables' names.
+    let errors = [
+        "[harnesses.claude] persist_sessions: unharness no longer takes this key, which did \
+         nothing; delete the line",
+        "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+         [harnesses.claude]",
+        "[harnesses.codex] command: codex does not take this key; to run another codex \
+         binary, set binary",
+        "[harnesses.pi] display_name: pi does not take this key",
+    ];
+
+    let out = unharness_in(tmp.path(), &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    for said in errors {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+    for said in [
+        "[harnesses.codex] not shown: the table is wrong",
+        "[harnesses.pi] not shown: the table is wrong",
+        "Claude Code",
+    ] {
+        assert!(stdout.contains(said), "{said}: {stdout}");
+    }
+
+    for args in [
+        &["--print", "--sandbox", "off", "hi"][..],
+        &["switch", "claude"],
+        &["models", "--harness", "claude"],
+    ] {
+        let out = unharness_in(tmp.path(), args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(stderr.contains(errors[0]), "{args:?}: {stderr}");
+    }
+}

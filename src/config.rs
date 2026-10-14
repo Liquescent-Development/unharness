@@ -106,7 +106,6 @@ pub struct HarnessSettings {
     pub default_model: Option<String>,
     pub default_effort: Option<String>,
     pub default_policy: Option<String>,
-    pub persist_sessions: Option<bool>,
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// `"acp"` defines a harness for an Agent Client Protocol agent under
@@ -160,9 +159,18 @@ impl HarnessSettings {
     /// [`own`](Self::own) for a table that says what runs its agent and
     /// the name it is shown by, `command` and `display_name`: an ACP
     /// agent's, and vibe's.
+    ///
+    /// A key in [`REMOVED_KEYS`] is left to the registry, which says so
+    /// for every table, whichever harness reads it.
     pub fn own_of_agent<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
         let takes = keys_of::<T>();
-        if let Some(key) = self.rest.keys().find(|k| !takes.contains(&k.as_str())) {
+        let rest: toml::Table = self
+            .rest
+            .iter()
+            .filter(|(k, _)| !REMOVED_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(key) = rest.keys().find(|k| !takes.contains(&k.as_str())) {
             let own = match takes {
                 [] => format!("{name} takes only the keys every harness takes"),
                 keys => format!(
@@ -172,13 +180,19 @@ impl HarnessSettings {
             };
             anyhow::bail!("[harnesses.{name}] {key}: unknown key; {own}");
         }
-        T::deserialize(toml::Value::Table(self.rest.clone())).map_err(|e| {
+        T::deserialize(toml::Value::Table(rest)).map_err(|e| {
             // toml says which key on a line of its own.
             let what = e.to_string();
             anyhow::anyhow!("[harnesses.{name}]: {}", what.trim_end().replace('\n', " "))
         })
     }
 }
+
+/// Keys a harness table once took that did nothing, and that unharness no
+/// longer takes. Setting one is an error naming it, in any table
+/// (`core::registry`), so that a line read by nothing does not stay as if
+/// it were a setting.
+pub const REMOVED_KEYS: &[&str] = &["persist_sessions"];
 
 /// What a harness that takes only the keys every harness takes has of its
 /// own: nothing.
@@ -486,7 +500,6 @@ impl Config {
             default_model: local.default_model.or(global.default_model),
             default_effort: local.default_effort.or(global.default_effort),
             default_policy: local.default_policy.or(global.default_policy),
-            persist_sessions: local.persist_sessions.or(global.persist_sessions),
             extra_args: if !local.extra_args.is_empty() {
                 local.extra_args
             } else {

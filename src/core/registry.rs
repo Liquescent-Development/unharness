@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::ids::HarnessId;
-use crate::config::{Config, HarnessSettings, TableErrors};
+use crate::config::{Config, HarnessSettings, REMOVED_KEYS, TableErrors};
 use crate::harness::{Harness, Probe, acp, agy, claude, codex, pi, resolve_binary, vibe};
 
 /// Builds a harness from its `[harnesses.<name>]` table, an empty one when
@@ -93,6 +93,22 @@ impl Registry {
         for (name, table) in &config.harnesses {
             if !built.read.contains(name) {
                 errors.push(ConfigError::new(Some(name), unread(name, table)));
+            }
+            // In every table, whichever harness reads it, if any: a
+            // builder leaves these keys to be said here. The harness is
+            // whole, since they did nothing.
+            for key in table
+                .rest
+                .keys()
+                .filter(|k| REMOVED_KEYS.contains(&k.as_str()))
+            {
+                errors.push(ConfigError::new(
+                    Some(name),
+                    format!(
+                        "[harnesses.{name}] {key}: unharness no longer takes this key, which did \
+                         nothing; delete the line"
+                    ),
+                ));
             }
         }
         errors.append(&mut built.errors);
@@ -290,10 +306,11 @@ impl Built {
 /// What is wrong with the config's harness settings ([`Registry::checked`]):
 /// a policy that is not one (the TUI reads them again when the harness is
 /// switched, where an error could no longer end the run), a table no
-/// harness reads, and every builder's error: a key the harness does not
-/// take, an ACP agent without a command, a mode map that does not parse
-/// (else the agent is left in a mode of its own choosing), a provider that
-/// is not whole (a session on it would fail, or run somewhere else).
+/// harness reads, a key unharness no longer takes ([`REMOVED_KEYS`]), and
+/// every builder's error: a key the harness does not take, an ACP agent
+/// without a command, a mode map that does not parse (else the agent is
+/// left in a mode of its own choosing), a provider that is not whole (a
+/// session on it would fail, or run somewhere else).
 pub fn config_errors(config: &Config) -> Vec<ConfigError> {
     Registry::checked(config).1
 }
@@ -315,7 +332,11 @@ fn unread(name: &str, table: &HarnessSettings) -> String {
         );
     }
     // The first key that would be a harness's own, if any.
-    let at = match table.rest.keys().next() {
+    let own = table
+        .rest
+        .keys()
+        .find(|k| !REMOVED_KEYS.contains(&k.as_str()));
+    let at = match own {
         Some(key) => format!(" {key}: unknown key;"),
         None => ":".to_string(),
     };
@@ -920,6 +941,78 @@ mod tests {
         );
     }
 
+    /// `persist_sessions` was read by nothing, and unharness no longer
+    /// takes it: in any table it is an error naming the table and the key,
+    /// so that the line is deleted. The harness itself is whole (#281).
+    #[test]
+    fn a_key_unharness_no_longer_takes_is_an_error_naming_it() {
+        let gone = |name: &str| {
+            format!(
+                "[harnesses.{name}] persist_sessions: unharness no longer takes this key, which \
+                 did nothing; delete the line"
+            )
+        };
+        for (text, name) in [
+            ("[harnesses.claude]\npersist_sessions = true\n", "claude"),
+            ("[harnesses.codex]\npersist_sessions = false\n", "codex"),
+            ("[harnesses.vibe]\npersist_sessions = true\n", "vibe"),
+            (
+                "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                 persist_sessions = true\n",
+                "myagent",
+            ),
+            // A preset's is not told how to define an agent.
+            ("[harnesses.gemini]\npersist_sessions = true\n", "gemini"),
+        ] {
+            let errors = config_errors(&parse(text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, gone(name));
+            assert_eq!(errors[0].table.as_deref(), Some(name));
+            assert!(!errors[0].left_out, "{errors:?}");
+            assert_eq!(
+                Registry::from_config(&parse(text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                gone(name)
+            );
+            let (reg, _) = Registry::checked(&parse(text));
+            assert!(
+                name == "gemini" || reg.parse(name).is_some(),
+                "{name} is built"
+            );
+        }
+
+        // Beside a key the harness does not take, each is said.
+        let e = config_errors(&parse(
+            "[harnesses.codex]\npersist_sessions = true\ntransprt = \"exec\"\n",
+        ));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                gone("codex").as_str(),
+                "[harnesses.codex] transprt: unknown key; besides the keys every harness takes, \
+                 codex takes transport"
+            ]
+        );
+        // In a table no harness reads, both are said, and the table names
+        // no key of a harness's own.
+        let e = config_errors(&parse("[harnesses.claud]\npersist_sessions = true\n"));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                format!(
+                    "[harnesses.claud]: no harness's table is named claud ({})",
+                    acp::DEFINING_AN_AGENT
+                )
+                .as_str(),
+                gone("claud").as_str()
+            ]
+        );
+    }
+
     /// A workspace's file is merged over the global one before anything
     /// is checked, so what it gets wrong is refused the same way, naming
     /// the table (#281).
@@ -975,6 +1068,15 @@ mod tests {
                 "{text}: {e:?}"
             );
         }
+        let e = check("[harnesses.claude]\npersist_sessions = true\n");
+        assert!(
+            e.len() == 1
+                && e[0].message
+                    == "[harnesses.claude] persist_sessions: unharness no longer takes this key, \
+                        which did nothing; delete the line"
+                && !e[0].left_out,
+            "{e:?}"
+        );
 
         // An agent defined globally keeps its command under a workspace's
         // empty list, and takes a name from there.

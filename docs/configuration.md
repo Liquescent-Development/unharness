@@ -14,13 +14,14 @@ doctor` prints the path, and `unharness init` creates the file.
 > sandbox and policy settings. A harness table that is wrong (an unknown
 > policy or Codex `transport`, a `modes` map or a provider that is not
 > whole, an ACP agent without a command, a key its harness does not take,
-> a value of the wrong type in a key only its harness takes, a table no
-> harness takes: a misspelt name, or another name for a harness such as
-> `claude-code`, whose table is `[harnesses.claude]`) stops a run,
-> `unharness switch` and `unharness models` too, and is never replaced by
-> the built-in or preset of its name. Such an error names the table and
-> the key, not the file; `unharness doctor` shows it, leaves out a harness
-> it cannot build, shows the rest, and exits 1.
+> a value of the wrong type in a key only its harness takes, a key
+> unharness no longer takes, a table no harness takes: a misspelt name,
+> or another name for a harness such as `claude-code`, whose table is
+> `[harnesses.claude]`) stops a run, `unharness switch` and `unharness
+> models` too, and is never replaced by the built-in or preset of its
+> name. Such an error names the table and the key, not the file;
+> `unharness doctor` shows it, leaves out a harness it cannot build,
+> shows the rest, and exits 1.
 
 ## Example
 
