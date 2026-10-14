@@ -1,9 +1,13 @@
 use super::*;
+use crate::config::BridgeSummary;
+use crate::core::controller::Handoff;
+use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::rules::Scope;
-use crate::core::transcript::Transcript;
+use crate::core::sandbox::SandboxLevel;
 use crate::core::{
-    CapsUpdate, ContextUsage, ModelRef, Parser, PermissionDecision, PermissionKind, Question,
-    QuestionOption, Rule, ToolAction, Usage,
+    CapsUpdate, ContextUsage, ModelRef, Parser, PermissionDecision, PermissionKind,
+    PermissionRequest, Question, QuestionOption, Rule, SessionCommand, StopReason, ToolAction,
+    Usage,
 };
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
@@ -24,7 +28,6 @@ mod policy;
 mod remote;
 mod rewind;
 mod sandbox;
-mod session;
 mod subagents;
 mod suggestions;
 mod switch;
@@ -182,35 +185,6 @@ fn sent_turn(app: &mut App) -> String {
     }
 }
 
-/// Claude, live, after a turn too long for a bridge of 500 characters.
-fn over_budget_app() -> App {
-    let mut app = test_app(HarnessId::CLAUDE);
-    app.bridge_max_chars = Some(500);
-    app.submit_prompt("the task".into());
-    app.take_actions();
-    app.session_alive = true;
-    app.on_event(AgentEvent::SessionStarted {
-        session_id: "claude-1".into(),
-        model: None,
-    });
-    app.on_event(AgentEvent::TextDelta("x".repeat(1_000)));
-    app.on_event(AgentEvent::TurnCompleted {
-        stop_reason: StopReason::Done,
-    });
-    app.take_actions();
-    app
-}
-
-fn has_notice(app: &App, text: &str) -> bool {
-    use super::transcript::Block;
-    app.controller
-        .conversation
-        .transcript
-        .blocks
-        .iter()
-        .any(|b| matches!(b, Block::Notice(n) if n == text))
-}
-
 /// One command as each harness asks to run it, through its own parser.
 fn cargo_test_requests(command: &str) -> Vec<AgentEvent> {
     requests_in(command, None)
@@ -295,15 +269,8 @@ pub(crate) fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
 /// A session started before anything was sent to it, as the event loop
 /// starts one.
 fn blank_session(app: &mut App) {
-    app.session_alive = true;
-    app.session_blank = true;
-}
-
-fn starts(actions: &[Action]) -> usize {
-    actions
-        .iter()
-        .filter(|a| matches!(a, Action::StartSession { .. }))
-        .count()
+    app.controller.session_alive = true;
+    app.controller.session_blank = true;
 }
 
 /// An app on the built-in vibe harness, whose model and effort are
@@ -327,7 +294,7 @@ fn vibe_app() -> (App, tempfile::TempDir) {
 fn prompted_vibe(app: &mut App) {
     app.submit_prompt("remember the word kumquat".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "v1".into(),
         model: Some("mistral-medium-3.5".into()),

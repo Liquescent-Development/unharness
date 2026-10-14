@@ -8,45 +8,10 @@ use crate::tui::clipboard::{self, Pasted};
 use crate::tui::{drop, prompt};
 
 impl App {
-    /// Why the active harness cannot take this attachment.
-    fn refusal(&self, a: &Attachment) -> String {
-        match a {
-            Attachment::Image { .. } => format!(
-                "{} does not accept images with the current model",
-                self.short_name()
-            ),
-            Attachment::File { .. } => format!(
-                "{} does not accept file attachments, only images",
-                self.short_name()
-            ),
-        }
-    }
-
-    /// The pending attachments the active harness accepts, with their
-    /// transcript markers appended to `shown`. The others are dropped, and
-    /// said to be: one queued for another harness can end up here.
-    pub(super) fn take_attachments(&mut self, shown: &mut String) -> Vec<Attachment> {
-        let caps = self.caps();
-        let (sent, dropped): (Vec<_>, Vec<_>) = std::mem::take(&mut self.attachments)
-            .into_iter()
-            .partition(|a| caps.accepts(a));
-        for a in &dropped {
-            let why = self.refusal(a);
-            self.controller
-                .conversation
-                .transcript
-                .push_error(format!("{} not sent: {why}", a.label()));
-        }
-        for a in &sent {
-            shown.push_str(&format!("\n{}", a.marker()));
-        }
-        sent
-    }
-
     /// The attachment `path` makes, or why the active harness gets none.
     fn attachable(&self, path: &Path) -> Result<Attachment, String> {
         match Attachment::from_path(path) {
-            Some(a) if !self.caps().accepts(&a) => Err(self.refusal(&a)),
+            Some(a) if !self.caps().accepts(&a) => Err(self.controller.refusal(&a)),
             Some(a) => Ok(a),
             None => {
                 Err("only images (png, jpg, gif, webp), PDFs and text files can be attached".into())
@@ -67,7 +32,7 @@ impl App {
         let path = path.trim().trim_matches(['"', '\'']);
         let path = match path.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
-            None => self.cwd.join(path),
+            None => self.controller.cwd.join(path),
         };
         if !path.is_file() {
             self.controller

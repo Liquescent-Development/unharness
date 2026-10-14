@@ -48,7 +48,7 @@ handoff summary from the old session as for a switch. Since #275 that is
 the driver's to say: a model, effort or provider sent to a session that
 was prompted is answered `NewSession` (`AgentHooks::chooses_at_spawn`,
 the reason `vibe::KEEPS_CHOICES`), which the TUI hears as
-`SessionRenewed` and renews from as for a switch (`App::session_renewed`:
+`SessionRenewed` and renews from as for a switch (`Controller::session_renewed`:
 the handoff summary asked of the old session, still live, then the
 session forgotten and shut down); nothing is sent to vibe, and a prompt
 typed before the answer waits for it, while another choice and what
@@ -194,7 +194,7 @@ and under a trusted one. Unverified: macOS.
 
 Trust (#171, 2.26.1): `Harness::session_notice` (empty for the others)
 gives vibe `trust::notice`, said once per harness in a TUI run
-(`App::show_session_notice`, beside `prepare`: a session starts again
+(`Controller::show_session_notice`, beside `prepare`: a session starts again
 on every model, policy or sandbox change) and as a warning on stderr
 in `--print`, when the folder has project configuration and vibe does
 not trust it (no entry, declined, or a file it cannot read). unharness
@@ -303,11 +303,11 @@ row the agent did not wait for stays at work until the session ends,
 saying that its end shows only when the agent waits for it. Its start
 says so (`SubagentStarted::unreported_end`, set by vibe's reader; until
 #275 a harness flag, `SubagentSupport::unreported_ends`, which the TUI
-and `--print` both read), and such a row (`App::awaited_subagents`) does not keep
+and `--print` both read), and such a row (`Controller::awaited_subagents`) does not keep
 the TUI busy (status rule, herdr; its own spinner and time still run,
 `has_running_subagents`) and holds back
 neither `/clear`, a model, effort or provider change
-(`App::refused_for_subagents`) nor a handoff summary
+(`Controller::refused_for_subagents`) nor a handoff summary
 (`handoff_wanted_for`), since it would hold them until the session
 ends (#215); each ends the session, and the row with it, as stopped.
 The refusals name Ctrl+S, and `Delete` on a running row names `s`,

@@ -1,225 +1,55 @@
-//! Providers, models and efforts, and the lists they are chosen from.
+//! Providers, models and efforts as the TUI offers them, and the lists
+//! they are chosen from. What a choice does to the session is the
+//! controller's (`core::controller`, `choices.rs`).
 
-use super::{Action, App, ListJob, ListRequest, ListResult};
-use crate::core::controller::{PendingChoice, Route, SessionNow};
-use crate::core::{ModelRef, ProviderId, SessionCommand};
+use super::{App, ListJob, ListRequest, ListResult};
+use crate::core::{ModelRef, ProviderId};
 use crate::harness::ModelInfo;
 use crate::tui::modal::{ListPicker, Modal, ProviderOption};
 
 impl App {
     pub fn current_provider(&self) -> Option<&ProviderId> {
-        self.controller.provider(self.active)
+        self.controller.provider(self.controller.active)
     }
 
     /// The provider to tell the active harness, if the user chose one.
     pub fn chosen_provider(&self) -> Option<&ProviderId> {
-        self.controller.chosen_provider(self.active)
+        self.controller.chosen_provider(self.controller.active)
     }
 
     pub fn current_model(&self) -> Option<&ModelRef> {
-        self.controller.model(self.active)
+        self.controller.model(self.controller.active)
     }
 
     pub fn current_effort(&self) -> Option<&str> {
-        self.controller.effort(self.active)
+        self.controller.effort(self.controller.active)
     }
 
     pub fn model_label(&self) -> String {
-        match self.current_model() {
-            Some(m) => m.label(),
-            None => match self.current_provider() {
-                Some(p) => format!("{p}/default"),
-                None => "default".to_string(),
-            },
-        }
+        self.controller.model_label()
     }
 
     /// Ask the active harness for its commands without a session, once,
     /// where the session would not say before the first prompt.
     pub(super) fn list_commands(&mut self) {
-        let request = ListRequest::Commands(self.active);
-        let listed = self.controller.commands_listed(self.active);
+        let request = ListRequest::Commands(self.controller.active);
+        let listed = self.controller.commands_listed(self.controller.active);
         if !listed && !self.lists_failed.contains(&request) {
             self.request_list(request);
         }
     }
 
-    /// What decides whether a choice may be made now, and how it reaches
-    /// the session (`Controller::set_provider` and the others).
-    fn session_now(&self) -> SessionNow {
-        SessionNow {
-            alive: self.session_alive,
-            prompted: self.session_seen(),
-            start_held: self.start_held,
-            turn: self.is_generating,
-            subagents: self.awaited_subagents(),
-            stored: self
-                .controller
-                .conversation
-                .session_ids
-                .contains_key(&self.active),
-            queued: self.queued.len(),
-        }
-    }
-
     /// Choose the active harness's provider (`Controller::set_provider`).
     pub fn set_provider(&mut self, provider: ProviderId) {
-        let now = self.session_now();
-        let route = match self
-            .controller
-            .set_provider(self.active, provider.clone(), &now)
-        {
-            Ok(route) => route,
-            Err(why) => {
-                self.controller.conversation.transcript.push_error(why);
-                return;
-            }
-        };
-        self.idle_start_paused = false;
-        let line = provider_line(&provider);
-        match route {
-            Route::Renew(why) => {
-                self.controller.conversation.transcript.push_system(line);
-                self.session_renewed(&format!("provider {provider}: {why}"));
-            }
-            Route::Restart => {
-                self.controller
-                    .conversation
-                    .transcript
-                    .push_system(restart_line(&provider, self.display_name()));
-                self.shutdown_session();
-            }
-            // Its line says how the session took it, with its answer.
-            Route::Hold(cmd) => self.choice_sent(cmd),
-            Route::Send(cmd) => {
-                self.controller.conversation.transcript.push_system(line);
-                self.actions.push_back(Action::Command(cmd));
-            }
-            Route::None => self.controller.conversation.transcript.push_system(line),
-        }
+        self.with(|c, screen| c.set_provider(provider, screen));
     }
 
     pub fn set_model(&mut self, model: String) {
-        let now = self.session_now();
-        let (m, route) = match self.controller.set_model(self.active, model, &now) {
-            Ok(set) => set,
-            Err(why) => {
-                self.controller.conversation.transcript.push_error(why);
-                return;
-            }
-        };
-        self.idle_start_paused = false;
-        self.controller
-            .conversation
-            .transcript
-            .push_system(format!("Model: {}", m.label()));
-        self.apply_choice(route, &format!("model {}", m.model));
+        self.with(|c, screen| c.set_model(model, screen));
     }
 
     pub fn set_effort(&mut self, effort: String) {
-        let now = self.session_now();
-        let (effort, route) = match self.controller.set_effort(self.active, effort, &now) {
-            Ok(set) => set,
-            Err(why) => {
-                self.controller.conversation.transcript.push_error(why);
-                return;
-            }
-        };
-        self.idle_start_paused = false;
-        self.controller
-            .conversation
-            .transcript
-            .push_system(format!("Effort: {effort}"));
-        self.apply_choice(route, &format!("effort {effort}"));
-    }
-
-    /// Carry out a model or effort just chosen (worded `choice`) as the
-    /// controller routes it (`Controller::route`).
-    fn apply_choice(&mut self, route: Route, choice: &str) {
-        match route {
-            Route::Renew(why) => self.session_renewed(&format!("{choice}: {why}")),
-            // The next session starts with it.
-            Route::None => {}
-            Route::Restart => self.shutdown_session(),
-            Route::Hold(cmd) => self.choice_sent(cmd),
-            Route::Send(cmd) => self.actions.push_back(Action::Command(cmd)),
-        }
-    }
-
-    /// Send `cmd`, a choice the session takes only between turns, whose
-    /// answer the controller waits for (`Route::Hold`): what is typed after
-    /// it is held until the session has said how it took it (`Restarted`,
-    /// `SessionRenewed`). Its process may be started again by its driver:
-    /// as before the TUI starts one, what the session changed since its
-    /// last turn is told now, its harness is prepared, and the next process
-    /// is watched from its start.
-    fn choice_sent(&mut self, cmd: SessionCommand) {
-        self.check_guard();
-        match self.harness().prepare() {
-            Ok(Some(note)) => self.controller.conversation.transcript.push_notice(note),
-            Ok(None) => {}
-            Err(e) => self
-                .controller
-                .conversation
-                .transcript
-                .push_error(format!("{}: {e:#}", self.short_name())),
-        }
-        self.arm_guard();
-        self.actions.push_back(Action::Command(cmd));
-    }
-
-    /// The choice the session was sent has been answered, or will not be
-    /// (its process is gone): what waited for the answer. A provider's line
-    /// is said here, as `taken` words it.
-    pub(super) fn choice_answered(
-        &mut self,
-        taken: impl FnOnce(&ProviderId) -> String,
-    ) -> Option<PendingChoice> {
-        let pending = self.controller.choice_answered()?;
-        if let Some(provider) = &pending.provider {
-            self.controller
-                .conversation
-                .transcript
-                .push_system(taken(provider));
-        }
-        Some(pending)
-    }
-
-    /// The choice the session was sent will not be answered: it is ending,
-    /// or gone. A stored session that keeps what it ran is forgotten, as
-    /// its answer would have had it, so that it is not resumed as it ran;
-    /// what was typed after the choice waits for Enter.
-    pub(super) fn choice_unanswered(&mut self) {
-        let Some(pending) = self.choice_answered(provider_line) else {
-            return;
-        };
-        let stored = self
-            .controller
-            .conversation
-            .session_ids
-            .contains_key(&self.active);
-        if self
-            .controller
-            .stored_session_keeps(self.active, stored)
-            .is_some()
-        {
-            self.controller.forget_ids(self.active);
-        }
-        if self.queued.len() > pending.queued {
-            self.controller.conversation.transcript.push_notice(format!(
-                "{} queued prompt(s) held; press Enter to send the next",
-                self.queued.len()
-            ));
-        }
-    }
-
-    /// The choice the session was sent is taken: the first prompt typed
-    /// after it goes now, as it would have had it been typed then; those
-    /// held before it still wait.
-    pub(super) fn send_typed_after(&mut self, pending: &PendingChoice) {
-        if self.queued.len() > pending.queued {
-            self.send_queued(pending.queued);
-        }
+        self.with(|c, screen| c.set_effort(effort, screen));
     }
 
     pub fn open_provider_picker(&mut self) {
@@ -233,9 +63,13 @@ impl App {
             ));
             return;
         }
-        match self.controller.provider_list(self.active).cloned() {
+        match self
+            .controller
+            .provider_list(self.controller.active)
+            .cloned()
+        {
             Some(providers) => self.show_provider_picker(Ok(providers)),
-            None => self.wait_for_list(ListRequest::Providers(self.active)),
+            None => self.wait_for_list(ListRequest::Providers(self.controller.active)),
         }
     }
 
@@ -271,8 +105,11 @@ impl App {
     /// otherwise they are asked for, once: after a failure only a picker
     /// the user opens asks again.
     pub(super) fn cached_models(&mut self, provider: &ProviderId) -> Option<Vec<ModelInfo>> {
-        let request = ListRequest::Models(self.active, provider.clone());
-        let cached = self.controller.model_list(self.active, provider).cloned();
+        let request = ListRequest::Models(self.controller.active, provider.clone());
+        let cached = self
+            .controller
+            .model_list(self.controller.active, provider)
+            .cloned();
         if cached.is_none() && !self.lists_failed.contains(&request) {
             self.request_list(request);
         }
@@ -316,7 +153,7 @@ impl App {
                     request,
                     registry: self.registry().clone(),
                     binary,
-                    cwd: self.cwd.clone(),
+                    cwd: self.controller.cwd.clone(),
                     sandbox,
                 });
                 true
@@ -383,7 +220,7 @@ impl App {
                     return;
                 };
                 self.controller.commands_arrived(harness, commands);
-                if harness == self.active {
+                if harness == self.controller.active {
                     self.commands_arrived();
                 }
             }
@@ -423,8 +260,10 @@ impl App {
         }
         self.open_when_listed = None;
         let still_there = match request {
-            ListRequest::Providers(h) => *h == self.active,
-            ListRequest::Models(h, p) => *h == self.active && self.current_provider() == Some(p),
+            ListRequest::Providers(h) => *h == self.controller.active,
+            ListRequest::Models(h, p) => {
+                *h == self.controller.active && self.current_provider() == Some(p)
+            }
             ListRequest::Commands(_) => false,
         };
         if !still_there || self.modal.is_some() {
@@ -456,9 +295,13 @@ impl App {
             }
             return;
         };
-        match self.controller.model_list(self.active, &provider).cloned() {
+        match self
+            .controller
+            .model_list(self.controller.active, &provider)
+            .cloned()
+        {
             Some(models) => self.show_model_picker(&provider, Ok(models)),
-            None => self.wait_for_list(ListRequest::Models(self.active, provider)),
+            None => self.wait_for_list(ListRequest::Models(self.controller.active, provider)),
         }
     }
 
@@ -495,14 +338,4 @@ impl App {
             .and_then(|e| levels.iter().position(|l| l == e));
         self.modal = Some(Modal::Effort(ListPicker::new(levels).with_selected(idx)));
     }
-}
-
-/// What is said of a provider chosen.
-pub(super) fn provider_line(provider: &ProviderId) -> String {
-    format!("Provider: {provider} (pick a model with Ctrl+M)")
-}
-
-/// What is said of a provider whose harness's process starts again on it.
-pub(super) fn restart_line(provider: &ProviderId, name: &str) -> String {
-    format!("Provider: {provider} ({name} restarts on it; pick a model with Ctrl+M)")
 }

@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn question_modal_answers() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
         id: "q".into(),
         kind: PermissionKind::Question {
@@ -37,7 +37,7 @@ fn question_modal_answers() {
 #[test]
 fn several_questions_send_only_from_the_submit_page() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     let question = |id: &str| Question {
         id: id.into(),
         header: id.into(),

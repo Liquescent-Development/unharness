@@ -66,7 +66,7 @@ impl App {
                     }
                 }
                 ("/sandbox", Some(s)) => {
-                    for l in self.available_sandbox_levels() {
+                    for l in self.controller.available_sandbox_levels() {
                         if l.as_str().starts_with(s) {
                             out.push((format!("/sandbox {l}"), l.description().to_string()));
                         }
@@ -165,7 +165,7 @@ impl App {
             return None;
         }
         self.file_walk_pending = true;
-        Some(self.cwd.clone())
+        Some(self.controller.cwd.clone())
     }
 
     /// The files under `cwd`, from `files::walk`.

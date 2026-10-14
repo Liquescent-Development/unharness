@@ -1,7 +1,7 @@
 # Bridging: status notes
 
 Bridging (`core/bridge.rs`): a switch whose bridge is over budget first
-asks the harness being left for a handoff summary (`App::ask_handoff`,
+asks the harness being left for a handoff summary (`Controller::ask_handoff`,
 `Block::Handoff`), with every permission request denied while it
 writes; not while its subagents are at work (their requests and reports
 would land in that turn), but for one whose end is never told (vibe's,
@@ -23,7 +23,7 @@ A model, effort or provider the session cannot take (Mistral Vibe pins
 them on its sessions) is the driver's to say (#275): it answers
 `Encoded::NewSession`, the loop tells `AgentEvent::SessionRenewed`, and
 the TUI goes on in a new session of the same harness as after a switch
-(`App::session_renewed`): over the budget the session left, still live,
+(`Controller::session_renewed`): over the budget the session left, still live,
 writes a handoff summary first (`renew_handoff_prompt`), then it is
 forgotten and shut down, and the next prompt bridges the conversation to
 the new one. A prompt typed between the choice and that answer waits for

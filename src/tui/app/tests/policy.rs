@@ -9,7 +9,7 @@ fn a_policy_the_session_refuses_gives_way_as_an_unsupported_one() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.take_actions();
     let refuse = |app: &mut App, policies: &[PermissionPolicy]| {
         app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
@@ -51,7 +51,7 @@ fn a_policy_the_session_refuses_gives_way_as_an_unsupported_one() {
     app.modal = None;
     app.submit_prompt("do it".into());
     assert!(app.take_actions().is_empty());
-    assert!(!app.is_generating);
+    assert!(!app.controller.is_generating);
 }
 
 /// A refusal is for the session that made it (#216): it holds while
@@ -111,7 +111,7 @@ fn a_refused_policy_is_offered_again_once_the_session_ends() {
     // next one, started by the event loop, is asked again.
     app.handle_slash_command("/clear");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert!(!app.session_alive);
+    assert!(!app.controller.session_alive);
     offered_again(&app);
     // The event loop starts the next one unprompted, under it.
     app.start_when_idle();
@@ -188,7 +188,7 @@ fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
     assert_eq!(app.effective_policy(), None);
     assert!(disabled(&app, PermissionPolicy::Ask));
     app.submit_prompt("do it".into());
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     assert!(app.take_actions().is_empty());
     assert_eq!(app.herdr_report().state, State::Blocked);
 
@@ -196,13 +196,13 @@ fn a_policy_picker_on_a_refusal_follows_the_session_ending() {
     assert!(app.modal.is_none());
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
     assert_ne!(app.herdr_report().state, State::Blocked);
-    assert_eq!(app.queued.len(), 1);
+    assert_eq!(app.controller.queued.len(), 1);
     assert!(
         notices(&app)
             .iter()
             .any(|n| n.starts_with("1 queued prompt(s) held"))
     );
-    app.queued.clear();
+    app.controller.queued.clear();
 
     // Opened by the user on a refusal that left a policy in effect.
     start(&mut app, "claude-2");
@@ -230,7 +230,7 @@ fn a_policy_that_is_not_available_waits_for_a_choice() {
     app.modal = None;
     app.submit_prompt("do it".into());
     assert!(app.take_actions().is_empty());
-    assert!(!app.is_generating);
+    assert!(!app.controller.is_generating);
     assert!(matches!(app.modal, Some(Modal::Policy(_))));
 
     // `ask` cannot be chosen: the cursor starts on the least permissive
@@ -286,31 +286,11 @@ fn prompts_held_for_a_policy_keep_their_order() {
             .unwrap()
     };
     assert_eq!(sent(&mut app), "first");
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
     assert_eq!(sent(&mut app), "second");
-}
-
-#[test]
-fn changing_the_policy_does_not_send_a_held_prompt() {
-    let mut app = test_app(HarnessId::CLAUDE);
-    app.submit_prompt("first".into());
-    app.take_actions();
-    app.session_alive = true;
-    app.queue_prompt("later".into());
-    app.on_event(AgentEvent::TurnCompleted {
-        stop_reason: StopReason::Interrupted,
-    });
-    // Held until the user sends it.
-    assert!(app.set_policy(PermissionPolicy::AcceptEdits));
-    assert!(
-        app.take_actions()
-            .iter()
-            .all(|a| !matches!(a, Action::SendTurn { .. }))
-    );
-    assert_eq!(app.queued.len(), 1);
 }
 
 #[test]
@@ -394,7 +374,7 @@ fn a_policy_the_harness_lacks_cannot_be_chosen() {
 fn the_policy_picker_saves_a_harness_default() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::PI, None, false);
-    let dir = app.cwd.join(".unharness/test-config");
+    let dir = app.controller.cwd.join(".unharness/test-config");
     let saving = |app: &App| match &app.modal {
         Some(Modal::Policy(p)) => p.save,
         _ => None,
@@ -411,14 +391,14 @@ fn the_policy_picker_saves_a_harness_default() {
     app.handle_modal_key(key(KeyCode::Enter));
     assert!(app.modal.is_none());
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Bypass));
-    let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+    let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.controller.cwd)).unwrap();
     let saved = Config::load_file(&local).unwrap().unwrap();
     assert_eq!(
         saved.harnesses["pi"].default_policy.as_deref(),
         Some("bypass")
     );
     assert_eq!(
-        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.controller.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
     assert!(!dir.join("config.toml").exists());
@@ -446,7 +426,7 @@ fn the_policy_picker_saves_a_harness_default() {
             .any(|n| n == "this workspace's settings make bypass pi's default here")
     );
     assert_eq!(
-        crate::core::controller::configured_policy(&app.config, HarnessId::PI).unwrap(),
+        crate::core::controller::configured_policy(&app.controller.config, HarnessId::PI).unwrap(),
         PermissionPolicy::Bypass
     );
 
@@ -465,8 +445,8 @@ fn the_policy_picker_saves_a_harness_default() {
 fn saving_over_a_workspace_default_for_every_harness_says_so() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    let dir = app.cwd.join(".unharness/test-config");
-    let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.cwd)).unwrap();
+    let dir = app.controller.cwd.join(".unharness/test-config");
+    let local = Config::scoped_path(&dir, Scope::Workspace, Some(&app.controller.cwd)).unwrap();
     std::fs::create_dir_all(local.parent().unwrap()).unwrap();
     std::fs::write(&local, "default_policy = \"ask\"\n").unwrap();
     assert!(app.save_default_policy(PermissionPolicy::Bypass, Scope::Global));

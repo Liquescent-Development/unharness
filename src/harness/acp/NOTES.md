@@ -144,7 +144,7 @@ whose answer names no modes refuses the policy for the session
 running one is cancelled, the TUI gives way as to an unsupported policy
 (the picker, or the nearest less permissive one sent as `SetPolicy`), and
 `--print` exits 1. The TUI forgets the refusal when that session ends
-(shut down, exited, its driver gone: `App::forget_refusals`, which redoes
+(shut down, exited, its driver gone: `Controller::forget_refusals`, which redoes
 an open policy picker, or closes one that waited once the wanted policy
 is in effect again), and `/clear` ends a session that refused one also
 when nothing was sent to it, so that the next session is asked for the
@@ -384,7 +384,7 @@ auth-required answer starts none (#162). vibe-acp 2.26.1 answers
 `session/load` and `session/fork` of a session it does not have with
 -32602 "Session not found" (`record-acp.py --fallback-new`,
 `fixtures/vibe_acp_{load,fork}_missing.jsonl`). The TUI
-(`App::session_replaced`) takes the new session as one started for a
+(`Controller::session_replaced`) takes the new session as one started for a
 harness switched to (see [Bridging](../../../docs/dev/bridging.md)); `--print --resume` fails on it
 (see [Headless](../../../docs/dev/headless.md)). Checked in the TUI (tmux, Landlock,
 scratch `VIBE_HOME`, built-in vibe, `--policy ask`): a turn given a code

@@ -139,7 +139,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   but Claude) is killed at once (`end_or_kill`): given its grace it could
   go on with the turn where nobody sees it. A turn still running
   `STOP_GRACE` (5 s) after an interrupt is ended with its process when the
-  user interrupts again, once told that would (`App::end_stuck_turn`);
+  user interrupts again, once told that would (`Controller::end_stuck_turn`);
   what it changed in the harness's configuration is checked first, its
   requests and owed rewind anchors are dropped, and the next prompt
   resumes the session. A session shut down takes its open requests with
@@ -153,7 +153,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
   unharness. The TUI says when it waits, and
   Ctrl+C, Ctrl+D or one of those signals stops the wait. The TUI resumes
   or forks a vendor session only once the CLI that ended it is gone
-  (`tui::Ending`), so that two never write one session: one still there
+  (`controller::Ending`), so that two never write one session: one still there
   after `END_GRACE + DRAIN_TIMEOUT + 1s` (its driver stuck) is killed
   through the session's `ProcessSlot`; meanwhile it says so, refuses a switch,
   resume, fork, rewind or `/clear` (each would take the held start for
@@ -191,7 +191,7 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
 harness → vendor session map, bridging bookmarks, per-harness usage, the
 active harness, and the policy, models and efforts chosen for it (never a
 configured default; one named in the run resuming it wins), one JSON
-file per conversation plus an index. `App::persist`
+file per conversation plus an index. `Controller::persist`
 runs on session start, turn end, harness switch, `/clear` (which then
 starts a new conversation with the same harness and run choices and no
 sessions, the way a launch does), and quit; a

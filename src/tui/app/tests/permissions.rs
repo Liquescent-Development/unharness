@@ -5,8 +5,10 @@ use crate::tui::modal::AlwaysDraft;
 fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
-    app.rules
+    app.controller.session_alive = true;
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
     for ev in cargo_test_requests("cargo test --all") {
@@ -28,7 +30,9 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
     assert_eq!(said, 3);
 
     // Several commands, several rules: all of them are named.
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::shell("git push")])
         .unwrap();
     app.on_event(cargo_test_requests("cargo test && git push").remove(0));
@@ -52,14 +56,16 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
         app.modal.as_ref().and_then(Modal::request_id),
         Some("claude")
     );
-    assert_eq!(app.pending_prompts.len(), 2);
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 2);
 
     // Run in the workspace it is the rule's command, elsewhere it is not.
     let mut app = test_app(HarnessId::CLAUDE);
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
-    let cwd = app.cwd.clone();
+    let cwd = app.controller.cwd.clone();
     for ev in requests_in("cargo test", Some(&cwd)).split_off(1) {
         app.on_event(ev);
     }
@@ -75,7 +81,9 @@ fn an_allow_rule_answers_the_request_of_any_harness_without_asking() {
 
     // A subagent's request is answered the same way.
     let mut app = test_app(HarnessId::CLAUDE);
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Global, &[Rule::shell("cargo test")])
         .unwrap();
     let ev = cargo_test_requests("cargo test").remove(0);
@@ -105,8 +113,10 @@ fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
             .collect()
     };
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
-    app.rules
+    app.controller.session_alive = true;
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::shell("cargo test")])
         .unwrap();
     for (renew, moving) in [
@@ -116,7 +126,7 @@ fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
             "The user is moving this conversation to a new session.",
         ),
     ] {
-        app.handoff = Some(Handoff {
+        app.controller.handoff = Some(Handoff {
             to: HarnessId::CODEX,
             start: 0,
             held: false,
@@ -157,7 +167,7 @@ fn a_handoff_answers_requests_itself_and_notes_a_tool_call() {
         );
     }
 
-    app.handoff = None;
+    app.controller.handoff = None;
     app.on_event(cargo_test_requests("cargo test").remove(0));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
     assert_eq!(
@@ -188,7 +198,7 @@ fn allow_always_writes_a_rule_that_the_next_harness_knows() {
         requests.pop().unwrap(),
     );
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(claude);
     // A second request for the same thing is already waiting.
     app.on_event(acp);
@@ -209,10 +219,22 @@ fn allow_always_writes_a_rule_that_the_next_harness_knows() {
     // waiting is answered by the new rule.
     assert_eq!(app.take_actions(), vec![allowed("claude"), allowed("acp")]);
     assert!(app.modal.is_none());
-    let path = app.rules.path(Scope::Workspace).unwrap();
+    let path = app
+        .controller
+        .tracking
+        .rules
+        .path(Scope::Workspace)
+        .unwrap();
     let written = std::fs::read_to_string(&path).unwrap();
     assert!(written.contains("command = \"cargo test\""), "{written}");
-    assert!(!app.rules.path(Scope::Global).unwrap().exists());
+    assert!(
+        !app.controller
+            .tracking
+            .rules
+            .path(Scope::Global)
+            .unwrap()
+            .exists()
+    );
 
     // After a switch, Codex asks for the same thing and is not asked about.
     app.on_event(codex);
@@ -220,7 +242,10 @@ fn allow_always_writes_a_rule_that_the_next_harness_knows() {
     assert!(app.modal.is_none());
 
     // The rule is there for the next run.
-    let reloaded = Rules::load_in(path.parent().unwrap().parent().unwrap(), Some(&app.cwd));
+    let reloaded = Rules::load_in(
+        path.parent().unwrap().parent().unwrap(),
+        Some(&app.controller.cwd),
+    );
     assert_eq!(
         reloaded.unwrap().iter().collect::<Vec<_>>(),
         [(Scope::Workspace, &Rule::shell("cargo test"))]
@@ -230,7 +255,7 @@ fn allow_always_writes_a_rule_that_the_next_harness_knows() {
 #[test]
 fn the_rule_can_be_changed_and_moved_before_it_is_kept() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(cargo_test_requests("cargo test --all").remove(0));
     app.handle_modal_key(key(KeyCode::Char('a')));
 
@@ -272,17 +297,24 @@ fn the_rule_can_be_changed_and_moved_before_it_is_kept() {
     app.handle_modal_key(key(KeyCode::Enter));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
     assert_eq!(
-        app.rules.iter().collect::<Vec<_>>(),
+        app.controller.tracking.rules.iter().collect::<Vec<_>>(),
         [(Scope::Global, &Rule::shell("cargo test"))]
     );
-    assert!(!app.rules.path(Scope::Workspace).unwrap().exists());
+    assert!(
+        !app.controller
+            .tracking
+            .rules
+            .path(Scope::Workspace)
+            .unwrap()
+            .exists()
+    );
 }
 
 #[test]
 fn a_request_behind_a_picker_opens_when_the_picker_closes() {
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
-    app.start_generation();
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::TurnStarted);
     for close in [KeyCode::Esc, KeyCode::Enter] {
         app.open_policy_picker();
         app.on_event(pi_gate_request("g1", "cq query"));
@@ -301,7 +333,7 @@ fn a_request_behind_a_picker_opens_when_the_picker_closes() {
 #[test]
 fn a_request_of_a_session_the_picker_ends_goes_with_it() {
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.open_sandbox_picker();
     // Between turns: an extension's dialog, say.
     app.on_event(pi_gate_request("g1", "ls"));
@@ -323,8 +355,8 @@ fn a_request_of_a_session_the_picker_ends_goes_with_it() {
 fn a_withdrawn_request_closes_unanswered() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
-    app.session_alive = true;
-    app.start_generation();
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::TurnStarted);
     app.on_event(pi_gate_request("g1", "echo one"));
     app.on_event(pi_gate_request("g2", "echo two"));
     app.on_event(pi_gate_request("g3", "echo three"));
@@ -352,7 +384,7 @@ fn a_withdrawn_request_closes_unanswered() {
 #[test]
 fn a_request_no_rule_can_cover_says_so_and_stays_a_question() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(cargo_test_requests("cargo test > log").remove(0));
     app.handle_modal_key(key(KeyCode::Char('a')));
     assert_eq!(draft(&app).rules(), []);
@@ -361,16 +393,21 @@ fn a_request_no_rule_can_cover_says_so_and_stays_a_question() {
     app.handle_modal_key(key(KeyCode::Esc));
     app.handle_modal_key(key(KeyCode::Char('y')));
     assert_eq!(app.take_actions(), vec![allowed("claude")]);
-    assert_eq!(app.rules.iter().count(), 0);
+    assert_eq!(app.controller.tracking.rules.iter().count(), 0);
 }
 
 #[test]
 fn a_rule_that_cannot_be_saved_still_allows_this_once() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     // Something that is not a rules file is in the way.
-    let path = app.rules.path(Scope::Workspace).unwrap();
+    let path = app
+        .controller
+        .tracking
+        .rules
+        .path(Scope::Workspace)
+        .unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "not toml [").unwrap();
     app.on_event(cargo_test_requests("cargo test").remove(0));
@@ -395,10 +432,14 @@ fn allow_lists_the_rules_and_where_they_are_kept() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     app.handle_slash_command("/allow");
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::edit("src/**")])
         .unwrap();
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Global, &[Rule::mcp("probe/*")])
         .unwrap();
     app.handle_slash_command("/allow");
@@ -427,7 +468,7 @@ fn allow_lists_the_rules_and_where_they_are_kept() {
 #[test]
 fn permission_modal_allow_and_deny_with_reason() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     let req = |id: &str| PermissionRequest {
         id: id.into(),
         kind: PermissionKind::ToolUse {

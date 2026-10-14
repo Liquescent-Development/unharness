@@ -18,13 +18,13 @@ fn slash_commands_and_suggestions() {
     assert_eq!(app.suggestions[0].0, "/policy bypass");
     app.set_input("");
     // Levels are offered where there is a backend for them.
-    app.sandbox = SandboxSetup::null(Some(SandboxLevel::Off));
+    app.controller.sandbox = SandboxSetup::null(Some(SandboxLevel::Off));
     for c in "/sandbox r".chars() {
         app.insert_char(c);
     }
     assert_eq!(app.suggestions[0].0, "/sandbox read-only");
     app.handle_slash_command("/sandbox bogus");
-    assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
+    assert_eq!(app.controller.sandbox.explicit, Some(SandboxLevel::Off));
     app.handle_slash_command("/sandbox");
     assert!(matches!(app.modal, Some(Modal::Sandbox(_))));
     app.modal = None;
@@ -36,9 +36,9 @@ fn slash_commands_and_suggestions() {
     app.handle_slash_command("/model sonnet");
     assert_eq!(app.model_label(), "anthropic/sonnet");
     app.handle_slash_command("/switch codex");
-    assert_eq!(app.active, HarnessId::CODEX);
+    assert_eq!(app.controller.active, HarnessId::CODEX);
     app.handle_slash_command("/quit");
-    assert!(app.should_quit);
+    assert!(app.controller.should_quit);
 }
 
 /// Claude, its session having listed `/hello`, `/clear` and `/model`.
@@ -77,7 +77,7 @@ fn a_command_unharness_lacks_goes_to_a_harness_that_runs_its_own() {
         notices(&app),
         vec!["/hello is Claude's own command: passed on"]
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
@@ -101,7 +101,7 @@ fn unharness_s_own_command_wins_unless_escaped() {
     let mut app = app_with_claude_commands();
     app.submit_prompt("before".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
@@ -112,7 +112,7 @@ fn unharness_s_own_command_wins_unless_escaped() {
         1,
         "a new conversation"
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.pass_command("/clear", true);
     assert_eq!(app.take_actions(), vec![Action::turn("/clear")]);
     let said = notices(&app);
@@ -139,17 +139,17 @@ fn a_slash_prompt_queued_for_one_harness_comes_back_on_another() {
     let mut app = test_app(HarnessId::CODEX);
     app.submit_prompt("go".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     // Text, on Codex.
     app.pass_command("/review the diff", true);
     app.queue_prompt("plain".into());
-    assert_eq!(app.queued.len(), 2);
+    assert_eq!(app.controller.queued.len(), 2);
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Interrupted,
     });
     app.switch_harness(HarnessId::CLAUDE);
     app.take_actions();
-    app.session_alive = false;
+    app.controller.session_alive = false;
     app.set_input("half typed");
     assert!(app.send_next_queued());
     assert!(sent_turn(&mut app).ends_with("\nplain"));
@@ -236,14 +236,14 @@ fn a_command_goes_alone_and_the_bridge_waits() {
     let mut app = test_app(HarnessId::CODEX);
     app.submit_prompt("first question".into());
     app.take_actions();
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::TextDelta("first answer".into()));
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
     app.switch_harness(HarnessId::CLAUDE);
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    app.session_alive = false;
+    app.controller.session_alive = false;
 
     app.handle_slash_command("/hello world");
     assert_eq!(sent_turn(&mut app), "/hello world");
@@ -253,7 +253,7 @@ fn a_command_goes_alone_and_the_bridge_waits() {
             .unwrap()
             .starts_with("Claude is told what it has not seen yet")
     );
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,

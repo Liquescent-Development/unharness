@@ -77,7 +77,7 @@ fn paste_inserts_at_the_cursor_without_submitting() {
     app.paste("one\r\ntwo\rthree\n\tfour\x1b[31m");
     assert_eq!(app.input, "aone\ntwo\nthree\n    four[31mb");
     assert_eq!(app.cursor, app.input.chars().count() - 1);
-    assert!(!app.is_generating && app.take_actions().is_empty());
+    assert!(!app.controller.is_generating && app.take_actions().is_empty());
     // Pasted text that starts with a slash is not a command to complete.
     app.take_input();
     app.paste("/model\nsonnet");
@@ -182,7 +182,7 @@ fn clipboard_images_are_saved_and_attached() {
 #[test]
 fn paste_into_a_modal_fills_its_text_field_or_is_ignored() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::PermissionRequest(PermissionRequest {
         id: "p1".into(),
         kind: PermissionKind::ToolUse {

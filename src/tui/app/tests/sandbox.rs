@@ -6,13 +6,13 @@ use super::*;
 fn the_sandbox_level_is_chosen_for_the_run() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = test_app_in(tmp.keep(), HarnessId::CLAUDE, None, false);
-    app.sandbox = SandboxSetup::null(None);
+    app.controller.sandbox = SandboxSetup::null(None);
     assert_eq!(app.sandbox_level().0, SandboxLevel::WorkspaceWrite);
 
     app.submit_prompt("hello".into());
     app.take_actions();
-    app.session_alive = true;
-    app.session_sandbox_level = Some(SandboxLevel::WorkspaceWrite);
+    app.controller.session_alive = true;
+    app.controller.session_sandbox_level = Some(SandboxLevel::WorkspaceWrite);
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -27,7 +27,7 @@ fn the_sandbox_level_is_chosen_for_the_run() {
     // The level the session already runs under restarts nothing.
     assert!(app.set_sandbox(SandboxLevel::WorkspaceWrite));
     assert!(app.take_actions().is_empty());
-    assert!(app.session_alive);
+    assert!(app.controller.session_alive);
 
     assert!(app.set_sandbox(SandboxLevel::ReadOnly));
     assert_eq!(app.sandbox_level().0, SandboxLevel::ReadOnly);
@@ -50,13 +50,13 @@ fn the_sandbox_level_is_chosen_for_the_run() {
 #[test]
 fn an_unavailable_sandbox_level_is_refused() {
     let mut app = test_app(HarnessId::CLAUDE);
-    app.sandbox = SandboxSetup {
+    app.controller.sandbox = SandboxSetup {
         explicit: None,
         backend: Err("no kernel".into()),
     };
     assert!(app.status_warning().unwrap().contains("(/sandbox)"));
     assert!(!app.set_sandbox(SandboxLevel::ReadOnly));
-    assert_eq!(app.sandbox.explicit, None);
+    assert_eq!(app.controller.sandbox.explicit, None);
 
     for c in "/sandbox ".chars() {
         app.insert_char(c);
@@ -77,6 +77,6 @@ fn an_unavailable_sandbox_level_is_refused() {
     app.handle_modal_key(key(KeyCode::Down));
     app.handle_modal_key(key(KeyCode::Enter));
     assert!(app.modal.is_none());
-    assert_eq!(app.sandbox.explicit, Some(SandboxLevel::Off));
+    assert_eq!(app.controller.sandbox.explicit, Some(SandboxLevel::Off));
     assert!(app.status_warning().is_none());
 }

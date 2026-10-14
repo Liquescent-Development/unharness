@@ -31,7 +31,7 @@ root, and is walked again at each `@`; never tried on a tree past the
 
 `!command` at the prompt (`core/shell.rs`, `Block::Shell`,
 `BlockRecord::Shell`): `$SHELL -c` in the session's `cwd` through
-`LineProcess::spawn_no_input` under `App::session_sandbox()` (stdin
+`LineProcess::spawn_no_input` under `Controller::session_sandbox()` (stdin
 `/dev/null`, `setsid`, the process tree killed on Esc and on quit, and
 on Linux what it left when the shell exits). No permission prompt, no rule. Refused during a
 turn; a prompt sent while it runs is queued. Its command, output tail

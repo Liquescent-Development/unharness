@@ -153,6 +153,7 @@ impl App {
                     }
                     None => {
                         let levels: Vec<&str> = self
+                            .controller
                             .available_sandbox_levels()
                             .iter()
                             .map(|l| l.as_str())
@@ -222,7 +223,7 @@ impl App {
                         self.controller.conversation.context.percent().unwrap_or(0)
                     ));
                 }
-                if let Some(r) = &self.rate_limit {
+                if let Some(r) = &self.controller.rate_limit {
                     self.controller
                         .conversation
                         .transcript
@@ -238,7 +239,7 @@ impl App {
                 text => self.steer(text.to_string()),
             },
             "/rewind" => self.open_rewind_picker(),
-            "/undo-restore" => self.undo_restore(),
+            "/undo-restore" => self.controller.undo_restore(),
             "/fork" => self.fork_conversation(),
             "/compact" => self.compact((!rest.is_empty()).then(|| rest.to_string())),
             "/remote-control" | "/rc" => self.remote_control_command(cmd, rest),
@@ -282,6 +283,8 @@ impl App {
             }
             "/allow" => {
                 let list: Vec<String> = self
+                    .controller
+                    .tracking
                     .rules
                     .iter()
                     .map(|(scope, rule)| {
@@ -294,7 +297,7 @@ impl App {
                     .collect();
                 let files: Vec<String> = [Scope::Workspace, Scope::Global]
                     .into_iter()
-                    .filter_map(|scope| self.rules.path(scope))
+                    .filter_map(|scope| self.controller.tracking.rules.path(scope))
                     .map(|path| format!("  {}", path.display()))
                     .collect();
                 let files = format!("Kept in (edit to change or remove):\n{}", files.join("\n"));
@@ -313,7 +316,7 @@ impl App {
             }
             "/skills" => {
                 let mut list = Vec::new();
-                if let Some(root) = &self.workspace_root {
+                if let Some(root) = &self.controller.workspace_root {
                     for s in crate::skills::discover_skills_in_dir(
                         &crate::skills::workspace_skills_dir(root),
                     ) {

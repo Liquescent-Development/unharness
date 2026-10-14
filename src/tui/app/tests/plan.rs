@@ -15,7 +15,7 @@ fn planning_app() -> App {
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.submit_prompt("change the greeting".into());
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::SessionStarted {
         session_id: "claude-1".into(),
         model: None,
@@ -69,7 +69,7 @@ fn an_approved_plan_is_carried_out_under_the_policy_chosen_with_it() {
     // A session started under bypass can go back to it.
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(Bypass));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.controller.policy.started_under(Some(Bypass));
     assert!(app.set_policy(Plan));
     app.on_event(plan_request());
@@ -110,7 +110,7 @@ fn a_plan_not_approved_keeps_the_agent_planning() {
     assert_eq!(app.take_actions(), vec![denied("plan", "")]);
 
     // Nor is a handoff: the summary is written instead.
-    app.handoff = Some(Handoff {
+    app.controller.handoff = Some(Handoff {
         to: HarnessId::CODEX,
         start: 0,
         held: false,
@@ -131,7 +131,9 @@ fn a_plan_not_approved_keeps_the_agent_planning() {
 #[test]
 fn while_planning_a_rule_answers_only_a_read() {
     let mut app = planning_app();
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::edit("**"), Rule::read("**")])
         .unwrap();
     let request = |id: &str, action: ToolAction| {
@@ -146,7 +148,7 @@ fn while_planning_a_rule_answers_only_a_read() {
             tool_call_id: None,
         })
     };
-    let file = app.cwd.join("notes.txt");
+    let file = app.controller.cwd.join("notes.txt");
     app.on_event(request("read", ToolAction::Read { path: file.clone() }));
     assert_eq!(app.take_actions(), vec![allowed("read")]);
     app.on_event(request(
@@ -174,7 +176,9 @@ fn while_planning_a_rule_answers_only_a_read() {
 #[test]
 fn a_request_made_while_planning_is_judged_so_after_the_approval() {
     let mut app = planning_app();
-    app.rules
+    app.controller
+        .tracking
+        .rules
         .append(Scope::Workspace, &[Rule::edit("**")])
         .unwrap();
     app.on_event(plan_request());
@@ -184,13 +188,13 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
             tool: "Write".into(),
             input: Value::Null,
             action: ToolAction::Edit {
-                paths: vec![app.cwd.join("notes.txt")],
+                paths: vec![app.controller.cwd.join("notes.txt")],
             },
             description: None,
         },
         tool_call_id: None,
     }));
-    assert_eq!(app.pending_prompts.len(), 1);
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 1);
     // Approved under accept-edits (highlighted: the policy planned from).
     app.handle_modal_key(key(KeyCode::Enter));
     assert_eq!(
@@ -206,32 +210,43 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
     );
 }
 
-/// Claude reports each mode it is set to; a report that comes after a
-/// later choice is not the agent changing its mind.
+/// A request made while planning that was dropped with its session is
+/// forgotten with it: a later session's request that reuses its id (an
+/// ACP agent's start at 0 again in a new process) is judged as it is
+/// made, not as made while planning.
 #[test]
-fn a_late_report_of_a_policy_set_does_not_undo_a_later_one() {
-    use crate::core::transcript::Block;
+fn a_request_dropped_with_its_session_is_not_judged_as_made_while_planning() {
     let mut app = planning_app();
-    assert!(app.set_policy(PermissionPolicy::Ask));
+    app.controller
+        .tracking
+        .rules
+        .append(Scope::Workspace, &[Rule::edit("**")])
+        .unwrap();
+    let write = AgentEvent::PermissionRequest(PermissionRequest {
+        id: "write".into(),
+        kind: PermissionKind::ToolUse {
+            tool: "Write".into(),
+            input: Value::Null,
+            action: ToolAction::Edit {
+                paths: vec![app.controller.cwd.join("notes.txt")],
+            },
+            description: None,
+        },
+        tool_call_id: None,
+    });
+    app.on_event(plan_request());
+    app.on_event(write.clone());
+    assert_eq!(app.controller.tracking.pending_prompts.len(), 1);
+    app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+    assert!(app.modal.is_none() && app.controller.tracking.pending_prompts.is_empty());
+
+    // The next session runs out of plan mode, and asks under the same id.
+    assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.take_actions();
-    app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Plan));
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
-    app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Ask));
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
-    assert!(
-        !app.controller
-            .conversation
-            .transcript
-            .blocks
-            .iter()
-            .any(|b| matches!(b, Block::Notice(n) if n.contains("plan mode")))
-    );
-    // Choosing the policy in effect sends nothing to report.
-    assert!(app.set_policy(PermissionPolicy::Ask));
-    assert!(app.take_actions().is_empty());
-    // Then one it did not send is the agent's own.
-    app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Plan));
-    assert_eq!(app.effective_policy(), Some(PermissionPolicy::Plan));
+    app.controller.session_alive = true;
+    app.on_event(write);
+    assert_eq!(app.take_actions(), vec![allowed("write")]);
+    assert!(app.modal.is_none());
 }
 
 /// The model can go into plan mode by itself (`EnterPlanMode`).
@@ -240,7 +255,7 @@ fn the_agent_going_into_plan_mode_by_itself_is_followed() {
     use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
-    app.session_alive = true;
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Plan));
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Plan));
     assert!(
@@ -256,18 +271,4 @@ fn the_agent_going_into_plan_mode_by_itself_is_followed() {
         panic!("{:?}", app.modal);
     };
     assert_eq!(m.current(), Some(PermissionPolicy::AcceptEdits));
-}
-
-#[test]
-fn plan_is_offered_only_where_the_harness_has_it() {
-    for harness in [HarnessId::PI, HarnessId::CODEX, HarnessId::AGY] {
-        let mut app = test_app(harness);
-        assert!(
-            !app.offered_policies().contains(&PermissionPolicy::Plan),
-            "{harness}"
-        );
-        assert!(!app.set_policy(PermissionPolicy::Plan), "{harness}");
-    }
-    let app = test_app(HarnessId::CLAUDE);
-    assert_eq!(app.offered_policies()[0], PermissionPolicy::Plan);
 }
