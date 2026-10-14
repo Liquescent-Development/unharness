@@ -2,6 +2,8 @@
 //! holds, and saving it, are the controller's (`ConversationState`).
 
 use super::App;
+use crate::core::HarnessId;
+use crate::core::conversations::Conversation;
 use crate::tui::modal::{ListPicker, Modal};
 
 impl App {
@@ -76,10 +78,7 @@ impl App {
             .split_off(said);
         self.idle_start_paused = false;
         let next = self.controller.successor(self.active);
-        self.controller.install(next, self.active);
-        self.subagent_focus = None;
-        self.close_subagent_view();
-        self.show_from_the_end();
+        self.install(next, self.active);
         self.controller
             .conversation
             .transcript
@@ -133,10 +132,7 @@ impl App {
         } else {
             self.active
         };
-        self.controller.install(conv, active);
-        self.modal = None;
-        self.pending_prompts.clear();
-        self.active = active;
+        self.install(conv, active);
         self.controller.take_conversation_choices(&self.config);
         self.controller
             .announce_resume(&self.config, self.active, false);
@@ -144,7 +140,23 @@ impl App {
             self.controller.conversation.transcript.push_notice(w);
         }
         self.require_policy();
-        self.auto_scroll = true;
+    }
+
+    /// Go on in `record` on `active`, a new conversation (`/clear`) or one
+    /// saved (`/resume`), in place of this one: the controller holds it
+    /// as a whole (`Controller::install`), and nothing on screen points
+    /// into the one before, no subagent's transcript, selection, scroll
+    /// or request waiting for an answer. Prompts held stay: they are the
+    /// user's, not the conversation's.
+    fn install(&mut self, record: Conversation, active: HarnessId) {
+        self.controller.install(record, active);
+        self.active = active;
+        self.modal = None;
+        self.pending_prompts.clear();
+        self.asked_planning.clear();
+        self.subagent_focus = None;
+        self.close_subagent_view();
+        self.show_from_the_end();
     }
 
     pub fn open_resume_picker(&mut self) {
