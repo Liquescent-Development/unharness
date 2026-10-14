@@ -299,12 +299,20 @@ impl App {
     }
 
     /// The CLI did not stop when asked: end its process and the turn. The
-    /// next prompt starts it again on the same session.
+    /// next prompt starts it again on the same session, unless the turn
+    /// was a handoff summary: the switch it was for goes ahead, or the new
+    /// session it was for starts, told the conversation (#226).
     fn end_stuck_turn(&mut self) {
-        self.transcript.push_notice(format!(
-            "{} did not stop, so its process was ended; the next prompt resumes the session",
-            self.short_name()
-        ));
+        let name = self.short_name();
+        self.transcript.push_notice(match self.handoff {
+            None => format!(
+                "{name} did not stop, so its process was ended; the next prompt resumes the session"
+            ),
+            Some(h) if h.renew => format!(
+                "{name} did not stop, so its process was ended; a new session starts with the change, and your next prompt tells it the conversation so far"
+            ),
+            Some(_) => format!("{name} did not stop, so its process was ended"),
+        });
         // What the turn changed is told before the next process is watched.
         self.check_guard();
         self.shutdown_session();

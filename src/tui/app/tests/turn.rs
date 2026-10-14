@@ -213,3 +213,66 @@ fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
     app.interrupt();
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
 }
+
+/// A CLI that did not stop while it wrote a handoff summary for a new
+/// session (vibe takes a new effort only in one) has its process ended,
+/// and the notice says what comes next: a new session with the change,
+/// not the one ended resumed (#226). A turn of the conversation still
+/// says the session is resumed.
+#[test]
+fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
+    let stuck = |app: &mut App| {
+        app.interrupt();
+        app.take_actions();
+        app.interrupted = Some((Instant::now() - STOP_GRACE, true));
+        app.interrupt();
+        notices(app)
+            .into_iter()
+            .filter(|n| n.contains("did not stop"))
+            .collect::<Vec<_>>()
+    };
+
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    assert_eq!(
+        stuck(&mut app),
+        [
+            "Mistral Vibe did not stop, so its process was ended; the next prompt resumes the session"
+        ]
+    );
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+
+    let (mut app, _cwd) = vibe_app();
+    app.bridge_max_chars = Some(300);
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TextDelta("x".repeat(600)));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    app.set_effort("off".into());
+    assert!(sent_turn(&mut app).contains("new session of yours"));
+    assert_eq!(
+        stuck(&mut app),
+        [
+            "Mistral Vibe did not stop, so its process was ended; a new session starts with the change, and your next prompt tells it the conversation so far"
+        ]
+    );
+    // The session it wrote in is ended and forgotten: the next is new.
+    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    app.start_when_idle();
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Shutdown, Action::StartSession { resume: None }]
+    );
+
+    // One for a switch: the switch goes ahead, which says so itself.
+    let mut app = over_budget_app();
+    app.switch_harness(HarnessId::CODEX);
+    assert!(app.handoff.is_some());
+    assert_eq!(
+        stuck(&mut app),
+        ["Claude did not stop, so its process was ended"]
+    );
+    assert_eq!(app.active, HarnessId::CODEX);
+}
