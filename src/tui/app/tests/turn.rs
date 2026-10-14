@@ -251,6 +251,8 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
     });
     app.take_actions();
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     assert!(sent_turn(&mut app).contains("new session of yours"));
     assert_eq!(
         stuck(&mut app),

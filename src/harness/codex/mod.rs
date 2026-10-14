@@ -25,7 +25,7 @@ use crate::core::jsonrpc;
 use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
+    Capabilities, Choices, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
     PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle,
     SubagentSupport,
 };
@@ -295,8 +295,13 @@ impl Harness for CodexHarness {
             live_model_list: app_server,
             // `-c model_provider=…` when the process starts.
             multi_provider: true,
-            provider_per_process: true,
-            model_per_process: false,
+            // On the server's command line: the driver starts it again on
+            // it (`exec`: the next turn runs on it).
+            between_turns: Choices {
+                provider: true,
+                ..Choices::default()
+            },
+            stored_session_keeps: None,
             ask_user_question: app_server,
             interrupt: true,
             usage_reporting: true,

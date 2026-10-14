@@ -30,12 +30,29 @@ fn claude_runs_on_the_provider_it_reports_until_one_is_chosen() {
 
     app.set_provider("bedrock".into());
     assert_eq!(app.chosen_provider(), Some(&"bedrock".into()));
-    // The prompt typed with it, before the loop has ended the
-    // session, starts the next one.
+    // The session is told, and its driver starts Claude again on it,
+    // resuming the session (`claude_starts_again_on_a_new_provider_…`,
+    // e2e). The prompt typed with it waits for that.
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetProvider(
+            "bedrock".into()
+        ))]
+    );
     app.submit_prompt("again".into());
-    let actions = app.take_actions();
-    assert_eq!(actions[0], Action::Shutdown);
-    assert!(matches!(&actions[1], Action::StartSession { resume: Some(id) } if id == "claude-1"));
+    assert!(app.take_actions().is_empty());
+    app.on_event(AgentEvent::Restarted);
+    let restarts = format!(
+        "Provider: bedrock ({} restarts on it; pick a model with Ctrl+M)",
+        app.display_name()
+    );
+    assert!(
+        app.transcript
+            .blocks
+            .iter()
+            .any(|b| matches!(b, super::super::transcript::Block::System(s) if *s == restarts))
+    );
+    assert_eq!(app.take_actions(), vec![Action::turn("again")]);
 }
 
 #[test]
@@ -289,7 +306,7 @@ fn a_choice_before_the_first_prompt_starts_the_session_again_with_it() {
 #[test]
 fn a_choice_at_spawn_before_the_first_prompt_restarts_the_session() {
     let (mut app, _cwd) = vibe_app();
-    assert!(app.caps().model_per_process);
+    assert!(app.caps().between_turns.effort);
     blank_session(&mut app);
     app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec![
         "off".into(),
@@ -305,8 +322,10 @@ fn a_choice_at_spawn_before_the_first_prompt_restarts_the_session() {
 }
 
 /// vibe keeps the model and effort a session last ran: after a prompt
-/// a change starts a new session, never sent to the old one, and the
-/// next prompt tells it the conversation so far. Not while a turn runs.
+/// a change is sent to the session, whose driver says it needs a new one
+/// (`SessionRenewed`); the session is left, and the next prompt tells the
+/// new one the conversation so far. Not while a turn runs. A prompt typed
+/// before the answer waits for it, and goes to the new session.
 #[test]
 fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     let (mut app, _cwd) = vibe_app();
@@ -325,8 +344,17 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
     });
     app.take_actions();
     app.set_effort("off".into());
-    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetEffort(Some(
+            "off".into()
+        )))]
+    );
     assert_eq!(app.current_effort(), Some("off"));
+    // The session is left only once its driver says so.
+    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    vibe_renews(&mut app, "effort off");
+    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert!(
         notices(&app)
             .iter()
@@ -362,11 +390,68 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
         stop_reason: StopReason::Done,
     });
 
-    // A model change goes the same way, and the bridge holds both turns.
+    // A model change goes the same way, and the bridge holds both turns,
+    // also for a prompt typed before the session answered.
     app.set_model("glm-5-3".into());
-    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    assert!(matches!(
+        &app.take_actions()[..],
+        [Action::Command(SessionCommand::SetModel(m))] if m.model == "glm-5-3"
+    ));
+    app.submit_prompt("and now?".into());
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.queued.len(), 1);
+    vibe_renews(&mut app, "model glm-5-3");
     assert_eq!(app.current_model().unwrap().model, "glm-5-3");
+    assert!(app.queued.is_empty());
+    let actions = app.take_actions();
+    assert_eq!(
+        actions[..2],
+        [Action::Shutdown, Action::StartSession { resume: None }]
+    );
+    let Some(Action::SendTurn { text, .. }) = actions.get(2) else {
+        panic!("{actions:?}");
+    };
+    assert!(text.contains("remember the word kumquat") && text.contains("which word?"));
+    assert!(text.ends_with("and now?"), "{text}");
     assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+}
+
+/// A stored vibe session the TUI started before the first prompt, or none
+/// live at all: no driver says what the session keeps, so the declaration
+/// does (`Capabilities::stored_session_keeps`), and the conversation goes
+/// on in a new session, never on the stored one started again as it ran.
+#[test]
+fn a_choice_for_a_stored_vibe_session_with_none_prompted_starts_a_new_one() {
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    app.take_actions();
+    // Resumed, nothing sent yet.
+    app.session_blank = true;
+    app.set_effort("off".into());
+    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    assert!(
+        notices(&app)
+            .iter()
+            .any(|n| n.contains("starts a new session for effort off"))
+    );
+    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+
+    // None live: the same, before anything starts.
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.on_event(AgentEvent::ProcessExited { code: Some(1) });
+    app.take_actions();
+    app.set_model("glm-5-3".into());
+    assert!(app.take_actions().is_empty());
+    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    app.start_when_idle();
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::StartSession { resume: None }]
+    );
 }
 
 /// With a provider in `[harnesses.vibe.providers]` vibe has more than
@@ -376,7 +461,7 @@ fn a_choice_at_spawn_after_a_prompt_starts_a_new_bridged_session() {
 #[test]
 fn a_vibe_provider_goes_with_the_model() {
     let (mut app, _cwd) = vibe_app_with_provider();
-    assert!(app.caps().multi_provider && app.caps().provider_per_process);
+    assert!(app.caps().multi_provider && app.caps().between_turns.provider);
 
     blank_session(&mut app);
     app.set_provider("lan".into());
@@ -396,14 +481,36 @@ fn a_vibe_provider_goes_with_the_model() {
     });
     app.take_actions();
     app.set_provider("agent".into());
-    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::SetProvider("agent".into()))]
+    );
     assert_eq!(app.chosen_provider(), Some(&"agent".into()));
+    vibe_renews(&mut app, "provider agent");
+    assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert!(
         notices(&app)
             .iter()
             .any(|n| n.contains("starts a new session for provider agent"))
     );
     assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    // Said with the answer, before the new session's notice.
+    let said = |b: &super::super::transcript::Block| match b {
+        super::super::transcript::Block::System(s) => s.starts_with("Provider: agent"),
+        super::super::transcript::Block::Notice(n) => n.contains("for provider agent"),
+        _ => false,
+    };
+    let lines: Vec<_> = app.transcript.blocks.iter().filter(|b| said(b)).collect();
+    assert!(
+        matches!(
+            lines[..],
+            [
+                super::super::transcript::Block::System(s),
+                super::super::transcript::Block::Notice(_)
+            ] if s == "Provider: agent (pick a model with Ctrl+M)"
+        ),
+        "{lines:?}"
+    );
 }
 
 /// A conversation too long for the new session's bridge: the session
@@ -419,6 +526,8 @@ fn a_new_session_for_a_choice_gets_a_handoff_when_over_budget() {
     });
     app.take_actions();
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     let ask = sent_turn(&mut app);
     assert!(ask.contains("new session of yours"), "{ask}");
     assert!(app.is_generating);

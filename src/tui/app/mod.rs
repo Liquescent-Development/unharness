@@ -156,7 +156,7 @@ struct Handoff {
     /// user sends those, also after the switch.
     held: bool,
     /// The next session is a new one of the same harness, for another
-    /// model or effort (`App::renew_session`).
+    /// model or effort (`App::session_renewed`).
     renew: bool,
     /// The session asked for it could not be resumed and runs new
     /// (`AgentEvent::SessionReplaced`): what it writes summarizes nothing.
@@ -333,6 +333,9 @@ pub struct App {
     /// The id (and model) such a session reported, committed with the
     /// first prompt.
     blank_session: Option<(String, Option<String>)>,
+    /// A choice sent to the session that it takes only between turns,
+    /// until it has said how it took it: prompts typed meanwhile wait.
+    choice_pending: Option<choices::PendingChoice>,
     /// The last session ended by itself or could not start: the next
     /// one waits for the user (a prompt, a switch, a resume).
     idle_start_paused: bool,
@@ -803,6 +806,7 @@ impl App {
             remote: None,
             session_blank: false,
             blank_session: None,
+            choice_pending: None,
             idle_start_paused: false,
             start_held: false,
             store,
@@ -1171,6 +1175,8 @@ impl App {
             AgentEvent::Error(e) => self.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
+                // A choice it was sent will not be answered.
+                self.choice_answered(choices::provider_line);
                 self.forget_refusals();
                 if self.session_blank {
                     self.transcript.push_notice(format!(

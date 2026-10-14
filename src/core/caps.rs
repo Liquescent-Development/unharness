@@ -130,15 +130,23 @@ pub struct Capabilities {
     pub resume_by_id: bool,
     pub live_model_list: bool,
     pub multi_provider: bool,
-    /// The provider is chosen when the process starts, so a session that
-    /// changes it starts again (resumed); otherwise it goes with the model.
-    pub provider_per_process: bool,
-    /// The model and effort are chosen when the process starts, and a
-    /// session keeps the ones it last ran: a change starts a session
-    /// nothing was sent to again with it, and leaves one that was prompted
-    /// for a new session told the conversation through the bridge.
-    /// Otherwise they are sent to the running session.
-    pub model_per_process: bool,
+    /// The choices the user is offered only between turns, with no subagent
+    /// whose end will be told still at work: Claude's and Codex's provider,
+    /// Mistral Vibe's model, effort and provider. Read by
+    /// `App::between_turns` alone. How the session takes one is its
+    /// driver's to say, and nothing is sent after it until it has.
+    pub between_turns: Choices,
+    /// A stored session of the harness keeps the model and effort it last
+    /// ran, for this reason (Mistral Vibe pins them on the session): a
+    /// choice made while none of its sessions is live, or while the live
+    /// one is a stored session nothing was sent to, leaves it for a new
+    /// session told the conversation, and none is made while an earlier
+    /// CLI of the harness is still exiting (the start that waits for it
+    /// resumes the stored session). Read by `App::stored_session_keeps`
+    /// alone. It stays a flag (#275): it decides before a driver could,
+    /// with none running, or with one the TUI would otherwise start again
+    /// on the stored session, as it ran.
+    pub stored_session_keeps: Option<&'static str>,
     /// The agent can ask the user structured questions.
     pub ask_user_question: bool,
     pub interrupt: bool,
@@ -185,6 +193,22 @@ pub struct Capabilities {
     /// Remote Control: claude.ai/code and the Claude app), and taken off it
     /// (`SessionCommand::RemoteControl`).
     pub remote_control: bool,
+}
+
+/// Which of the choices of a model, an effort and a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Choices {
+    pub model: bool,
+    pub effort: bool,
+    pub provider: bool,
+}
+
+impl Choices {
+    pub const ALL: Choices = Choices {
+        model: true,
+        effort: true,
+        provider: true,
+    };
 }
 
 /// Whether a harness takes MCP server definitions for one session, without

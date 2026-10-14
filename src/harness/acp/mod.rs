@@ -31,8 +31,8 @@ use super::{
 };
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport, ProviderId,
-    RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, Choices, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport,
+    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 /// Agents with a native ACP mode: (id, display name, command). Each is
@@ -279,10 +279,20 @@ impl Harness for AcpHarness {
             resume_by_id: true,
             live_model_list: true,
             multi_provider: false,
-            provider_per_process: false,
+            // Chosen at spawn, and kept by a session as it last ran: its
+            // driver answers a session told one with `NewSession`.
+            between_turns: if self.profile.hooks.chooses_at_spawn() {
+                Choices::ALL
+            } else {
+                Choices::default()
+            },
+            stored_session_keeps: self
+                .profile
+                .hooks
+                .chooses_at_spawn()
+                .then(|| self.profile.hooks.keeps_choices()),
             // Form elicitation is declared at `initialize`; whether the
             // agent asks is reported once it sends one.
-            model_per_process: self.profile.hooks.chooses_at_spawn(),
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,

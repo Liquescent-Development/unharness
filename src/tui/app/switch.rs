@@ -114,7 +114,7 @@ impl App {
     /// turn ends (Esc switches without it). It is told to use no tools,
     /// and what it asks permission for is denied.
     /// `renew`: the next session is a new one of the active harness
-    /// (`renew_session`), not `next`'s.
+    /// (`session_renewed`), not `next`'s.
     pub(super) fn ask_handoff(&mut self, next: HarnessId, renew: bool) {
         let to = self.handoff_target(next, renew);
         self.transcript.push_system(format!(
@@ -278,7 +278,7 @@ pub(super) fn handoff_prompt(to: &str, budget: usize) -> String {
 }
 
 /// What a session left for a new one of the same harness is asked for
-/// (`App::renew_session`), as [`handoff_prompt`] is.
+/// (`App::session_renewed`), as [`handoff_prompt`] is.
 fn renew_handoff_prompt(budget: usize) -> String {
     let words = (budget / 2 / 6).clamp(50, HANDOFF_MAX_WORDS);
     format!(

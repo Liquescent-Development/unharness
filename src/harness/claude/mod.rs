@@ -21,8 +21,8 @@ use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
-    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, Choices, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy,
+    PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Debug, Default)]
@@ -386,8 +386,12 @@ impl Harness for ClaudeHarness {
             live_model_list: true,
             // `CLAUDE_CODE_USE_*` in its environment.
             multi_provider: true,
-            provider_per_process: true,
-            model_per_process: false,
+            // Its environment's: the driver starts the process again on it.
+            between_turns: Choices {
+                provider: true,
+                ..Choices::default()
+            },
+            stored_session_keeps: None,
             ask_user_question: true,
             interrupt: true,
             usage_reporting: true,

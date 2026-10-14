@@ -20,8 +20,8 @@ use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
-    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy,
+    PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Default)]
@@ -118,8 +118,8 @@ impl Harness for AgyHarness {
             resume_by_id: true,
             live_model_list: true,
             multi_provider: false,
-            provider_per_process: false,
-            model_per_process: false,
+            between_turns: Choices::default(),
+            stored_session_keeps: None,
             ask_user_question: false,
             interrupt: true,
             usage_reporting: true,

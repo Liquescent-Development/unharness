@@ -45,8 +45,9 @@ impl App {
         }
         // A picker the user asked for and moved on from stays shut.
         self.open_when_listed = None;
-        if self.shell.is_some() || !self.require_policy() {
-            // Kept until the `!` command has ended, or a policy is chosen.
+        if self.shell.is_some() || self.choice_pending.is_some() || !self.require_policy() {
+            // Kept until the `!` command has ended, the session has taken
+            // the choice it was sent, or a policy is chosen.
             self.queued.push_back(QueuedPrompt {
                 text,
                 attachments: std::mem::take(&mut self.attachments),
@@ -169,7 +170,11 @@ impl App {
 
     /// Send the oldest queued prompt, if idle. Returns whether one was sent.
     pub fn send_next_queued(&mut self) -> bool {
-        if self.is_generating || self.shell.is_some() || self.effective_policy().is_none() {
+        if self.is_generating
+            || self.shell.is_some()
+            || self.choice_pending.is_some()
+            || self.effective_policy().is_none()
+        {
             return false;
         }
         let Some(q) = self.queued.pop_front() else {

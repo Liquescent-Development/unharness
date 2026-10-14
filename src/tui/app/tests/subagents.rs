@@ -622,6 +622,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     // An effort change starts a new session, and the subagent goes
     // with the old one.
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_effort(), Some("off"));
     assert!(app.subagents.is_empty());
@@ -635,6 +637,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let (mut app, _cwd) = vibe_app();
     vibe_with_unseen_child(&mut app);
     app.set_model("glm-5-3".into());
+    app.take_actions();
+    vibe_renews(&mut app, "model glm-5-3");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.current_model().unwrap().model, "glm-5-3");
 
@@ -650,6 +654,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     let (mut app, _cwd) = vibe_app_with_provider();
     vibe_with_unseen_child(&mut app);
     app.set_provider("lan".into());
+    app.take_actions();
+    vibe_renews(&mut app, "provider lan");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert_eq!(app.chosen_provider(), Some(&"lan".into()));
 
@@ -664,6 +670,8 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     });
     app.take_actions();
     app.set_effort("off".into());
+    app.take_actions();
+    vibe_renews(&mut app, "effort off");
     let ask = sent_turn(&mut app);
     assert!(ask.contains("new session of yours"), "{ask}");
 }

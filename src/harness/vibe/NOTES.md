@@ -42,10 +42,26 @@ session restarted with `thinking: high` in `VIBE_MODELS` loaded at `off`,
 and with `VIBE_ACTIVE_MODEL=glm-5-3` on `mistral-medium-3.5`. ACP has no
 write scoped to a session (`ext_method`, `agent.py:1140`). So, as
 Richard decided, a change before the first prompt starts vibe again
-with it, and after one the session is forgotten and a new one started
-(`App::renew_session`, `Capabilities::model_per_process`), told the
-conversation by the bridge with its budget and, over it, a handoff
-summary from the old session as for a switch. After every session
+with it, and after one the session is forgotten and a new one started,
+told the conversation by the bridge with its budget and, over it, a
+handoff summary from the old session as for a switch. Since #275 that is
+the driver's to say: a model, effort or provider sent to a session that
+was prompted is answered `NewSession` (`AgentHooks::chooses_at_spawn`,
+the reason `vibe::KEEPS_CHOICES`), which the TUI hears as
+`SessionRenewed` and renews from as for a switch (`App::session_renewed`:
+the handoff summary asked of the old session, still live, then the
+session forgotten and shut down); nothing is sent to vibe, and a prompt
+typed before the answer waits for it. The choices are offered only
+between turns (`Capabilities::between_turns`: all three for vibe). Where
+no prompted session can say it, the static declaration does
+(`Capabilities::stored_session_keeps`, one reader,
+`App::stored_session_keeps`): a choice made with no vibe session live, or
+with the live one a stored session started before the first prompt
+(after `--resume`), leaves the stored session for a new one at once, and
+none is made while the vibe before it is still exiting. It stays a flag:
+it decides before a driver could (none is running), or for a session
+the TUI would otherwise start again on the stored session, as it ran.
+After every session
 answer the driver compares `model` and `thinking` with the choice and
 says when they differ (vibe falls back to its default for an alias it
 lacks and resets a level the model does not offer, silently).
@@ -378,9 +394,10 @@ and name the model's, the level in the entry of the one that runs) and
 parse fails vibe's environment layer. Only the key's variable is named.
 The session lists vibe's own models beside the provider's, and the
 transport reports only the provider's, as its (`SpawnPlan::restrict`).
-`multi_provider` and `provider_per_process` are declared only with a
-provider defined; a change after a prompt starts a new bridged session,
-as a model change does. Recorded (`fixtures/vibe_acp_provider.jsonl`,
+`multi_provider` is declared only with a provider defined, and only then
+does a provider change start a session nothing was sent to again; a
+change after a prompt starts a new bridged session, as a model change
+does (`NewSession`, above). Recorded (`fixtures/vibe_acp_provider.jsonl`,
 `scripts/record-acp.py`, the environment as the driver sets it, the
 server redacted to `https://LOCAL-LLM`): an OpenAI-compatible server
 needing no key, `session/new` listing `mistral-medium-3.5`, `glm-5-3`

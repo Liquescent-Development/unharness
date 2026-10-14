@@ -44,7 +44,13 @@ stops Codex at startup, and `config/read` lists the configured
 `modelProvider` goes on `thread/resume` and `thread/fork` (schema; a
 thread keeps its own provider otherwise);
 `thread/start` and `thread/resume` answer with `modelProvider`, which
-the driver reports and checks against the choice. `model/list` gave
+the driver reports and checks against the choice. A provider chosen
+after a prompt has the app-server driver start the server again on it
+(#275; before, the TUI did), its input closed and, once it is gone,
+`thread/resume` of the thread with `modelProvider` (e2e, not run live);
+on `exec` it goes on the next turn's command line. Either tells the TUI
+`Restarted`. It is offered only between turns
+(`Capabilities::between_turns`). `model/list` gave
 OpenAI's catalog under every provider tried, so only `openai` lists
 models; with no model chosen Codex took `gpt-6-astra` on `ollama` too.
 Checked live: a turn through a custom `[model_providers]` entry

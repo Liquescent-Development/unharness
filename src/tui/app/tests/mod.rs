@@ -297,7 +297,7 @@ fn starts(actions: &[Action]) -> usize {
 }
 
 /// An app on the built-in vibe harness, whose model and effort are
-/// chosen when its process starts (`model_per_process`).
+/// chosen when its process starts, and kept by a session as it last ran.
 fn vibe_app() -> (App, tempfile::TempDir) {
     let cwd = tempfile::tempdir().unwrap();
     let registry =
@@ -326,6 +326,14 @@ fn prompted_vibe(app: &mut App) {
         "off".into(),
         "high".into(),
     ])));
+}
+
+/// What vibe's driver answers a session told `choice` (the e2e test
+/// `vibe_chooses_model_and_effort_at_spawn_never_by_option`).
+fn vibe_renews(app: &mut App, choice: &str) {
+    app.on_event(AgentEvent::SessionRenewed {
+        reason: format!("{choice}: {}", crate::harness::vibe::KEEPS_CHOICES),
+    });
 }
 
 /// An app on vibe with a provider `lan` in `[harnesses.vibe.providers]`.

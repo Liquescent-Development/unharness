@@ -113,6 +113,7 @@ impl App {
     /// The session's driver stopped taking commands.
     pub fn driver_gone(&mut self) {
         self.transcript.push_error("session driver is gone");
+        self.choice_answered(super::choices::provider_line);
         self.session_alive = false;
         self.forget_refusals();
         self.session_blank = false;
@@ -244,6 +245,8 @@ impl App {
         if self.session_alive {
             self.check_guard();
         }
+        // A choice it was sent will not be answered.
+        self.choice_answered(super::choices::provider_line);
         self.session_alive = false;
         self.session_blank = false;
         self.blank_session = None;
@@ -257,31 +260,29 @@ impl App {
         self.actions.push_back(Action::Shutdown);
     }
 
-    /// Leave the active harness's session for a new one that runs
-    /// `choice`: its sessions keep the model and effort they last ran
-    /// (Mistral Vibe 2.26.1 pins them, and setting them in the session
-    /// would rewrite its own configuration).
-    pub(super) fn renew_session(&mut self, choice: &str) {
-        self.session_renewed(&format!(
-            "{choice}: {}",
-            crate::harness::vibe::KEEPS_CHOICES
-        ));
-    }
-
     /// The active harness's session cannot take a choice, for `reason`
-    /// (`AgentEvent::SessionRenewed`): the conversation goes on in a new
-    /// session, told it with the next prompt as a harness switched to is,
-    /// and the one left writes a handoff summary first when the
-    /// conversation does not fit in that bridge.
+    /// (`AgentEvent::SessionRenewed`, or its stored session keeps what it
+    /// ran with none live to say so, `App::renewal_without_session`): the
+    /// conversation goes on in a new session, told it with the next prompt
+    /// as a harness switched to is, and the one left writes a handoff
+    /// summary first when the conversation does not fit in that bridge.
+    /// What was typed after the choice goes after that, as if typed then.
     pub(super) fn session_renewed(&mut self, reason: &str) {
+        let pending = self.choice_answered(super::choices::provider_line);
         let name = self.display_name();
         self.transcript.push_notice(format!(
             "{name} starts a new session for {reason}. Your next prompt tells it the conversation so far."
         ));
         if self.handoff_wanted_for(0, self.bridge_budget(self.active)) {
             self.ask_handoff(self.active, true);
+            if let (Some(pending), Some(handoff)) = (&pending, self.handoff.as_mut()) {
+                handoff.held = pending.queued > 0;
+            }
         } else {
             self.renew_now();
+            if pending.is_some() {
+                self.send_next_queued();
+            }
         }
     }
 
@@ -291,6 +292,14 @@ impl App {
     /// started it again, and the session goes on, resumed, in a process
     /// nothing was sent to yet. Its driver puts it back on Remote Control.
     pub(super) fn process_restarted(&mut self) {
+        let name = self.display_name();
+        let pending = self.choice_answered(|provider| super::choices::restart_line(provider, name));
+        // A turn the process before had started by itself cannot end now.
+        if self.is_generating {
+            self.transcript.end_running_tools();
+            self.finish_generation();
+            self.transcript.push_system("Turn interrupted.");
+        }
         self.policies_sent.clear();
         self.drop_subagents();
         self.drop_prompts();
@@ -302,6 +311,9 @@ impl App {
         if let Some(remote) = self.remote.as_mut() {
             remote.url = None;
             remote.state = None;
+        }
+        if pending.is_some() {
+            self.send_next_queued();
         }
     }
 
