@@ -51,7 +51,11 @@ the reason `vibe::KEEPS_CHOICES`), which the TUI hears as
 `SessionRenewed` and renews from as for a switch (`App::session_renewed`:
 the handoff summary asked of the old session, still live, then the
 session forgotten and shut down); nothing is sent to vibe, and a prompt
-typed before the answer waits for it. The choices are offered only
+typed before the answer waits for it, while another choice and what
+would end the session (a switch, resume, fork, rewind, `/clear`) are
+refused until then; a session that ends before it answers (quit, its
+process gone) is forgotten all the same, as the answer would have had
+it, so that `--resume` does not bring it back as it ran. The choices are offered only
 between turns (`Capabilities::between_turns`: all three for vibe). Where
 no prompted session can say it, the static declaration does
 (`Capabilities::stored_session_keeps`, one reader,

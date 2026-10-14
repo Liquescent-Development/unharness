@@ -27,7 +27,10 @@ the TUI goes on in a new session of the same harness as after a switch
 writes a handoff summary first (`renew_handoff_prompt`), then it is
 forgotten and shut down, and the next prompt bridges the conversation to
 the new one. A prompt typed between the choice and that answer waits for
-it. With no prompted session to say so (none live, or a stored one
+it, and goes once the choice is taken (prompts held before it still
+wait for Enter); another such choice, and what would end the session,
+is refused until then; a session that ends first is forgotten as the
+answer would have had it. With no prompted session to say so (none live, or a stored one
 started before the first prompt), the harness's declaration does
 (`Capabilities::stored_session_keeps`). A turn that does not stop while
 the summary is written is ended with its process, and the notice says

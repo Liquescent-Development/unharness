@@ -34,7 +34,12 @@ words the default model lacks). `--mode plan` writes
 and acts in the same turn, so plan mode is not declared. SIGINT gives a
 `result` with `error: "interrupted"` and exit 1, and leaves the command
 agy started running; unharness's kill takes it (a `--print` run's
-`sleep` gone on Ctrl+C). Sign-in is the token
+`sleep` gone on Ctrl+C). A model, effort or policy change starts the
+next turn's agy again with its flags, resuming the conversation; since
+#286 the agy before is ended as a shutdown ends it (its input closed,
+killed after `END_GRACE`) and the next starts once it is gone (before,
+it was killed and the next started at once). How fast agy exits once
+its input closes was not checked live. Sign-in is the token
 file beside `settings.json`; whether `GEMINI_API_KEY` signs a headless
 run in is unverified, so it is not looked at.
 Headless runs did not touch `settings.json`, `~/.gemini/config/

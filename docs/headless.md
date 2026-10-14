@@ -106,6 +106,8 @@ change, so ignore what you do not know. Absent values are `null`.
 | `policy_changed` | `policy`: the one the session runs under now (Claude reports each change of its mode, also one the model makes) |
 | `notice` | `message` |
 | `session_replaced` | `reason`: the session `--resume` named could not be resumed and the harness started a new one; the run fails with it, and nothing of the new session follows |
+| `session_renewed` | `reason`: the session cannot take a model, effort or provider chosen during it; never sent by `--print`, which chooses nothing during a run |
+| `restarted` | the harness's CLI was started again for such a choice; never sent by `--print` |
 | `error` | `message` (the turn goes on) |
 | `process_exited` | `code` |
 
