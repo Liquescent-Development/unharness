@@ -73,7 +73,7 @@ impl App {
     }
 
     pub fn is_thinking(&self) -> bool {
-        self.is_generating && self.transcript.is_thinking()
+        self.is_generating && self.controller.conversation.transcript.is_thinking()
     }
 
     pub fn elapsed_secs(&self) -> f32 {
@@ -82,7 +82,9 @@ impl App {
                 .map(|s| s.elapsed().as_secs_f32())
                 .unwrap_or(0.0)
         } else {
-            self.generation_duration
+            self.controller
+                .conversation
+                .generation_duration
                 .map(|d| d.as_secs_f32())
                 .unwrap_or(0.0)
         }
@@ -102,6 +104,8 @@ impl App {
         if let Some(super::transcript::Block::Tool {
             name, done: false, ..
         }) = self
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter()
@@ -110,11 +114,11 @@ impl App {
         {
             return format!("Running {name}");
         }
-        if self.transcript.is_thinking() {
+        if self.controller.conversation.transcript.is_thinking() {
             return "Thinking".to_string();
         }
         if matches!(
-            self.transcript.blocks.last(),
+            self.controller.conversation.transcript.blocks.last(),
             Some(super::transcript::Block::Assistant { duration: None, .. })
         ) {
             return "Streaming".to_string();

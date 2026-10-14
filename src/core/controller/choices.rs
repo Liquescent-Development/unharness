@@ -3,7 +3,6 @@
 
 use super::{Controller, Origin, Pick};
 use crate::config::Config;
-use crate::core::conversations::Conversation;
 use crate::core::{HarnessId, ModelInfo, ModelRef, ProviderId, SessionCommand};
 
 /// What a harness runs with besides its policy.
@@ -181,20 +180,16 @@ impl Controller {
     }
 
     /// Choose `provider` for `harness`. Another than it had takes the
-    /// model chosen on the one before with it, here and in `conversation`,
-    /// and what its session ran on. Returns whether it is another.
-    pub fn choose_provider(
-        &mut self,
-        harness: HarnessId,
-        provider: ProviderId,
-        conversation: &mut Conversation,
-    ) -> bool {
+    /// model chosen on the one before with it, here and in the
+    /// conversation, and what its session ran on. Returns whether it is
+    /// another.
+    pub fn choose_provider(&mut self, harness: HarnessId, provider: ProviderId) -> bool {
         let state = self.choices.entry(harness).or_default();
         let changed = state.provider() != Some(&provider);
         if changed {
             state.runs_on = None;
             state.model = None;
-            conversation.models.remove(&harness);
+            self.conversation.record.models.remove(&harness);
         }
         state.provider = Some(Pick::new(provider, Origin::User));
         changed
@@ -325,7 +320,6 @@ impl Controller {
         harness: HarnessId,
         provider: ProviderId,
         now: &SessionNow,
-        conversation: &mut Conversation,
     ) -> Result<Route, String> {
         if let Some(why) = self.refused_while_pending(harness, now) {
             return Err(why);
@@ -338,7 +332,7 @@ impl Controller {
         {
             return Err(why);
         }
-        self.choose_provider(harness, provider.clone(), conversation);
+        self.choose_provider(harness, provider.clone());
         let multi = self.caps_of(harness).is_some_and(|c| c.multi_provider);
         Ok(if !changed {
             Route::None

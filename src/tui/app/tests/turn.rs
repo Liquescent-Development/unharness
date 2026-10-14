@@ -108,10 +108,13 @@ fn submit_starts_session_then_sends_turn() {
 #[test]
 fn an_interrupt_the_turn_ignores_ends_the_process() {
     use crate::core::guard::{Guarded, Watch};
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.session_alive = true;
-    app.session_ids.insert(HarnessId::PI, "pi-1".into());
+    app.controller
+        .conversation
+        .session_ids
+        .insert(HarnessId::PI, "pi-1".into());
     let config = tempfile::tempdir().unwrap();
     app.guard = Some(Watch::begin(
         &[Guarded::Tree(config.path().to_path_buf())],
@@ -134,7 +137,9 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     app.interrupt();
     assert_eq!(app.take_actions(), vec![]);
     let notices = |app: &App, start: &str| {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .filter(|b| matches!(b, Block::Notice(n) if n.starts_with(start)))
@@ -151,7 +156,9 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
     assert!(!app.is_generating && !app.session_alive && !app.awaiting_answer());
     assert!(matches!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .find(|b| matches!(b, Block::Tool { .. })),
@@ -163,7 +170,7 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     ));
     // What the turn changed in the harness's configuration is told.
     assert!(
-        app.transcript.blocks.iter().any(
+        app.controller.conversation.transcript.blocks.iter().any(
             |b| matches!(b, Block::Error(e) if e.contains("configuration changed while it ran"))
         )
     );
@@ -181,11 +188,16 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
     // Its anchor is its own: the ended turn's will never come.
     app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
     let go_on = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
         .rposition(|b| matches!(b, Block::User { text } if text == "go on"));
-    assert_eq!(app.anchors.last().map(|a| a.block), go_on);
+    assert_eq!(
+        app.controller.conversation.anchors.last().map(|a| a.block),
+        go_on
+    );
     // A turn that ends when asked leaves nothing behind.
     app.interrupt();
     app.on_event(AgentEvent::TurnCompleted {
@@ -196,7 +208,7 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
 
 #[test]
 fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::PI);
     app.session_alive = true;
     app.submit_prompt("look".into());
@@ -207,7 +219,7 @@ fn an_interrupt_long_after_the_first_warns_before_ending_the_process() {
     app.interrupt();
     assert_eq!(app.take_actions(), vec![]);
     assert!(app.is_generating);
-    assert!(app.transcript.blocks.iter().any(
+    assert!(app.controller.conversation.transcript.blocks.iter().any(
         |b| matches!(b, Block::Notice(n) if n.ends_with("asked again, its process is ended"))
     ));
     app.interrupt();
@@ -240,7 +252,12 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
             "Mistral Vibe did not stop, so its process was ended; the next prompt resumes the session"
         ]
     );
-    assert!(app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
 
     let (mut app, _cwd) = vibe_app();
     app.bridge_max_chars = Some(300);
@@ -261,7 +278,12 @@ fn a_stuck_handoff_for_a_new_session_says_a_new_one_starts() {
         ]
     );
     // The session it wrote in is ended and forgotten: the next is new.
-    assert!(!app.session_ids.contains_key(&HarnessId::VIBE));
+    assert!(
+        !app.controller
+            .conversation
+            .session_ids
+            .contains_key(&HarnessId::VIBE)
+    );
     app.start_when_idle();
     assert_eq!(
         app.take_actions(),

@@ -31,9 +31,11 @@ impl App {
                     ),
                     Some(_) => "Remote Control is starting".to_string(),
                 };
-                self.transcript.push_notice(says);
+                self.controller.conversation.transcript.push_notice(says);
             }
             _ => self
+                .controller
+                .conversation
                 .transcript
                 .push_notice("usage: /remote-control [on [name] | off | status]"),
         }
@@ -45,7 +47,7 @@ impl App {
                 Some(url) => format!("Remote Control is already on: {url}"),
                 None => "Remote Control is starting".to_string(),
             };
-            self.transcript.push_notice(says);
+            self.controller.conversation.transcript.push_notice(says);
             return;
         }
         self.remote = Some(RemoteSession {
@@ -58,13 +60,13 @@ impl App {
                     enabled: true,
                     name,
                 }));
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "turning on Remote Control for {}",
                 self.short_name()
             ));
         } else {
             // Sent once the session is up (`remote_control_resend`).
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "Remote Control goes on once {}'s session has started",
                 self.short_name()
             ));
@@ -79,7 +81,10 @@ impl App {
                     name: None,
                 }));
         }
-        self.transcript.push_notice("Remote Control is off");
+        self.controller
+            .conversation
+            .transcript
+            .push_notice("Remote Control is off");
     }
 
     /// Remote Control ends with the conversation's tie to this session (a
@@ -96,7 +101,10 @@ impl App {
                     name: None,
                 }));
         }
-        self.transcript.push_notice("Remote Control ended");
+        self.controller
+            .conversation
+            .transcript
+            .push_notice("Remote Control ended");
     }
 
     /// For a session that just started: the command that puts it on Remote
@@ -117,20 +125,26 @@ impl App {
         // What this harness has not been told yet is still owed: it goes
         // with the next prompt typed here, as after a command.
         let from = self.bridge_start(self.active);
-        if from < self.transcript.blocks.len() {
-            self.last_active_index.insert(self.active, from);
+        if from < self.controller.conversation.transcript.blocks.len() {
+            self.controller
+                .conversation
+                .last_active_index
+                .insert(self.active, from);
         }
         // The session is the conversation's from here on.
         if self.session_blank {
             self.mark_prompted();
         }
-        if self.first_prompt.is_none() {
-            self.first_prompt = Some(text.clone());
+        if self.controller.conversation.first_prompt.is_none() {
+            self.controller.conversation.first_prompt = Some(text.clone());
         }
-        self.transcript.push_notice("from Remote Control:");
-        self.transcript.push_user(text);
-        let block = self.transcript.blocks.len() - 1;
-        self.checkpoint_files(block);
+        self.controller
+            .conversation
+            .transcript
+            .push_notice("from Remote Control:");
+        self.controller.conversation.transcript.push_user(text);
+        let block = self.controller.conversation.transcript.blocks.len() - 1;
+        self.controller.checkpoint_files(block);
     }
 
     /// What the status bar says of Remote Control.
@@ -153,7 +167,7 @@ impl App {
                 if let Some(remote) = self.remote.as_mut() {
                     remote.url = Some(url.clone());
                 }
-                self.transcript.push_system(format!(
+                self.controller.conversation.transcript.push_system(format!(
                     "Remote Control is on: open {url} in a browser or the Claude app"
                 ));
             }
@@ -166,7 +180,9 @@ impl App {
             RemoteControl::Off => {}
             RemoteControl::Failed { reason } => {
                 self.remote = None;
-                self.transcript
+                self.controller
+                    .conversation
+                    .transcript
                     .push_error(format!("Remote Control: {reason}"));
             }
         }

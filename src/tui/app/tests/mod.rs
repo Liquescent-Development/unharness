@@ -1,8 +1,9 @@
 use super::*;
 use crate::core::rules::Scope;
+use crate::core::transcript::Transcript;
 use crate::core::{
-    CapsUpdate, ModelRef, Parser, PermissionDecision, PermissionKind, Question, QuestionOption,
-    Rule, ToolAction,
+    CapsUpdate, ContextUsage, ModelRef, Parser, PermissionDecision, PermissionKind, Question,
+    QuestionOption, Rule, ToolAction, Usage,
 };
 use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
@@ -135,8 +136,10 @@ pub(crate) fn test_app(harness: HarnessId) -> App {
     test_app_in(tmp.keep(), harness, None, false)
 }
 
-fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::super::transcript::AgentRun {
-    app.transcript
+fn spawn_block<'a>(app: &'a App, want: &str) -> &'a super::transcript::AgentRun {
+    app.controller
+        .conversation
+        .transcript
         .agent(want)
         .unwrap_or_else(|| panic!("no subagent on {want}"))
 }
@@ -199,8 +202,10 @@ fn over_budget_app() -> App {
 }
 
 fn has_notice(app: &App, text: &str) -> bool {
-    use super::super::transcript::Block;
-    app.transcript
+    use super::transcript::Block;
+    app.controller
+        .conversation
+        .transcript
         .blocks
         .iter()
         .any(|b| matches!(b, Block::Notice(n) if n == text))
@@ -265,8 +270,10 @@ fn pi_gate_request(id: &str, command: &str) -> AgentEvent {
 }
 
 fn notices(app: &App) -> Vec<String> {
-    use super::super::transcript::Block;
-    app.transcript
+    use super::transcript::Block;
+    app.controller
+        .conversation
+        .transcript
         .blocks
         .iter()
         .filter_map(|b| match b {

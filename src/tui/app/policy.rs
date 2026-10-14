@@ -73,10 +73,10 @@ impl App {
             if before.is_none() && self.effective_policy().is_some() {
                 self.modal = None;
                 if let Some(w) = self.policy_warning() {
-                    self.transcript.push_notice(w);
+                    self.controller.conversation.transcript.push_notice(w);
                 }
                 if !self.queued.is_empty() {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "{} queued prompt(s) held; press Enter to send the next",
                         self.queued.len()
                     ));
@@ -102,14 +102,19 @@ impl App {
         {
             Ok(set) => set,
             Err(e) => {
-                self.transcript.push_error(e.to_string());
+                self.controller
+                    .conversation
+                    .transcript
+                    .push_error(e.to_string());
                 return false;
             }
         };
-        self.transcript
+        self.controller
+            .conversation
+            .transcript
             .push_system(format!("Permission policy: {}", set.effective));
         if let Some(w) = set.warning {
-            self.transcript.push_notice(w);
+            self.controller.conversation.transcript.push_notice(w);
         }
         self.idle_start_paused = false;
         if self.session_alive && self.session_blank {
@@ -132,7 +137,7 @@ impl App {
             .controller
             .on_policy_changed(&self.config, self.active, p)
         {
-            self.transcript.push_notice(notice);
+            self.controller.conversation.transcript.push_notice(notice);
         }
     }
 
@@ -143,7 +148,7 @@ impl App {
         match refused {
             Refused::GaveWay { now, send } => {
                 if let Some(w) = self.policy_warning() {
-                    self.transcript.push_notice(w);
+                    self.controller.conversation.transcript.push_notice(w);
                 }
                 if send {
                     self.actions
@@ -151,7 +156,7 @@ impl App {
                 }
             }
             Refused::Waits => {
-                self.transcript.push_notice(format!(
+                self.controller.conversation.transcript.push_notice(format!(
                     "{} waits for another policy (Ctrl+P)",
                     self.display_name()
                 ));
@@ -176,17 +181,23 @@ impl App {
         let id = self.active.as_str();
         let root = self.workspace_root.clone();
         let Some(dir) = self.rules.config_dir().map(Path::to_path_buf) else {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("there is no config directory to save the default policy in");
             return false;
         };
         let Some(path) = Config::scoped_path(&dir, scope, root.as_deref()) else {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error("there is no workspace to save the default policy for");
             return false;
         };
         if let Err(e) = Config::set_harness_default_policy(&path, id, p) {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_error(format!("could not save the default policy: {e:#}"));
             return false;
         }
@@ -194,7 +205,7 @@ impl App {
             Scope::Workspace => "for this workspace",
             Scope::Global => "for every workspace",
         };
-        self.transcript.push_system(format!(
+        self.controller.conversation.transcript.push_system(format!(
             "Saved {p} as {name}'s default policy {place} ({})",
             path.display()
         ));
@@ -211,12 +222,12 @@ impl App {
             .and_then(|c| c.harness(id)?.default_policy.clone());
         let for_all = workspace.as_ref().and_then(|c| c.default_policy.clone());
         match for_harness {
-            Some(w) => self.transcript.push_notice(format!(
+            Some(w) => self.controller.conversation.transcript.push_notice(format!(
                 "this workspace's settings make {w} {name}'s default here"
             )),
             None => {
                 if let Some(w) = for_all.filter(|w| *w != p.as_str()) {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "this workspace's default_policy ({w}) no longer applies to {name}: \
                          a harness's own default comes first (save for this workspace to \
                          keep {w} here)"
@@ -238,7 +249,10 @@ impl App {
         match self.controller.offered(self.active, p) {
             Ok(res) => Some(res),
             Err(e) => {
-                self.transcript.push_error(e.to_string());
+                self.controller
+                    .conversation
+                    .transcript
+                    .push_error(e.to_string());
                 None
             }
         }

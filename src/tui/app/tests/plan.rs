@@ -210,7 +210,7 @@ fn a_request_made_while_planning_is_judged_so_after_the_approval() {
 /// later choice is not the agent changing its mind.
 #[test]
 fn a_late_report_of_a_policy_set_does_not_undo_a_later_one() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = planning_app();
     assert!(app.set_policy(PermissionPolicy::Ask));
     app.take_actions();
@@ -219,7 +219,9 @@ fn a_late_report_of_a_policy_set_does_not_undo_a_later_one() {
     app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Ask));
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Ask));
     assert!(
-        !app.transcript
+        !app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Notice(n) if n.contains("plan mode")))
@@ -235,14 +237,16 @@ fn a_late_report_of_a_policy_set_does_not_undo_a_later_one() {
 /// The model can go into plan mode by itself (`EnterPlanMode`).
 #[test]
 fn the_agent_going_into_plan_mode_by_itself_is_followed() {
-    use crate::tui::transcript::Block;
+    use crate::core::transcript::Block;
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.set_policy(PermissionPolicy::AcceptEdits));
     app.session_alive = true;
     app.on_event(AgentEvent::PolicyChanged(PermissionPolicy::Plan));
     assert_eq!(app.effective_policy(), Some(PermissionPolicy::Plan));
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .any(|b| matches!(b, Block::Notice(n) if n.contains("went into plan mode")))

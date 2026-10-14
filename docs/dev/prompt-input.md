@@ -29,7 +29,7 @@ root, and is walked again at each `@`; never tried on a tree past the
 
 ## `!command` at the prompt
 
-`!command` at the prompt (`tui/shell.rs`, `Block::Shell`,
+`!command` at the prompt (`core/shell.rs`, `Block::Shell`,
 `BlockRecord::Shell`): `$SHELL -c` in the session's `cwd` through
 `LineProcess::spawn_no_input` under `App::session_sandbox()` (stdin
 `/dev/null`, `setsid`, the process tree killed on Esc and on quit, and

@@ -18,7 +18,7 @@ impl App {
         );
         if !warnings.is_empty() && self.mcp_warned.insert(self.active) {
             for w in warnings {
-                self.transcript.push_notice(w);
+                self.controller.conversation.transcript.push_notice(w);
             }
         }
         servers
@@ -35,7 +35,7 @@ impl App {
         }
         if let Some(notice) = self.harness().session_notice(&self.cwd) {
             self.session_noticed.insert(self.active);
-            self.transcript.push_notice(notice);
+            self.controller.conversation.transcript.push_notice(notice);
         }
     }
 
@@ -58,7 +58,10 @@ impl App {
             return;
         };
         for change in watch.changes(&guard::default_keep_dir()) {
-            self.transcript.push_error(change.describe(name));
+            self.controller
+                .conversation
+                .transcript
+                .push_error(change.describe(name));
         }
     }
 
@@ -66,7 +69,12 @@ impl App {
     /// its way.
     pub(super) fn ensure_session(&mut self) {
         if !self.session_alive && !self.start_pending() {
-            let resume = self.session_ids.get(&self.active).cloned();
+            let resume = self
+                .controller
+                .conversation
+                .session_ids
+                .get(&self.active)
+                .cloned();
             self.actions.push_back(Action::StartSession { resume });
         }
     }
@@ -91,7 +99,12 @@ impl App {
             self.list_commands();
             return;
         }
-        let resume = self.session_ids.get(&self.active).cloned();
+        let resume = self
+            .controller
+            .conversation
+            .session_ids
+            .get(&self.active)
+            .cloned();
         self.actions.push_back(Action::StartSession { resume });
         self.session_blank = true;
     }
@@ -106,13 +119,16 @@ impl App {
                 stop_reason: StopReason::Error(why),
             });
         } else {
-            self.transcript.push_error(why);
+            self.controller.conversation.transcript.push_error(why);
         }
     }
 
     /// The session's driver stopped taking commands.
     pub fn driver_gone(&mut self) {
-        self.transcript.push_error("session driver is gone");
+        self.controller
+            .conversation
+            .transcript
+            .push_error("session driver is gone");
         self.session_alive = false;
         self.choice_unanswered();
         self.forget_refusals();
@@ -147,15 +163,22 @@ impl App {
 
     /// `id` is the active harness's session in this conversation.
     pub(super) fn commit_session(&mut self, session_id: String, model: Option<String>) {
-        let is_new = self.session_ids.get(&self.active) != Some(&session_id);
+        let is_new =
+            self.controller.conversation.session_ids.get(&self.active) != Some(&session_id);
         // A branch of the forked-from session now exists under its own id.
         if is_new {
-            self.fork_pending.remove(&self.active);
+            self.controller
+                .conversation
+                .fork_pending
+                .remove(&self.active);
         }
-        self.session_ids.insert(self.active, session_id.clone());
+        self.controller
+            .conversation
+            .session_ids
+            .insert(self.active, session_id.clone());
         self.persist();
         if is_new {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "session {} ({})",
                 session_id,
                 model.unwrap_or_else(|| "default model".into())
@@ -173,14 +196,20 @@ impl App {
     pub(super) fn session_replaced(&mut self, reason: &str) {
         let harness = self.active;
         let name = self.short_name().to_string();
-        self.fork_pending.remove(&harness);
-        self.anchors.retain(|a| a.harness != harness);
+        self.controller.conversation.fork_pending.remove(&harness);
+        self.controller
+            .conversation
+            .anchors
+            .retain(|a| a.harness != harness);
         if self.session_blank {
             // The new session's id waits in `blank_session` for the first
             // prompt; the old one is not this conversation's any more.
-            self.session_ids.remove(&harness);
-            self.last_active_index.remove(&harness);
-            self.transcript.push_notice(format!(
+            self.controller.conversation.session_ids.remove(&harness);
+            self.controller
+                .conversation
+                .last_active_index
+                .remove(&harness);
+            self.controller.conversation.transcript.push_notice(format!(
                 "{reason}: {name} starts a new session, and your next prompt tells it the conversation so far"
             ));
             return;
@@ -188,14 +217,17 @@ impl App {
         // A prompt went with the start, without the conversation: the
         // next one tells it all of it. The session's id is committed by
         // its `SessionStarted`, before or after this.
-        self.last_active_index.insert(harness, 0);
+        self.controller
+            .conversation
+            .last_active_index
+            .insert(harness, 0);
         if let Some(handoff) = self.handoff.as_mut() {
             handoff.blind = true;
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{reason}: {name} runs a new session, which has no conversation to summarize"
             ));
         } else {
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{reason}: {name} runs a new session without the conversation so far; your next prompt tells it"
             ));
         }
@@ -210,16 +242,7 @@ impl App {
         if harness == self.active && self.session_alive {
             self.shutdown_session();
         }
-        self.forget_ids(harness);
-    }
-
-    /// What points at `harness`'s vendor session: its id, where the bridge
-    /// to it starts, a fork of it to make, rewind anchors into it.
-    pub(super) fn forget_ids(&mut self, harness: HarnessId) {
-        self.session_ids.remove(&harness);
-        self.last_active_index.remove(&harness);
-        self.fork_pending.remove(&harness);
-        self.anchors.retain(|a| a.harness != harness);
+        self.controller.forget_ids(harness);
     }
 
     /// True, with an error shown, while the session is settling
@@ -227,7 +250,7 @@ impl App {
     pub(super) fn refused_while_settling(&mut self) -> bool {
         match self.controller.settling(self.active, self.start_held) {
             Some(why) => {
-                self.transcript.push_error(why);
+                self.controller.conversation.transcript.push_error(why);
                 true
             }
             None => false,
@@ -237,10 +260,10 @@ impl App {
     /// The session's process is gone, or going: what it was running and
     /// would have reported on will not be.
     pub(super) fn process_gone(&mut self) {
-        self.transcript.end_running_hooks();
+        self.controller.conversation.transcript.end_running_hooks();
         // The next process takes the messages so far as its baseline, so
         // the anchors still owed would land on later turns (pi).
-        self.anchor_pending.clear();
+        self.controller.conversation.anchor_pending.clear();
         self.drop_prompts();
     }
 
@@ -285,7 +308,7 @@ impl App {
             return;
         }
         let name = self.display_name();
-        self.transcript.push_notice(format!(
+        self.controller.conversation.transcript.push_notice(format!(
             "{name} starts a new session for {reason}. Your next prompt tells it the conversation so far."
         ));
         if self.handoff_wanted_for(0, self.bridge_budget(self.active)) {
@@ -311,9 +334,12 @@ impl App {
         let pending = self.choice_answered(|provider| super::choices::restart_line(provider, name));
         // A turn the process before had started by itself cannot end now.
         if self.is_generating {
-            self.transcript.end_running_tools();
+            self.controller.conversation.transcript.end_running_tools();
             self.finish_generation();
-            self.transcript.push_system("Turn interrupted.");
+            self.controller
+                .conversation
+                .transcript
+                .push_system("Turn interrupted.");
         }
         self.drop_subagents();
         self.drop_prompts();
@@ -347,7 +373,10 @@ impl App {
         }
         // The event loop kills it on the way out.
         if self.shell.take().is_some() {
-            self.transcript.shell_ended(ShellStatus::Killed);
+            self.controller
+                .conversation
+                .transcript
+                .shell_ended(ShellStatus::Killed);
         }
         self.persist();
         self.should_quit = true;

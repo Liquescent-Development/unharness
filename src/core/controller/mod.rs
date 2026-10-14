@@ -6,17 +6,24 @@
 //! capabilities ([`Controller::caps_of`]). For the active harness's
 //! session: when a choice may be made, how it reaches the session
 //! ([`Route`]), and a choice sent that the session has not said how it took
-//! ([`PendingChoice`]), which holds back what follows it.
+//! ([`PendingChoice`]), which holds back what follows it. And the
+//! conversation it runs ([`ConversationState`]): installed as one, saved,
+//! and its file checkpoints.
 //!
-//! The TUI calls into it and reads from it; what it wants shown comes back
-//! as values (notices, refusals) for the TUI to push to the transcript.
-//! `headless` resolves its policy through the same [`PolicyState`].
+//! The TUI calls into it and reads from it. What it says of the
+//! conversation it holds (a save that failed, a checkpoint that could not
+//! be taken, a resumed conversation's choices, a file restore undone) it
+//! puts in that conversation's transcript itself; what it says of a choice
+//! or a policy comes back as values (notices, refusals) for the TUI to
+//! push there. `headless` resolves its policy through the same
+//! [`PolicyState`].
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::config::Config;
-use crate::core::conversations::Conversation;
+use crate::core::checkpoints::Checkpoints;
+use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::registry::Registry;
 use crate::core::{
     Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef, PermissionPolicy,
@@ -24,9 +31,11 @@ use crate::core::{
 };
 
 mod choices;
+mod conversation;
 mod policy;
 
 pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow, subagents_refusal};
+pub use conversation::{ConversationState, Keeping};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
 
 /// Where a choice came from.
@@ -97,14 +106,26 @@ pub struct Controller {
     /// meanwhile wait, and another choice and what would end the session
     /// are refused.
     pending: Option<PendingChoice>,
+    /// The conversation it runs, installed as one (`Controller::install`).
+    pub conversation: ConversationState,
+    /// Where the workspace's conversations are kept.
+    pub store: ConversationStore,
+    /// Saving it failed, which is said once per run.
+    persist_failed: bool,
+    /// File checkpoints of the workspace; `None` outside a git repository
+    /// or when switched off.
+    checkpoints: Option<Checkpoints>,
+    checkpoint_failed: bool,
+    restore_seq: usize,
 }
 
 impl Controller {
     /// Every harness starts with its configured provider, else its guess at
     /// its own, and its configured model and effort; the run's harness with
     /// what `launch` names. A configured model of a harness whose provider
-    /// is not known is given to the run's harness only.
-    pub fn new(registry: Arc<Registry>, config: &Config, launch: Launch) -> Self {
+    /// is not known is given to the run's harness only. It runs a new
+    /// conversation, kept and checkpointed as `keeping` says.
+    pub fn new(registry: Arc<Registry>, config: &Config, launch: Launch, keeping: Keeping) -> Self {
         let mut choices: HashMap<HarnessId, ChoiceState> = HashMap::new();
         for h in registry.all() {
             let id = h.descriptor().id;
@@ -165,6 +186,12 @@ impl Controller {
             provider_lists: HashMap::new(),
             live: HashMap::new(),
             pending: None,
+            conversation: ConversationState::new(Conversation::new(launch.harness), launch.harness),
+            store: keeping.store,
+            persist_failed: false,
+            checkpoints: keeping.checkpoints,
+            checkpoint_failed: false,
+            restore_seq: 0,
         }
     }
 
@@ -408,13 +435,13 @@ impl Controller {
     /// What the conversation keeps of the choices. `prompted`: `active`'s
     /// live session was sent something, so the policy in effect is the
     /// one it last ran under.
-    pub fn sync_conversation(
-        &self,
-        config: &Config,
-        active: HarnessId,
-        prompted: bool,
-        conversation: &mut Conversation,
-    ) {
+    fn sync_choices(&mut self, config: &Config, active: HarnessId, prompted: bool) {
+        let last = if prompted {
+            self.effective_policy(config, active)
+        } else {
+            None
+        };
+        let conversation = &mut self.conversation.record;
         self.policy.sync_conversation(conversation);
         for (h, state) in &self.choices {
             if let Some(m) = state.chosen_model() {
@@ -424,7 +451,7 @@ impl Controller {
                 conversation.efforts.insert(*h, e.clone());
             }
         }
-        if prompted && let Some(p) = self.effective_policy(config, active) {
+        if let Some(p) = last {
             conversation.last_policies.insert(active, p);
         }
     }

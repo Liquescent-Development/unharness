@@ -665,7 +665,7 @@ mod tests {
                 },
             ]
         );
-        let back = crate::tui::transcript::Transcript::from_records(&blocks);
+        let back = crate::core::transcript::Transcript::from_records(&blocks);
         assert_eq!(back.blocks.len(), 2);
     }
 

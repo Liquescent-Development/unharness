@@ -27,7 +27,7 @@ fn a_subagents_hook_goes_to_its_transcript() {
     let mut app = test_app(HarnessId::CODEX);
     app.submit_prompt("delegate".into());
     spawn(&mut app, "spawn", "look around", None);
-    let main = kinds(&app.transcript.blocks);
+    let main = kinds(&app.controller.conversation.transcript.blocks);
     app.on_event(sub(
         "spawn",
         AgentEvent::HookStarted {
@@ -44,7 +44,7 @@ fn a_subagents_hook_goes_to_its_transcript() {
             output: "no rm".into(),
         },
     ));
-    assert_eq!(kinds(&app.transcript.blocks), main);
+    assert_eq!(kinds(&app.controller.conversation.transcript.blocks), main);
     let run = spawn_block(&app, "spawn");
     assert_eq!(kinds(&run.log.blocks), ["hook:preToolUse"]);
     assert!(matches!(
@@ -75,7 +75,7 @@ fn an_unannounced_subagent_still_gets_a_transcript_of_its_own() {
         name: "Agent".into(),
         input: serde_json::json!({"description": "look around"}),
     });
-    let main_len = app.transcript.blocks.len();
+    let main_len = app.controller.conversation.transcript.blocks.len();
     app.on_event(sub("spawn", read_call("inner", "a.txt")));
     app.on_event(sub(
         "spawn",
@@ -86,7 +86,10 @@ fn an_unannounced_subagent_still_gets_a_transcript_of_its_own() {
         },
     ));
     app.on_event(sub("spawn", AgentEvent::TextDelta("found it".into())));
-    assert_eq!(app.transcript.blocks.len(), main_len);
+    assert_eq!(
+        app.controller.conversation.transcript.blocks.len(),
+        main_len
+    );
     let run = spawn_block(&app, "spawn");
     assert_eq!(run.description, "look around");
     assert_eq!(run.status, None);
@@ -103,7 +106,12 @@ fn an_unannounced_subagent_still_gets_a_transcript_of_its_own() {
     );
 
     // Another harness is told what it reported, not what it called.
-    let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
+    let bridge = app
+        .controller
+        .conversation
+        .transcript
+        .bridge_text(0, 10_000)
+        .unwrap();
     assert!(bridge.contains("[tool Agent look around → completed] found it"));
     assert!(!bridge.contains("[tool Read"));
 
@@ -145,7 +153,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     assert!(!app.is_generating);
     assert_eq!(app.subagents.len(), 1);
     assert_eq!(spawn_block(&app, "spawn").status, None);
-    let main = kinds(&app.transcript.blocks);
+    let main = kinds(&app.controller.conversation.transcript.blocks);
 
     app.on_event(sub("spawn", AgentEvent::ThinkingDelta("hm".into())));
     app.on_event(sub("spawn", AgentEvent::TextDelta("Looking.".into())));
@@ -173,7 +181,7 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
 
     // All of it is in the subagent's transcript, the report (once) last,
     // and none of it in the main one.
-    assert_eq!(kinds(&app.transcript.blocks), main);
+    assert_eq!(kinds(&app.controller.conversation.transcript.blocks), main);
     let run = spawn_block(&app, "spawn");
     assert_eq!(run.status, Some(SubagentStatus::Completed));
     let log = kinds(&run.log.blocks);
@@ -191,7 +199,11 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     assert_eq!(run.report(), "The word is alpha.");
 
     // Its end was saved though no turn was running, and comes back.
-    let saved = app.store.load(&app.conversation.id).unwrap();
+    let saved = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     let back = Transcript::from_records(&saved.blocks);
     assert_eq!(kinds(&back.blocks), main);
     let restored = back.agent("spawn").unwrap();
@@ -200,7 +212,12 @@ fn a_background_subagent_outlives_its_call_and_its_turn() {
     assert_eq!(restored.kind.as_deref(), Some("Explore"));
 
     // Another harness is told what the subagent reported, not the receipt.
-    let bridge = app.transcript.bridge_text(0, 10_000).unwrap();
+    let bridge = app
+        .controller
+        .conversation
+        .transcript
+        .bridge_text(0, 10_000)
+        .unwrap();
     assert!(bridge.contains("completed] The word is alpha."));
     assert!(!bridge.contains("launched"));
 
@@ -321,7 +338,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
         ["tool:s1", "tool:deep"]
     );
     assert_eq!(kinds(&spawn_block(&app, "deep").log.blocks), ["tool:d1"]);
-    let main = kinds(&app.transcript.blocks);
+    let main = kinds(&app.controller.conversation.transcript.blocks);
     assert_eq!(kinds(app.shown_blocks()), main);
 
     // The picker lists them all, finished or not, and starts on the
@@ -442,7 +459,9 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
     use crate::harness::claude::parse::ClaudeParser;
     use crate::harness::codex::app_server_parse::CodexAppServerParser;
     let reports = |app: &App| -> Vec<(Option<SubagentStatus>, String)> {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .agents()
             .into_iter()
             .map(|(_, a, _)| (a.status, a.report().to_string()))
@@ -472,9 +491,11 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
             .filter(|k| k.starts_with("tool:"))
             .count()
     };
-    assert_eq!(tools(&app.transcript.blocks), 3);
+    assert_eq!(tools(&app.controller.conversation.transcript.blocks), 3);
     assert!(
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .agents()
             .iter()
             .all(|(_, a, _)| tools(&a.log.blocks) == 1)
@@ -523,7 +544,7 @@ fn recorded_subagent_sessions_end_with_every_report_in_place() {
         |l| p.feed(l),
     );
     assert!(app.subagents.is_empty() && !app.is_generating);
-    let runs = app.transcript.agents();
+    let runs = app.controller.conversation.transcript.agents();
     assert_eq!(runs.len(), 2);
     assert!(runs.iter().all(|(_, run, _)| run.duration.is_some()));
     assert_eq!((runs[0].1.status, runs[0].1.report()), (done, "waiting"));
@@ -659,9 +680,9 @@ fn a_subagent_whose_end_is_never_told_holds_nothing_back() {
     // And /clear.
     let (mut app, _cwd) = vibe_app();
     vibe_with_unseen_child(&mut app);
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_ne!(app.conversation.id, id);
+    assert_ne!(app.controller.conversation.record.id, id);
     assert!(app.subagents.is_empty() && app.subagent_rows().is_empty());
 
     // And a provider change.
@@ -715,9 +736,9 @@ fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     assert!(app.is_busy());
     assert_eq!(app.subagents_label().as_deref(), Some("1 subagent running"));
 
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     assert!(
         notices(&app)
             .last()
@@ -757,9 +778,9 @@ fn a_subagent_whose_end_is_told_holds_back_what_would_end_the_session() {
     app.on_event(AgentEvent::TurnCompleted {
         stop_reason: StopReason::Done,
     });
-    let id = app.conversation.id.clone();
+    let id = app.controller.conversation.record.id.clone();
     app.handle_slash_command("/clear");
-    assert_eq!(app.conversation.id, id);
+    assert_eq!(app.controller.conversation.record.id, id);
     let refused = notices(&app).last().unwrap().clone();
     assert!(
         refused.ends_with("wait for them before clearing") && !refused.contains("Ctrl+S"),

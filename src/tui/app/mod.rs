@@ -12,26 +12,27 @@ use ratatui::text::Line;
 use super::history::PromptHistory;
 use super::modal::{HarnessOption, Modal};
 use super::selection::{Point, RowCopy, Selection};
-// The files below, and their tests, reach these through this module
-// (`super::transcript`, `super::shell`, ...), as when they were one file.
-use super::transcript::{self, Transcript, tool_summary};
-use super::{bridge, herdr, markdown, shell};
+use super::{herdr, markdown};
 use crate::config::{BridgeSummary, Config};
 use crate::core::checkpoints::Checkpoints;
-use crate::core::controller::{Controller, Launch};
+use crate::core::controller::{Controller, Keeping, Launch};
 use crate::core::conversations::{
-    CheckpointRecord, ContextWindows, Conversation, ConversationStore, TurnAnchorRecord,
-    default_context_windows_path, load_context_windows,
+    ContextWindows, Conversation, ConversationStore, default_context_windows_path,
+    load_context_windows,
 };
 use crate::core::guard::Watch;
 use crate::core::registry::Registry;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxSetup};
 use crate::core::{
-    AgentEvent, Attachment, ContextUsage, HarnessCommand, HarnessId, PermissionPolicy,
-    PermissionRequest, PlanEntry, ProviderId, RateLimitInfo, Rules, SessionCommand, StopReason,
-    Usage,
+    AgentEvent, Attachment, HarnessCommand, HarnessId, PermissionPolicy, PermissionRequest,
+    ProviderId, RateLimitInfo, Rules, SessionCommand, StopReason,
 };
 use crate::harness::ModelInfo;
+
+// The files below, and their tests, reach these through this module
+// (`super::transcript`, `super::shell`, ...), as when they were one file.
+use crate::core::transcript::{self, tool_summary};
+use crate::core::{bridge, shell};
 
 mod accessors;
 mod choices;
@@ -273,7 +274,6 @@ pub struct App {
     /// The picker the user asked for, opened when its list arrives.
     open_when_listed: Option<ListRequest>,
 
-    pub transcript: Transcript,
     /// The bridge's budget, when the user set one.
     pub bridge_max_chars: Option<usize>,
     bridge_summary: BridgeSummary,
@@ -281,10 +281,6 @@ pub struct App {
     context_windows: ContextWindows,
     context_windows_path: PathBuf,
     handoff: Option<Handoff>,
-    /// Transcript length when each harness was last active (bridge start).
-    last_active_index: HashMap<HarnessId, usize>,
-    /// Session ids seen this run (or chosen via /resume), per harness.
-    pub session_ids: HashMap<HarnessId, String>,
     pub session_alive: bool,
     /// The vendor's remote control the user put the active harness's
     /// session on (`/remote-control`). It outlives the harness's process:
@@ -305,10 +301,6 @@ pub struct App {
     /// to be gone (`tui::Ending`): what would start another is refused
     /// meanwhile, as during a turn.
     pub start_held: bool,
-    pub store: ConversationStore,
-    pub conversation: Conversation,
-    persist_failed: bool,
-    first_prompt: Option<String>,
 
     pub input: String,
     /// Char index into `input`.
@@ -346,17 +338,11 @@ pub struct App {
 
     pub is_generating: bool,
     pub generation_start: Option<Instant>,
-    pub generation_duration: Option<Duration>,
     /// When the running turn was asked to stop, and whether the user has
     /// been told it has not yet.
     interrupted: Option<(Instant, bool)>,
     pub spinner_frame: usize,
-    pub turn_usage: Usage,
-    pub session_usage: Usage,
-    /// Context-window fill of the active harness's session.
-    pub context: ContextUsage,
     pub rate_limit: Option<RateLimitInfo>,
-    pub plan: Vec<PlanEntry>,
     pub show_plan: bool,
     /// Subagents at work, oldest first. They can outlive the turn that
     /// started them.
@@ -370,23 +356,6 @@ pub struct App {
     main_scroll: (u16, bool),
     /// Images that go out with the next prompt.
     pub attachments: Vec<Attachment>,
-    /// Where each harness can rewind its session to (see `TurnAnchor`).
-    anchors: Vec<TurnAnchorRecord>,
-    /// Harnesses whose stored session id must be branched, not reattached
-    /// (set by `/fork` until the branch exists).
-    fork_pending: HashSet<HarnessId>,
-    /// File checkpoints of the workspace; `None` outside a git repository
-    /// or when switched off.
-    checkpoints: Option<Checkpoints>,
-    file_checkpoints: Vec<CheckpointRecord>,
-    checkpoint_failed: bool,
-    /// The tree as it was before the last file restore, for `/undo-restore`.
-    restore_undo: Option<String>,
-    restore_seq: usize,
-    /// User blocks whose anchor has not arrived yet, oldest first. A harness
-    /// that can rewind reports one anchor per turn, in order, but not
-    /// always before the next turn starts (pi lists it after the turn).
-    anchor_pending: VecDeque<usize>,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
     /// The `!` command running now.
@@ -612,19 +581,6 @@ impl App {
             });
         }
 
-        let controller = Controller::new(
-            registry,
-            &config,
-            Launch {
-                harness: init.harness,
-                policy: init.policy,
-                provider: init.provider,
-                model: init.model,
-                effort: init.effort,
-                default_providers: init.default_providers,
-            },
-        );
-
         let store = ConversationStore::open(init.workspace_root.as_deref(), &init.cwd);
         let history = PromptHistory::load(store.history_path());
         let mut resume_error: Option<String> = None;
@@ -645,28 +601,6 @@ impl App {
                 },
             }
         }
-        let resumed = loaded.is_some();
-        let conversation = loaded.unwrap_or_else(|| Conversation::new(init.harness));
-        let active = if resumed
-            && !init.harness_explicit
-            && controller
-                .registry()
-                .get(conversation.active_harness)
-                .is_some()
-        {
-            conversation.active_harness
-        } else {
-            init.harness
-        };
-        let session_ids = conversation.sessions.clone();
-        let last_active_index = conversation.bookmarks.clone();
-        let transcript = Transcript::from_records(&conversation.blocks);
-        let session_usage = conversation.usage.get(&active).cloned().unwrap_or_default();
-        let first_prompt = (!conversation.title.is_empty()).then(|| conversation.title.clone());
-        let plan = conversation.plan.clone();
-        let anchors = conversation.anchors.clone();
-        let file_checkpoints = conversation.checkpoints.clone();
-        let fork_pending: HashSet<HarnessId> = conversation.fork_pending.iter().copied().collect();
         let checkpoints = if config.file_checkpoints.unwrap_or(true) {
             let store = init
                 .checkpoint_store
@@ -676,6 +610,37 @@ impl App {
                 .and_then(|root| Checkpoints::open_in(root, &store))
         } else {
             None
+        };
+        let mut controller = Controller::new(
+            registry,
+            &config,
+            Launch {
+                harness: init.harness,
+                policy: init.policy,
+                provider: init.provider,
+                model: init.model,
+                effort: init.effort,
+                default_providers: init.default_providers,
+            },
+            Keeping { store, checkpoints },
+        );
+        let resumed = loaded.is_some();
+        let active = match loaded {
+            Some(conversation) => {
+                let active = if !init.harness_explicit
+                    && controller
+                        .registry()
+                        .get(conversation.active_harness)
+                        .is_some()
+                {
+                    conversation.active_harness
+                } else {
+                    init.harness
+                };
+                controller.install(conversation, active);
+                active
+            }
+            None => init.harness,
         };
 
         let git_branch = init.workspace_root.as_deref().and_then(git_branch);
@@ -702,19 +667,12 @@ impl App {
             lists_failed: HashSet::new(),
             list_jobs: Vec::new(),
             open_when_listed: None,
-            transcript,
-            last_active_index,
-            session_ids,
             session_alive: false,
             remote: None,
             session_blank: false,
             blank_session: None,
             idle_start_paused: false,
             start_held: false,
-            store,
-            conversation,
-            persist_failed: false,
-            first_prompt,
             input: String::new(),
             cursor: 0,
             prompt_width: 78,
@@ -733,28 +691,15 @@ impl App {
             auto_scroll: true,
             is_generating: false,
             generation_start: None,
-            generation_duration: None,
             interrupted: None,
             spinner_frame: 0,
-            turn_usage: Usage::default(),
-            session_usage,
-            context: ContextUsage::default(),
             rate_limit: None,
-            plan,
             show_plan: true,
             subagents: Vec::new(),
             subagent_focus: None,
             viewing: None,
             main_scroll: (0, true),
             attachments: Vec::new(),
-            anchors,
-            fork_pending,
-            checkpoints,
-            file_checkpoints,
-            checkpoint_failed: false,
-            restore_undo: None,
-            restore_seq: 0,
-            anchor_pending: VecDeque::new(),
             queued: VecDeque::new(),
             shell: None,
             compacting: false,
@@ -777,29 +722,30 @@ impl App {
         };
 
         if resumed {
-            app.take_conversation_choices();
+            app.controller.take_conversation_choices(&app.config);
         }
-        app.transcript.push_system(format!(
+        app.controller.conversation.transcript.push_system(format!(
             "Welcome to unharness. Harness: {}  Policy: {}  Sandbox: {}. Ctrl+H harness, Ctrl+M model, Ctrl+E effort, Ctrl+P policy, /sandbox, /help.",
             app.display_name(),
             app.policy_label(),
             app.sandbox_level().0
         ));
         if let Some(w) = app.policy_warning() {
-            app.transcript.push_notice(w);
+            app.controller.conversation.transcript.push_notice(w);
         }
         app.require_policy();
         if let Some(w) = app.sandbox_level().1 {
-            app.transcript.push_notice(w);
+            app.controller.conversation.transcript.push_notice(w);
         }
         for problem in app.config.mcp_servers().1 {
-            app.transcript.push_notice(problem);
+            app.controller.conversation.transcript.push_notice(problem);
         }
         if let Some(e) = resume_error {
-            app.transcript.push_error(e);
+            app.controller.conversation.transcript.push_error(e);
         }
         if resumed {
-            app.announce_resume(true);
+            app.controller
+                .announce_resume(&app.config, app.active, true);
         }
         app
     }
@@ -825,30 +771,46 @@ impl App {
                     self.start_generation();
                 }
             }
-            AgentEvent::TextDelta(t) => self.transcript.append_assistant(&sender, &t),
-            AgentEvent::ThinkingDelta(t) => self.transcript.append_thought(&t),
-            AgentEvent::ToolCallStarted { id, name, input } => {
-                self.transcript.tool_started(&id, &name, input)
+            AgentEvent::TextDelta(t) => self
+                .controller
+                .conversation
+                .transcript
+                .append_assistant(&sender, &t),
+            AgentEvent::ThinkingDelta(t) => {
+                self.controller.conversation.transcript.append_thought(&t)
             }
+            AgentEvent::ToolCallStarted { id, name, input } => self
+                .controller
+                .conversation
+                .transcript
+                .tool_started(&id, &name, input),
             // Live output. Streaming args arrive before the block exists and
             // are dropped there; ToolCallStarted carries the final input.
-            AgentEvent::ToolCallDelta { id, delta, .. } => self.transcript.tool_delta(&id, &delta),
+            AgentEvent::ToolCallDelta { id, delta, .. } => self
+                .controller
+                .conversation
+                .transcript
+                .tool_delta(&id, &delta),
             AgentEvent::ToolCallResult {
                 id,
                 output,
                 is_error,
-            } => self.transcript.tool_result(&id, &output, is_error),
+            } => self
+                .controller
+                .conversation
+                .transcript
+                .tool_result(&id, &output, is_error),
             AgentEvent::PermissionRequest(req) => self.on_permission_request(req),
             AgentEvent::PermissionWithdrawn { id } => self.withdraw_prompt(&id),
             AgentEvent::Usage(u) => {
                 if u.cumulative {
-                    self.session_usage = u;
+                    self.controller.conversation.session_usage = u;
                 } else {
-                    self.session_usage.add(&u);
-                    self.turn_usage = u;
+                    self.controller.conversation.session_usage.add(&u);
+                    self.controller.conversation.turn_usage = u;
                 }
             }
-            AgentEvent::PlanUpdated { entries, .. } => self.plan = entries,
+            AgentEvent::PlanUpdated { entries, .. } => self.controller.conversation.plan = entries,
             // What a subagent does goes into its own transcript, not this
             // one: several at work would otherwise drown the main agent.
             AgentEvent::Sub { parent, event } => match *event {
@@ -874,12 +836,15 @@ impl App {
                         }
                     }
                     let sender = self
+                        .controller
+                        .conversation
                         .transcript
                         .agent(&parent)
                         .map_or("subagent", |run| run.sender())
                         .to_string();
                     // Nothing known of the call that spawned it: nowhere to put it.
-                    let Some(log) = self.transcript.agent_log(&parent) else {
+                    let Some(log) = self.controller.conversation.transcript.agent_log(&parent)
+                    else {
                         return;
                     };
                     match ev {
@@ -907,8 +872,11 @@ impl App {
                 kind,
                 unreported_end,
             } => {
-                self.transcript
-                    .agent_started(&id, &description, kind.as_deref());
+                self.controller.conversation.transcript.agent_started(
+                    &id,
+                    &description,
+                    kind.as_deref(),
+                );
                 self.subagents.retain(|a| a.id != id);
                 self.subagents.push(RunningSubagent {
                     id,
@@ -928,7 +896,10 @@ impl App {
                 }
             }
             AgentEvent::SubagentEnded { id, status, result } => {
-                self.transcript.agent_ended(&id, status, result.as_deref());
+                self.controller
+                    .conversation
+                    .transcript
+                    .agent_ended(&id, status, result.as_deref());
                 self.subagents.retain(|a| a.id != id);
                 // Between turns nothing else would save its report.
                 if !self.is_generating {
@@ -939,13 +910,15 @@ impl App {
                 if let Some(window) = c.window {
                     self.learn_context_window(window);
                 }
-                self.context.merge(c);
+                self.controller.conversation.context.merge(c);
             }
             AgentEvent::RateLimit(r) => {
                 // Warn once each time a window crosses the threshold.
                 let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
                 if !was_high && rate_limit_high(&r) {
-                    self.transcript
+                    self.controller
+                        .conversation
+                        .transcript
                         .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
                 }
                 self.rate_limit = Some(r);
@@ -954,35 +927,25 @@ impl App {
                 let name = self.short_name();
                 if self.is_generating {
                     // The edited prompt is already running in the old session.
-                    self.transcript.push_error(format!(
+                    self.controller.conversation.transcript.push_error(format!(
                         "{name} could not rewind its session ({reason}): it still remembers the turns you removed"
                     ));
                 } else {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "{name} could not rewind its session ({reason}); it will start a fresh one with the conversation so far"
                     ));
                     self.forget_session(self.active);
                     self.persist();
                 }
             }
-            // An empty id means the turn never reached the harness.
-            AgentEvent::TurnAnchor { id } => {
-                if let Some(block) = self.anchor_pending.pop_front()
-                    && !id.is_empty()
-                {
-                    let harness = self.active;
-                    self.anchors
-                        .retain(|a| !(a.block == block && a.harness == harness));
-                    self.anchors.push(TurnAnchorRecord { block, harness, id });
-                }
-            }
+            AgentEvent::TurnAnchor { id } => self.controller.turn_anchor(self.active, id),
             AgentEvent::PolicyChanged(p) => self.on_policy_changed(p),
             AgentEvent::CapabilitiesChanged(update) => {
                 let report =
                     self.controller
                         .report(&self.config, self.active, update, self.session_alive);
                 for notice in report.notices {
-                    self.transcript.push_notice(notice);
+                    self.controller.conversation.transcript.push_notice(notice);
                 }
                 if report.commands {
                     self.commands_arrived();
@@ -997,7 +960,7 @@ impl App {
                 // A session started early failed before anything was sent
                 // to it (Codex's thread, an ACP agent's session/new): a
                 // prompt would wait on it for good.
-                self.transcript.push_error(e);
+                self.controller.conversation.transcript.push_error(e);
                 self.shutdown_session();
                 self.idle_start_paused = true;
             }
@@ -1005,13 +968,17 @@ impl App {
                 let done = stop_reason == StopReason::Done;
                 // A hook or a call of a turn cut short is not reported on.
                 if !done {
-                    self.transcript.end_turn_hooks();
-                    self.transcript.end_turn_calls();
+                    self.controller.conversation.transcript.end_turn_hooks();
+                    self.controller.conversation.transcript.end_turn_calls();
                 }
                 match stop_reason {
                     StopReason::Done => {}
-                    StopReason::Interrupted => self.transcript.push_system("Turn interrupted."),
-                    StopReason::Error(e) => self.transcript.push_error(e),
+                    StopReason::Interrupted => self
+                        .controller
+                        .conversation
+                        .transcript
+                        .push_system("Turn interrupted."),
+                    StopReason::Error(e) => self.controller.conversation.transcript.push_error(e),
                 }
                 self.check_guard();
                 self.finish_generation();
@@ -1024,30 +991,38 @@ impl App {
                 if done && !held {
                     self.send_next_queued();
                 } else if !self.queued.is_empty() {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "{} queued prompt(s) held; press Enter to send the next",
                         self.queued.len()
                     ));
                 }
             }
-            AgentEvent::HookStarted { id, name } => self.transcript.hook_started(&id, &name),
+            AgentEvent::HookStarted { id, name } => self
+                .controller
+                .conversation
+                .transcript
+                .hook_started(&id, &name),
             AgentEvent::HookEnded {
                 id,
                 name,
                 outcome,
                 output,
-            } => self.transcript.hook_ended(&id, &name, outcome, &output),
+            } => self
+                .controller
+                .conversation
+                .transcript
+                .hook_ended(&id, &name, outcome, &output),
             AgentEvent::RemoteControl(r) => self.on_remote_control(r),
             AgentEvent::RemotePrompt { text } => self.remote_prompt(text),
-            AgentEvent::Notice(n) => self.transcript.push_notice(n),
-            AgentEvent::Error(e) => self.transcript.push_error(e),
+            AgentEvent::Notice(n) => self.controller.conversation.transcript.push_notice(n),
+            AgentEvent::Error(e) => self.controller.conversation.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
                 self.session_alive = false;
                 // A choice it was sent will not be answered.
                 self.choice_unanswered();
                 self.forget_refusals();
                 if self.session_blank {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "{} exited{} before any prompt; your next prompt starts it again",
                         self.short_name(),
                         code.map(|c| format!(" with code {c}")).unwrap_or_default()
@@ -1058,7 +1033,7 @@ impl App {
                 // It is not started again until the user does something.
                 self.idle_start_paused = true;
                 if self.remote.is_some() {
-                    self.transcript.push_notice(format!(
+                    self.controller.conversation.transcript.push_notice(format!(
                         "Remote Control is paused until {} runs again (your next prompt)",
                         self.short_name()
                     ));
@@ -1066,10 +1041,10 @@ impl App {
                 self.drop_subagents();
                 self.check_guard();
                 self.process_gone();
-                self.transcript.end_running_tools();
+                self.controller.conversation.transcript.end_running_tools();
                 if self.is_generating {
                     self.finish_generation();
-                    self.transcript.push_error(format!(
+                    self.controller.conversation.transcript.push_error(format!(
                         "{} exited{} before the turn completed",
                         self.short_name(),
                         code.map(|c| format!(" with code {c}")).unwrap_or_default()

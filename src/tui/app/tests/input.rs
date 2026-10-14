@@ -22,7 +22,7 @@ fn attachments_go_out_with_the_next_prompt() {
     });
     assert_eq!(sent.unwrap()[0].label(), "my shot.png");
     assert!(matches!(
-        app.transcript.blocks.last(),
+        app.controller.conversation.transcript.blocks.last(),
         Some(super::super::transcript::Block::User { text }) if text.ends_with("[image: my shot.png]")
     ));
 
@@ -46,7 +46,7 @@ fn files_are_attached_where_the_harness_takes_them() {
     });
     assert_eq!(sent.unwrap()[0].mime(), "text/plain");
     assert!(matches!(
-        app.transcript.blocks.last(),
+        app.controller.conversation.transcript.blocks.last(),
         Some(super::super::transcript::Block::User { text }) if text.ends_with("[file: notes.txt]")
     ));
 
@@ -115,6 +115,8 @@ fn dropped_files_are_attached_instead_of_pasted() {
     assert_eq!(labels(&app), ["my shot.png"]);
     assert_eq!(app.input, format!("{notes} {binary}"));
     let notices: Vec<&str> = app
+        .controller
+        .conversation
         .transcript
         .blocks
         .iter()
@@ -166,7 +168,7 @@ fn clipboard_images_are_saved_and_attached() {
     app.attach_pasted(Err(anyhow::anyhow!("over ssh …")), &dir);
     assert_eq!(app.attachments.len(), 2);
     assert!(matches!(
-        app.transcript.blocks.last(),
+        app.controller.conversation.transcript.blocks.last(),
         Some(super::super::transcript::Block::Error(text)) if text == "not pasted: over ssh …"
     ));
 

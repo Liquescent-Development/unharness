@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::{App, CodeRows, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
-    sanitize, wrap_words, wrap_words_joined, written_lines,
+    wrap_words, wrap_words_joined, written_lines,
 };
 use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
@@ -25,13 +25,14 @@ use super::modal::{
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
-use super::transcript::{
-    Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
-    tool_summary, tool_summary_full, truncate_chars, waits_on_user,
-};
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
 use crate::core::rules::Scope;
+use crate::core::text::sanitize;
+use crate::core::transcript::{
+    Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
+    tool_summary, tool_summary_full, truncate_chars, waits_on_user,
+};
 use crate::core::{
     HarnessId, HookOutcome, PermissionKind, PermissionPolicy, PlanStatus, SubagentStatus,
 };
@@ -183,28 +184,42 @@ fn subagent_list_lines(app: &App) -> Vec<Line<'static>> {
 /// Lines pinned between the transcript and the prompt.
 fn pinned_lines(app: &App) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    if app.show_plan && !app.plan.is_empty() {
+    if app.show_plan && !app.controller.conversation.plan.is_empty() {
         // When the plan is long, start at the first unfinished step.
         let first_open = app
+            .controller
+            .conversation
             .plan
             .iter()
             .position(|e| e.status != PlanStatus::Completed)
             .unwrap_or(0);
-        let start = if app.plan.len() > PLAN_ROWS {
-            first_open.min(app.plan.len() - PLAN_ROWS)
+        let start = if app.controller.conversation.plan.len() > PLAN_ROWS {
+            first_open.min(app.controller.conversation.plan.len() - PLAN_ROWS)
         } else {
             0
         };
         let done = app
+            .controller
+            .conversation
             .plan
             .iter()
             .filter(|e| e.status == PlanStatus::Completed)
             .count();
         lines.push(Line::from(Span::styled(
-            format!("  Plan · {done}/{} done", app.plan.len()),
+            format!(
+                "  Plan · {done}/{} done",
+                app.controller.conversation.plan.len()
+            ),
             Style::default().fg(Color::DarkGray),
         )));
-        for entry in app.plan.iter().skip(start).take(PLAN_ROWS) {
+        for entry in app
+            .controller
+            .conversation
+            .plan
+            .iter()
+            .skip(start)
+            .take(PLAN_ROWS)
+        {
             let style = match entry.status {
                 PlanStatus::Completed => Style::default().fg(Color::DarkGray),
                 PlanStatus::InProgress => Style::default()
@@ -1414,7 +1429,7 @@ fn render_bottom(
         )
     } else if app.awaiting_answer() {
         Span::styled(" Waiting for you ", Style::default().fg(Color::Cyan))
-    } else if let Some(d) = app.generation_duration {
+    } else if let Some(d) = app.controller.conversation.generation_duration {
         Span::styled(
             format!(" Ready · last turn {:.1}s ", d.as_secs_f32()),
             Style::default().fg(Color::DarkGray),
@@ -1554,8 +1569,8 @@ fn render_bottom(
     render_split(frame, rows[4], left1, right1, true);
 
     // Line 2: usage (left) · session id (right)
-    let t = &app.turn_usage;
-    let s = &app.session_usage;
+    let t = &app.controller.conversation.turn_usage;
+    let s = &app.controller.conversation.session_usage;
     let mut usage = format!(
         "↑{} ↓{} · session {}",
         fmt_tokens(t.input + t.cache_read + t.cache_write),
@@ -1565,24 +1580,28 @@ fn render_bottom(
     if let Some(c) = s.cost_usd {
         usage.push_str(&format!(" · ${c:.2}"));
     }
-    if let Some(pct) = app.context.percent() {
+    if let Some(pct) = app.controller.conversation.context.percent() {
         usage.push_str(&format!(" · ctx {pct}%"));
     }
     let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
     let right2 = Line::from(Span::styled(
-        app.session_ids
+        app.controller
+            .conversation
+            .session_ids
             .get(&app.active)
             .map(|id| {
                 format!(
                     "conv {} · session {}",
-                    &app.conversation.id[..8.min(app.conversation.id.len())],
+                    &app.controller.conversation.record.id
+                        [..8.min(app.controller.conversation.record.id.len())],
                     truncate_chars(id, 12)
                 )
             })
             .unwrap_or_else(|| {
                 format!(
                     "conv {}",
-                    &app.conversation.id[..8.min(app.conversation.id.len())]
+                    &app.controller.conversation.record.id
+                        [..8.min(app.controller.conversation.record.id.len())]
                 )
             }),
         Style::default().fg(Color::DarkGray),
@@ -2102,7 +2121,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                             .join(", "),
                         truncate_chars(&r.title, 50)
                     ),
-                    r.id == app.conversation.id,
+                    r.id == app.controller.conversation.record.id,
                 )
             }),
         ),
@@ -3357,9 +3376,14 @@ mod tests {
         let left = MouseButton::Left;
 
         let mut app = test_app(HarnessId::CLAUDE);
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .push_user("open src/tui/app.rs please".to_string());
-        app.transcript.push_user("second prompt".to_string());
+        app.controller
+            .conversation
+            .transcript
+            .push_user("second prompt".to_string());
         let (rows, _) = screen(&mut app, 80, 24);
         let y = rows.iter().position(|r| r.contains("open src")).unwrap() as u16;
         let x = rows[y as usize].find("open").unwrap() as u16 - 2; // "│" is 3 bytes, 1 cell
@@ -3693,8 +3717,14 @@ mod tests {
         });
         app.on_event(E::ThinkingDelta("hmm".into()));
         app.on_event(E::TextDelta("Done.".into()));
-        app.transcript.push_notice("a notice");
-        app.transcript.push_system("a system line");
+        app.controller
+            .conversation
+            .transcript
+            .push_notice("a notice");
+        app.controller
+            .conversation
+            .transcript
+            .push_system("a system line");
         screen(&mut app, 80, 50);
         let lines = app.transcript_view.lines.clone();
         let text = lines.join("\n");
@@ -3746,10 +3776,15 @@ mod tests {
             app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
         };
         let collapsed = |app: &App| {
-            app.transcript.blocks.iter().find_map(|b| match b {
-                TBlock::Tool { id, collapsed, .. } if id == "t1" => Some(*collapsed),
-                _ => None,
-            })
+            app.controller
+                .conversation
+                .transcript
+                .blocks
+                .iter()
+                .find_map(|b| match b {
+                    TBlock::Tool { id, collapsed, .. } if id == "t1" => Some(*collapsed),
+                    _ => None,
+                })
         };
         let before = collapsed(&app);
         click(&mut app, row(t1 - 1));
@@ -4023,7 +4058,10 @@ mod tests {
         assert!(!rows.iter().any(|r| r.contains('█') || r.contains("Jump")));
 
         for i in 0..40 {
-            app.transcript.push_user(format!("prompt number {i}"));
+            app.controller
+                .conversation
+                .transcript
+                .push_user(format!("prompt number {i}"));
         }
         let (rows, _) = screen(&mut app, 60, 20);
         let bar = app.transcript_view.scrollbar.unwrap();
@@ -4136,7 +4174,10 @@ mod tests {
         app.on_event(crate::core::AgentEvent::TextDelta("Some **text**".into()));
         check(&mut app, 70, "first frame");
         let kept_blocks = app.transcript_view.blocks.clone();
-        assert_eq!(kept_blocks.len(), app.transcript.blocks.len());
+        assert_eq!(
+            kept_blocks.len(),
+            app.controller.conversation.transcript.blocks.len()
+        );
 
         // Nothing changed: every block is reused as it is.
         screen(&mut app, 70, 30);
@@ -4158,6 +4199,8 @@ mod tests {
         });
         check(&mut app, 70, "second tool and turn end");
         if let Some(TBlock::Tool { collapsed, .. }) = app
+            .controller
+            .conversation
             .transcript
             .blocks
             .iter_mut()
@@ -4235,7 +4278,7 @@ mod tests {
         check(&mut app, 70, "back from the subagent");
         assert_eq!(
             app.transcript_view.blocks.len(),
-            app.transcript.blocks.len()
+            app.controller.conversation.transcript.blocks.len()
         );
 
         // A new width lays everything out again.
@@ -4243,13 +4286,13 @@ mod tests {
         check(&mut app, 90, "wider");
 
         // Blocks removed from the end, and all of them.
-        app.transcript.blocks.truncate(2);
+        app.controller.conversation.transcript.blocks.truncate(2);
         check(&mut app, 90, "truncated");
         assert_eq!(app.transcript_view.blocks.len(), 2);
-        app.transcript.clear();
+        app.controller.conversation.transcript.clear();
         check(&mut app, 90, "cleared");
         assert!(app.transcript_view.lines.is_empty());
-        app.transcript.push_user("again");
+        app.controller.conversation.transcript.push_user("again");
         check(&mut app, 90, "after clear");
     }
 
@@ -4263,7 +4306,9 @@ mod tests {
             name: "AskUserQuestion".into(),
             input: serde_json::json!({"questions": []}),
         });
-        if let Some(TBlock::Tool { started, .. }) = app.transcript.blocks.last_mut() {
+        if let Some(TBlock::Tool { started, .. }) =
+            app.controller.conversation.transcript.blocks.last_mut()
+        {
             *started = std::time::Instant::now() - std::time::Duration::from_secs(90);
         }
         let (rows, _) = screen(&mut app, 80, 30);
@@ -4290,7 +4335,10 @@ mod tests {
     #[test]
     fn a_running_row_cut_to_the_width_still_turns() {
         let mut app = test_app(HarnessId::CLAUDE);
-        app.transcript.shell_started("sleep 5");
+        app.controller
+            .conversation
+            .transcript
+            .shell_started("sleep 5");
         // Too narrow for the whole status: the line is cut, and the cut
         // line is what is drawn again.
         let (rows, _) = screen(&mut app, 18, 20);
@@ -4330,8 +4378,14 @@ mod tests {
             name: "Bash".into(),
             input: serde_json::json!({"command": "sleep 20"}),
         });
-        app.transcript.shell_started("sleep 5");
-        app.transcript.push_notice("below them");
+        app.controller
+            .conversation
+            .transcript
+            .shell_started("sleep 5");
+        app.controller
+            .conversation
+            .transcript
+            .push_notice("below them");
         let (rows, _) = screen(&mut app, 80, 30);
         let text = rows.join("\n");
         assert!(text.contains("(Explore) ⠋ 0s"), "{text}");
@@ -4342,7 +4396,7 @@ mod tests {
         // Time passes and the spinner turns: each row says so, and none is
         // laid out again.
         let ago = std::time::Instant::now() - Duration::from_secs(12);
-        for b in &mut app.transcript.blocks {
+        for b in &mut app.controller.conversation.transcript.blocks {
             match b {
                 TBlock::Tool {
                     agent: Some(run), ..
@@ -4386,7 +4440,10 @@ mod tests {
             output: String::new(),
             is_error: false,
         });
-        app.transcript.shell_ended(ShellStatus::Exited { code: 0 });
+        app.controller
+            .conversation
+            .transcript
+            .shell_ended(ShellStatus::Exited { code: 0 });
         let (rows, _) = screen(&mut app, 80, 30);
         let text = rows.join("\n");
         assert!(
@@ -4517,7 +4574,7 @@ mod tests {
 
         // The subagent in view goes away with its conversation.
         app.open_subagent("a");
-        app.transcript.clear();
+        app.controller.conversation.transcript.clear();
         let (rows, _) = screen(&mut app, 100, 40);
         assert!(app.viewing.is_none() && rows[0].contains("┌ unharness ─"));
     }
@@ -4645,10 +4702,14 @@ mod tests {
         let rows = list(&mut app);
         assert!(rows[0].contains("Subagents · 5 done"), "{rows:#?}");
         assert!(rows[1].starts_with("❯ ") && rows[1].contains("task 4"));
-        assert!(app.transcript.agent("s5").is_some());
+        assert!(app.controller.conversation.transcript.agent("s5").is_some());
         // That it was taken off is saved with the conversation.
-        let saved = app.store.load(&app.conversation.id).unwrap();
-        let back = super::super::transcript::Transcript::from_records(&saved.blocks);
+        let saved = app
+            .controller
+            .store
+            .load(&app.controller.conversation.record.id)
+            .unwrap();
+        let back = crate::core::transcript::Transcript::from_records(&saved.blocks);
         assert_eq!(back.agents().len(), 6);
         assert_eq!(back.listed_agents().len(), 5);
 

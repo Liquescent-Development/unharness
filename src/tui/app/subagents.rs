@@ -3,8 +3,8 @@
 use super::{Action, App, SubagentOption, SubagentRow, TranscriptView};
 use crate::core::SessionCommand;
 use crate::core::controller::subagents_refusal;
+use crate::core::transcript::Transcript;
 use crate::tui::modal::{ListPicker, Modal};
-use crate::tui::transcript::Transcript;
 
 impl App {
     /// The subagents at work whose end the harness reports. Only these
@@ -32,7 +32,9 @@ impl App {
         if n == 0 {
             return false;
         }
-        self.transcript
+        self.controller
+            .conversation
+            .transcript
             .push_error(subagents_refusal(n, self.caps().subagents.stop, doing));
         true
     }
@@ -61,6 +63,8 @@ impl App {
     /// it off, so that what it did can still be read.
     pub fn subagent_rows(&self) -> Vec<SubagentRow> {
         let mut rows: Vec<SubagentRow> = self
+            .controller
+            .conversation
             .transcript
             .listed_agents()
             .into_iter()
@@ -136,7 +140,12 @@ impl App {
             }
             return;
         }
-        if let Some(run) = self.transcript.agent_mut(&rows[at].id) {
+        if let Some(run) = self
+            .controller
+            .conversation
+            .transcript
+            .agent_mut(&rows[at].id)
+        {
             run.dismissed = true;
         }
         self.persist();
@@ -160,6 +169,8 @@ impl App {
     /// Every subagent of the conversation, to choose one to look at.
     pub fn open_subagent_picker(&mut self) {
         let items: Vec<SubagentOption> = self
+            .controller
+            .conversation
             .transcript
             .agents()
             .into_iter()
@@ -172,7 +183,9 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            self.transcript
+            self.controller
+                .conversation
+                .transcript
                 .push_notice("no subagents in this conversation");
             return;
         }
@@ -190,7 +203,7 @@ impl App {
     /// Show the transcript of the subagent that the tool call `id` spawned
     /// in place of the main one.
     pub fn open_subagent(&mut self, id: &str) {
-        if self.transcript.agent(id).is_none() {
+        if self.controller.conversation.transcript.agent(id).is_none() {
             return;
         }
         if self.viewing.is_none() {
@@ -221,12 +234,17 @@ impl App {
 
     /// The subagent in view, if it still exists (a rewind may have removed it).
     pub fn viewed(&self) -> Option<&super::transcript::AgentRun> {
-        self.transcript.agent(self.viewing.as_deref()?)
+        self.controller
+            .conversation
+            .transcript
+            .agent(self.viewing.as_deref()?)
     }
 
     /// The next (or previous) subagent's transcript, round and round.
     pub fn view_next_subagent(&mut self, back: bool) {
         let ids: Vec<String> = self
+            .controller
+            .conversation
             .transcript
             .agents()
             .into_iter()
@@ -244,17 +262,23 @@ impl App {
     pub fn shown_blocks(&self) -> &[super::transcript::Block] {
         match self.viewed() {
             Some(run) => &run.log.blocks,
-            None => &self.transcript.blocks,
+            None => &self.controller.conversation.transcript.blocks,
         }
     }
 
     /// The transcript on screen, for expanding and collapsing its tool calls.
     pub fn shown_transcript_mut(&mut self) -> &mut Transcript {
         let id = self.viewing.clone().unwrap_or_default();
-        if self.transcript.agent(&id).is_some() {
-            return &mut self.transcript.agent_mut(&id).unwrap().log;
+        if self.controller.conversation.transcript.agent(&id).is_some() {
+            return &mut self
+                .controller
+                .conversation
+                .transcript
+                .agent_mut(&id)
+                .unwrap()
+                .log;
         }
-        &mut self.transcript
+        &mut self.controller.conversation.transcript
     }
 
     /// Stop the subagent in view.
@@ -279,6 +303,6 @@ impl App {
     /// The session is going away, and whatever its subagents were doing.
     pub(super) fn drop_subagents(&mut self) {
         self.subagents.clear();
-        self.transcript.end_running_agents();
+        self.controller.conversation.transcript.end_running_agents();
     }
 }

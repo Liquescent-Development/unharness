@@ -2,7 +2,6 @@
 //! the active harness session's event stream.
 
 pub mod app;
-pub mod bridge;
 pub mod clipboard;
 pub mod code;
 pub mod drop;
@@ -17,8 +16,6 @@ pub mod modal;
 pub mod prompt;
 pub mod rows;
 pub mod selection;
-pub mod shell;
-pub mod transcript;
 pub mod ui;
 
 use std::collections::{HashMap, VecDeque};
@@ -50,6 +47,7 @@ use crate::core::Rules;
 use crate::core::process::{LineProcess, RawLine};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
+use crate::core::shell;
 use crate::core::{
     HarnessId, McpServer, PermissionPolicy, SessionCommand, SessionConfig, SessionHandle,
 };
@@ -212,7 +210,7 @@ pub async fn run_tui(launch: TuiLaunch) -> Result<()> {
     restore_terminal()?;
     terminal.show_cursor()?;
 
-    if let Some(line) = app.exit_summary() {
+    if let Some(line) = app.controller.exit_summary() {
         println!("{line}");
     }
     res
@@ -599,7 +597,9 @@ async fn edit_prompt(
     ends: &mut crate::core::process::EndSignals,
 ) -> Result<()> {
     let Some(command) = editor::command() else {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .push_notice("set $EDITOR (or $VISUAL) to edit the prompt in an editor");
         return Ok(());
     };
@@ -609,11 +609,13 @@ async fn edit_prompt(
     terminal.clear()?;
     match edited {
         Ok(editor::Edited::Saved(text)) => app.set_input(&text),
-        Ok(editor::Edited::Failed) => app.transcript.push_notice(format!(
+        Ok(editor::Edited::Failed) => app.controller.conversation.transcript.push_notice(format!(
             "`{command}` exited with an error; prompt unchanged"
         )),
         Ok(editor::Edited::Stopped) => app.quit(),
         Err(e) => app
+            .controller
+            .conversation
             .transcript
             .push_error(format!("could not edit the prompt: {e:#}")),
     }
@@ -698,9 +700,9 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('p')) => app.open_policy_picker(),
         (true, KeyCode::Char('r')) => app.open_resume_picker(),
         (true, KeyCode::Char('o')) => {
-            app.transcript.toggle_last_tool();
+            app.controller.conversation.transcript.toggle_last_tool();
         }
-        (true, KeyCode::Char('t')) => app.transcript.toggle_all_tools(),
+        (true, KeyCode::Char('t')) => app.controller.conversation.transcript.toggle_all_tools(),
         (true, KeyCode::Char('s')) => app.open_subagent_picker(),
         (true, KeyCode::Char('a')) => app.move_cursor_home(),
         (true, KeyCode::Char('u')) => {
@@ -891,7 +893,7 @@ async fn run_actions(
                 // command typed here is confined no less than the agent.
                 let started = app
                     .session_sandbox()
-                    .and_then(|sandbox| self::shell::spawn(&command, &app.cwd, &sandbox));
+                    .and_then(|sandbox| shell::spawn(&command, &app.cwd, &sandbox));
                 match started {
                     Ok(p) => *shell = Some(p),
                     Err(e) => app.shell_failed(format!("{e:#}")),
@@ -943,7 +945,10 @@ async fn run_actions(
                 // After `prepare`, which may itself create a watched file.
                 app.arm_guard();
                 if let Ok(Some(note)) = &prepared {
-                    app.transcript.push_notice(note.clone());
+                    app.controller
+                        .conversation
+                        .transcript
+                        .push_notice(note.clone());
                 }
                 app.show_session_notice();
                 let mcp_servers = app.session_mcp_servers();
@@ -1013,7 +1018,7 @@ fn start_session(
         policy: app
             .effective_policy()
             .context("no permission policy is chosen")?,
-        fork: resume.is_some() && app.fork_pending(),
+        fork: resume.is_some() && app.controller.fork_pending(app.active),
         resume: if app.caps().resume_by_id {
             resume
         } else {
@@ -1030,6 +1035,7 @@ fn start_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::transcript;
     use crate::tui::app::tests::test_app;
 
     const NONE: KeyModifiers = KeyModifiers::NONE;
@@ -1479,7 +1485,10 @@ mod tests {
         let mut ending = Ending::new();
         let mut shell = None;
         app.session_alive = true;
-        app.session_ids.insert(HarnessId::CODEX, "thread-1".into());
+        app.controller
+            .conversation
+            .session_ids
+            .insert(HarnessId::CODEX, "thread-1".into());
         app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
         assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
         run_actions(&mut app, &mut session, &mut ending, &mut shell).await;
@@ -1569,8 +1578,8 @@ mod tests {
         // running: it would take the held start for its own.
         app.switch_harness(HarnessId::CLAUDE);
         assert_eq!(app.active, HarnessId::CODEX);
-        assert!(app.transcript.blocks.iter().any(
-            |b| matches!(b, crate::tui::transcript::Block::Error(e) if e.contains("still exiting"))
+        assert!(app.controller.conversation.transcript.blocks.iter().any(
+            |b| matches!(b, crate::core::transcript::Block::Error(e) if e.contains("still exiting"))
         ));
     }
 
@@ -1589,7 +1598,10 @@ mod tests {
         let mut ending = Ending::new();
         let mut shell = None;
         app.session_alive = true;
-        app.session_ids.insert(HarnessId::CODEX, "thread-1".into());
+        app.controller
+            .conversation
+            .session_ids
+            .insert(HarnessId::CODEX, "thread-1".into());
         app.session_sandbox_level = Some(crate::core::sandbox::SandboxLevel::ReadOnly);
         assert!(app.set_sandbox(crate::core::sandbox::SandboxLevel::Off));
         app.start_when_idle();
@@ -1625,7 +1637,9 @@ mod tests {
     }
 
     fn shell_block(app: &App) -> (String, crate::core::conversations::ShellStatus) {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .rev()
@@ -1723,7 +1737,7 @@ mod tests {
             sent[0]
         );
         // The transcript shows the prompt as typed.
-        assert!(app.transcript.blocks.iter().any(
+        assert!(app.controller.conversation.transcript.blocks.iter().any(
             |b| matches!(b, transcript::Block::User { text } if text == "what did it print?")
         ));
 
@@ -1737,7 +1751,7 @@ mod tests {
         assert_eq!(sent_turns(&mut app), vec!["and now?".to_string()]);
 
         // Saved with the conversation and back on resume, already sent.
-        let id = app.conversation.id.clone();
+        let id = app.controller.conversation.record.id.clone();
         app.persist();
         let back = crate::tui::app::tests::test_app_in(dir, HarnessId::CLAUDE, Some(id), false);
         assert_eq!(
@@ -1745,7 +1759,9 @@ mod tests {
             ("hi\nhere\n".into(), ShellStatus::Exited { code: 0 })
         );
         assert!(
-            back.transcript
+            back.controller
+                .conversation
+                .transcript
                 .blocks
                 .iter()
                 .any(|b| matches!(b, transcript::Block::Shell { sent: true, .. }))

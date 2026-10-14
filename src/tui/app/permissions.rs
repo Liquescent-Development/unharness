@@ -38,6 +38,8 @@ impl App {
         if let Route::Answered { decision, why } = router.route(&req) {
             match (why, &req.kind) {
                 (Why::Handoff, PermissionKind::ToolUse { tool, .. }) => self
+                    .controller
+                    .conversation
                     .transcript
                     .push_notice(format!("denied {tool}: a handoff summary uses no tools")),
                 (Why::Handoff, _) => {}
@@ -49,7 +51,7 @@ impl App {
                             format!("allowed by your rules for {}", rules.join(", and for "))
                         }
                     };
-                    self.transcript.push_notice(notice);
+                    self.controller.conversation.transcript.push_notice(notice);
                 }
             }
             self.actions
@@ -103,7 +105,7 @@ impl App {
     pub(super) fn withdraw_prompt(&mut self, id: &str) {
         if self.modal.as_ref().and_then(Modal::request_id) == Some(id) {
             self.modal = None;
-            self.transcript.push_notice(format!(
+            self.controller.conversation.transcript.push_notice(format!(
                 "{} stopped waiting for your answer",
                 self.short_name()
             ));
@@ -129,12 +131,12 @@ impl App {
             Scope::Global => "in every workspace",
         };
         match self.rules.append(scope, rules) {
-            Ok(path) => self.transcript.push_notice(format!(
+            Ok(path) => self.controller.conversation.transcript.push_notice(format!(
                 "from now on allowing {} {place} (see /allow; kept in {})",
                 what.join(", "),
                 path.display()
             )),
-            Err(e) => self.transcript.push_error(format!(
+            Err(e) => self.controller.conversation.transcript.push_error(format!(
                 "allowed this once, but the rule could not be saved: {e:#}"
             )),
         }

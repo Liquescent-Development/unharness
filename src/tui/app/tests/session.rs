@@ -35,10 +35,18 @@ fn a_session_in_place_of_one_not_resumed_is_told_the_conversation() {
     assert!(!sent.contains(&"x".repeat(600)), "{sent}");
     assert!(sent.ends_with("what was the task?"), "{sent}");
     assert_eq!(
-        app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CLAUDE)
+            .map(String::as_str),
         Some("claude-2")
     );
-    let saved = app.store.load(&app.conversation.id).unwrap();
+    let saved = app
+        .controller
+        .store
+        .load(&app.controller.conversation.record.id)
+        .unwrap();
     assert_eq!(
         saved.sessions.get(&HarnessId::CLAUDE).map(String::as_str),
         Some("claude-2")
@@ -50,9 +58,18 @@ fn a_session_in_place_of_one_not_resumed_is_told_the_conversation() {
 #[test]
 fn a_session_replaced_under_the_same_id_is_told_the_conversation() {
     let mut app = test_app(HarnessId::PI);
-    app.transcript.push_user("The code word is pineapple.");
-    app.transcript.append_assistant("pi", "ok");
-    app.session_ids.insert(HarnessId::PI, "pi-1".into());
+    app.controller
+        .conversation
+        .transcript
+        .push_user("The code word is pineapple.");
+    app.controller
+        .conversation
+        .transcript
+        .append_assistant("pi", "ok");
+    app.controller
+        .conversation
+        .session_ids
+        .insert(HarnessId::PI, "pi-1".into());
     app.session_alive = true;
     app.session_blank = true;
     app.on_event(AgentEvent::SessionStarted {
@@ -66,7 +83,11 @@ fn a_session_replaced_under_the_same_id_is_told_the_conversation() {
     let sent = sent_turn(&mut app);
     assert!(sent.contains("pineapple"), "{sent}");
     assert_eq!(
-        app.session_ids.get(&HarnessId::PI).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::PI)
+            .map(String::as_str),
         Some("pi-1")
     );
 }
@@ -120,7 +141,11 @@ fn a_session_replaced_under_a_prompt_is_told_the_conversation_next() {
         "{sent}"
     );
     assert_eq!(
-        app.session_ids.get(&HarnessId::CLAUDE).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CLAUDE)
+            .map(String::as_str),
         Some("claude-2")
     );
     // Told once.
@@ -258,7 +283,9 @@ fn mcp_servers_go_to_harnesses_that_take_them_and_the_rest_is_said_once() {
         },
     );
     let notices = |app: &App| {
-        app.transcript
+        app.controller
+            .conversation
+            .transcript
             .blocks
             .iter()
             .filter(|b| matches!(b, Block::Notice(n) if n.contains("MCP")))
@@ -281,11 +308,14 @@ fn an_unprompted_session_is_not_saved_until_the_first_prompt() {
         session_id: "codex-1".into(),
         model: None,
     });
-    assert!(app.session_ids.is_empty());
-    assert!(app.store.list().is_empty());
+    assert!(app.controller.conversation.session_ids.is_empty());
+    assert!(app.controller.store.list().is_empty());
     assert!(!notices(&app).iter().any(|n| n.contains("codex-1")));
     app.quit();
-    assert!(app.store.list().is_empty(), "quitting saved nothing");
+    assert!(
+        app.controller.store.list().is_empty(),
+        "quitting saved nothing"
+    );
 
     let mut app = test_app(HarnessId::CODEX);
     blank_session(&mut app);
@@ -296,10 +326,14 @@ fn an_unprompted_session_is_not_saved_until_the_first_prompt() {
     app.submit_prompt("hello".into());
     assert_eq!(app.take_actions(), vec![Action::turn("hello")]);
     assert_eq!(
-        app.session_ids.get(&HarnessId::CODEX).map(String::as_str),
+        app.controller
+            .conversation
+            .session_ids
+            .get(&HarnessId::CODEX)
+            .map(String::as_str),
         Some("codex-1")
     );
-    assert_eq!(app.store.list().len(), 1);
+    assert_eq!(app.controller.store.list().len(), 1);
 }
 
 #[test]

@@ -107,7 +107,11 @@ fn unharness_s_own_command_wins_unless_escaped() {
     });
     app.handle_slash_command("/clear");
     assert_eq!(app.take_actions(), vec![Action::Shutdown]);
-    assert_eq!(app.transcript.blocks.len(), 1, "a new conversation");
+    assert_eq!(
+        app.controller.conversation.transcript.blocks.len(),
+        1,
+        "a new conversation"
+    );
     app.session_alive = true;
     app.pass_command("/clear", true);
     assert_eq!(app.take_actions(), vec![Action::turn("/clear")]);

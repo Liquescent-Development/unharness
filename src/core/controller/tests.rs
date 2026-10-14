@@ -36,9 +36,26 @@ fn launch(policy: Option<PermissionPolicy>) -> Launch {
     }
 }
 
-/// A controller as a run starts, with `policy` named for every harness.
-fn controller(policy: Option<PermissionPolicy>) -> Controller {
-    Controller::new(registry(), &Config::default(), launch(policy))
+/// Where a test keeps conversations: in `dir`, a directory of its own, so
+/// that one which saves writes nowhere else.
+fn keeping(dir: &tempfile::TempDir) -> Keeping {
+    Keeping {
+        store: ConversationStore::at(dir.path().to_path_buf()),
+        checkpoints: None,
+    }
+}
+
+/// A controller as a run starts, with `policy` named for every harness,
+/// and the directory it keeps conversations in.
+fn controller(policy: Option<PermissionPolicy>) -> (tempfile::TempDir, Controller) {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Controller::new(
+        registry(),
+        &Config::default(),
+        launch(policy),
+        keeping(&dir),
+    );
+    (dir, c)
 }
 
 fn warning(c: &Controller, config: &Config, harness: HarnessId) -> Option<String> {
@@ -50,7 +67,7 @@ fn policy_resolution_per_harness() {
     // As with `--policy auto`: agy, which has no `auto`, runs the nearest
     // less permissive policy and says so.
     let config = Config::default();
-    let mut c = controller(Some(Auto));
+    let (_dir, mut c) = controller(Some(Auto));
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(Auto));
     assert!(warning(&c, &config, CLAUDE).is_none());
     assert_eq!(c.effective_policy(&config, AGY), Some(AcceptEdits));
@@ -76,7 +93,7 @@ fn a_harness_default_policy_stays_with_its_harness() {
             ..Default::default()
         },
     );
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     assert_eq!(c.effective_policy(&config, AGY), Some(Bypass));
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(Ask));
     assert_eq!(c.effective_policy(&config, AGY), Some(Bypass));
@@ -92,7 +109,7 @@ fn a_harness_default_policy_stays_with_its_harness() {
 #[test]
 fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
     let config = Config::default();
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     let e = c.set_policy(&config, PI, Auto, true).unwrap_err();
     assert_eq!(e.supported, vec![Ask, Bypass]);
 
@@ -117,7 +134,7 @@ fn a_policy_is_sent_as_a_change_and_its_report_is_not_news() {
 #[test]
 fn a_mode_the_agent_goes_into_is_its_policy() {
     let config = Config::default();
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     c.set_policy(&config, CLAUDE, AcceptEdits, true).unwrap();
     c.on_policy_changed(&config, CLAUDE, AcceptEdits);
     assert_eq!(
@@ -150,7 +167,7 @@ fn a_mode_the_agent_goes_into_is_its_policy() {
 #[test]
 fn a_refused_policy_gives_way_until_the_session_ends() {
     let config = Config::default();
-    let mut c = controller(Some(AcceptEdits));
+    let (_dir, mut c) = controller(Some(AcceptEdits));
     let refuse = |c: &mut Controller, policies: &[PermissionPolicy], alive| {
         c.report(
             &config,
@@ -194,7 +211,7 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     conv.policy_choices.insert(AGY, AcceptEdits);
     conv.policy_choices.insert(CLAUDE, Bypass);
 
-    let mut c = controller(None);
+    let (_dir, mut c) = controller(None);
     c.set_policy(&config, PI, Bypass, false).unwrap();
     c.take_conversation(&config, &conv);
     assert_eq!(c.effective_policy(&config, AGY), Some(AcceptEdits));
@@ -203,16 +220,17 @@ fn a_resumed_conversation_gives_way_to_what_the_run_named() {
     assert_eq!(c.policy.source(CLAUDE), PolicySource::ChosenForConversation);
     assert_eq!(c.policy.source(PI), PolicySource::ChosenInRun);
     assert_eq!(c.policy.source(CODEX), PolicySource::NamedForConversation);
-    let mut saved = Conversation::new(CLAUDE);
-    c.sync_conversation(&config, CLAUDE, false, &mut saved);
+    c.sync_conversation(&config, CLAUDE, false);
+    let saved = &c.conversation.record;
     assert_eq!(saved.policy, Some(Ask));
     assert_eq!(saved.policy_choices.len(), 3);
     assert!(saved.last_policies.is_empty());
-    c.sync_conversation(&config, CLAUDE, true, &mut saved);
+    c.sync_conversation(&config, CLAUDE, true);
+    let saved = &c.conversation.record;
     assert_eq!(saved.last_policies[&CLAUDE], Bypass);
 
     // `--policy accept-edits`: over every choice of the conversation's.
-    let mut c = controller(Some(AcceptEdits));
+    let (_dir, mut c) = controller(Some(AcceptEdits));
     c.take_conversation(&config, &conv);
     assert_eq!(c.policy.chosen(), HashMap::new());
     assert_eq!(c.effective_policy(&config, CLAUDE), Some(AcceptEdits));
@@ -262,16 +280,16 @@ fn codex_run(model: Option<&str>, effort: Option<&str>, provider: &str) -> (Conf
 /// `effort` where given.
 fn codex_conversation(model: Option<&str>, effort: Option<&str>) -> Conversation {
     let (config, launch) = codex_run(None, None, "openai");
-    let mut c = Controller::new(registry(), &config, launch);
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(registry(), &config, launch, keeping(&dir));
     if let Some(m) = model {
         c.choose_model(CODEX, m.into());
     }
     if let Some(e) = effort {
         c.choose_effort(CODEX, e.into());
     }
-    let mut conv = Conversation::new(CODEX);
-    c.sync_conversation(&config, CODEX, true, &mut conv);
-    conv
+    c.sync_conversation(&config, CODEX, true);
+    c.conversation.record.clone()
 }
 
 /// `conversation` resumed by a run as `codex_run` has it, and what it says.
@@ -280,11 +298,12 @@ fn resume_codex(
     model: Option<&str>,
     effort: Option<&str>,
     provider: &str,
-) -> (Controller, Vec<String>) {
+) -> (tempfile::TempDir, Controller, Vec<String>) {
     let (config, launch) = codex_run(model, effort, provider);
-    let mut c = Controller::new(registry(), &config, launch);
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = Controller::new(registry(), &config, launch, keeping(&dir));
     let notices = c.take_conversation(&config, conversation);
-    (c, notices)
+    (dir, c, notices)
 }
 
 fn codex_model(c: &Controller) -> Option<&str> {
@@ -294,12 +313,12 @@ fn codex_model(c: &Controller) -> Option<&str> {
 #[test]
 fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
     let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
-    let (c, _) = resume_codex(&conv, None, None, "openai");
+    let (_dir, c, _) = resume_codex(&conv, None, None, "openai");
     assert_eq!(codex_model(&c), Some("gpt-chosen"));
     assert_eq!(c.effort(CODEX), Some("high"));
 
     // Named on the command line, they win.
-    let (c, _) = resume_codex(&conv, Some("gpt-flag"), Some("low"), "openai");
+    let (_dir, c, _) = resume_codex(&conv, Some("gpt-flag"), Some("low"), "openai");
     assert_eq!(codex_model(&c), Some("gpt-flag"));
     assert_eq!(c.effort(CODEX), Some("low"));
 }
@@ -307,7 +326,7 @@ fn a_resumed_conversation_keeps_the_model_and_effort_chosen_for_it() {
 #[test]
 fn a_configured_model_is_not_kept_with_the_conversation() {
     let conv = codex_conversation(None, None);
-    let (c, _) = resume_codex(&conv, None, None, "openai");
+    let (_dir, c, _) = resume_codex(&conv, None, None, "openai");
     assert!(conv.models.is_empty());
     assert!(conv.efforts.is_empty());
     assert_eq!(codex_model(&c), Some("configured-model"));
@@ -316,7 +335,7 @@ fn a_configured_model_is_not_kept_with_the_conversation() {
 #[test]
 fn a_model_chosen_on_another_provider_is_left() {
     let conv = codex_conversation(Some("gpt-chosen"), Some("high"));
-    let (c, notices) = resume_codex(&conv, None, None, "ollama");
+    let (_dir, c, notices) = resume_codex(&conv, None, None, "ollama");
     assert_eq!(codex_model(&c), Some("configured-model"));
     // Its effort was for it.
     assert_eq!(c.effort(CODEX), None);
@@ -329,6 +348,7 @@ fn a_model_chosen_on_another_provider_is_left() {
 #[test]
 fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     let config = Config::default();
+    let dir = tempfile::tempdir().unwrap();
     let mut c = Controller::new(
         registry(),
         &config,
@@ -337,6 +357,7 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
             default_providers: [(CLAUDE, "anthropic".into())].into(),
             ..launch(None)
         },
+        keeping(&dir),
     );
     assert_eq!(c.chosen_provider(CLAUDE), None);
     let report = |c: &mut Controller, provider: &str| {
@@ -359,11 +380,12 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     assert_eq!(c.model(CLAUDE).unwrap().label(), "vertex/opus");
     assert_eq!(c.chosen_provider(CLAUDE), None);
 
-    let mut conv = Conversation::new(CLAUDE);
-    conv.models
+    c.conversation
+        .record
+        .models
         .insert(CLAUDE, ModelRef::new(CLAUDE, "vertex", "opus"));
-    assert!(c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
-    assert!(conv.models.is_empty() && c.model(CLAUDE).is_none());
+    assert!(c.choose_provider(CLAUDE, "bedrock".into()));
+    assert!(c.conversation.record.models.is_empty() && c.model(CLAUDE).is_none());
     assert!(report(&mut c, "anthropic").is_empty());
     assert_eq!(c.runs_on(CLAUDE), Some(&"anthropic".into()));
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"bedrock".into()));
@@ -373,7 +395,7 @@ fn a_reported_provider_corrects_a_guess_and_not_a_choice() {
     c.process_ended(CLAUDE);
     assert_eq!(c.runs_on(CLAUDE), None);
     // The same again changes nothing.
-    assert!(!c.choose_provider(CLAUDE, "bedrock".into(), &mut conv));
+    assert!(!c.choose_provider(CLAUDE, "bedrock".into()));
 }
 
 /// When a choice may be made, and how it reaches the session it meets: the
@@ -390,6 +412,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             .with(Box::new(ClaudeHarness::default())),
     );
     let vibe = registry.get(VIBE).unwrap().descriptor().short_name;
+    let dir = tempfile::tempdir().unwrap();
     let mut c = Controller::new(
         registry,
         &config,
@@ -397,6 +420,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             harness: VIBE,
             ..launch(None)
         },
+        keeping(&dir),
     );
     assert!(c.between_turns(VIBE, Choice::Model));
     assert!(!c.between_turns(CLAUDE, Choice::Effort));
@@ -446,8 +470,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
     let taking = format!("{vibe} is still taking the model just chosen; try again in a moment");
     assert_eq!(c.settling(VIBE, false), Some(taking.clone()));
     assert_eq!(
-        c.set_provider(VIBE, "lan".into(), &prompted, &mut Conversation::new(VIBE))
-            .unwrap_err(),
+        c.set_provider(VIBE, "lan".into(), &prompted).unwrap_err(),
         taking
     );
     let answered = c.choice_answered().unwrap();
@@ -508,10 +531,8 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
             .unwrap_err()
             .starts_with("unknown effort 'loud'; Claude supports: ")
     );
-    let mut conv = Conversation::new(CLAUDE);
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
         Route::Hold(SessionCommand::SetProvider("bedrock".into()))
     );
     assert_eq!(
@@ -519,8 +540,7 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         Some("bedrock".into())
     );
     assert_eq!(
-        c.set_provider(CLAUDE, "bedrock".into(), &prompted, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "bedrock".into(), &prompted).unwrap(),
         Route::None
     );
     let held = SessionNow {
@@ -529,9 +549,117 @@ fn a_choice_is_refused_or_routed_by_the_session_it_meets() {
         ..Default::default()
     };
     assert_eq!(
-        c.set_provider(CLAUDE, "vertex".into(), &held, &mut conv)
-            .unwrap(),
+        c.set_provider(CLAUDE, "vertex".into(), &held).unwrap(),
         Route::None
     );
     assert_eq!(c.chosen_provider(CLAUDE), Some(&"vertex".into()));
+}
+
+/// A conversation as the store gives it back, with something in each
+/// field `ConversationState` takes from it.
+fn saved_conversation() -> Conversation {
+    use crate::core::conversations::{BlockRecord, CheckpointRecord, TurnAnchorRecord};
+    let mut c = Conversation::new(CODEX);
+    c.title = "the task".into();
+    c.sessions.insert(CLAUDE, "claude-1".into());
+    c.sessions.insert(CODEX, "codex-1".into());
+    c.bookmarks.insert(CLAUDE, 2);
+    c.blocks = vec![
+        BlockRecord::User {
+            text: "the task".into(),
+        },
+        BlockRecord::Assistant {
+            text: "done".into(),
+            sender: "claude".into(),
+            secs: Some(1.5),
+        },
+        BlockRecord::User {
+            text: "and then".into(),
+        },
+    ];
+    c.usage.insert(
+        CODEX,
+        crate::core::Usage {
+            input: 7,
+            ..Default::default()
+        },
+    );
+    c.plan.push(crate::core::PlanEntry {
+        text: "write the tests".into(),
+        status: crate::core::PlanStatus::InProgress,
+    });
+    c.anchors.push(TurnAnchorRecord {
+        block: 0,
+        harness: CLAUDE,
+        id: "u1".into(),
+    });
+    c.checkpoints.push(CheckpointRecord {
+        block: 2,
+        commit: "abc".into(),
+    });
+    c.fork_pending = vec![CLAUDE, CODEX];
+    c
+}
+
+/// A conversation installed and saved again is what was saved: nothing
+/// is lost or added between the store and the controller.
+#[test]
+fn a_conversation_installed_is_saved_as_it_came() {
+    let config = Config::default();
+    let saved = saved_conversation();
+    let (_dir, mut c) = controller(None);
+    c.install(saved.clone(), CODEX);
+    let state = &c.conversation;
+    assert_eq!(state.session_ids, saved.sessions);
+    assert_eq!(state.transcript.blocks.len(), 3);
+    assert_eq!(state.session_usage.input, 7);
+    assert_eq!(state.first_prompt.as_deref(), Some("the task"));
+    assert!(state.fork_pending.contains(&CLAUDE) && state.fork_pending.contains(&CODEX));
+
+    // Saved again from what the controller holds, not from the record it
+    // was given: only the conversation's identity is kept from that.
+    c.conversation.record = Conversation {
+        id: saved.id.clone(),
+        created_at: saved.created_at.clone(),
+        ..Conversation::new(CODEX)
+    };
+    c.sync_conversation(&config, CODEX, false);
+    let again = Conversation {
+        updated_at: saved.updated_at.clone(),
+        ..c.conversation.record.clone()
+    };
+    assert_eq!(again, saved);
+}
+
+/// A conversation that cannot be written is said once in a run, not at
+/// every turn.
+#[test]
+fn a_save_that_fails_is_said_once() {
+    let config = Config::default();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("conversations"), "in the way").unwrap();
+    let mut c = Controller::new(
+        registry(),
+        &config,
+        launch(None),
+        Keeping {
+            store: ConversationStore::at(dir.path().to_path_buf()),
+            checkpoints: None,
+        },
+    );
+    c.install(saved_conversation(), CODEX);
+    for _ in 0..3 {
+        c.persist(&config, CODEX, true);
+    }
+    let said = c
+        .conversation
+        .transcript
+        .blocks
+        .iter()
+        .filter(|b| {
+            matches!(b, crate::core::transcript::Block::Error(e)
+                if e.starts_with("could not save the conversation"))
+        })
+        .count();
+    assert_eq!(said, 1);
 }

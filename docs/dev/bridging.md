@@ -1,6 +1,6 @@
 # Bridging: status notes
 
-Bridging (`tui/bridge.rs`): a switch whose bridge is over budget first
+Bridging (`core/bridge.rs`): a switch whose bridge is over budget first
 asks the harness being left for a handoff summary (`App::ask_handoff`,
 `Block::Handoff`), with every permission request denied while it
 writes; not while its subagents are at work (their requests and reports
