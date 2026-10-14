@@ -19,9 +19,9 @@ doctor` prints the path, and `unharness init` creates the file.
 > misspelt name, or another name for a harness such as `claude-code`,
 > whose table is `[harnesses.claude]`) stops a run, `unharness switch`
 > and `unharness models` too, and is never replaced by the built-in or
-> preset of its name. Such an error names the table and the key, not the
-> file; `unharness doctor` shows it, leaves out a harness it cannot
-> build, shows the rest, and exits 1.
+> preset of its name. Such an error names the table, and the key when a
+> key is wrong, not the file; `unharness doctor` shows it, leaves out a
+> harness it cannot build, shows the rest, and exits 1.
 
 ## Example
 
