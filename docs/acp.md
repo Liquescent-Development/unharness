@@ -67,6 +67,9 @@ Kiro are added automatically when their binary is on `PATH`, using the
 launch commands from the ACP registry. A table with the same name and
 `protocol = "acp"` replaces a preset; without it, the table sets only the
 keys every harness takes (`binary`, `default_model`, …) for the preset.
+The preset runs its own command under its own name, so a `command` or
+`display_name` there is an error; another binary of it is set with
+`binary`.
 
 > [!NOTE]
 > The presets have not been run with unharness yet, and `unharness doctor`

@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::ids::HarnessId;
-use crate::config::{Config, HarnessSettings, TableErrors};
+use crate::config::{
+    AN_AGENT_NEEDS_ITS_OWN_NAME, Config, HarnessSettings, REMOVED_KEYS, TableErrors,
+};
 use crate::harness::{Harness, Probe, acp, agy, claude, codex, pi, resolve_binary, vibe};
 
 /// Builds a harness from its `[harnesses.<name>]` table, an empty one when
@@ -56,13 +58,13 @@ impl Registry {
     pub fn checked(config: &Config) -> (Self, Vec<ConfigError>) {
         let empty = HarnessSettings::default();
         let mut built = Built::default();
+        // A protocol unharness does not have is said before a built-in or
+        // a preset is built from the table, which then leaves it out.
         for (id, build) in BUILTIN {
             let name = id.as_str();
-            built.add(
-                name,
-                build(name, config.harness(name).unwrap_or(&empty)),
-                true,
-            );
+            let table = config.harness(name).unwrap_or(&empty);
+            let harness = known_protocol(name, table).and_then(|()| build(name, table));
+            built.add(name, harness, true);
         }
         // ACP agents defined in config, by name for a stable order. None
         // may take a built-in harness's name.
@@ -85,22 +87,39 @@ impl Registry {
         for (name, installed) in acp::AcpHarness::presets(&taken) {
             let table = config.harness(name);
             if installed || table.is_some() {
-                built.add(name, acp::build(name, table.unwrap_or(&empty)), installed);
+                let table = table.unwrap_or(&empty);
+                let harness = known_protocol(name, table).and_then(|()| acp::build(name, table));
+                built.add(name, harness, installed);
             }
         }
 
         let mut errors = policy_errors(config);
-        // A table no harness was built from has no keys of a harness's own.
         for (name, table) in &config.harnesses {
-            if let Some(key) = table.rest.keys().next()
-                && !built.read.contains(name)
+            if !built.read.contains(name) {
+                // A protocol unharness does not have is why a table under
+                // a name of its own defines no agent, and is said alone.
+                // Another name for a built-in is said to be one first.
+                let protocol = known_protocol(name, table).err();
+                if protocol.is_none() || HarnessId::parse(name).is_some() {
+                    errors.push(ConfigError::new(Some(name), unread(name, table)));
+                }
+                if let Some(e) = protocol {
+                    errors.push(ConfigError::new(Some(name), e.to_string()));
+                }
+            }
+            // In every table, whichever harness reads it, if any: a
+            // builder leaves these keys to be said here. The harness is
+            // whole, since they did nothing.
+            for key in table
+                .rest
+                .keys()
+                .filter(|k| REMOVED_KEYS.contains(&k.as_str()))
             {
                 errors.push(ConfigError::new(
                     Some(name),
                     format!(
-                        "[harnesses.{name}] {key}: unknown key; no harness's table is named \
-                         {name} ({})",
-                        acp::DEFINING_AN_AGENT
+                        "[harnesses.{name}] {key}: unharness no longer takes this key, which did \
+                         nothing; delete the line"
                     ),
                 ));
             }
@@ -299,13 +318,57 @@ impl Built {
 
 /// What is wrong with the config's harness settings ([`Registry::checked`]):
 /// a policy that is not one (the TUI reads them again when the harness is
-/// switched, where an error could no longer end the run), and every
-/// builder's error: a key the harness does not take, an ACP agent without
-/// a command, a mode map that does not parse (else the agent is left in a
-/// mode of its own choosing), a provider that is not whole (a session on
-/// it would fail, or run somewhere else).
+/// switched, where an error could no longer end the run), a table no
+/// harness reads, a key unharness no longer takes ([`REMOVED_KEYS`]), a
+/// protocol it does not have, and every builder's error: a key the
+/// harness does not take, an ACP agent without a command, a mode map that
+/// does not parse (else the agent is left in a mode of its own choosing),
+/// a provider that is not whole (a session on it would fail, or run
+/// somewhere else).
 pub fn config_errors(config: &Config) -> Vec<ConfigError> {
     Registry::checked(config).1
+}
+
+/// `protocol` says how unharness drives the agent a table defines, and
+/// `acp` is the one it has: any other value is an error naming the table,
+/// in any table, never the built-in or preset of its name in place of the
+/// agent it was to define.
+fn known_protocol(name: &str, table: &HarnessSettings) -> Result<()> {
+    match table.protocol.as_deref() {
+        Some(p) if p != "acp" => bail!("[harnesses.{name}] protocol: unknown protocol '{p}' (acp)"),
+        _ => Ok(()),
+    }
+}
+
+/// What is wrong with `[harnesses.<name>]`, a table no harness was built
+/// from, whatever keys it has: nothing in it is read. A name
+/// [`HarnessId::parse`] takes is another name for a built-in, which reads
+/// only the table of its own name (and no agent may take it); any other
+/// is no harness's, and the error says how a table defines an agent.
+fn unread(name: &str, table: &HarnessSettings) -> String {
+    if let Some(id) = HarnessId::parse(name) {
+        let agent = match table.protocol {
+            Some(_) => format!(" ({AN_AGENT_NEEDS_ITS_OWN_NAME})"),
+            None => String::new(),
+        };
+        return format!(
+            "[harnesses.{name}]: {name} is another name for {id}; its table is \
+             [harnesses.{id}]{agent}"
+        );
+    }
+    // The first key that would be a harness's own, if any.
+    let own = table
+        .rest
+        .keys()
+        .find(|k| !REMOVED_KEYS.contains(&k.as_str()));
+    let at = match own {
+        Some(key) => format!(" {key}: unknown key;"),
+        None => ":".to_string(),
+    };
+    format!(
+        "[harnesses.{name}]{at} no harness's table is named {name} ({})",
+        acp::DEFINING_AN_AGENT
+    )
 }
 
 /// The policies the config names that are not ones: the global one, then
@@ -671,28 +734,6 @@ mod tests {
         );
         assert!(config_errors(&parse("[harnesses.gemini]\ndefault_model = \"m\"\n")).is_empty());
 
-        // A table no harness is built from takes nothing of a harness's
-        // own; it is no harness to leave out.
-        let e = config_errors(&parse("[harnesses.claude-code]\nrelocate_config = false\n"));
-        assert_eq!(
-            e[0].message,
-            "[harnesses.claude-code] relocate_config: unknown key; no harness's table is named \
-             claude-code (a table with protocol = \"acp\" and a command defines an agent that \
-             takes asks_permission, modes and sign_in)"
-        );
-        assert!(!e[0].left_out);
-        assert!(config_errors(&parse("[harnesses.claud]\ndefault_model = \"m\"\n")).is_empty());
-        // A key in a table that defines no agent says how to define one.
-        let e = config_errors(&parse("[harnesses.myagent]\nasks_permission = true\n"));
-        assert_eq!(
-            e[0].message,
-            format!(
-                "[harnesses.myagent] asks_permission: unknown key; no harness's table is named \
-                 myagent ({})",
-                acp::DEFINING_AN_AGENT
-            )
-        );
-
         // Written in a workspace's table, it is refused once merged.
         let merged = crate::config::Config::merge(
             parse("[harnesses.codex]\ntransport = \"exec\"\n"),
@@ -705,6 +746,493 @@ mod tests {
                     .message
                     .starts_with("[harnesses.codex] transprt: unknown key"),
             "{e:?}"
+        );
+    }
+
+    /// A table no harness is built from is an error naming it, whatever
+    /// keys it has: a misspelt name says how a table defines an agent,
+    /// another name for a built-in says which table that is. It is no
+    /// harness to leave out (#281).
+    #[test]
+    fn a_table_no_harness_reads_is_an_error_naming_it() {
+        let agent = acp::DEFINING_AN_AGENT;
+        let defines = "protocol = \"acp\"\ncommand = [\"my-agent\", \"--acp\"]\n";
+        let needs = " (an ACP agent's table needs a name no built-in harness has)";
+        for (text, name, said) in [
+            // Only the keys every harness takes, or an agent's without
+            // `protocol`.
+            (
+                "[harnesses.claud]\ndefault_model = \"m\"\n".to_string(),
+                "claud",
+                format!("[harnesses.claud]: no harness's table is named claud ({agent})"),
+            ),
+            (
+                "[harnesses.claud]\n".to_string(),
+                "claud",
+                format!("[harnesses.claud]: no harness's table is named claud ({agent})"),
+            ),
+            (
+                "[harnesses.myagent]\ncommand = [\"my-agent\"]\n".to_string(),
+                "myagent",
+                format!("[harnesses.myagent]: no harness's table is named myagent ({agent})"),
+            ),
+            // A key in a table that defines no agent is named.
+            (
+                "[harnesses.myagent]\nasks_permission = true\n".to_string(),
+                "myagent",
+                format!(
+                    "[harnesses.myagent] asks_permission: unknown key; no harness's table is \
+                     named myagent ({agent})"
+                ),
+            ),
+            // Each alias, with a key its built-in takes and defining an
+            // agent.
+            (
+                "[harnesses.claude-code]\nrelocate_config = false\n".to_string(),
+                "claude-code",
+                "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+                 [harnesses.claude]"
+                    .to_string(),
+            ),
+            (
+                format!("[harnesses.claude-code]\n{defines}"),
+                "claude-code",
+                format!(
+                    "[harnesses.claude-code]: claude-code is another name for claude; its table \
+                     is [harnesses.claude]{needs}"
+                ),
+            ),
+            (
+                "[harnesses.antigravity]\ndefault_model = \"m\"\n".to_string(),
+                "antigravity",
+                "[harnesses.antigravity]: antigravity is another name for agy; its table is \
+                 [harnesses.agy]"
+                    .to_string(),
+            ),
+            (
+                format!("[harnesses.antigravity]\n{defines}"),
+                "antigravity",
+                format!(
+                    "[harnesses.antigravity]: antigravity is another name for agy; its table \
+                     is [harnesses.agy]{needs}"
+                ),
+            ),
+            (
+                "[harnesses.mistral-vibe]\nmodes = { ask = \"ask\" }\n".to_string(),
+                "mistral-vibe",
+                "[harnesses.mistral-vibe]: mistral-vibe is another name for vibe; its table is \
+                 [harnesses.vibe]"
+                    .to_string(),
+            ),
+            (
+                format!("[harnesses.mistral-vibe]\n{defines}"),
+                "mistral-vibe",
+                format!(
+                    "[harnesses.mistral-vibe]: mistral-vibe is another name for vibe; its \
+                     table is [harnesses.vibe]{needs}"
+                ),
+            ),
+            // A table's name is read as written.
+            (
+                "[harnesses.Claude]\nrelocate_config = false\n".to_string(),
+                "Claude",
+                "[harnesses.Claude]: Claude is another name for claude; its table is \
+                 [harnesses.claude]"
+                    .to_string(),
+            ),
+        ] {
+            let errors = config_errors(&parse(&text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, said);
+            assert_eq!(errors[0].table.as_deref(), Some(name));
+            assert!(!errors[0].left_out, "{errors:?}");
+            let e = Registry::from_config(&parse(&text)).err().unwrap();
+            assert_eq!(e.to_string(), said);
+            // Every harness is still built.
+            let reg = Registry::checked(&parse(&text)).0;
+            assert_eq!(&reg.ids()[..BUILTIN.len()], HarnessId::BUILTIN);
+        }
+
+        // The tables those names stand for are read, and so are a
+        // preset's and an agent's.
+        for good in [
+            "[harnesses.claude]\nrelocate_config = false\n".to_string(),
+            "[harnesses.agy]\ndefault_model = \"m\"\n".to_string(),
+            "[harnesses.vibe]\nmodes = { ask = \"ask\" }\n".to_string(),
+            "[harnesses.gemini]\ndefault_model = \"m\"\n".to_string(),
+            format!("[harnesses.myagent]\n{defines}"),
+            format!("[harnesses.gemini]\n{defines}"),
+        ] {
+            assert!(config_errors(&parse(&good)).is_empty(), "{good}");
+        }
+    }
+
+    /// `command` and `display_name` say what runs an agent and the name it
+    /// is shown by: a built-in that runs its own CLI, or a preset's table
+    /// without `protocol = "acp"`, does not take them, and the error points
+    /// to `binary`. An agent's table and vibe's take them (#281).
+    #[test]
+    fn command_and_display_name_are_an_agent_s() {
+        let binary = |name: &str| {
+            format!(
+                "[harnesses.{name}] command: {name} does not take this key; to run another \
+                 {name} binary, set binary"
+            )
+        };
+        let mut cases: Vec<(String, &str, String)> = ["agy", "claude", "codex", "pi"]
+            .into_iter()
+            .map(|name| {
+                let text = format!("[harnesses.{name}]\ncommand = [\"/opt/{name}\"]\n");
+                (text, name, binary(name))
+            })
+            .collect();
+        cases.extend([
+            // An empty one is set too.
+            (
+                "[harnesses.claude]\ncommand = []\n".to_string(),
+                "claude",
+                binary("claude"),
+            ),
+            // `command` is said first.
+            (
+                "[harnesses.codex]\ndisplay_name = \"C\"\ncommand = [\"c\"]\n".to_string(),
+                "codex",
+                binary("codex"),
+            ),
+            (
+                "[harnesses.codex]\ndisplay_name = \"My Codex\"\n".to_string(),
+                "codex",
+                "[harnesses.codex] display_name: codex does not take this key".to_string(),
+            ),
+            (
+                "[harnesses.pi]\ndisplay_name = \"My pi\"\n".to_string(),
+                "pi",
+                "[harnesses.pi] display_name: pi does not take this key".to_string(),
+            ),
+            // A preset's table without `protocol = "acp"` is told how to
+            // define an agent as well.
+            (
+                "[harnesses.gemini]\ncommand = [\"gemini\", \"--experimental-acp\"]\n".to_string(),
+                "gemini",
+                format!("{} ({})", binary("gemini"), acp::DEFINING_AN_AGENT),
+            ),
+            (
+                "[harnesses.kiro]\ndisplay_name = \"My Kiro\"\n".to_string(),
+                "kiro",
+                format!(
+                    "[harnesses.kiro] display_name: kiro does not take this key ({})",
+                    acp::DEFINING_AN_AGENT
+                ),
+            ),
+            // A built-in's table that sets `protocol` was to define an
+            // agent, which needs a name of its own.
+            (
+                "[harnesses.pi]\nprotocol = \"acp\"\ncommand = [\"pi-acp\"]\n".to_string(),
+                "pi",
+                format!(
+                    "{} (an ACP agent's table needs a name no built-in harness has)",
+                    binary("pi")
+                ),
+            ),
+            (
+                "[harnesses.claude]\nprotocol = \"acp\"\ndisplay_name = \"Claude (ACP)\"\n"
+                    .to_string(),
+                "claude",
+                "[harnesses.claude] display_name: claude does not take this key (an ACP agent's \
+                 table needs a name no built-in harness has)"
+                    .to_string(),
+            ),
+        ]);
+        for (text, name, said) in cases {
+            let errors = config_errors(&parse(&text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, said);
+            assert!(errors[0].left_out && errors[0].table.as_deref() == Some(name));
+            assert_eq!(
+                Registry::from_config(&parse(&text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                said
+            );
+            assert!(Registry::checked(&parse(&text)).0.parse(name).is_none());
+        }
+
+        // `binary` is what those tables take.
+        for name in ["agy", "claude", "codex", "pi", "gemini"] {
+            let text = format!("[harnesses.{name}]\nbinary = \"/opt/{name}\"\n");
+            assert!(config_errors(&parse(&text)).is_empty(), "{text}");
+        }
+
+        // An agent's table and vibe's take both, and show the name.
+        let good = "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                    display_name = \"Mine\"\n\
+                    [harnesses.gemini]\nprotocol = \"acp\"\ncommand = [\"gemini\", \"--acp\"]\n\
+                    display_name = \"My Gemini\"\n\
+                    [harnesses.vibe]\ncommand = [\"/opt/vibe-acp\"]\ndisplay_name = \"My Vibe\"\n";
+        let reg = Registry::from_config(&parse(good)).unwrap();
+        for (name, shown) in [
+            ("myagent", "Mine"),
+            ("gemini", "My Gemini"),
+            ("vibe", "My Vibe"),
+        ] {
+            assert_eq!(reg.parse(name).unwrap().descriptor().display_name, shown);
+        }
+        assert_eq!(
+            reg.get(HarnessId::VIBE).unwrap().descriptor().binary_names,
+            ["/opt/vibe-acp"]
+        );
+    }
+
+    /// A `protocol` other than `acp` is an error naming the table, the key
+    /// and the one there is, in any table: a preset's or a built-in's is
+    /// left out, not run in place of the agent the table was to define
+    /// (#281).
+    #[test]
+    fn an_unknown_protocol_is_an_error_naming_it() {
+        let wrong = |name: &str, p: &str| {
+            format!("[harnesses.{name}] protocol: unknown protocol '{p}' (acp)")
+        };
+        for (text, name, p) in [
+            (
+                "[harnesses.gemini]\nprotocol = \"acpx\"\ncommand = [\"gemini\", \"--acp\"]\n",
+                "gemini",
+                "acpx",
+            ),
+            (
+                "[harnesses.opencode]\nprotocol = \"ACP\"\n",
+                "opencode",
+                "ACP",
+            ),
+            (
+                "[harnesses.claude]\nprotocol = \"acpx\"\n",
+                "claude",
+                "acpx",
+            ),
+            ("[harnesses.vibe]\nprotocol = \"stdio\"\n", "vibe", "stdio"),
+        ] {
+            let errors = config_errors(&parse(text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, wrong(name, p));
+            assert!(errors[0].left_out && errors[0].table.as_deref() == Some(name));
+            assert_eq!(
+                Registry::from_config(&parse(text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                wrong(name, p)
+            );
+            assert!(Registry::checked(&parse(text)).0.parse(name).is_none());
+        }
+
+        // Under a name of its own it is why no agent is defined, and what
+        // a run says: also when a workspace's file sets it over an agent
+        // the global one defines.
+        let defined = parse("[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n");
+        for (config, p) in [
+            (
+                parse("[harnesses.myagent]\nprotocol = \"ACP\"\ncommand = [\"my-agent\"]\n"),
+                "ACP",
+            ),
+            (
+                Config::merge(
+                    defined.clone(),
+                    parse("[harnesses.myagent]\nprotocol = \"acpx\"\n"),
+                ),
+                "acpx",
+            ),
+        ] {
+            let e = config_errors(&config);
+            let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+            assert_eq!(said, [wrong("myagent", p)]);
+            assert!(!e[0].left_out);
+            assert_eq!(
+                Registry::from_config(&config).err().unwrap().to_string(),
+                wrong("myagent", p)
+            );
+        }
+        assert!(config_errors(&defined).is_empty());
+        // Another name for a built-in is said to be one first.
+        let alias = parse("[harnesses.claude-code]\nprotocol = \"acpx\"\n");
+        let e = config_errors(&alias);
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+                 [harnesses.claude] (an ACP agent's table needs a name no built-in harness has)",
+                wrong("claude-code", "acpx").as_str()
+            ]
+        );
+        assert_eq!(
+            Registry::from_config(&alias).err().unwrap().to_string(),
+            said[0]
+        );
+
+        // `acp` on a built-in's table is that built-in's still.
+        let reg =
+            Registry::from_config(&parse("[harnesses.claude]\nprotocol = \"acp\"\n")).unwrap();
+        assert!(reg.get(HarnessId::CLAUDE).is_some());
+    }
+
+    /// `persist_sessions` was read by nothing, and unharness no longer
+    /// takes it: in any table it is an error naming the table and the key,
+    /// so that the line is deleted. The harness itself is whole (#281).
+    #[test]
+    fn a_key_unharness_no_longer_takes_is_an_error_naming_it() {
+        let gone = |name: &str| {
+            format!(
+                "[harnesses.{name}] persist_sessions: unharness no longer takes this key, which \
+                 did nothing; delete the line"
+            )
+        };
+        for (text, name) in [
+            ("[harnesses.claude]\npersist_sessions = true\n", "claude"),
+            ("[harnesses.codex]\npersist_sessions = false\n", "codex"),
+            ("[harnesses.vibe]\npersist_sessions = true\n", "vibe"),
+            (
+                "[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n\
+                 persist_sessions = true\n",
+                "myagent",
+            ),
+            // A preset's is not told how to define an agent.
+            ("[harnesses.gemini]\npersist_sessions = true\n", "gemini"),
+        ] {
+            let errors = config_errors(&parse(text));
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, gone(name));
+            assert_eq!(errors[0].table.as_deref(), Some(name));
+            assert!(!errors[0].left_out, "{errors:?}");
+            assert_eq!(
+                Registry::from_config(&parse(text))
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                gone(name)
+            );
+            let (reg, _) = Registry::checked(&parse(text));
+            assert!(
+                name == "gemini" || reg.parse(name).is_some(),
+                "{name} is built"
+            );
+        }
+
+        // Beside a key the harness does not take, each is said.
+        let e = config_errors(&parse(
+            "[harnesses.codex]\npersist_sessions = true\ntransprt = \"exec\"\n",
+        ));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                gone("codex").as_str(),
+                "[harnesses.codex] transprt: unknown key; besides the keys every harness takes, \
+                 codex takes transport"
+            ]
+        );
+        // In a table no harness reads, both are said, and the table names
+        // no key of a harness's own.
+        let e = config_errors(&parse("[harnesses.claud]\npersist_sessions = true\n"));
+        let said: Vec<&str> = e.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(
+            said,
+            [
+                format!(
+                    "[harnesses.claud]: no harness's table is named claud ({})",
+                    acp::DEFINING_AN_AGENT
+                )
+                .as_str(),
+                gone("claud").as_str()
+            ]
+        );
+    }
+
+    /// A workspace's file is merged over the global one before anything
+    /// is checked, so what it gets wrong is refused the same way, naming
+    /// the table (#281).
+    #[test]
+    fn a_workspace_s_table_is_checked_as_the_global_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, root) = (tmp.path().join("workspaces"), tmp.path().join("ws"));
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let global = parse("[harnesses.claude]\nrelocate_config = false\n");
+        let check = |text: &str| {
+            std::fs::write(Config::workspace_path_in(&store, &root), text).unwrap();
+            let local = Config::load_workspace_in(&store, &root).unwrap().unwrap();
+            config_errors(&Config::merge(global.clone(), local))
+        };
+        let e = check("[harnesses.claude-code]\nrelocate_config = true\n");
+        assert_eq!(
+            e[0].message,
+            "[harnesses.claude-code]: claude-code is another name for claude; its table is \
+             [harnesses.claude]"
+        );
+        let e = check("[harnesses.claud]\ndefault_model = \"m\"\n");
+        assert!(
+            e.len() == 1
+                && e[0].table.as_deref() == Some("claud")
+                && e[0]
+                    .message
+                    .starts_with("[harnesses.claud]: no harness's table is named claud"),
+            "{e:?}"
+        );
+        assert!(check("[harnesses.claude]\ndefault_model = \"m\"\n").is_empty());
+
+        for (text, said) in [
+            (
+                "[harnesses.claude]\ncommand = [\"/opt/claude\"]\n",
+                "[harnesses.claude] command: claude does not take this key; to run another \
+                 claude binary, set binary",
+            ),
+            // An empty list keeps the global one's, and is still refused.
+            (
+                "[harnesses.claude]\ncommand = []\n",
+                "[harnesses.claude] command: claude does not take this key; to run another \
+                 claude binary, set binary",
+            ),
+            (
+                "[harnesses.claude]\ndisplay_name = \"Mine\"\n",
+                "[harnesses.claude] display_name: claude does not take this key",
+            ),
+        ] {
+            let e = check(text);
+            assert!(
+                e.len() == 1 && e[0].message == said && e[0].left_out,
+                "{text}: {e:?}"
+            );
+        }
+        let e = check("[harnesses.claude]\npersist_sessions = true\n");
+        assert!(
+            e.len() == 1
+                && e[0].message
+                    == "[harnesses.claude] persist_sessions: unharness no longer takes this key, \
+                        which did nothing; delete the line"
+                && !e[0].left_out,
+            "{e:?}"
+        );
+        let e = check("[harnesses.gemini]\nprotocol = \"acpx\"\n");
+        assert!(
+            e.len() == 1
+                && e[0].message == "[harnesses.gemini] protocol: unknown protocol 'acpx' (acp)"
+                && e[0].left_out,
+            "{e:?}"
+        );
+
+        // An agent defined globally keeps its command under a workspace's
+        // empty list, and takes a name from there.
+        let global = parse("[harnesses.myagent]\nprotocol = \"acp\"\ncommand = [\"my-agent\"]\n");
+        std::fs::write(
+            Config::workspace_path_in(&store, &root),
+            "[harnesses.myagent]\ncommand = []\ndisplay_name = \"Mine\"\n",
+        )
+        .unwrap();
+        let local = Config::load_workspace_in(&store, &root).unwrap().unwrap();
+        let reg = Registry::from_config(&Config::merge(global, local)).unwrap();
+        let mine = reg.parse("myagent").unwrap().descriptor();
+        assert_eq!(
+            (mine.display_name, mine.binary_names),
+            ("Mine", &["my-agent"][..])
         );
     }
 

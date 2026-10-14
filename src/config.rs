@@ -94,7 +94,8 @@ impl SandboxSettings {
     }
 }
 
-/// A `[harnesses.<name>]` table: the keys every harness takes, and in
+/// A `[harnesses.<name>]` table: the keys every harness takes, the ones
+/// that define an ACP agent (`protocol`, `command`, `display_name`), and in
 /// `rest` the ones only its own harness takes (Codex's `transport`, an ACP
 /// agent's `modes`, …), which the harness's builder parses
 /// ([`HarnessSettings::own`], `core::registry`).
@@ -105,16 +106,18 @@ pub struct HarnessSettings {
     pub default_model: Option<String>,
     pub default_effort: Option<String>,
     pub default_policy: Option<String>,
-    pub persist_sessions: Option<bool>,
     #[serde(default)]
     pub extra_args: Vec<String>,
     /// `"acp"` defines a harness for an Agent Client Protocol agent under
     /// this table's name; `command` is then required.
     pub protocol: Option<String>,
     /// The agent's command line for an ACP harness, e.g. `["gemini", "--acp"]`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub command: Vec<String>,
-    /// Name shown in the TUI for a config-defined harness.
+    /// Only a table that defines an agent takes it, and vibe's
+    /// ([`HarnessSettings::own_of_agent`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// Name shown in the TUI for a config-defined harness. Taken where
+    /// `command` is.
     pub display_name: Option<String>,
     /// Paths this harness may write inside the sandbox, besides the ones
     /// unharness knows it needs (an ACP agent's state, an MCP server's data).
@@ -131,13 +134,49 @@ impl HarnessSettings {
     /// [`rest`](Self::rest). A key `T` does not take is an error naming the
     /// table and the key, as a value it cannot take is.
     ///
+    /// `command` and `display_name` are refused too: they say what runs an
+    /// agent and the name it is shown by, which only a table that defines
+    /// one reads ([`own_of_agent`](Self::own_of_agent)). A harness that
+    /// runs its own CLI under its own name points to `binary`, and a table
+    /// that sets `protocol` as well is told an agent needs a name of its
+    /// own ([`AN_AGENT_NEEDS_ITS_OWN_NAME`]).
+    ///
     /// `T` is a plain struct, without `#[serde(flatten)]`: its keys are the
     /// field names its derived `Deserialize` hands `deserialize_struct`,
     /// which a struct with a flattened field does not call, and then every
     /// key is refused.
     pub fn own<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
+        let agent = match self.protocol {
+            Some(_) => format!(" ({AN_AGENT_NEEDS_ITS_OWN_NAME})"),
+            None => String::new(),
+        };
+        if self.command.is_some() {
+            anyhow::bail!(
+                "[harnesses.{name}] command: {name} does not take this key; to run another \
+                 {name} binary, set binary{agent}"
+            );
+        }
+        if self.display_name.is_some() {
+            anyhow::bail!("[harnesses.{name}] display_name: {name} does not take this key{agent}");
+        }
+        self.own_of_agent(name)
+    }
+
+    /// [`own`](Self::own) for a table that says what runs its agent and
+    /// the name it is shown by, `command` and `display_name`: an ACP
+    /// agent's, and vibe's.
+    ///
+    /// A key in [`REMOVED_KEYS`] is left to the registry, which says so
+    /// for every table, whichever harness reads it.
+    pub fn own_of_agent<T: DeserializeOwned>(&self, name: &str) -> Result<T> {
         let takes = keys_of::<T>();
-        if let Some(key) = self.rest.keys().find(|k| !takes.contains(&k.as_str())) {
+        let rest: toml::Table = self
+            .rest
+            .iter()
+            .filter(|(k, _)| !REMOVED_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if let Some(key) = rest.keys().find(|k| !takes.contains(&k.as_str())) {
             let own = match takes {
                 [] => format!("{name} takes only the keys every harness takes"),
                 keys => format!(
@@ -147,13 +186,24 @@ impl HarnessSettings {
             };
             anyhow::bail!("[harnesses.{name}] {key}: unknown key; {own}");
         }
-        T::deserialize(toml::Value::Table(self.rest.clone())).map_err(|e| {
+        T::deserialize(toml::Value::Table(rest)).map_err(|e| {
             // toml says which key on a line of its own.
             let what = e.to_string();
             anyhow::anyhow!("[harnesses.{name}]: {}", what.trim_end().replace('\n', " "))
         })
     }
 }
+
+/// Why a table that sets `protocol` defines no agent when it is a built-in
+/// harness's, or another name for one: said in its error.
+pub const AN_AGENT_NEEDS_ITS_OWN_NAME: &str =
+    "an ACP agent's table needs a name no built-in harness has";
+
+/// Keys a harness table once took that did nothing, and that unharness no
+/// longer takes. Setting one is an error naming it, in any table
+/// (`core::registry`), so that a line read by nothing does not stay as if
+/// it were a setting.
+pub const REMOVED_KEYS: &[&str] = &["persist_sessions"];
 
 /// What a harness that takes only the keys every harness takes has of its
 /// own: nothing.
@@ -461,17 +511,17 @@ impl Config {
             default_model: local.default_model.or(global.default_model),
             default_effort: local.default_effort.or(global.default_effort),
             default_policy: local.default_policy.or(global.default_policy),
-            persist_sessions: local.persist_sessions.or(global.persist_sessions),
             extra_args: if !local.extra_args.is_empty() {
                 local.extra_args
             } else {
                 global.extra_args
             },
             protocol: local.protocol.or(global.protocol),
-            command: if !local.command.is_empty() {
-                local.command
-            } else {
-                global.command
+            // An empty list keeps the global one's, as `extra_args` does,
+            // and is still there to be refused where nothing takes it.
+            command: match local.command {
+                Some(c) if c.is_empty() => global.command.or(Some(c)),
+                local => local.or(global.command),
             },
             display_name: local.display_name.or(global.display_name),
             sandbox_writable: [global.sandbox_writable, local.sandbox_writable].concat(),
@@ -911,6 +961,18 @@ url = "https://example.com/mcp"
             "[harnesses.x] modes: unknown key; x takes only the keys every harness takes"
         );
         assert!(HarnessSettings::default().own::<NoOwnKeys>("x").is_ok());
+
+        // `command` and `display_name` are read only from an agent's table.
+        let agent: Config =
+            toml::from_str("[harnesses.x]\ncommand = [\"x\"]\ndisplay_name = \"X\"\n").unwrap();
+        assert!(agent.harnesses["x"].own_of_agent::<NoOwnKeys>("x").is_ok());
+        assert_eq!(
+            agent.harnesses["x"]
+                .own::<NoOwnKeys>("x")
+                .unwrap_err()
+                .to_string(),
+            "[harnesses.x] command: x does not take this key; to run another x binary, set binary"
+        );
     }
 
     /// A workspace's table of the same name merges its harness's own keys
