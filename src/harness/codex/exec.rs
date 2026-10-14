@@ -7,9 +7,15 @@ use super::OwnSandbox;
 use super::exec_parse::CodexExecParser;
 use crate::core::driver::per_turn::{PerTurnProtocol, TurnSpec, TurnState};
 use crate::core::sandbox::SandboxLevel;
-use crate::core::{Attachment, HarnessId, Parser, PermissionPolicy};
+use crate::core::{Attachment, CapsUpdate, HarnessId, Parser, PermissionPolicy};
 
-pub struct CodexExec;
+/// Codex `exec`'s turns.
+#[derive(Debug, Default)]
+pub struct CodexExec {
+    /// What the session reports of its capabilities, where its harness
+    /// declares more than `exec` can do (`transport = "auto"`).
+    pub reports: Option<CapsUpdate>,
+}
 
 /// Flags for a fresh `codex exec` (not accepted by `exec resume`).
 ///
@@ -132,6 +138,10 @@ impl PerTurnProtocol for CodexExec {
     fn new_parser(&self) -> Box<dyn Parser> {
         Box::new(CodexExecParser::new())
     }
+
+    fn reported_caps(&self) -> Option<CapsUpdate> {
+        self.reports.clone()
+    }
 }
 
 #[cfg(test)]
@@ -169,7 +179,7 @@ mod tests {
     #[test]
     fn images_are_passed_before_a_flag() {
         let a = Attachment::image("/w/a.png").unwrap();
-        let spec = CodexExec
+        let spec = CodexExec::default()
             .build_turn(&state(PermissionPolicy::Auto, None), "p", &[a])
             .unwrap();
         let args: Vec<String> = spec
@@ -187,7 +197,7 @@ mod tests {
     fn a_chosen_provider_goes_on_every_turn() {
         let mut s = state(PermissionPolicy::Auto, Some("t1"));
         s.provider = Some("ollama".into());
-        let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+        let a = argv(&CodexExec::default().build_turn(&s, "p", &[]).unwrap());
         assert!(a.contains("-m gpt-5.5 -c model_provider=\"ollama\""), "{a}");
     }
 
@@ -203,7 +213,7 @@ mod tests {
     fn first_turn_uses_sandbox_flags() {
         let mut s = state(PermissionPolicy::Auto, None);
         s.sandbox = unconfined(SandboxLevel::WorkspaceWrite);
-        let spec = CodexExec.build_turn(&s, "p", &[]).unwrap();
+        let spec = CodexExec::default().build_turn(&s, "p", &[]).unwrap();
         assert_eq!(
             argv(&spec),
             "exec --json --skip-git-repo-check -C /work --approve-for-me -m gpt-5.5 -c model_reasoning_effort=\"high\" -"
@@ -280,7 +290,7 @@ mod tests {
 
         let mut s = state(PermissionPolicy::Bypass, Some("t1"));
         s.sandbox = unconfined(ReadOnly);
-        let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+        let a = argv(&CodexExec::default().build_turn(&s, "p", &[]).unwrap());
         assert!(
             a.contains("-c sandbox_mode=\"read-only\" -c approval_policy=\"never\"")
                 && !a.contains("--dangerously-bypass"),
@@ -301,7 +311,7 @@ mod tests {
         }
         for session in [None, Some("t1")] {
             assert!(
-                CodexExec
+                CodexExec::default()
                     .build_turn(&state(PermissionPolicy::Ask, session), "p", &[])
                     .is_err()
             );
@@ -310,7 +320,7 @@ mod tests {
 
     #[test]
     fn resume_uses_config_overrides() {
-        let spec = CodexExec
+        let spec = CodexExec::default()
             .build_turn(&state(PermissionPolicy::Bypass, Some("t1")), "p", &[])
             .unwrap();
         let a = argv(&spec);
@@ -325,7 +335,7 @@ mod tests {
         for session in [None, Some("t1")] {
             let mut s = state(PermissionPolicy::Auto, session);
             s.mcp_servers = servers.clone();
-            let a = argv(&CodexExec.build_turn(&s, "p", &[]).unwrap());
+            let a = argv(&CodexExec::default().build_turn(&s, "p", &[]).unwrap());
             assert!(
                 a.contains(" -c mcp_servers.files.command=\"/usr/bin/files-mcp\" -c ")
                     && a.contains(" -c mcp_servers.docs.url="),

@@ -26,7 +26,7 @@ pub mod text;
 pub mod transcript;
 
 pub use caps::{
-    Capabilities, Choices, McpChannel, McpSupport, PermissionPolicy, PolicyResolution,
+    Ability, Capabilities, Choices, McpChannel, McpSupport, PermissionPolicy, PolicyResolution,
     PolicySupport, PolicyUnavailable, RewindSupport, SubagentSupport, resolve_policy,
 };
 pub use event::{

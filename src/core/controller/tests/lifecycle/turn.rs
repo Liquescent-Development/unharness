@@ -185,7 +185,7 @@ async fn a_compaction_or_rewind_the_driver_refuses_ends_the_wait() {
             sandbox: Sandbox::off(),
         },
         &CodexHarness::new(CodexTransport::Exec).capabilities(),
-        Arc::new(CodexExec),
+        Arc::new(CodexExec::default()),
     )
     .unwrap();
     app.controller.session_alive = true;

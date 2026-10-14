@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use super::caps::PermissionPolicy;
+use super::caps::{Ability, PermissionPolicy};
 use super::ids::{ModelInfo, ProviderId};
 use super::rules::ToolAction;
 
@@ -314,6 +314,13 @@ pub struct CapsUpdate {
     /// The agent asks the user questions (`Capabilities::ask_user_question`):
     /// an ACP agent is seen to once it sends a form elicitation.
     pub ask_user_question: Option<bool>,
+    /// What the live session cannot do although its harness declares it
+    /// (Codex under `transport = "auto"` that came to `exec`): taken out of
+    /// what is offered, and refused by the driver if asked all the same.
+    /// It only ever takes away (`Capabilities::lacking` builds one). Each
+    /// list replaces the last, and it stays when the session ends, until
+    /// another session of the harness reports one.
+    pub lacks: Option<Vec<Ability>>,
 }
 
 /// A command a harness runs when a prompt starts with `/name`: one of its
@@ -398,6 +405,9 @@ impl CapsUpdate {
         }
         if newer.ask_user_question.is_some() {
             self.ask_user_question = newer.ask_user_question;
+        }
+        if newer.lacks.is_some() {
+            self.lacks = newer.lacks;
         }
     }
 }
@@ -733,6 +743,10 @@ impl AgentEvent {
                 }
                 if let Some(q) = u.ask_user_question {
                     parts.push(format!("ask_user_question={q}"));
+                }
+                if let Some(l) = &u.lacks {
+                    let l: Vec<&str> = l.iter().map(|a| a.as_str()).collect();
+                    parts.push(format!("lacks={}", l.join(",")));
                 }
                 format!("CapabilitiesChanged {}", parts.join(" "))
             }

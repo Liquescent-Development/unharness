@@ -762,6 +762,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(q) = u.ask_user_question {
         v["ask_user_question"] = json!(q);
     }
+    if let Some(l) = &u.lacks {
+        v["lacks"] = json!(l.iter().map(|a| a.as_str()).collect::<Vec<_>>());
+    }
     if let Some(p) = &u.provider {
         v["provider"] = json!(p.0);
     }
@@ -1220,6 +1223,22 @@ mod tests {
             v["commands"],
             json!([{"name": "review", "description": "Review it", "hint": "[pr]", "aliases": []}])
         );
+    }
+
+    /// What a session lacks of what its harness declares is listed by
+    /// name (Codex under `transport = "auto"` that came to `exec`).
+    #[test]
+    fn what_a_session_lacks_is_listed_by_name() {
+        let v = event_json(&AgentEvent::CapabilitiesChanged(CapsUpdate {
+            lacks: Some(vec![
+                crate::core::Ability::Steer,
+                crate::core::Ability::StopSubagent,
+            ]),
+            refused_policies: Some(vec![PermissionPolicy::Ask]),
+            ..Default::default()
+        }));
+        assert_eq!(v["lacks"], json!(["steer", "stop_subagent"]));
+        assert_eq!(v["refused_policies"], json!(["ask"]));
     }
 
     #[test]

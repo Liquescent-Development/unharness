@@ -503,11 +503,19 @@ impl Harness for CodexHarness {
         let transport = self.effective_transport(&cfg.binary);
         match transport {
             // What `exec` can do, also where `auto` came to it only now.
-            CodexTransport::Exec => crate::core::driver::per_turn::start(
-                cfg,
-                &CodexHarness::new(transport).capabilities(),
-                Arc::new(exec::CodexExec),
-            ),
+            // `auto` declares app-server's capabilities, so its session
+            // reports what `exec` lacks of them (#288). `auto` comes to
+            // the same for every session of a run, from the installed CLI.
+            CodexTransport::Exec => {
+                let exec = CodexHarness::new(transport).capabilities();
+                let reports = (self.transport == CodexTransport::Auto)
+                    .then(|| self.capabilities().lacking(&exec));
+                crate::core::driver::per_turn::start(
+                    cfg,
+                    &exec,
+                    Arc::new(exec::CodexExec { reports }),
+                )
+            }
             _ => app_server::start(cfg, &self.capabilities()),
         }
     }
@@ -948,6 +956,38 @@ region = "us-east-1"
             Some(CodexTransport::AppServer)
         );
         assert_eq!(CodexTransport::parse("x"), None);
+    }
+
+    /// `auto` declares app-server's capabilities. A session of it that
+    /// came to `exec` reports what `exec` lacks of them, and with that
+    /// the TUI offers what `exec` has, `ask` not among it (#288).
+    #[test]
+    fn auto_come_to_exec_reports_what_exec_lacks() {
+        use crate::core::{Ability, CapsUpdate};
+        let auto = CodexHarness::new(CodexTransport::Auto).capabilities();
+        let exec = CodexHarness::new(CodexTransport::Exec).capabilities();
+        let report = auto.lacking(&exec);
+        assert_eq!(
+            report,
+            CapsUpdate {
+                lacks: Some(Ability::ALL.to_vec()),
+                fork: Some(false),
+                plan_mode: Some(false),
+                ask_user_question: Some(false),
+                refused_policies: Some(vec![PermissionPolicy::Ask]),
+                ..Default::default()
+            }
+        );
+        let mut offered = auto.clone();
+        offered.apply(&report);
+        for ability in Ability::ALL {
+            assert_eq!(offered.has(ability), exec.has(ability), "{ability:?}");
+        }
+        assert_eq!(offered.permission_policies, exec.permission_policies);
+        assert_eq!(
+            (offered.fork, offered.plan_mode, offered.ask_user_question),
+            (exec.fork, exec.plan_mode, exec.ask_user_question)
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 
 use super::{asks, exited};
 use crate::core::caps::{Capabilities, PermissionPolicy};
-use crate::core::event::{AgentEvent, StopReason};
+use crate::core::event::{AgentEvent, CapsUpdate, StopReason};
 use crate::core::ids::{HarnessId, ModelRef, ProviderId};
 use crate::core::mcp::McpServer;
 use crate::core::parser::Parser;
@@ -62,6 +62,15 @@ pub trait PerTurnProtocol: Send + Sync {
         attachments: &[Attachment],
     ) -> Result<TurnSpec>;
     fn new_parser(&self) -> Box<dyn Parser>;
+
+    /// What the session reports of its capabilities before its first
+    /// turn, on top of what its harness declares (Codex under `transport
+    /// = "auto"` that came to `exec`: what it lacks of app-server's). Told
+    /// again after `Restarted`, with which the TUI forgets the policies a
+    /// session refused, as for a CLI started anew.
+    fn reported_caps(&self) -> Option<CapsUpdate> {
+        None
+    }
 }
 
 /// Drive `protocol` for the session whose handle this returns. `caps` is
@@ -109,6 +118,12 @@ async fn drive(
     events: mpsc::Sender<AgentEvent>,
     mut cmds: mpsc::Receiver<SessionCommand>,
 ) {
+    let reported = protocol.reported_caps();
+    if let Some(update) = &reported {
+        let _ = events
+            .send(AgentEvent::CapabilitiesChanged(update.clone()))
+            .await;
+    }
     // Announce the resumed session immediately so the TUI can label it.
     if let Some(id) = &state.session_id {
         let _ = events
@@ -205,6 +220,11 @@ async fn drive(
                         state.provider = Some(p);
                         state.model = None;
                         let _ = events.send(AgentEvent::Restarted).await;
+                        if let Some(update) = &reported {
+                            let _ = events
+                                .send(AgentEvent::CapabilitiesChanged(update.clone()))
+                                .await;
+                        }
                     }
                     SessionCommand::Shutdown => {
                         if let Some(mut p) = current.take() {
@@ -650,6 +670,63 @@ mod tests {
             turn.contains(&AgentEvent::TextDelta("llama -".into())),
             "{turn:?}"
         );
+    }
+
+    // What the session reports of its capabilities comes before anything
+    // else, and again after it says it was restarted on a provider: the
+    // TUI forgets then what the session before refused (#288).
+    #[tokio::test]
+    async fn what_the_session_reports_of_its_capabilities_comes_first_and_after_a_restart() {
+        struct Lacking;
+        impl PerTurnProtocol for Lacking {
+            fn harness(&self) -> HarnessId {
+                HarnessId::CODEX
+            }
+            fn build_turn(&self, s: &TurnState, t: &str, a: &[Attachment]) -> Result<TurnSpec> {
+                Echo.build_turn(s, t, a)
+            }
+            fn new_parser(&self) -> Box<dyn Parser> {
+                Box::new(EchoParser)
+            }
+            fn reported_caps(&self) -> Option<CapsUpdate> {
+                Some(CapsUpdate {
+                    refused_policies: Some(vec![PermissionPolicy::Ask]),
+                    ..Default::default()
+                })
+            }
+        }
+        async fn next(h: &mut SessionHandle) -> AgentEvent {
+            tokio::time::timeout(Duration::from_secs(5), h.events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        let reported = AgentEvent::CapabilitiesChanged(Lacking.reported_caps().unwrap());
+        let mut resumed = cfg();
+        resumed.resume = Some("t1".into());
+        let mut h = start(resumed, &caps(), Arc::new(Lacking)).unwrap();
+        assert_eq!(next(&mut h).await, reported);
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::SessionStarted { .. }
+        ));
+        h.send(SessionCommand::SetProvider("llama".into()))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut h).await, AgentEvent::Restarted);
+        assert_eq!(next(&mut h).await, reported);
+
+        // A protocol that reports nothing says nothing.
+        let mut h = start(cfg(), &caps(), Arc::new(Echo)).unwrap();
+        h.send(SessionCommand::SetProvider("llama".into()))
+            .await
+            .unwrap();
+        assert_eq!(next(&mut h).await, AgentEvent::Restarted);
+        h.send(SessionCommand::Shutdown).await.unwrap();
+        assert!(matches!(
+            next(&mut h).await,
+            AgentEvent::ProcessExited { .. }
+        ));
     }
 
     #[tokio::test]

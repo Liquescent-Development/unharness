@@ -457,7 +457,8 @@ impl Controller {
 
     /// Declared capabilities of `harness` plus what a session of it
     /// reported in this run (an ACP agent says at `initialize` whether it
-    /// can fork); `None` for one not in the registry.
+    /// can fork, a Codex session under `transport = "auto"` that came to
+    /// `exec` what it lacks); `None` for one not in the registry.
     pub fn caps_of(&self, harness: HarnessId) -> Option<Capabilities> {
         let mut caps = self.registry.get(harness)?.capabilities();
         if let Some(update) = self.live.get(&harness) {
