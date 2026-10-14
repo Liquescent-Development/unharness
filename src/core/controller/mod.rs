@@ -219,7 +219,7 @@ pub struct QueuedPrompt {
 
 /// The active harness's session on the vendor's remote control.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct RemoteSession {
+struct RemoteSession {
     /// What it is called there, if the user named it.
     name: Option<String>,
     /// Where it can be opened, once the harness's process said.
@@ -284,7 +284,7 @@ pub struct Controller {
     /// session on (`/remote-control`). It outlives the harness's process:
     /// each new one is put on it again (`remote_control_resend`); a
     /// switch, a fork, a resume, `/clear` and quit end it.
-    pub(crate) remote: Option<RemoteSession>,
+    remote: Option<RemoteSession>,
     /// The live or starting session was started before anything was sent
     /// to it (so that its commands are listed): until the first prompt it
     /// is not part of the conversation.

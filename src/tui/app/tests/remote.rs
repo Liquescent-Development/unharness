@@ -7,7 +7,7 @@ fn remote_control_is_offered_only_where_declared() {
     let mut app = test_app(HarnessId::PI);
     app.controller.session_alive = true;
     app.handle_slash_command("/rc now");
-    assert!(app.controller.remote.is_none());
+    assert!(app.remote_status().is_none());
     assert!(
         app.controller
             .conversation
