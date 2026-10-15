@@ -198,6 +198,7 @@ impl Harness for AgyHarness {
                 description: None,
                 effort_levels: None,
                 is_default: false,
+                cli_default: false,
             })
             .collect())
     }

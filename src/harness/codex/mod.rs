@@ -424,6 +424,7 @@ impl Harness for CodexHarness {
                 description: Some(desc.to_string()),
                 effort_levels: None,
                 is_default: false,
+                cli_default: false,
             })
             .collect())
     }
@@ -696,6 +697,7 @@ fn listed_models(data: &[Value]) -> Vec<ModelInfo> {
                     .map(str::to_string),
                 effort_levels: (!efforts.is_empty()).then_some(efforts),
                 is_default: m.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+                cli_default: false,
             }
         })
         .collect()
@@ -770,7 +772,11 @@ mod tests {
         let answer = include_str!("fixtures/app_server_two_turns.jsonl")
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-            .find(|v| v.get("id") == Some(&json!(5)))
+            .find(|v| {
+                v.pointer("/result/data/0/model").is_some()
+                    && v.pointer("/result/data/0/supportedReasoningEfforts")
+                        .is_some()
+            })
             .expect("the model/list answer");
         let data = answer
             .pointer("/result/data")

@@ -227,6 +227,7 @@ impl Harness for PiHarness {
                         vec!["off".to_string()]
                     }),
                     is_default: false,
+                    cli_default: false,
                 }
             })
             .collect())

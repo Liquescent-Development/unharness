@@ -34,6 +34,11 @@ impl App {
         self.controller.model_label()
     }
 
+    /// The model's label without its provider, for a narrow status row.
+    pub fn short_model_label(&self) -> String {
+        self.controller.short_model_label()
+    }
+
     /// Ask the active harness for its commands without a session, once,
     /// where the session would not say before the first prompt.
     pub(super) fn list_commands(&mut self) {

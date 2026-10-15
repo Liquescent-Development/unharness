@@ -135,6 +135,7 @@ impl SessionOptions {
                         description: description.clone(),
                         effort_levels: None,
                         is_default: false,
+                        cli_default: false,
                     })
                     .collect(),
             ),

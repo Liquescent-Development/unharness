@@ -109,6 +109,9 @@ names none (`fixtures/exec_*.jsonl`), so an `exec` session stays
 picker marks `(default)`; the fallback table, which `exec` lists, marks
 none. That flag is the catalog's: a `model` in Codex's `config.toml`
 is not reflected in it (unverified), so the label waits for the thread.
+Unverified: whether `thread/resume` and `thread/fork` are followed by a
+`thread/started` that names the model; no recording has either on
+app-server, so a resumed or forked thread may say `openai (CLI default)`.
 
 ## Providers
 

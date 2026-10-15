@@ -724,3 +724,61 @@ fn the_reported_model_is_the_default_while_its_process_runs() {
         None
     );
 }
+
+/// Claude's `default` entry is its own choice, not a model: chosen, the
+/// label names what the session reports as the default, as with none
+/// chosen, and `default` is still what Claude is told (#329).
+#[test]
+fn the_clis_own_choice_is_named_as_no_model_chosen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+    app.controller.sandbox = SandboxSetup::null(None);
+    // Not listed yet: it is taken for the model it names.
+    app.set_model("default".into());
+    assert_eq!(app.controller.model_label(), "anthropic/default");
+
+    let entry = |id: &str, cli_default| ModelInfo {
+        model_ref: ModelRef::new(HarnessId::CLAUDE, "anthropic", id),
+        display_name: id.to_string(),
+        description: None,
+        effort_levels: None,
+        is_default: false,
+        cli_default,
+    };
+    app.controller.keep_models(
+        HarnessId::CLAUDE,
+        "anthropic".into(),
+        vec![entry("default", true), entry("sonnet", false)],
+    );
+    assert_eq!(app.controller.model_label(), "anthropic (CLI default)");
+    app.submit_prompt("hello".into());
+    app.take_actions();
+    assert_eq!(app.current_model().unwrap().model, "default");
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: Some("claude-opus-5-5".into()),
+    });
+    assert_eq!(
+        app.controller.model_label(),
+        "anthropic/claude-opus-5-5 (default)"
+    );
+    assert_eq!(
+        app.controller.short_model_label(),
+        "claude-opus-5-5 (default)"
+    );
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+
+    // A model chosen after it is named, and the default forgotten.
+    app.set_model("sonnet".into());
+    assert_eq!(app.controller.model_label(), "anthropic/sonnet");
+    assert_eq!(
+        app.controller
+            .choices(HarnessId::CLAUDE)
+            .unwrap()
+            .reported_model,
+        None
+    );
+}

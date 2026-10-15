@@ -9,11 +9,14 @@ The transcript fills the window. The current state sits under the prompt:
   provider and model, effort (not for a harness with no effort levels,
   such as Antigravity), policy and sandbox level, token usage and cost,
   the session id, any capability caveat, and key hints. A model not
-  chosen shows as the one the session reported, marked `(default)`, or
-  as `CLI default` until it reports one (Antigravity and Codex's `exec`
-  never do); an effort not chosen shows as `CLI default`. On a
-  narrow terminal the directory is shortened first, then effort, model
-  and sandbox give way; the harness and its policy always stay.
+  chosen, or Claude's "Default (recommended)", shows as the one the
+  session reported, marked `(default)`, or as `CLI default` until it
+  reports one (some sessions never do, such as Antigravity's and
+  Codex's `exec`; each harness's status notes say which). An effort not
+  chosen shows as `CLI default`. On a narrow terminal the directory is
+  shortened first, then effort goes, the model loses its provider and
+  then goes, and the sandbox goes; the harness and its policy always
+  stay.
 
 Above the prompt, when there is something to show: the agent's plan as a
 checklist (`/plan` hides it; plan mode is the `plan`

@@ -174,6 +174,7 @@ mod tests {
             description: None,
             effort_levels: None,
             is_default: false,
+            cli_default: false,
         };
         let update = CapsUpdate {
             models: Some(vec![model("mistral-medium-3.5"), model("qwen")]),

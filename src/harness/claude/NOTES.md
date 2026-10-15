@@ -97,7 +97,12 @@ its `init` with a turn, not at its start. Until then the status line
 says `anthropic (CLI default)`, then `anthropic/<model> (default)`.
 The `initialize` answer's `default` entry also says what it resolves to
 (`resolvedModel`), which is not used; the picker marks no entry, since
-that one's own name says it ("Default (recommended)").
+that one's own name says it ("Default (recommended)"). That entry is
+Claude's own choice, not a model (`ModelInfo::cli_default`, set in
+`parse::initialize_models`): chosen, `--model default` and `set_model`
+still send it, and the label is the one for no model chosen, so
+`anthropic/default` shows only while no list has been seen (a
+`default_model = "default"` before the first session or picker).
 
 ## Providers
 

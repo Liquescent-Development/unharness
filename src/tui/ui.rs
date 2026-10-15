@@ -1573,7 +1573,14 @@ fn render_bottom(
     if let Some(remote) = app.remote_status() {
         segments.push((remote, Style::default().fg(Color::LightMagenta), 4));
     }
-    let right1 = fit_segments(&segments, width.saturating_sub(SPLIT_LEFT_MIN));
+    let room = width.saturating_sub(SPLIT_LEFT_MIN);
+    let mut right1 = fit_segments(&segments, room);
+    // A model label too long for the row loses its provider before it goes.
+    let shown = |line: &Line, text: &str| line.spans.iter().any(|s| s.content == text);
+    if !shown(&right1, &segments[1].0) {
+        segments[1].0 = app.short_model_label();
+        right1 = fit_segments(&segments, room);
+    }
     render_split(frame, rows[4], left1, right1, true);
 
     // Line 2: usage (left) · session id (right)
@@ -2968,11 +2975,22 @@ mod tests {
             description: None,
             effort_levels: None,
             is_default,
+            cli_default: false,
         };
         app.modal = Some(Modal::Model(ListPicker::new(vec![
             model("gpt-a", true),
             model("gpt-b", false),
         ])));
+        // Too narrow for the whole label, it loses its provider first.
+        let full = "anthropic/claude-haiku-4-5-20251001 (default)";
+        let short = " claude-haiku-4-5-20251001 (default)";
+        let shortened = (40..140).find(|&w| {
+            let (rows, _) = screen(&mut app, w, 30);
+            let status = rows.into_iter().find(|r| r.contains("[Claude]")).unwrap();
+            !status.contains(full) && status.contains(short)
+        });
+        assert!(shortened.is_some());
+
         let (rows, _) = screen(&mut app, 100, 30);
         let row = |id: &str| rows.iter().find(|r| r.contains(id)).cloned().unwrap();
         assert!(row("gpt-a").contains("gpt-a  (default)"), "{rows:#?}");

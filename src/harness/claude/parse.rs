@@ -68,8 +68,9 @@ fn initialize_commands(answer: &Value) -> Option<Vec<HarnessCommand>> {
 /// The models the answer to `initialize` offers, under the provider it
 /// names. They differ by provider: Bedrock's are `us.anthropic.…` ids,
 /// Vertex's carry an `@` date (2.1.292, without credentials for either).
-/// `default` is one of them, and `--model default` takes it. `None` for an
-/// empty list, as some older recordings carry.
+/// `default` is one of them, and `--model default` takes it: Claude's own
+/// choice, not a model (`ModelInfo::cli_default`). `None` for an empty
+/// list, as some older recordings carry.
 pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
     let models = answer.get("models")?.as_array()?;
     if models.is_empty() {
@@ -108,6 +109,7 @@ pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
                     description: Some(description),
                     effort_levels: efforts,
                     is_default: false,
+                    cli_default: id == "default",
                 })
             })
             .collect(),
@@ -2094,6 +2096,7 @@ mod tests {
         });
         let models = initialize_models(&answer).unwrap();
         assert_eq!(models[0].model_ref.to_string(), "claude:vertex/default");
+        assert!(models[0].cli_default && !models[1].cli_default);
         assert_eq!(
             models[0].effort_levels,
             Some(vec!["low".into(), "high".into()])
