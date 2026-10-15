@@ -998,16 +998,14 @@ impl ClaudeParser {
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let text = val
+            .get("result")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
         let stop_reason = if subtype == "success" && !is_error {
             StopReason::Done
         } else {
-            let detail = val
-                .get("result")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(|s| format!("{subtype}: {s}"))
-                .unwrap_or_else(|| subtype.to_string());
-            StopReason::Error(detail)
+            StopReason::Error(turn_error(subtype, text))
         };
         out.push(AgentEvent::TurnCompleted { stop_reason });
         self.turn_started = false;
@@ -1209,6 +1207,21 @@ fn hook_outcome(val: &Value) -> HookVerdict {
     }
     let output = if stderr.is_empty() { stdout } else { stderr };
     HookVerdict::Ended(HookOutcome::Failed, output.to_string())
+}
+
+/// A failed turn's error, from its result's `subtype` and text. The
+/// subtype leads only when it names the failure (`error_max_turns`,
+/// `error_during_execution`, …); an API or sign-in error comes as a
+/// `success` with `is_error`, and that word would read as the opposite
+/// (#325).
+fn turn_error(subtype: &str, text: Option<&str>) -> String {
+    let named = Some(subtype).filter(|s| s.starts_with("error"));
+    match (named, text) {
+        (Some(subtype), Some(text)) => format!("{subtype}: {text}"),
+        (Some(subtype), None) => subtype.to_string(),
+        (None, Some(text)) => text.to_string(),
+        (None, None) => "the turn failed".to_string(),
+    }
 }
 
 fn str_at<'a>(v: &'a Value, key: &str) -> &'a str {
@@ -2081,6 +2094,55 @@ mod tests {
                     stop_reason: StopReason::Done
                 },
             ]
+        );
+    }
+
+    /// The error a result line ends its turn with.
+    fn result_error(line: &str) -> String {
+        match ClaudeParser::new().feed(line).pop() {
+            Some(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(e),
+            }) => e,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The subtype leads a turn's error only when it names the failure
+    /// (#325).
+    #[test]
+    fn a_failed_turn_is_named_by_its_error_subtype_only() {
+        // An API or sign-in error.
+        assert_eq!(
+            result_error(
+                r#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate"}"#
+            ),
+            "Failed to authenticate"
+        );
+        assert_eq!(
+            result_error(r#"{"type":"result","subtype":"success","is_error":true,"result":""}"#),
+            "the turn failed"
+        );
+        assert_eq!(
+            result_error(
+                r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"stopped at 3"}"#
+            ),
+            "error_max_turns: stopped at 3"
+        );
+        assert_eq!(
+            result_error(r#"{"type":"result","subtype":"error_max_turns","is_error":true}"#),
+            "error_max_turns"
+        );
+        assert_eq!(
+            result_error(r#"{"type":"result","is_error":true,"result":"overloaded"}"#),
+            "overloaded"
+        );
+        assert_eq!(
+            result_error(r#"{"type":"result","is_error":true}"#),
+            "the turn failed"
+        );
+        assert_eq!(
+            result_error(r#"{"type":"result","subtype":"cancelled","result":"stopped"}"#),
+            "stopped"
         );
     }
 
