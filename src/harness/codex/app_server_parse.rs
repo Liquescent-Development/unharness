@@ -361,7 +361,8 @@ impl CodexAppServerParser {
                 // rollback do not add `last` to, and which a resumed or
                 // forked thread carries on from (NOTES.md). The total goes
                 // second: it replaces the session's figure, which `last`
-                // adds to (#311).
+                // adds to (#311). Between the two the TUI may draw one
+                // frame with the previous total plus `last`.
                 if let Some(last) = p.pointer("/tokenUsage/last") {
                     out.push(AgentEvent::Usage(token_usage(last)));
                 }

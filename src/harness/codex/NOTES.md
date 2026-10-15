@@ -48,8 +48,10 @@ Adding up `last` does not give `total`, in the recordings:
   the new turn's (32497, then 16238 + 16266 = 32504;
   `app_server_rewind.jsonl`): the dropped turn is no longer counted;
 - a thread forked (`thread/fork`, `excludeTurns: true`) starts from the
-  total of the thread it was forked from (its first `total` 52729 with
-  `last` 19509, `app_server_fork.jsonl`).
+  total of the thread it was forked from: its first `total` is 52729
+  with `last` 19509 (`app_server_fork.jsonl`), and the source thread's
+  last rollout ends at `total_token_usage` 33220 = 52729 − 19509. A
+  second fork of the same thread also started at 52729.
 
 A resumed thread carries on from its total too. Checked on the rollout
 files Codex wrote for the exec recordings (0.157.0, thread `01a10023`):
