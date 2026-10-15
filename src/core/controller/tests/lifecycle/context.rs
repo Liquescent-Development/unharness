@@ -312,3 +312,40 @@ fn a_window_only_filled_is_not_saved_over_the_file() {
     assert_eq!(again.controller.active, HarnessId::CODEX);
     assert_eq!(context(&again), ctx(None, Some(400_000)));
 }
+
+/// Rewound in place, a session holds less than it said: its fill is
+/// told again when it reports it.
+#[test]
+fn a_native_rewind_drops_the_fill() {
+    use crate::core::transcript::Block;
+    let mut app = test_app(HarnessId::CLAUDE);
+    for (prompt, anchor) in [("one", "a1"), ("two", "a2")] {
+        app.submit_prompt(prompt.into());
+        app.controller.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s1".into(),
+            model: None,
+        });
+        app.on_event(AgentEvent::TurnAnchor { id: anchor.into() });
+        app.on_event(AgentEvent::Context(ctx(Some(50_000), Some(200_000))));
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+    }
+    app.take_actions();
+    let two = app
+        .controller
+        .conversation
+        .transcript
+        .blocks
+        .iter()
+        .position(|b| matches!(b, Block::User { text } if text == "two"))
+        .unwrap();
+    app.rewind_to(two, false);
+    assert!(
+        app.take_actions()
+            .iter()
+            .any(|a| matches!(a, Action::Command(SessionCommand::Rewind { .. })))
+    );
+    assert_eq!(context(&app), ctx(None, Some(200_000)));
+}
