@@ -12,7 +12,7 @@ use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, ContextUsage, HookOutcome, Parser, PermissionKind, PermissionRequest, PlanEntry,
     PlanStatus, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
-    SubagentStatus, ToolAction, Usage,
+    SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -364,6 +364,7 @@ impl CodexAppServerParser {
                         cache_write: u(last, "cacheWriteInputTokens"),
                         cost_usd: None,
                         cumulative: false,
+                        scope: UsageScope::Request,
                     }));
                 }
                 // The last request's total is what currently sits in the context.
@@ -859,7 +860,24 @@ fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{assert_fixture, fixtures_dir};
+    use crate::core::testing::{assert_fixture, fixtures_dir, replay};
+
+    /// `thread/tokenUsage/updated` comes once per model request: a turn
+    /// that edits a file reports two (#312).
+    #[test]
+    fn usage_is_reported_per_request() {
+        let jsonl =
+            std::fs::read_to_string(fixtures_dir(file!()).join("app_server_file_change.jsonl"))
+                .unwrap();
+        let scopes: Vec<UsageScope> = replay(&mut CodexAppServerParser::new(), &jsonl)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage(u) => Some(u.scope),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scopes, [UsageScope::Request; 2]);
+    }
 
     #[test]
     fn fixture_app_server_mcp_server() {

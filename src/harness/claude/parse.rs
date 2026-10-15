@@ -11,7 +11,7 @@ use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
     ModelRef, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
     ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, RemoteControl,
-    StopReason, SubagentStatus, ToolAction, Usage,
+    StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// The policy of one of Claude's permission modes, as `system` `status`
@@ -944,6 +944,7 @@ impl ClaudeParser {
                 cache_write: u64_at(usage, "cache_creation_input_tokens"),
                 cost_usd,
                 cumulative: false,
+                scope: UsageScope::Turn,
             };
             // A subagent's report that arrives during a turn is taken into
             // that turn; the turn it would have started still gets a result,

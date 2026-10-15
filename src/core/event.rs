@@ -522,8 +522,34 @@ pub struct Usage {
     pub cache_read: u64,
     pub cache_write: u64,
     pub cost_usd: Option<f64>,
-    /// True when the numbers are session totals rather than one turn's.
+    /// True when the numbers are session totals rather than one turn's or
+    /// one request's; `scope` is then not read.
     pub cumulative: bool,
+    /// What a report that is not `cumulative` covers. Left out of the
+    /// fixture summary, and not saved when it is a turn's, as it was before
+    /// there was a scope.
+    #[serde(default, skip_serializing_if = "UsageScope::is_turn")]
+    pub scope: UsageScope,
+}
+
+/// What a usage report covers: a whole turn, or one of the model requests
+/// a turn makes, of which it may report several.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageScope {
+    /// Claude's `result`, agy's sum, Codex `exec`'s `turn.completed`, an
+    /// ACP prompt's answer.
+    #[default]
+    Turn,
+    /// Codex app-server's `thread/tokenUsage/updated`, pi's `turn_end`
+    /// (one per model call).
+    Request,
+}
+
+impl UsageScope {
+    pub fn is_turn(&self) -> bool {
+        *self == UsageScope::Turn
+    }
 }
 
 impl Usage {
@@ -890,5 +916,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(u.total_tokens(), 10);
+    }
+
+    /// Usage saved before there was a scope reads as a turn's, and a
+    /// turn's is saved as it was then.
+    #[test]
+    fn usage_saved_without_a_scope_is_a_turns() {
+        let old = r#"{"input":1,"output":2,"cache_read":0,"cache_write":0,"cost_usd":null,"cumulative":false}"#;
+        let u: Usage = serde_json::from_str(old).unwrap();
+        assert_eq!(u.scope, UsageScope::Turn);
+        assert_eq!(serde_json::to_string(&u).unwrap(), old);
+        let request = Usage {
+            scope: UsageScope::Request,
+            ..u
+        };
+        let saved = serde_json::to_string(&request).unwrap();
+        assert!(saved.ends_with(r#""scope":"request"}"#), "{saved}");
+        assert_eq!(serde_json::from_str::<Usage>(&saved).unwrap(), request);
     }
 }

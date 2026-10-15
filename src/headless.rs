@@ -24,7 +24,7 @@ use crate::core::permissions::{Route, Why};
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
     PermissionRequest, PolicyResolution, PolicySupport, RemoteControl, Rules, SessionCommand,
-    SessionHandle, StopReason, SubagentSupport, ToolAction, Usage,
+    SessionHandle, StopReason, SubagentSupport, ToolAction, Usage, UsageScope,
 };
 use crate::harness::Harness;
 
@@ -883,6 +883,11 @@ pub fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::Usage(u) => {
             let mut v = usage_json(u);
             v["type"] = json!("usage");
+            v["scope"] = json!(match (u.cumulative, u.scope) {
+                (true, _) => "session",
+                (false, UsageScope::Turn) => "turn",
+                (false, UsageScope::Request) => "request",
+            });
             v
         }
         AgentEvent::PlanUpdated {
@@ -1296,6 +1301,54 @@ mod tests {
         assert_eq!(result["usage"]["output"], 4);
         // Nothing but the lines on stdout.
         assert!(run.err.is_empty());
+    }
+
+    /// A harness that reports each request of a turn has each counted once
+    /// in the run's usage; each `usage` line says what it covers.
+    #[test]
+    fn usage_reported_per_request_is_summed_and_says_so() {
+        let (_dir, mut run) = headless(Format::StreamJson, false);
+        let request = |input, cost| {
+            AgentEvent::Usage(Usage {
+                input,
+                output: 1,
+                cost_usd: Some(cost),
+                scope: UsageScope::Request,
+                ..Default::default()
+            })
+        };
+        feed(
+            &mut run,
+            vec![
+                AgentEvent::TurnStarted,
+                request(3, 0.25),
+                request(4, 0.5),
+                done(),
+            ],
+        );
+        assert_eq!(run.finish(), 0);
+        let lines = lines(&run);
+        let usage: Vec<&Value> = lines.iter().filter(|l| l["type"] == "usage").collect();
+        assert_eq!(usage.len(), 2);
+        assert!(usage.iter().all(|u| u["scope"] == "request"));
+        assert!(usage.iter().all(|u| u["cumulative"] == false));
+        let result = lines.last().unwrap();
+        assert_eq!(result["usage"]["input"], 7);
+        assert_eq!(result["usage"]["output"], 2);
+        assert_eq!(result["usage"]["cost_usd"], 0.75);
+        assert_eq!(result["usage"]["cumulative"], false);
+        assert!(result["usage"].get("scope").is_none());
+        assert_eq!(
+            event_json(&AgentEvent::Usage(Usage::default()))["scope"],
+            "turn"
+        );
+        assert_eq!(
+            event_json(&AgentEvent::Usage(Usage {
+                cumulative: true,
+                ..Default::default()
+            }))["scope"],
+            "session"
+        );
     }
 
     /// The model can go into plan mode by itself: its writes and commands
