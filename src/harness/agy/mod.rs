@@ -137,6 +137,7 @@ impl Harness for AgyHarness {
             },
             steer: false,
             compaction: false,
+            // Its stream has token counts but no window (NOTES.md).
             context_usage: false,
             rate_limits: false,
             rewind: RewindSupport::default(),

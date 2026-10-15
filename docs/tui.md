@@ -349,7 +349,9 @@ attached the same way.
 
 ## Context and rate limits
 
-The usage line shows how full the model's context is (`ctx 34%`).
+The usage line shows how full the model's context is (`ctx 34%`), once
+the harness has said. A harness that never says (agy, Codex on `exec`)
+shows `ctx –`; pi says after each turn.
 `/usage` adds the account's rate-limit windows, and a notice appears when
 one passes 80%.
 

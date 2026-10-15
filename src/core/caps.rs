@@ -162,7 +162,9 @@ pub struct Capabilities {
     pub steer: bool,
     /// Context can be compacted on request.
     pub compaction: bool,
-    /// Context-window usage is reported (`Context`).
+    /// Context-window usage may be reported (`Context`). Without it the
+    /// harness never reports one, and the status row says so (`ctx –`)
+    /// where it would otherwise leave out a figure not known yet.
     pub context_usage: bool,
     /// Account rate-limit windows are reported (`RateLimit`).
     pub rate_limits: bool,
@@ -353,6 +355,9 @@ impl Capabilities {
         if let Some(f) = update.fork {
             self.fork = f;
         }
+        if let Some(c) = update.context_usage {
+            self.context_usage = c;
+        }
         if let Some(h) = update.mcp_http {
             self.mcp.http = h;
         }
@@ -425,6 +430,7 @@ impl Capabilities {
             image_input: lost(self.image_input, session.image_input),
             resume_by_id: lost(self.resume_by_id, session.resume_by_id),
             fork: lost(self.fork, session.fork),
+            context_usage: lost(self.context_usage, session.context_usage),
             mcp_http: lost(self.mcp.http, session.mcp.http),
             plan_mode: lost(self.plan_mode, session.plan_mode),
             slash_commands: lost(self.slash_commands, session.slash_commands),
@@ -620,6 +626,7 @@ mod tests {
             interactive_permissions: true,
             fork: true,
             image_input: true,
+            context_usage: true,
             permission_policies: vec![PolicySupport::full(Ask), PolicySupport::full(Bypass)],
             ..Default::default()
         };
@@ -649,6 +656,7 @@ mod tests {
                     Ability::InteractivePermissions
                 ]),
                 fork: Some(false),
+                context_usage: Some(false),
                 lacks_policies: Some(vec![Ask]),
                 ..Default::default()
             }
@@ -663,6 +671,7 @@ mod tests {
             );
         }
         assert!(!now.fork && now.image_input && !now.plan_mode && !now.remote_control);
+        assert!(!now.context_usage);
         assert_eq!(now.permission_policies, [PolicySupport::full(Bypass)]);
 
         // A session with all that is declared lacks nothing, and says so.

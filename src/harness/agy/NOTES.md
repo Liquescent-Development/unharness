@@ -84,3 +84,25 @@ read at the next delivery or result and shown as a second end),
 `manage_subagents` actions other than `list`, a subagent's own
 subagents, what agy does with its subagents on an interrupt, macOS
 (where the brain directory is taken from `log_uri`).
+
+## Context fill
+
+agy reports no context figure unharness could show, so it declares no
+`context_usage` and the status row shows `ctx –` (#313). Looked for on
+agy 1.3.5 (`strings` of the binary, no model call; first on 1.3.2,
+which it updated itself to meanwhile) and in the recordings (1.2.17,
+1.3.1): `step_update.usage` and `result.usage` carry
+`input_tokens`, `output_tokens`, `thinking_tokens`, `cache_read_tokens`
+and `total_tokens`, and nothing else (no window, no fraction);
+`agy --output-format json models` lists only `id` and `label` per
+model (checked on 1.3.2 and 1.3.5). The binary does know a window: a
+`ContextWindowMetadata` from its backend (`EstimatedTokensUsed`,
+`MaxContextTokens`), the `/context` command of its own interface
+("Visualize current context usage"), and its status-line command's
+JSON (`context_window`, `context_window_size`, `used_percentage`); none
+of that is in `--output-format stream-json`, and print mode has no
+context report among its own commands (`printmode` has reports for
+usage, model, effort, config, credits, skills, hooks, agents and the
+like, none for context). A step's `input_tokens` would say what one
+model call sent, but without the window it is no fill. Unverified:
+whether a later agy puts the window in `init` or `result`.

@@ -1583,8 +1583,12 @@ fn render_bottom(
     if let Some(c) = s.cost_usd {
         usage.push_str(&format!(" · ${c:.2}"));
     }
-    if let Some(pct) = app.controller.conversation.context.percent() {
-        usage.push_str(&format!(" · ctx {pct}%"));
+    // A figure not known yet is left out; one the harness never reports
+    // is said to be missing, so that it does not look like the former.
+    match app.controller.conversation.context.percent() {
+        Some(pct) => usage.push_str(&format!(" · ctx {pct}%")),
+        None if !app.caps().context_usage => usage.push_str(" · ctx –"),
+        None => {}
     }
     let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
     let right2 = Line::from(Span::styled(
@@ -4991,6 +4995,60 @@ mod tests {
 
         app.handle_slash_command("/plan");
         assert!(!screen(&mut app).contains("Plan ·"));
+    }
+
+    /// A context figure not known yet is left out of the usage row; one
+    /// the harness never reports is shown missing, as its capabilities
+    /// say, also once its session says it lacks them (#313).
+    #[test]
+    fn context_not_reported_differs_from_not_known_yet() {
+        use crate::core::{AgentEvent, CapsUpdate, ContextUsage};
+        use crate::harness::Harness;
+        use crate::harness::codex::{CodexHarness, CodexTransport};
+        let usage_row = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            term.draw(|f| render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..30)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .find(|row| row.contains("· session "))
+                .expect("a usage row")
+        };
+
+        // Claude reports one, but not before its first turn.
+        let mut app = test_app(HarnessId::CLAUDE);
+        assert!(app.caps().context_usage);
+        assert!(!usage_row(&mut app).contains("ctx"));
+        app.on_event(AgentEvent::Context(ContextUsage {
+            used: Some(1_000),
+            window: Some(200_000),
+        }));
+        assert!(usage_row(&mut app).contains("ctx 0%"));
+
+        // agy never does.
+        let mut app = test_app(HarnessId::AGY);
+        assert!(!app.caps().context_usage);
+        assert!(usage_row(&mut app).contains("ctx –"));
+
+        // Codex under `auto` declares app-server's; a session that came
+        // to `exec` reports that it lacks them.
+        let mut app = test_app(HarnessId::CODEX);
+        assert!(!usage_row(&mut app).contains("ctx"));
+        app.on_event(AgentEvent::CapabilitiesChanged(
+            CodexHarness::new(CodexTransport::Auto)
+                .capabilities()
+                .lacking(&CodexHarness::new(CodexTransport::Exec).capabilities()),
+        ));
+        assert!(usage_row(&mut app).contains("ctx –"));
+        // A later report that says nothing of it leaves it so.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec![
+            "low".into(),
+        ])));
+        assert!(usage_row(&mut app).contains("ctx –"));
     }
 
     #[test]
