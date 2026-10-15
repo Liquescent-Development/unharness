@@ -2,6 +2,31 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.10.0 - 2026-10-15
+
+### Added
+
+- `/usage` shows the billed tokens of the last turn and of the session, split into uncached input, output, cache reads and cache writes, with the cost, and says whether the harness never reports how full its context is or has not said yet. See [Tokens and cost](https://github.com/Liquescent-Development/unharness/blob/main/docs/tui.md#tokens-and-cost).
+- The status line shows `ctx –` for a harness that never reports how full its context is (agy, Codex on `exec`), and leaves `ctx` out only while a harness has not said yet.
+- Each harness's context fill and last turn's usage are kept with the conversation and come back on a resume or a switch back to it; until a session reports its model's window, the window that model last reported is used.
+- Usage events of `--print` and `--no-tui` say what they cover in `scope` (`turn`, `request` or `session`). See [Headless](https://github.com/Liquescent-Development/unharness/blob/main/docs/headless.md).
+
+### Changed
+
+- A key or harness table that nothing reads is a config error naming it, where it used to be ignored: a misspelt key, another harness's key, `persist_sessions`, `command` or `display_name` on a harness that does not take them, a `protocol` other than `acp`, a table no harness reads, and an unknown Codex `transport`. `unharness doctor` lists them.
+- The usage line keeps the last turn's numbers until the next turn reports, instead of going back to 0 when a turn starts; on Codex app-server and pi it counts up during the turn.
+- A Codex app-server session's total is Codex's own, so it follows compaction, `/rewind` and `/fork` as Codex counts them.
+
+### Fixed
+
+- The usage line no longer reads `↑0 ↓0` after a turn that failed or reported no tokens, or after Claude's `/compact`.
+- Codex's cached input is no longer counted twice in `↑`, the session total and `/usage`.
+- `ctx %` drops after Claude's `/compact` instead of keeping the size from before, and starts again after a model change or a new session instead of showing the old figure.
+- Codex on `transport = "auto"` that falls back to `exec` offers only what `exec` can do, and `/fork` there starts a new session.
+- A `/compact` or `/rewind` the harness refuses no longer leaves the TUI waiting.
+- On macOS, a CLI whose error output stayed open after it exited was never seen to end.
+- A harness's CLI started again (agy on a new model, Codex `exec`'s next turn) starts only once the one before it has ended.
+
 ## 0.9.0 - 2026-10-13
 
 ### Added
