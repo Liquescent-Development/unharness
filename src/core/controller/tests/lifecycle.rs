@@ -27,6 +27,7 @@ use crate::harness::agy::AgyHarness;
 use crate::harness::claude::ClaudeHarness;
 
 mod choices;
+mod context;
 mod conversation;
 mod conversation_choices;
 mod events;

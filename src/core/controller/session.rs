@@ -186,6 +186,7 @@ impl Controller {
         let name = self.short_name().to_string();
         self.conversation.fork_pending.remove(&harness);
         self.conversation.anchors.retain(|a| a.harness != harness);
+        self.conversation.context.used = None;
         if self.session_blank {
             // The new session's id waits in `blank_session` for the first
             // prompt; the old one is not this conversation's any more.
@@ -340,6 +341,9 @@ impl Controller {
     /// the conversation in its first prompt's bridge.
     pub(super) fn renew_now(&mut self, front: &mut dyn Front) {
         self.forget_session(self.active, front);
+        // What the session left reported in its handoff turn may have been
+        // on the model chosen before.
+        self.fresh_context();
         self.idle_start_paused = false;
         self.persist();
     }

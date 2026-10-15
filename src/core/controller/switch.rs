@@ -5,7 +5,7 @@ use crate::config::BridgeSummary;
 use crate::core::bridge;
 use crate::core::conversations::{CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, save_context_windows};
 use crate::core::transcript::{Block, DEFAULT_BRIDGE_MAX_CHARS};
-use crate::core::{ContextUsage, HarnessId, ModelRef, Usage};
+use crate::core::{ContextUsage, HarnessId, ModelRef};
 
 impl Controller {
     /// How long the bridge to `harness` may be: `bridge_max_chars` when
@@ -14,26 +14,57 @@ impl Controller {
     pub fn bridge_budget(&self, harness: HarnessId) -> usize {
         self.bridge_max_chars
             .or_else(|| {
-                self.context_windows
-                    .get(&harness)?
-                    .get(&self.model_key(harness))
-                    .map(|w| {
-                        usize::try_from(*w).unwrap_or(usize::MAX) / BRIDGE_WINDOW_SHARE
-                            * CHARS_PER_TOKEN
-                    })
+                self.known_window(harness).map(|w| {
+                    usize::try_from(w).unwrap_or(usize::MAX) / BRIDGE_WINDOW_SHARE * CHARS_PER_TOKEN
+                })
             })
             .unwrap_or(DEFAULT_BRIDGE_MAX_CHARS)
     }
 
     /// The model `harness` runs, as the context windows are kept by.
-    fn model_key(&self, harness: HarnessId) -> String {
+    pub(super) fn model_key(&self, harness: HarnessId) -> String {
         self.model(harness)
             .map_or_else(|| "default".to_string(), ModelRef::label)
     }
 
+    /// The window `harness`'s model last reported here, if it did.
+    fn known_window(&self, harness: HarnessId) -> Option<u64> {
+        self.context_windows
+            .get(&harness)?
+            .get(&self.model_key(harness))
+            .copied()
+    }
+
+    /// A window of the active harness's context nothing reported yet is
+    /// the one its model last reported here, so that the fill can be told
+    /// before the session says it (Claude only at the end of a turn). One
+    /// the session reports takes its place.
+    pub(super) fn fill_context_window(&mut self) {
+        if self.conversation.context.window.is_none() {
+            self.conversation.context.window = self.known_window(self.active);
+        }
+    }
+
+    /// The active harness's context as its session starts it on the model
+    /// it runs now (another model, a new session): the fill is not told
+    /// until the session reports it, and the window is the model's, when
+    /// it reported one here.
+    pub(super) fn fresh_context(&mut self) {
+        self.conversation.context = ContextUsage {
+            used: None,
+            window: self.known_window(self.active),
+        };
+        self.conversation.window_reported = false;
+    }
+
     /// Keep the window the active harness's model reported, for the next
-    /// bridge to it.
+    /// bridge to it and for its context's fill. Not while the session
+    /// being renewed writes its handoff summary: it may still run the
+    /// model chosen before (`Controller::session_renewed`).
     pub(super) fn learn_context_window(&mut self, window: u64) {
+        if self.handoff.is_some_and(|h| h.renew) {
+            return;
+        }
         let window = window.clamp(CONTEXT_WINDOW_MIN, CONTEXT_WINDOW_MAX);
         let model = self.model_key(self.active);
         let known = self.context_windows.entry(self.active).or_default();
@@ -222,9 +253,7 @@ impl Controller {
             .get(&next)
             .cloned()
             .unwrap_or_default();
-        self.conversation.turn_usage = Usage::default();
-        self.conversation.turn_reported = false;
-        self.conversation.context = ContextUsage::default();
+        self.restore_context();
         self.conversation.anchor_pending.clear();
         self.persist();
         self.conversation.transcript.push_system(format!(

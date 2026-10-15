@@ -14,8 +14,8 @@ use std::time::Duration;
 use super::{Controller, Front};
 use crate::core::checkpoints::Checkpoints;
 use crate::core::conversations::{
-    CheckpointRecord, Conversation, ConversationStore, TurnAnchorRecord, now_rfc3339,
-    truncate_title,
+    CheckpointRecord, ContextRecord, Conversation, ConversationStore, TurnAnchorRecord,
+    now_rfc3339, truncate_title,
 };
 use crate::core::transcript::Transcript;
 use crate::core::{ContextUsage, HarnessId, PlanEntry, Usage};
@@ -59,6 +59,7 @@ pub struct ConversationState {
     pub restore_undo: Option<String>,
     /// What titles it once saved.
     pub first_prompt: Option<String>,
+    /// What the active harness's last turn used.
     pub turn_usage: Usage,
     /// Belongs to `turn_usage`, and is reset wherever it is set: the
     /// running turn, or the last one, has put its own numbers there. A
@@ -69,12 +70,19 @@ pub struct ConversationState {
     pub session_usage: Usage,
     /// Context-window fill of the active harness's session.
     pub context: ContextUsage,
+    /// `context.window` is one a session reported, not one filled from
+    /// the context windows kept (`Controller::fill_context_window`): only
+    /// such a one is saved, so that a filled one does not stand later in
+    /// place of what the file knows by then.
+    pub window_reported: bool,
     /// How long the last turn took.
     pub generation_duration: Option<Duration>,
 }
 
 impl ConversationState {
-    /// `record` as it was saved, run on `active`.
+    /// `record` as it was saved, run on `active`. Its last turn's usage
+    /// and context are taken by [`Controller::restore_context`], which
+    /// knows the model it runs.
     pub fn new(record: Conversation, active: HarnessId) -> Self {
         ConversationState {
             transcript: Transcript::from_records(&record.blocks),
@@ -91,6 +99,7 @@ impl ConversationState {
             turn_reported: false,
             session_usage: record.usage.get(&active).cloned().unwrap_or_default(),
             context: ContextUsage::default(),
+            window_reported: false,
             generation_duration: None,
             record,
         }
@@ -110,6 +119,36 @@ impl Controller {
         self.policy.forget_plans();
         self.active = active;
         self.tracking.drop_waiting();
+        self.restore_context();
+    }
+
+    /// The active harness's last turn's usage and context as the
+    /// conversation saved them. The fill was the session's: it is told
+    /// again only for that session, still stored, on the model it was
+    /// measured on; the window only for that model. What is not known is
+    /// filled from the window the model last reported here.
+    pub(super) fn restore_context(&mut self) {
+        let active = self.active;
+        let model = self.model_key(active);
+        let c = &mut self.conversation;
+        c.turn_usage = c
+            .record
+            .turn_usage
+            .get(&active)
+            .cloned()
+            .unwrap_or_default();
+        c.turn_reported = false;
+        c.context = match c.record.context.get(&active) {
+            Some(r) if r.model == model => ContextUsage {
+                used: r.used.filter(|_| {
+                    r.session.is_some() && r.session.as_ref() == c.session_ids.get(&active)
+                }),
+                window: r.window,
+            },
+            _ => ContextUsage::default(),
+        };
+        c.window_reported = c.context.window.is_some();
+        self.fill_context_window();
     }
 
     /// A new conversation that keeps the models and efforts this one chose.
@@ -120,19 +159,26 @@ impl Controller {
         next
     }
 
-    /// Usage and context start again with a session that knows nothing.
+    /// Usage starts again in a fork ([`Controller::fork`]): what it spends
+    /// is its own. Its context is the session it goes on in: a branch
+    /// knows what the original knew, so the fill stays, a fresh session's
+    /// is not known until it reports. The window is the model's, and stays.
     pub fn reset_usage(&mut self) {
+        let branched = self.fork_pending(self.active);
         let c = &mut self.conversation;
         c.anchor_pending.clear();
         c.session_usage = Usage::default();
         c.turn_usage = Usage::default();
         c.turn_reported = false;
-        c.context = ContextUsage::default();
+        if !branched {
+            c.context.used = None;
+        }
     }
 
     /// Bring what is saved up to date. `active` runs the conversation, and
     /// its live session was sent something (`prompted`).
     pub fn sync_conversation(&mut self, active: HarnessId, prompted: bool) {
+        let model = self.model_key(active);
         let c = &mut self.conversation;
         let r = &mut c.record;
         r.active_harness = active;
@@ -140,6 +186,16 @@ impl Controller {
         r.bookmarks = c.last_active_index.clone();
         r.blocks = c.transcript.to_records();
         r.usage.insert(active, c.session_usage.clone());
+        r.turn_usage.insert(active, c.turn_usage.clone());
+        r.context.insert(
+            active,
+            ContextRecord {
+                used: c.context.used,
+                window: c.context.window.filter(|_| c.window_reported),
+                model,
+                session: c.session_ids.get(&active).cloned(),
+            },
+        );
         r.plan = c.plan.clone();
         r.anchors = c.anchors.clone();
         r.checkpoints = c.file_checkpoints.clone();
@@ -179,12 +235,14 @@ impl Controller {
 
     /// Take what the resumed conversation was run with, its policy, models
     /// and efforts, except where this run named its own
-    /// (`Controller::take_conversation`).
+    /// (`Controller::take_conversation`), and its context as of the model
+    /// that runs it now.
     pub fn take_conversation_choices(&mut self) {
         let record = self.conversation.record.clone();
         for notice in self.take_conversation(&record) {
             self.conversation.transcript.push_notice(notice);
         }
+        self.restore_context();
     }
 
     /// Say which conversation was resumed, and whether `active` runs under
@@ -232,13 +290,21 @@ impl Controller {
     }
 
     /// What points at `harness`'s vendor session: its id, where the bridge
-    /// to it starts, a fork of it to make, rewind anchors into it.
+    /// to it starts, a fork of it to make, rewind anchors into it, how full
+    /// its context was.
     pub fn forget_ids(&mut self, harness: HarnessId) {
+        let active = self.active;
         let c = &mut self.conversation;
         c.session_ids.remove(&harness);
         c.last_active_index.remove(&harness);
         c.fork_pending.remove(&harness);
         c.anchors.retain(|a| a.harness != harness);
+        if harness == active {
+            c.context.used = None;
+        }
+        if let Some(saved) = c.record.context.get_mut(&harness) {
+            saved.used = None;
+        }
     }
 
     /// Whether `harness`'s next session must branch the stored session id
@@ -397,6 +463,9 @@ impl Controller {
         let mut fork = self.successor(active);
         fork.title = self.conversation.record.title.clone();
         fork.last_policies = self.conversation.record.last_policies.clone();
+        // Each fill is told again only for a session still stored, the
+        // branch to be made of it (`Controller::restore_context`).
+        fork.context = self.conversation.record.context.clone();
         self.conversation.record = fork;
 
         let mut branched = Vec::new();

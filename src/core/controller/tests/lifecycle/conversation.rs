@@ -161,7 +161,15 @@ fn clear_starts_a_new_conversation() {
     assert!(app.controller.conversation.session_ids.is_empty());
     assert!(app.controller.conversation.last_active_index.is_empty());
     assert_eq!(app.controller.conversation.session_usage, Usage::default());
-    assert_eq!(app.controller.conversation.context, ContextUsage::default());
+    // The fill was the session's; the window is the model's, as it
+    // reported it (at least the smallest believed).
+    assert_eq!(
+        app.controller.conversation.context,
+        ContextUsage {
+            used: None,
+            window: Some(8_000)
+        }
+    );
     assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert_eq!(
         app.controller.model(HarnessId::CLAUDE).unwrap().model,
