@@ -356,8 +356,21 @@ impl CodexAppServerParser {
                 }
             }
             "thread/tokenUsage/updated" => {
+                // `last` is the request's, for the turn's numbers; `total`
+                // is the thread's own count, which compaction and a
+                // rollback do not add `last` to, and which a resumed or
+                // forked thread carries on from (NOTES.md). The total goes
+                // second: it replaces the session's figure, which `last`
+                // adds to (#311).
                 if let Some(last) = p.pointer("/tokenUsage/last") {
                     out.push(AgentEvent::Usage(token_usage(last)));
+                }
+                if let Some(total) = p.pointer("/tokenUsage/total") {
+                    out.push(AgentEvent::Usage(Usage {
+                        cumulative: true,
+                        scope: UsageScope::Turn,
+                        ..token_usage(total)
+                    }));
                 }
                 // The last request's total is what currently sits in the context.
                 let used = p
@@ -880,11 +893,58 @@ mod tests {
         let scopes: Vec<UsageScope> = replay(&mut CodexAppServerParser::new(), &jsonl)
             .into_iter()
             .filter_map(|e| match e {
-                AgentEvent::Usage(u) => Some(u.scope),
+                AgentEvent::Usage(u) if !u.cumulative => Some(u.scope),
                 _ => None,
             })
             .collect();
         assert_eq!(scopes, [UsageScope::Request; 2]);
+    }
+
+    /// Each `thread/tokenUsage/updated` reports `last` as a request's and
+    /// then `total` as the session's, in that order: the session's figure
+    /// is what Codex counts, also where adding up `last` drifts from it
+    /// (compaction, a rollback; #311).
+    #[test]
+    fn the_session_total_is_codexs_own() {
+        // (fixture, Codex's last `total`: input, cached input, output)
+        for (case, (input, cached, output)) in [
+            ("app_server_steer_and_compact", (29032, 26496, 73)),
+            ("app_server_rewind", (32494, 28160, 10)),
+            ("app_server_fork", (52714, 40320, 15)),
+        ] {
+            let jsonl =
+                std::fs::read_to_string(fixtures_dir(file!()).join(format!("{case}.jsonl")))
+                    .unwrap();
+            let usage: Vec<Usage> = replay(&mut CodexAppServerParser::new(), &jsonl)
+                .into_iter()
+                .filter_map(|e| match e {
+                    AgentEvent::Usage(u) => Some(u),
+                    _ => None,
+                })
+                .collect();
+            assert!(!usage.is_empty(), "{case}");
+            for pair in usage.chunks(2) {
+                assert!(
+                    matches!(pair, [last, total] if !last.cumulative && total.cumulative),
+                    "{case}: {pair:?}"
+                );
+            }
+            // What the controller and `--print` do with them: a session
+            // total replaces the figure, anything else adds to it.
+            let session = usage.iter().fold(Usage::default(), |mut s, u| {
+                if u.cumulative {
+                    s = u.clone();
+                } else {
+                    s.add(u);
+                }
+                s
+            });
+            assert_eq!(
+                (session.input, session.cache_read, session.output),
+                (input - cached, cached, output),
+                "{case}"
+            );
+        }
     }
 
     /// `inputTokens` counts the cached input too (`totalTokens` is

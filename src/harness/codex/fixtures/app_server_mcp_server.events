@@ -5,6 +5,7 @@ ToolCallStarted id=exec-5bf5a82b-0aa3-4a3f-bad4-6bdbaa65fd97 name=probe/magic_wo
 PermissionRequest id=0 ToolUse probe/magic_word [mcp probe/magic_word]
 ToolCallResult id=exec-5bf5a82b-0aa3-4a3f-bad4-6bdbaa65fd97 error=false "{\"_meta\":null,\"content\":[{\"text\":\"zanzibar argA\",\"type\":\"..."
 Usage in=2223 out=90 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=2223 out=90 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14473 window=258400
 RateLimit status=- 7d=9%
 TextDelta "z"
@@ -12,6 +13,7 @@ TextDelta "anzibar"
 TextDelta " arg"
 TextDelta "A"
 Usage in=292 out=8 cache_read=14208 cache_write=0 cost=- cumulative=false
+Usage in=2515 out=98 cache_read=26368 cache_write=0 cost=- cumulative=true
 Context used=14508 window=258400
 RateLimit status=- 7d=9%
 TurnCompleted Done
