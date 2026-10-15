@@ -98,6 +98,18 @@ whose command fails completes and says so. Unverified: a failed child turn
 (mapped to `Failed`), `interacted`, nested sub-agents, `multi_agent_v2`
 (stable but off by default).
 
+## The default model
+
+With no model chosen (#329), app-server's `thread/started` names the one
+that runs (`thread.model`, `gpt-6-astra` in `fixtures/app_server_*.jsonl`,
+0.157.0), shown as `openai/<model> (default)`; `exec`'s `thread.started`
+names none (`fixtures/exec_*.jsonl`), so an `exec` session stays
+`openai (CLI default)`. `model/list` marks one entry `isDefault`
+(`gpt-6-astra` in `fixtures/app_server_two_turns.jsonl`), which the
+picker marks `(default)`; the fallback table, which `exec` lists, marks
+none. That flag is the catalog's: a `model` in Codex's `config.toml`
+is not reflected in it (unverified), so the label waits for the thread.
+
 ## Providers
 
 Codex providers (0.157.0): the built-in `openai`, `ollama`, `lmstudio`

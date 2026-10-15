@@ -173,6 +173,7 @@ mod tests {
             display_name: v.to_string(),
             description: None,
             effort_levels: None,
+            is_default: false,
         };
         let update = CapsUpdate {
             models: Some(vec![model("mistral-medium-3.5"), model("qwen")]),

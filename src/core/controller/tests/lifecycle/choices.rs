@@ -658,3 +658,69 @@ fn a_choice_waits_for_the_cli_before_only_where_the_stored_session_keeps_it() {
     app.set_provider("vertex".into());
     assert_eq!(app.chosen_provider(), Some(&"vertex".into()));
 }
+
+/// The model a session reports is shown as the CLI's default while none is
+/// chosen, and only for as long as its process runs on the provider it
+/// reported it on (#329).
+#[test]
+fn the_reported_model_is_the_default_while_its_process_runs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = test_app_in(tmp.path().to_path_buf(), HarnessId::CLAUDE, None, false);
+    app.controller.sandbox = SandboxSetup::null(None);
+    let started = |app: &mut TestApp, id: &str, model: Option<&str>| {
+        app.controller.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: id.into(),
+            model: model.map(str::to_string),
+        });
+    };
+    let haiku = Some("claude-haiku-4-5-20251001");
+    let unreported = "anthropic (CLI default)";
+    let reported = "anthropic/claude-haiku-4-5-20251001 (default)";
+    assert_eq!(app.controller.model_label(), unreported);
+    app.submit_prompt("hello".into());
+    app.take_actions();
+    started(&mut app, "claude-1", haiku);
+    assert_eq!(app.controller.model_label(), reported);
+    // A start that names no model leaves the one reported.
+    started(&mut app, "claude-1", None);
+    assert_eq!(app.controller.model_label(), reported);
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+
+    // The CLI exits: what it runs on is not known until the next one says.
+    app.on_event(AgentEvent::ProcessExited { code: Some(0) });
+    assert_eq!(app.controller.model_label(), unreported);
+    started(&mut app, "claude-1", haiku);
+    // A switch ends the session; the harness switched to has its own.
+    app.switch_harness(HarnessId::CODEX);
+    app.take_actions();
+    assert_eq!(app.controller.model_label(), "openai (CLI default)");
+    app.switch_harness(HarnessId::CLAUDE);
+    app.take_actions();
+    assert_eq!(app.controller.model_label(), unreported);
+
+    // Another provider runs another default.
+    started(&mut app, "claude-1", haiku);
+    app.set_provider("bedrock".into());
+    assert_eq!(app.controller.model_label(), "bedrock (CLI default)");
+    app.take_actions();
+    app.on_event(AgentEvent::Restarted);
+    app.take_actions();
+
+    // A model chosen is named as chosen, and what a session reports for
+    // it is not taken as the default.
+    started(&mut app, "claude-1", haiku);
+    app.set_model("sonnet".into());
+    assert_eq!(app.controller.model_label(), "bedrock/sonnet");
+    app.take_actions();
+    started(&mut app, "claude-2", Some("claude-sonnet-5-5"));
+    assert_eq!(
+        app.controller
+            .choices(HarnessId::CLAUDE)
+            .unwrap()
+            .reported_model,
+        None
+    );
+}

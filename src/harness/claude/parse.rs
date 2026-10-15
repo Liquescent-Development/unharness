@@ -107,6 +107,7 @@ pub fn initialize_models(answer: &Value) -> Option<Vec<ModelInfo>> {
                     display_name: name.to_string(),
                     description: Some(description),
                     effort_levels: efforts,
+                    is_default: false,
                 })
             })
             .collect(),

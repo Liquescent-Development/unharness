@@ -442,11 +442,13 @@ impl Controller {
     }
 
     /// `harness`'s session process is ended: what was sent to it will not
-    /// be reported back, and the next one reports where it runs.
+    /// be reported back, and the next one reports where it runs and on
+    /// which model.
     pub fn process_ended(&mut self, harness: HarnessId) {
         self.policy.process_ended();
         if let Some(state) = self.choices.get_mut(&harness) {
             state.runs_on = None;
+            state.reported_model = None;
         }
     }
 

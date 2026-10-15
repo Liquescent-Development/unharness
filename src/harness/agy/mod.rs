@@ -197,6 +197,7 @@ impl Harness for AgyHarness {
                 display_name: label,
                 description: None,
                 effort_levels: None,
+                is_default: false,
             })
             .collect())
     }

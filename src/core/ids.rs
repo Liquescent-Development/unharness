@@ -158,6 +158,9 @@ pub struct ModelInfo {
     pub description: Option<String>,
     /// Per-model effort levels when the harness reports them.
     pub effort_levels: Option<Vec<String>>,
+    /// The list says this is the model the harness runs when none is
+    /// chosen (Codex's `isDefault`); never guessed.
+    pub is_default: bool,
 }
 
 #[cfg(test)]

@@ -528,6 +528,7 @@ impl Harness for ClaudeHarness {
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
+                is_default: false,
             })
             .collect())
     }

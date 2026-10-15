@@ -90,6 +90,15 @@ into `~/.claude/settings.json`, so the probe runs in the session's
 sandbox; a probe does not seed the relocated config (`prepare` does,
 with its notice).
 
+With no model chosen (#329), `system/init` names the one that runs
+(`model`, the full id: `claude-haiku-4-5-20251001` in the fixtures,
+2.1.289 to 2.1.296), but only once a prompt is sent, since Claude writes
+its `init` with a turn, not at its start. Until then the status line
+says `anthropic (CLI default)`, then `anthropic/<model> (default)`.
+The `initialize` answer's `default` entry also says what it resolves to
+(`resolvedModel`), which is not used; the picker marks no entry, since
+that one's own name says it ("Default (recommended)").
+
 ## Providers
 
 Claude providers (2.1.292, read in the binary and run): Claude picks its

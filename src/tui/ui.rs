@@ -2007,6 +2007,9 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     .description
                     .clone()
                     .unwrap_or_else(|| m.display_name.clone());
+                if m.is_default {
+                    desc.push_str("  (default)");
+                }
                 if let Some(e) = &m.effort_levels {
                     desc.push_str(&format!("  [{}]", e.join("/")));
                 }
@@ -2886,6 +2889,49 @@ mod tests {
                 "{width}: {rows:#?}"
             );
         }
+    }
+
+    /// No model chosen: the status line says the CLI picks it, then names
+    /// the one the session reported as the default; the picker marks the
+    /// entry its list says is the default (#329).
+    #[test]
+    fn the_default_model_is_named_as_the_default() {
+        use crate::core::{AgentEvent, ModelRef};
+        use crate::harness::ModelInfo;
+        let status = |app: &mut App| {
+            let (rows, _) = screen(app, 140, 30);
+            rows.into_iter()
+                .find(|r| r.contains("[Claude]"))
+                .unwrap_or_default()
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        assert!(status(&mut app).contains("[Claude] anthropic (CLI default) ·"));
+        app.controller.session_alive = true;
+        app.on_event(AgentEvent::SessionStarted {
+            session_id: "s".into(),
+            model: Some("claude-haiku-4-5-20251001".into()),
+        });
+        assert!(
+            status(&mut app).contains("anthropic/claude-haiku-4-5-20251001 (default) ·"),
+            "{}",
+            status(&mut app)
+        );
+
+        let model = |id: &str, is_default| ModelInfo {
+            model_ref: ModelRef::new(HarnessId::CODEX, "openai", id),
+            display_name: id.to_string(),
+            description: None,
+            effort_levels: None,
+            is_default,
+        };
+        app.modal = Some(Modal::Model(ListPicker::new(vec![
+            model("gpt-a", true),
+            model("gpt-b", false),
+        ])));
+        let (rows, _) = screen(&mut app, 100, 30);
+        let row = |id: &str| rows.iter().find(|r| r.contains(id)).cloned().unwrap();
+        assert!(row("gpt-a").contains("gpt-a  (default)"), "{rows:#?}");
+        assert!(!row("gpt-b").contains("(default)"), "{rows:#?}");
     }
 
     #[test]
