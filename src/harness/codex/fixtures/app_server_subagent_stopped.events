@@ -22,12 +22,12 @@ TextDelta ".\\n"
 ToolCallStarted id=call_gTXGDDbgDZvzj2bm9WZZPcQQ name=agent input={"path":"/root/sleep_task"}
 SubagentStarted id=call_gTXGDDbgDZvzj2bm9WZZPcQQ kind=- "sleep_task"
 ToolCallResult id=call_gTXGDDbgDZvzj2bm9WZZPcQQ error=false ""
-Usage in=14393 out=64 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=2233 out=64 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=14457 window=258400
 RateLimit status=- 7d=2%
 RateLimit status=- 7d=2%
 SubagentEnded id=call_gTXGDDbgDZvzj2bm9WZZPcQQ stopped -
-Usage in=14479 out=21 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=2319 out=21 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=14500 window=258400
 RateLimit status=- 7d=2%
 TextDelta "Started"
@@ -60,7 +60,7 @@ TextDelta " not"
 TextDelta " close"
 TextDelta " them"
 TextDelta "."
-Usage in=14519 out=34 cache_read=14208 cache_write=0 cost=- cumulative=false
+Usage in=311 out=34 cache_read=14208 cache_write=0 cost=- cumulative=false
 Context used=14553 window=258400
 RateLimit status=- 7d=2%
 TurnCompleted Done
@@ -86,7 +86,7 @@ TextDelta ".\\n"
 ToolCallStarted id=call_PUmXsjCbgjbrydpgCgSsvKBj name=agent input={"path":"/root/cat_missing_file"}
 SubagentStarted id=call_PUmXsjCbgjbrydpgCgSsvKBj kind=- "cat_missing_file"
 ToolCallResult id=call_PUmXsjCbgjbrydpgCgSsvKBj error=false ""
-Usage in=17106 out=86 cache_read=14336 cache_write=0 cost=- cumulative=false
+Usage in=2770 out=86 cache_read=14336 cache_write=0 cost=- cumulative=false
 Context used=17192 window=258400
 RateLimit status=- 7d=2%
 ToolCallStarted id=call_5yi4kaWzQMMM5UOq3mdL9ZJA name=agent:wait input=null
@@ -137,7 +137,7 @@ Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta "."
 RateLimit status=- 7d=2%
 SubagentEnded id=call_PUmXsjCbgjbrydpgCgSsvKBj completed "Failed with exit code 1. Output:\\n\\n```text\\n[bat error]:..."
 ToolCallResult id=call_5yi4kaWzQMMM5UOq3mdL9ZJA error=false ""
-Usage in=17215 out=21 cache_read=16896 cache_write=0 cost=- cumulative=false
+Usage in=319 out=21 cache_read=16896 cache_write=0 cost=- cumulative=false
 Context used=17236 window=258400
 RateLimit status=- 7d=2%
 TextDelta "The"
@@ -186,7 +186,7 @@ TextDelta " without"
 TextDelta " retry"
 TextDelta "ing"
 TextDelta "."
-Usage in=17339 out=50 cache_read=17024 cache_write=0 cost=- cumulative=false
+Usage in=315 out=50 cache_read=17024 cache_write=0 cost=- cumulative=false
 Context used=17389 window=258400
 RateLimit status=- 7d=2%
 TurnCompleted Done

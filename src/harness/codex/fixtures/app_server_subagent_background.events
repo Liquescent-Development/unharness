@@ -3,7 +3,7 @@ TurnStarted
 ToolCallStarted id=call_qFBeGLkELSBZvSTlVk57QQnt name=agent input={"path":"/root/read_word"}
 SubagentStarted id=call_qFBeGLkELSBZvSTlVk57QQnt kind=- "read_word"
 ToolCallResult id=call_qFBeGLkELSBZvSTlVk57QQnt error=false ""
-Usage in=16193 out=75 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=4033 out=75 cache_read=12160 cache_write=0 cost=- cumulative=false
 Context used=16268 window=258400
 RateLimit status=- 7d=2%
 TextDelta "Spawn"
@@ -12,7 +12,7 @@ TextDelta " the"
 TextDelta " sub"
 TextDelta "-agent"
 TextDelta "."
-Usage in=16289 out=10 cache_read=16000 cache_write=0 cost=- cumulative=false
+Usage in=289 out=10 cache_read=16000 cache_write=0 cost=- cumulative=false
 Context used=16299 window=258400
 RateLimit status=- 7d=2%
 TurnCompleted Done
@@ -20,7 +20,7 @@ TurnStarted
 Sub parent=call_qFBeGLkELSBZvSTlVk57QQnt ToolCallStarted id=exec-2ee3469a-24ed-493c-bb99-6bc455df61b0 name=shell input={"command":"/usr/bin/zsh -lc 'sleep 20'","cwd":"/WORKSPACE"}
 Sub parent=call_qFBeGLkELSBZvSTlVk57QQnt PermissionRequest id=0 ToolUse shell [shell "sleep 20"]
 TextDelta "4"
-Usage in=16322 out=5 cache_read=16128 cache_write=0 cost=- cumulative=false
+Usage in=194 out=5 cache_read=16128 cache_write=0 cost=- cumulative=false
 Context used=16327 window=258400
 RateLimit status=- 7d=2%
 TurnCompleted Done

@@ -357,15 +357,7 @@ impl CodexAppServerParser {
             }
             "thread/tokenUsage/updated" => {
                 if let Some(last) = p.pointer("/tokenUsage/last") {
-                    out.push(AgentEvent::Usage(Usage {
-                        input: u(last, "inputTokens"),
-                        output: u(last, "outputTokens"),
-                        cache_read: u(last, "cachedInputTokens"),
-                        cache_write: u(last, "cacheWriteInputTokens"),
-                        cost_usd: None,
-                        cumulative: false,
-                        scope: UsageScope::Request,
-                    }));
+                    out.push(AgentEvent::Usage(token_usage(last)));
                 }
                 // The last request's total is what currently sits in the context.
                 let used = p
@@ -824,6 +816,22 @@ fn s(v: &Value) -> &str {
     v.as_str().unwrap_or("")
 }
 
+/// A `tokenUsage` breakdown (`last` or `total`) as one request's usage.
+/// Codex counts cached input in `inputTokens` (`totalTokens` is
+/// `inputTokens + outputTokens`); `Usage::input` leaves it out (#308).
+fn token_usage(v: &Value) -> Usage {
+    let cache_read = u(v, "cachedInputTokens");
+    Usage {
+        input: u(v, "inputTokens").saturating_sub(cache_read),
+        output: u(v, "outputTokens"),
+        cache_read,
+        cache_write: u(v, "cacheWriteInputTokens"),
+        cost_usd: None,
+        cumulative: false,
+        scope: UsageScope::Request,
+    }
+}
+
 fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
@@ -877,6 +885,30 @@ mod tests {
             })
             .collect();
         assert_eq!(scopes, [UsageScope::Request; 2]);
+    }
+
+    /// `inputTokens` counts the cached input too (`totalTokens` is
+    /// `inputTokens + outputTokens`); `Usage::input` does not (#308,
+    /// app_server_subagent_background.jsonl).
+    #[test]
+    fn cached_input_is_not_counted_twice() {
+        let ev = CodexAppServerParser::new().feed(
+            r#"{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":16268,"inputTokens":16193,"cachedInputTokens":12160,"outputTokens":75,"reasoningOutputTokens":0},"last":{"totalTokens":16268,"inputTokens":16193,"cachedInputTokens":12160,"outputTokens":75,"reasoningOutputTokens":0},"modelContextWindow":258400}}}"#,
+        );
+        let usage: Vec<&Usage> = ev
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage(u) => Some(u),
+                _ => None,
+            })
+            .collect();
+        assert!(!usage.is_empty());
+        for u in usage {
+            assert_eq!((u.input, u.cache_read, u.output), (4033, 12160, 75));
+            assert_eq!(u.total_tokens(), 16268);
+        }
+        let odd = token_usage(&serde_json::json!({"inputTokens": 3, "cachedInputTokens": 5}));
+        assert_eq!((odd.input, odd.cache_read), (0, 5));
     }
 
     #[test]

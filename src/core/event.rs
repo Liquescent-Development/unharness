@@ -520,8 +520,13 @@ pub enum PermissionDecision {
     Answer(Value),
 }
 
+/// Tokens a turn, a request or a session used, in four counts that do not
+/// overlap: `total_tokens` is their sum.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
+    /// Input tokens neither read from nor written to the prompt cache.
+    /// Codex counts its cache reads in its input; its parsers take them
+    /// out (#308).
     pub input: u64,
     pub output: u64,
     pub cache_read: u64,
