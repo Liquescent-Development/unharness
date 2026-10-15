@@ -202,3 +202,29 @@ fn held_context_survives_a_switch_away_and_back() {
     let next = sent_turn(&mut app);
     assert!(next.contains("first answer"), "{next}");
 }
+
+#[test]
+fn the_switch_notice_names_an_effort_only_where_the_harness_has_levels() {
+    use super::super::transcript::Block;
+    let notice = |app: &App| {
+        app.controller
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|b| match b {
+                Block::System(s) if s.starts_with("Switched to") => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a switch notice")
+    };
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.controller.choose_effort(HarnessId::AGY, "high".into());
+    app.switch_harness(HarnessId::CODEX);
+    assert!(notice(&app).contains("effort: default"), "{}", notice(&app));
+    app.switch_harness(HarnessId::AGY);
+    let text = notice(&app);
+    assert!(text.starts_with("Switched to Antigravity"), "{text}");
+    assert!(!text.contains("effort"), "{text}");
+}

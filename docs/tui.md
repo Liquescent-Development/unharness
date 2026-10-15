@@ -6,8 +6,9 @@ The transcript fills the window. The current state sits under the prompt:
 - the prompt box, which grows with what you type up to eight rows, then
   scrolls;
 - a status line with the working directory and git branch, the harness,
-  provider and model, effort, policy and sandbox level, token usage and
-  cost, the session id, any capability caveat, and key hints. On a
+  provider and model, effort (not for a harness with no effort levels,
+  such as Antigravity), policy and sandbox level, token usage and cost,
+  the session id, any capability caveat, and key hints. On a
   narrow terminal the directory is shortened first, then effort, model
   and sandbox give way; the harness and its policy always stay.
 
