@@ -84,7 +84,7 @@ fn is_own_command(name: &str) -> bool {
 }
 
 /// `n` with its digits in groups of three: `157,702,965`.
-fn grouped(n: u64) -> String {
+pub(super) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
@@ -135,6 +135,10 @@ impl App {
             (_, Some(used), _) => lines.push(format!(
                 "Context: {} tokens, of a window not known yet",
                 grouped(used)
+            )),
+            (_, None, Some(window)) if window > 0 => lines.push(format!(
+                "Context: not known yet, of a {}-token window",
+                grouped(window)
             )),
             _ => lines.push("Context: not known yet".into()),
         }

@@ -369,9 +369,23 @@ fn usage_tells_context_never_reported_from_not_known_yet() {
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.caps().context_usage);
     assert!(usage_text(&mut app).ends_with("\nContext: not known yet"));
+    // The window a model last reported, before the session says how full.
+    app.controller.conversation.context.window = Some(200_000);
+    assert!(usage_text(&mut app).ends_with("\nContext: not known yet, of a 200,000-token window"));
+    app.controller.conversation.context.window = None;
     app.on_event(AgentEvent::Context(ContextUsage {
         used: Some(1_500),
         window: None,
     }));
     assert!(usage_text(&mut app).ends_with("\nContext: 1,500 tokens, of a window not known yet"));
+}
+
+#[test]
+fn grouped_puts_digits_in_threes() {
+    use super::super::commands::grouped;
+    assert_eq!(grouped(0), "0");
+    assert_eq!(grouped(999), "999");
+    assert_eq!(grouped(1_000), "1,000");
+    assert_eq!(grouped(100_000), "100,000");
+    assert_eq!(grouped(u64::MAX), "18,446,744,073,709,551,615");
 }
