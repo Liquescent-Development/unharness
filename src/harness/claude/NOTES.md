@@ -127,3 +127,33 @@ start did before.
 Unverified: a turn on any of them with credentials, `_MANTLE` beside
 `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
 `CLAUDE_CODE_USE_GATEWAY` (left alone).
+
+## Compaction
+
+A compaction ends with a `system` `compact_boundary` whose
+`compact_metadata` has `trigger` (`manual` or `auto`), `pre_tokens` and
+`post_tokens`; the parser makes it the "context compacted" notice and,
+from `post_tokens`, the context's new size (#310), which otherwise kept
+the size from before the compaction until the next request's
+`message_start`. Recorded for `/compact` only (2.1.288,
+`fixtures/steer_and_compact.jsonl`: `pre_tokens` 22975, `post_tokens`
+1988; the next turn was not recorded). Read in the 2.1.300 binary: the
+SDK schema declares `post_tokens` optional (`pre_tokens` is not); one
+function writes the line for every `compact_boundary`, whatever its
+trigger, and leaves `post_tokens` out when it is unset; the compaction
+both `/compact` and auto-compaction run (`isAutoCompact`) sets it, as do
+reactive compaction (auto), a compaction a hook replaced and partial
+compaction (manual). It is Claude Code's own estimate of what the kept
+messages hold (counted from their content, not an API's usage), and its
+own context size after a boundary with no assistant message since is
+`postTokens`, else that estimate. It leaves out the system prompt and
+the tools, so the next request's `message_start`, the real figure, is
+expected to be well above it: a jump in ctx % on the first request
+after `/compact` is that, not a fault. A boundary without it, or with
+0, reports no size, so the last one stands. A subagent's compaction
+writes no line: Claude forwards only a subagent's `assistant` and
+`user` messages (read in 2.1.300, not run live), and the parser ignores
+a subagent's `system` lines anyway (`feed_sub`), so a `compact_boundary`
+is always the main agent's. Unverified live: an
+auto-compaction's line (no recording), and how far the estimate is from
+the next request's usage.

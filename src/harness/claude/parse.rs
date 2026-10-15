@@ -571,7 +571,26 @@ impl ClaudeParser {
                     "permission denied for {tool} (no prompt available in this mode)"
                 )));
             }
-            "compact_boundary" => out.push(AgentEvent::Notice("context compacted".into())),
+            // `post_tokens` is Claude Code's own estimate of what the
+            // compacted context holds, the size it shows itself until the
+            // next request reports one. It counts the kept messages only,
+            // not the system prompt or the tools, so the next
+            // `message_start` (the real figure) is usually well above it.
+            // Optional in its schema: a boundary without it leaves the
+            // last size standing (NOTES.md).
+            "compact_boundary" => {
+                out.push(AgentEvent::Notice("context compacted".into()));
+                let post = val
+                    .pointer("/compact_metadata/post_tokens")
+                    .and_then(Value::as_u64)
+                    .filter(|&n| n > 0);
+                if let Some(used) = post {
+                    out.push(AgentEvent::Context(ContextUsage {
+                        used: Some(used),
+                        window: None,
+                    }));
+                }
+            }
             // Sent when the mode changes: set by us, or by the model
             // (`EnterPlanMode`, `fixtures/plan_enter.jsonl`).
             "status" if val.get("permissionMode").is_some() => {
@@ -1936,6 +1955,30 @@ mod tests {
     #[test]
     fn fixture_steer_and_compact() {
         fixture("steer_and_compact");
+    }
+
+    /// A compaction reports the context's new size (#310), for either
+    /// trigger; a boundary without `post_tokens`, or with 0, reports none.
+    #[test]
+    fn compact_boundary_reports_post_tokens() {
+        let compacted = |post: &str| {
+            ClaudeParser::new().feed(&format!(
+                r#"{{"type":"system","subtype":"compact_boundary","compact_metadata":{{"trigger":"auto","pre_tokens":180000{post}}}}}"#
+            ))
+        };
+        let notice = AgentEvent::Notice("context compacted".into());
+        assert_eq!(
+            compacted(r#","post_tokens":4200"#),
+            vec![
+                notice.clone(),
+                AgentEvent::Context(ContextUsage {
+                    used: Some(4200),
+                    window: None,
+                }),
+            ]
+        );
+        assert_eq!(compacted(""), vec![notice.clone()]);
+        assert_eq!(compacted(r#","post_tokens":0"#), vec![notice]);
     }
 
     #[test]
