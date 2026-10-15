@@ -355,10 +355,14 @@ until the next turn reports; where a harness reports each model request
 of a turn on its own (Codex's app-server, pi), the turn's requests are
 added up. `session 162.3M` is the billed tokens of the harness's
 session so far: uncached input, output, cache reads and cache writes,
-added up. Each harness in a conversation keeps its own, and a resume
-brings it back. It is not how full the context is (`ctx`, below): each
-request reads the cached prompt again, so on a long session most of it
-is cache reads, billed at a fraction of the input rate. The cost
+added up, or the total the harness keeps itself where it reports one
+(Codex's app-server, whose thread total a fork starts from and a rewind
+shrinks). Each harness in a conversation keeps its own, and a resume
+brings it back. On Codex's `exec` transport both figures count too
+much for now: each turn there reports the thread's total so far as its
+own. The session figure is not how full the context is (`ctx`, below):
+each request reads the cached prompt again, so on a long session most
+of it is cache reads, billed at a fraction of the input rate. The cost
 (`$41.27`) follows it where the harness reports one.
 
 `/usage` breaks the billed tokens down, for the last turn and the
@@ -382,8 +386,8 @@ as long as its session is the one measured and it runs the same model;
 another model, or a new session, starts the figure again. `/usage` gives
 the tokens behind the percentage, or says that the harness never
 reports them (`Context: not reported by Antigravity (agy)`) or has not
-yet (`Context: not known yet`). It adds the account's rate-limit windows, and a notice appears
-when one passes 80%.
+yet (`Context: not known yet`). It adds the account's rate-limit
+windows, and a notice appears when one passes 80%.
 
 ## Rendering
 
