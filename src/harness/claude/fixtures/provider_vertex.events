@@ -6,5 +6,4 @@ Notice "MCP server 'plugin:cq:cq' failed to start"
 Notice "API retry 1/2 (cloud_credential_error)"
 Notice "API retry 2/2 (cloud_credential_error)"
 TurnStarted
-TextDelta "API Error: Could not load Google Cloud credentials · Coul..."
 TurnCompleted Error "API Error: Could not load Google Cloud credentials · Coul..."

@@ -601,6 +601,11 @@ impl StreamProtocol for Claude {
         &mut self.parser
     }
 
+    /// An API error held for a result that never came is shown as text.
+    fn on_exit(&mut self, _code: Option<i32>) -> Vec<AgentEvent> {
+        self.parser.flush()
+    }
+
     async fn on_stdout(&mut self, line: &str, io: &mut Io<'_>) -> Result<(), Gone> {
         // The answer to one of our `remote_control` requests, which the
         // parser would take for a generic one.

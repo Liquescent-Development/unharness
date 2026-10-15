@@ -202,6 +202,9 @@ pub struct ClaudeParser {
     /// with the `PermissionRequest` hook that runs beside each, until both
     /// are done or [`KEPT_REQUESTS`] newer ones came.
     requests: VecDeque<Request>,
+    /// The text of an API error's assistant message, held for the turn's
+    /// result, which repeats it as the error.
+    api_error: Option<String>,
 }
 
 /// The most permission requests kept for their hooks. One is dropped
@@ -331,6 +334,34 @@ impl Parser for ClaudeParser {
 
 impl ClaudeParser {
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        // A held API error is the result's to show; anything else that
+        // says something, or a newer one, sends it out first.
+        if str_at(val, "type") == "result" {
+            return self.feed_line(val);
+        }
+        let held = self.api_error.take();
+        let mut out = self.feed_line(val);
+        if let Some(text) = held {
+            if out.is_empty() && self.api_error.is_none() {
+                self.api_error = Some(text);
+            } else {
+                out.insert(0, AgentEvent::TextDelta(text));
+            }
+        }
+        out
+    }
+
+    /// What is still held when the CLI has exited: an API error whose
+    /// result never came.
+    pub fn flush(&mut self) -> Vec<AgentEvent> {
+        self.api_error
+            .take()
+            .map(AgentEvent::TextDelta)
+            .into_iter()
+            .collect()
+    }
+
+    fn feed_line(&mut self, val: &Value) -> Vec<AgentEvent> {
         let mut out = Vec::new();
         self.settle_requests(val, &mut out);
         // Messages produced inside a subagent name the tool call that spawned it.
@@ -848,6 +879,14 @@ impl ClaudeParser {
         let Some(content) = message.get("content").and_then(Value::as_array) else {
             return;
         };
+        // Claude's own message for an API or sign-in error (model
+        // `<synthetic>`), whose text the result repeats as the error. A
+        // subagent's has no result of its own and is shown.
+        let api_error = val.get("is_api_error_message").and_then(Value::as_bool) == Some(true)
+            && val
+                .get("parent_tool_use_id")
+                .and_then(Value::as_str)
+                .is_none();
         for block in content {
             match str_at(block, "type") {
                 "tool_use" => {
@@ -858,6 +897,12 @@ impl ClaudeParser {
                         let plan = todo_write_plan(&name, &input);
                         out.push(AgentEvent::ToolCallStarted { id, name, input });
                         out.extend(plan);
+                    }
+                }
+                "text" if !streamed && api_error => {
+                    let t = str_at(block, "text");
+                    if !t.is_empty() {
+                        self.api_error.get_or_insert_default().push_str(t);
                     }
                 }
                 "text" if !streamed => {
@@ -950,6 +995,26 @@ impl ClaudeParser {
     }
 
     fn on_result(&mut self, val: &Value, out: &mut Vec<AgentEvent>) {
+        let subtype = str_at(val, "subtype");
+        let is_error = val
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let text = val
+            .get("result")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let stop_reason = if subtype == "success" && !is_error {
+            StopReason::Done
+        } else {
+            StopReason::Error(turn_error(subtype, text))
+        };
+        // An API error is shown once, as the error, when the result repeats it.
+        if let Some(held) = self.api_error.take()
+            && !(matches!(stop_reason, StopReason::Error(_)) && text == Some(held.as_str()))
+        {
+            out.push(AgentEvent::TextDelta(held));
+        }
         let cost_usd = val.get("total_cost_usd").and_then(Value::as_f64).map(|t| {
             let turn = (t - self.last_total_cost).max(0.0);
             self.last_total_cost = t;
@@ -993,20 +1058,6 @@ impl ClaudeParser {
                 names.join(", ")
             )));
         }
-        let subtype = str_at(val, "subtype");
-        let is_error = val
-            .get("is_error")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let text = val
-            .get("result")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let stop_reason = if subtype == "success" && !is_error {
-            StopReason::Done
-        } else {
-            StopReason::Error(turn_error(subtype, text))
-        };
         out.push(AgentEvent::TurnCompleted { stop_reason });
         self.turn_started = false;
         self.blocks.clear();
@@ -2144,6 +2195,85 @@ mod tests {
             result_error(r#"{"type":"result","subtype":"cancelled","result":"stopped"}"#),
             "stopped"
         );
+    }
+
+    const API_ERROR: &str = r#"{"type":"assistant","message":{"id":"m1","model":"<synthetic>","content":[{"type":"text","text":"API Error: no credentials"}]},"parent_tool_use_id":null,"error":"cloud_credential_error","is_api_error_message":true}"#;
+
+    fn failed(e: &str) -> AgentEvent {
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(e.into()),
+        }
+    }
+
+    /// Claude's message for an API error is shown once, as the error its
+    /// result repeats (#325).
+    #[test]
+    fn an_api_error_is_shown_once() {
+        let mut p = ClaudeParser::new();
+        let mut ev = p.feed(API_ERROR);
+        // Says nothing: kept.
+        ev.extend(p.feed(r#"{"type":"system","subtype":"status","status":"requesting"}"#));
+        ev.extend(p.feed(r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: no credentials"}"#));
+        assert_eq!(
+            ev,
+            vec![AgentEvent::TurnStarted, failed("API Error: no credentials")]
+        );
+    }
+
+    /// Nothing held is lost: a result that says something else, a line
+    /// that says something, a newer API error and the CLI's exit each send
+    /// it out first.
+    #[test]
+    fn a_held_api_error_is_sent_before_what_follows() {
+        let delta = |t: &str| AgentEvent::TextDelta(t.into());
+        let mut p = ClaudeParser::new();
+        p.feed(API_ERROR);
+        assert_eq!(
+            p.feed(r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#),
+            vec![
+                delta("API Error: no credentials"),
+                failed("error_during_execution")
+            ]
+        );
+
+        let mut p = ClaudeParser::new();
+        p.feed(API_ERROR);
+        assert_eq!(
+            p.feed(
+                r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":2,"error":"x"}"#
+            ),
+            vec![
+                delta("API Error: no credentials"),
+                AgentEvent::Notice("API retry 1/2 (x)".into())
+            ]
+        );
+        assert_eq!(
+            p.feed(r#"{"type":"result","subtype":"success","is_error":true,"result":"API Error: no credentials"}"#),
+            vec![failed("API Error: no credentials")]
+        );
+
+        let mut p = ClaudeParser::new();
+        p.feed(API_ERROR);
+        assert_eq!(
+            p.feed(&API_ERROR.replace("no credentials", "overloaded")),
+            vec![delta("API Error: no credentials")]
+        );
+        assert_eq!(p.flush(), vec![delta("API Error: overloaded")]);
+        assert_eq!(p.flush(), vec![]);
+
+        // A subagent's has no result of its own.
+        let mut p = ClaudeParser::new();
+        assert_eq!(
+            p.feed(&API_ERROR.replace(
+                r#""parent_tool_use_id":null"#,
+                r#""parent_tool_use_id":"t1""#
+            )),
+            vec![AgentEvent::Sub {
+                parent: "t1".into(),
+                event: Box::new(delta("API Error: no credentials"))
+            }]
+        );
+        assert_eq!(p.flush(), vec![]);
     }
 
     #[test]
