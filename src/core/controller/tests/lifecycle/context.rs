@@ -1,6 +1,6 @@
 //! How full the context window is, and the last turn's usage: kept with
-//! each harness, told again only for the session and model measured
-//! (#309).
+//! each harness, told again only for the session and model measured, and
+//! filled from the window the model last reported (#309).
 
 use super::*;
 
@@ -41,6 +41,13 @@ fn switch(app: &mut TestApp, next: HarnessId) {
     app.controller.session_alive = false;
 }
 
+/// The windows file of a test app opened in `cwd` (`test_init`).
+fn write_windows(cwd: &Path, json: &str) {
+    let path = cwd.join(".unharness/test-state/context_windows.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, json).unwrap();
+}
+
 #[test]
 fn a_resumed_conversation_tells_its_context_and_last_turn() {
     let tmp = tempfile::tempdir().unwrap();
@@ -64,6 +71,36 @@ fn a_resumed_conversation_tells_its_context_and_last_turn() {
     assert_eq!(fresh.controller.conversation.turn_usage.input, 50_000);
 }
 
+/// A run naming another model than the conversation ran: the fill was
+/// measured on the one before, the window is the named model's.
+#[test]
+fn a_conversation_resumed_on_another_model_takes_that_model_s_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
+    turn(&mut app, "claude-1", 50_000, Some(200_000));
+    app.quit();
+    write_windows(
+        &cwd,
+        r#"{"claude": {"default": 200000, "anthropic/opus": 1000000}}"#,
+    );
+
+    let mut init = test_init(
+        cwd,
+        HarnessId::CLAUDE,
+        Some(String::new()),
+        false,
+        Config::default(),
+        test_registry(),
+    );
+    init.launch.model = Some("opus".into());
+    let app = TestApp::new(init);
+    assert_eq!(app.current_model().unwrap().label(), "anthropic/opus");
+    assert_eq!(context(&app), ctx(None, Some(1_000_000)));
+    // The last turn happened, whatever runs next.
+    assert_eq!(app.controller.conversation.turn_usage.input, 50_000);
+}
+
 #[test]
 fn each_harness_keeps_its_own_context_across_a_switch() {
     let mut app = test_app(HarnessId::CLAUDE);
@@ -81,6 +118,22 @@ fn each_harness_keeps_its_own_context_across_a_switch() {
     switch(&mut app, HarnessId::CODEX);
     assert_eq!(context(&app), ctx(Some(10_000), Some(258_000)));
     assert_eq!(app.controller.conversation.turn_usage.input, 10_000);
+}
+
+/// Switched to before it has run in this conversation, a harness's
+/// window is the one its model last reported here.
+#[test]
+fn a_harness_switched_to_takes_its_model_s_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    write_windows(
+        &cwd,
+        r#"{"codex": {"openai/default": 258400, "default": 400000}}"#,
+    );
+    let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+    turn(&mut app, "claude-1", 50_000, Some(200_000));
+    switch(&mut app, HarnessId::CODEX);
+    assert_eq!(context(&app), ctx(None, Some(400_000)));
 }
 
 /// A session forgotten is not resumed: what it filled is not told for the
@@ -145,6 +198,52 @@ fn a_new_session_in_place_of_one_not_resumed_drops_the_fill() {
     assert_eq!(context(&app), ctx(None, Some(200_000)));
 }
 
+#[test]
+fn a_model_change_drops_the_fill_and_takes_that_model_s_window() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    turn(&mut app, "claude-1", 50_000, Some(200_000));
+
+    app.set_model("opus".into());
+    assert_eq!(context(&app), ctx(None, None));
+    turn(&mut app, "claude-1", 60_000, Some(1_000_000));
+
+    app.set_model("sonnet".into());
+    assert_eq!(context(&app), ctx(None, None));
+    app.set_model("opus".into());
+    assert_eq!(context(&app), ctx(None, Some(1_000_000)));
+    turn(&mut app, "claude-1", 70_000, None);
+    assert_eq!(context(&app), ctx(Some(70_000), Some(1_000_000)));
+
+    // The same model again changes nothing.
+    app.set_model("opus".into());
+    assert_eq!(context(&app), ctx(Some(70_000), Some(1_000_000)));
+}
+
+/// Claude reports its window only when a turn ends: the one its model
+/// last reported here is there from the session's start, so that the
+/// fill it reports at the first request can be told. One the session
+/// reports takes its place.
+#[test]
+fn a_session_starts_with_its_model_s_window_until_it_reports_one() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    write_windows(&cwd, r#"{"claude": {"default": 1000000}}"#);
+    let mut app = test_app_in(cwd, HarnessId::CLAUDE, None, false);
+    assert_eq!(context(&app), ctx(None, None));
+    app.submit_prompt("go".into());
+    app.take_actions();
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "claude-1".into(),
+        model: None,
+    });
+    assert_eq!(context(&app), ctx(None, Some(1_000_000)));
+    app.on_event(AgentEvent::Context(ctx(Some(100_000), None)));
+    assert_eq!(app.controller.conversation.context.percent(), Some(10));
+    app.on_event(AgentEvent::Context(ctx(None, Some(200_000))));
+    assert_eq!(context(&app), ctx(Some(100_000), Some(200_000)));
+}
+
 /// A branch knows what the original knew, so its fill holds; a harness
 /// started fresh in the copy has none yet. The usage is the copy's own.
 #[test]
@@ -170,4 +269,25 @@ fn a_fork_drops_the_fill_of_a_session_it_cannot_branch() {
     app.fork_conversation();
     assert!(!app.controller.fork_pending(HarnessId::AGY));
     assert_eq!(context(&app), ctx(None, Some(100_000)));
+}
+
+/// The session renewed for another model writes its handoff summary on
+/// the model it ran: what it reports is not kept as the new one's window,
+/// and the new session starts with that model's.
+#[test]
+fn a_session_renewed_for_another_model_starts_with_that_model_s_window() {
+    let (mut app, _cwd) = vibe_app();
+    prompted_vibe(&mut app);
+    app.controller.handoff = Some(crate::core::controller::Handoff {
+        to: HarnessId::VIBE,
+        start: 0,
+        held: false,
+        renew: true,
+        blind: false,
+    });
+    app.on_event(AgentEvent::Context(ctx(Some(9_000), Some(128_000))));
+    assert!(app.controller.context_windows.is_empty());
+    app.controller.handoff = None;
+    app.with(|c, front| c.renew_now(front));
+    assert_eq!(context(&app), ctx(None, None));
 }

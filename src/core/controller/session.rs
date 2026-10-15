@@ -341,6 +341,9 @@ impl Controller {
     /// the conversation in its first prompt's bridge.
     pub(super) fn renew_now(&mut self, front: &mut dyn Front) {
         self.forget_session(self.active, front);
+        // What the session left reported in its handoff turn may have been
+        // on the model chosen before.
+        self.fresh_context();
         self.idle_start_paused = false;
         self.persist();
     }

@@ -349,8 +349,13 @@ attached the same way.
 
 ## Context and rate limits
 
-The usage line shows how full the model's context is (`ctx 34%`).
-`/usage` adds the account's rate-limit windows, and a notice appears when
+The usage line shows how full the model's context is (`ctx 34%`). Until
+a session reports its model's window (Claude says it only when a turn
+ends), the window that model last reported in any workspace is taken.
+Each harness's figure is kept with the conversation and comes back on a
+switch to it or a resume, as long as its session is the one measured and
+it runs the same model; another model, or a new session, starts the
+figure again. `/usage` adds the account's rate-limit windows, and a notice appears when
 one passes 80%.
 
 ## Rendering

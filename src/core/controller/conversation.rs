@@ -113,7 +113,8 @@ impl Controller {
     /// The active harness's last turn's usage and context as the
     /// conversation saved them. The fill was the session's: it is told
     /// again only for that session, still stored, on the model it was
-    /// measured on; the window only for that model.
+    /// measured on; the window only for that model. What is not known is
+    /// filled from the window the model last reported here.
     pub(super) fn restore_context(&mut self) {
         let active = self.active;
         let model = self.model_key(active);
@@ -133,6 +134,7 @@ impl Controller {
             },
             _ => ContextUsage::default(),
         };
+        self.fill_context_window();
     }
 
     /// A new conversation that keeps the models and efforts this one chose.
