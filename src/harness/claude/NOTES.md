@@ -157,3 +157,44 @@ a subagent's `system` lines anyway (`feed_sub`), so a `compact_boundary`
 is always the main agent's. Unverified live: an
 auto-compaction's line (no recording), and how far the estimate is from
 the next request's usage.
+
+## Credentials and the relocated config
+
+Claude keeps its login in a store named after
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` when that is set, else after
+`CLAUDE_CONFIG_DIR` (read in the 2.1.300 binary, and in 2.1.296): on
+macOS the Keychain entry is `Claude Code-credentials`, with
+`-<first 8 hex of sha256(dir)>` appended once either names a directory;
+the plaintext store is `<dir>/.credentials.json`, `~/.claude` when the
+variable is empty. The relocation sets `CLAUDE_CONFIG_DIR=~/.claude`, so
+on a Mac its Claude looked for an entry a plain `claude` never signs in
+and signed in from a stale `~/.claude/.credentials.json`: "OAuth session
+expired and could not be refreshed" on every turn while `claude` and
+`doctor` (which checks without the relocation) were signed in (#324).
+Checked on that Mac (2.1.300): `claude -p` worked, with
+`CLAUDE_CONFIG_DIR=$HOME/.claude` it failed so, and with
+`CLAUDE_SECURESTORAGE_CONFIG_DIR=` beside it it worked. So the
+relocation sets that variable empty too, unless the user set it. On
+Linux it changes nothing (`~/.claude` either way).
+
+A user who set `CLAUDE_CONFIG_DIR` gets no relocation, and their
+environment is passed on as it is: Claude then keeps its login where a
+plain `claude` with the same environment does, on macOS the hashed entry
+unless they also set `CLAUDE_SECURESTORAGE_CONFIG_DIR=`. Setting it empty
+for them would split the two the other way when the variable is
+exported in their shell, so `docs/sandbox.md` says so instead.
+
+Both variables reach what Claude starts (the Bash tool, hooks, MCP
+servers). Read in the 2.1.300 binary, not run: it removes them from a
+subprocess's environment only when it scrubs that environment
+(`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`, on by default in GitHub Actions),
+where they are in its list of variables naming credential and config
+files; it passes both on to a Claude it starts itself (a teammate),
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` even when empty, the only variable it
+passes on empty; and no settings file can set either. So a `claude` run from
+a session uses the session's config and login, which is what it would
+use in a shell that exports both; nothing to undo.
+
+Unverified: a session in unharness on macOS with the fix, and a token
+refresh there inside Seatbelt (the refreshed token written back to the
+default Keychain entry from a confined Claude).

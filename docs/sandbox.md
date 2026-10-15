@@ -118,7 +118,17 @@ directory.
 - Your `~/.claude.json` is copied there on the first run (a notice says
   so) and otherwise left alone.
 - A plain `claude` outside unharness keeps using the original, so the two
-  drift apart unless you export the same variable in your shell.
+  drift apart unless you export the same variables in your shell:
+  `CLAUDE_CONFIG_DIR=$HOME/.claude` and `CLAUDE_SECURESTORAGE_CONFIG_DIR=`
+  (empty, see the next point).
+- Your login is shared with a plain `claude`: unharness also sets
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR` to empty, since with
+  `CLAUDE_CONFIG_DIR` alone Claude Code on macOS looks for its login in a
+  Keychain entry of its own. A value you set yourself is kept.
+- If you set `CLAUDE_CONFIG_DIR` yourself, unharness relocates nothing and
+  passes your environment on as it is. On macOS Claude Code then keeps its
+  login in a Keychain entry of its own, apart from the one a `claude`
+  without it uses, unless you also set `CLAUDE_SECURESTORAGE_CONFIG_DIR=`.
 - `relocate_config = false` under `[harnesses.claude]` turns this off.
   Sessions still work, but "always allow" rules, trust and MCP approvals
   given in a confined session are forgotten after it.
