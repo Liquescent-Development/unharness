@@ -2,6 +2,17 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.10.1 - 2026-10-15
+
+### Changed
+
+- With `--print` or `--no-tui`, a Claude turn that fails with an API or sign-in error gives its message only as the error (stderr, or `error` in JSON), no longer also as the turn's text.
+
+### Fixed
+
+- On macOS, Claude Code run by unharness signs in with the same login as a plain `claude`. It looked for its login in a Keychain entry of its own and could fail every turn with "OAuth session expired and could not be refreshed" while `claude` worked. See [Sandbox](https://github.com/Liquescent-Development/unharness/blob/main/docs/sandbox.md#things-to-know).
+- A Claude turn that fails with an API or sign-in error shows the error once, without a `success:` prefix.
+
 ## 0.10.0 - 2026-10-15
 
 ### Added
