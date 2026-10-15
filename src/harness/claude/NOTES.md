@@ -128,6 +128,30 @@ Unverified: a turn on any of them with credentials, `_MANTLE` beside
 `_BEDROCK` (the binary treats Mantle as a Bedrock variant),
 `CLAUDE_CODE_USE_GATEWAY` (left alone).
 
+## Failed turns
+
+An API or sign-in error ends a turn with a `result` of `subtype:
+"success"` and `is_error: true` whose `result` is the error's text,
+after an `assistant` message of Claude's own (model `<synthetic>`,
+`is_api_error_message: true`, `error` the kind) with the same text
+(recorded on 2.1.292, `fixtures/provider_vertex.jsonl`: Vertex without
+credentials; an expired sign-in reported in #325). Read in the 2.1.300
+binary: the result's other subtypes are `error_during_execution`,
+`error_max_turns`, `error_max_budget_usd` and
+`error_max_structured_output_retries`, which the SDK schema gives an
+`errors` list and no `result` (not read yet), and `is_api_error_message`
+marks "an assistant message [that] wraps an API error". So a subtype
+leads the turn's error only when it starts with `error`; otherwise
+`is_error` says it failed and the error is the result's text alone,
+or "the turn failed" when it has none (before, the user read
+`success: Failed to authenticate: …`). The synthetic message's text is
+held for the result and dropped when the result repeats it, so the
+error is shown once, as the error; it is shown as text when the result
+says something else, when another line says something first, or when
+Claude exits without a result (`on_exit`). A subagent's is shown as
+text. Unverified: an `error_…` result live (none recorded), and a
+synthetic message a result does not follow.
+
 ## Compaction
 
 A compaction ends with a `system` `compact_boundary` whose
