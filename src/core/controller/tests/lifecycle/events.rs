@@ -362,7 +362,8 @@ fn a_codex_session_come_to_exec_takes_away_what_exec_cannot_do() {
             && !caps.rewind.conversation
             && !caps.subagents.stop
             && !caps.interactive_permissions
-            && !caps.fork,
+            && !caps.fork
+            && !caps.context_usage,
         "{caps:?}"
     );
     assert_eq!(

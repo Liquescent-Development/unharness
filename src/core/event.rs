@@ -292,6 +292,8 @@ pub struct CapsUpdate {
     /// A session can be branched into a new one (`Capabilities::fork`): an
     /// ACP agent says so at `initialize`.
     pub fork: Option<bool>,
+    /// Context-window usage may be reported (`Capabilities::context_usage`).
+    pub context_usage: Option<bool>,
     /// The agent takes MCP servers reached over HTTP (`McpSupport::http`).
     pub mcp_http: Option<bool>,
     pub plan_mode: Option<bool>,
@@ -388,6 +390,9 @@ impl CapsUpdate {
         }
         if newer.fork.is_some() {
             self.fork = newer.fork;
+        }
+        if newer.context_usage.is_some() {
+            self.context_usage = newer.context_usage;
         }
         if newer.mcp_http.is_some() {
             self.mcp_http = newer.mcp_http;
