@@ -20,6 +20,7 @@ use crate::core::transcript::Transcript;
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef, Parser,
     PermissionPolicy, PermissionRequest, ProviderId, Rules, SessionCommand, StopReason, Usage,
+    UsageScope,
 };
 use crate::harness::ModelInfo;
 use crate::harness::agy::AgyHarness;

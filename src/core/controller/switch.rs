@@ -223,6 +223,7 @@ impl Controller {
             .cloned()
             .unwrap_or_default();
         self.conversation.turn_usage = Usage::default();
+        self.conversation.turn_reported = false;
         self.conversation.context = ContextUsage::default();
         self.conversation.anchor_pending.clear();
         self.persist();

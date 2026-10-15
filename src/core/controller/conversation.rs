@@ -60,6 +60,11 @@ pub struct ConversationState {
     /// What titles it once saved.
     pub first_prompt: Option<String>,
     pub turn_usage: Usage,
+    /// Belongs to `turn_usage`, and is reset wherever it is set: the
+    /// running turn, or the last one, has put its own numbers there. A
+    /// report of one request adds to them where it is set; otherwise it
+    /// starts them again.
+    pub turn_reported: bool,
     /// The active harness's session's usage.
     pub session_usage: Usage,
     /// Context-window fill of the active harness's session.
@@ -83,6 +88,7 @@ impl ConversationState {
             restore_undo: None,
             first_prompt: (!record.title.is_empty()).then(|| record.title.clone()),
             turn_usage: Usage::default(),
+            turn_reported: false,
             session_usage: record.usage.get(&active).cloned().unwrap_or_default(),
             context: ContextUsage::default(),
             generation_duration: None,
@@ -120,6 +126,7 @@ impl Controller {
         c.anchor_pending.clear();
         c.session_usage = Usage::default();
         c.turn_usage = Usage::default();
+        c.turn_reported = false;
         c.context = ContextUsage::default();
     }
 

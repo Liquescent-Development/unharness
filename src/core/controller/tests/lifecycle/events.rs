@@ -163,27 +163,163 @@ fn hooks_still_running_end_as_unknown() {
     assert_eq!(sub_state(&app), Some(HookState::Unknown));
 }
 
+/// A usage report of `scope` with `input` and `output` tokens.
+fn usage(input: u64, output: u64, scope: UsageScope) -> AgentEvent {
+    AgentEvent::Usage(Usage {
+        input,
+        output,
+        scope,
+        ..Default::default()
+    })
+}
+
+fn turn_ends(app: &mut TestApp, stop_reason: StopReason) {
+    app.on_event(AgentEvent::TurnCompleted { stop_reason });
+}
+
+/// What the row shows: the turn's input and output, and the session's.
+fn row(app: &TestApp) -> (u64, u64, u64, u64) {
+    let c = &app.controller.conversation;
+    (
+        c.turn_usage.input,
+        c.turn_usage.output,
+        c.session_usage.input,
+        c.session_usage.output,
+    )
+}
+
+/// The row keeps the last turn's numbers when the next turn starts: a
+/// harness that reports at the end of a turn would otherwise show
+/// nothing for the whole of it (#307).
 #[test]
-fn usage_accumulates() {
+fn a_new_turn_keeps_the_last_turns_usage_until_it_reports() {
     let mut app = test_app(HarnessId::CLAUDE);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
+    app.on_event(usage(10, 5, UsageScope::Turn));
+    turn_ends(&mut app, StopReason::Done);
+    app.submit_prompt("two".into());
+    assert!(app.controller.is_generating);
+    assert_eq!(row(&app), (10, 5, 10, 5));
+    app.on_event(usage(20, 7, UsageScope::Turn));
+    assert_eq!(row(&app), (20, 7, 30, 12));
+}
+
+/// A report with only a cost (Claude's `/compact`) adds it to the
+/// session and leaves the token numbers as they were (#307).
+#[test]
+fn a_cost_only_report_adds_its_cost_and_leaves_the_tokens() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
     app.on_event(AgentEvent::Usage(Usage {
         input: 10,
         output: 5,
+        cost_usd: Some(0.5),
         ..Default::default()
     }));
+    turn_ends(&mut app, StopReason::Done);
+    app.submit_prompt("/compact".into());
     app.on_event(AgentEvent::Usage(Usage {
-        input: 1,
-        output: 1,
+        cost_usd: Some(0.25),
         ..Default::default()
     }));
-    assert_eq!(app.controller.conversation.turn_usage.input, 1);
-    assert_eq!(app.controller.conversation.session_usage.input, 11);
+    turn_ends(&mut app, StopReason::Done);
+    let c = &app.controller.conversation;
+    assert_eq!(row(&app), (10, 5, 10, 5));
+    assert_eq!(c.turn_usage.cost_usd, Some(0.5));
+    assert_eq!(c.session_usage.cost_usd, Some(0.75));
+}
+
+/// A turn that fails before it reports (a rate limit, a provider's
+/// error) leaves the numbers before it (#307).
+#[test]
+fn a_turn_ended_by_an_error_without_usage_leaves_the_last_numbers() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
+    app.on_event(usage(10, 5, UsageScope::Turn));
+    turn_ends(&mut app, StopReason::Done);
+    app.submit_prompt("two".into());
+    turn_ends(
+        &mut app,
+        StopReason::Error("You've hit your session limit".into()),
+    );
+    assert!(!app.controller.is_generating);
+    assert_eq!(row(&app), (10, 5, 10, 5));
+}
+
+/// A harness that reports each request of a turn (pi's `turn_end`, Codex
+/// app-server's `tokenUsage`) has them added up into the turn, which
+/// counts up as it runs, and each added once to the session. The next
+/// turn's first report starts its total again (#312).
+#[test]
+fn requests_add_up_into_their_turn_and_the_next_turn_starts_again() {
+    let mut app = test_app(HarnessId::PI);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
+    app.on_event(usage(100, 10, UsageScope::Request));
+    assert_eq!(row(&app), (100, 10, 100, 10));
+    app.on_event(usage(30, 3, UsageScope::Request));
+    assert_eq!(row(&app), (130, 13, 130, 13));
+    turn_ends(&mut app, StopReason::Done);
+
+    app.submit_prompt("two".into());
+    assert_eq!(row(&app), (130, 13, 130, 13));
+    // A request that took no tokens (Codex's compaction) starts nothing.
+    app.on_event(usage(0, 0, UsageScope::Request));
+    assert_eq!(row(&app), (130, 13, 130, 13));
+    app.on_event(usage(7, 1, UsageScope::Request));
+    assert_eq!(row(&app), (7, 1, 137, 14));
+    app.on_event(AgentEvent::Usage(Usage {
+        cost_usd: Some(0.1),
+        scope: UsageScope::Request,
+        ..Default::default()
+    }));
+    assert_eq!(app.controller.conversation.turn_usage.cost_usd, Some(0.1));
+    app.on_event(usage(2, 2, UsageScope::Request));
+    assert_eq!(row(&app), (9, 3, 139, 16));
+    turn_ends(&mut app, StopReason::Done);
+    assert_eq!(row(&app), (9, 3, 139, 16));
+}
+
+/// Whatever puts a turn's numbers in place puts back whether its turn
+/// reported (#309 restores them on a switch back): a request reported
+/// before the next turn starts starts the numbers again, not adds to
+/// those of a turn of another session.
+#[test]
+fn a_switch_away_and_back_starts_the_turns_numbers_again() {
+    let mut app = test_app(HarnessId::PI);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
+    app.on_event(usage(130, 13, UsageScope::Request));
+    turn_ends(&mut app, StopReason::Done);
+    assert!(app.controller.conversation.turn_reported);
+    app.switch_harness(HarnessId::CODEX);
+    app.switch_harness(HarnessId::PI);
+    assert_eq!(app.controller.active, HarnessId::PI);
+    assert!(!app.controller.conversation.turn_reported);
+    app.on_event(usage(5, 1, UsageScope::Request));
+    let t = &app.controller.conversation.turn_usage;
+    assert_eq!((t.input, t.output), (5, 1));
+}
+
+/// A whole turn's report replaces the row, a second one in the same turn
+/// too, and a session total replaces the session's.
+#[test]
+fn turn_reports_replace_the_row_and_session_totals_the_session() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.submit_prompt("one".into());
+    app.controller.session_alive = true;
+    app.on_event(usage(10, 5, UsageScope::Turn));
+    app.on_event(usage(1, 1, UsageScope::Turn));
+    assert_eq!(row(&app), (1, 1, 11, 6));
     app.on_event(AgentEvent::Usage(Usage {
         input: 100,
         cumulative: true,
         ..Default::default()
     }));
-    assert_eq!(app.controller.conversation.session_usage.input, 100);
+    assert_eq!(row(&app), (1, 1, 100, 0));
 }
 
 /// A Codex session under `transport = "auto"` that came to `exec` reports

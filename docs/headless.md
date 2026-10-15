@@ -90,7 +90,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `tool_call_result` | `id`, `output`, `is_error` |
 | `permission_request` | `id`, `tool_call_id`, `kind`, and per kind the fields below |
 | `permission_withdrawn` | `id` of a `permission_request` the harness stopped waiting for (its turn was interrupted, or a hook answered it) |
-| `usage` | `input`, `output`, `cache_read`, `cache_write`, `cost_usd`, `cumulative` (whether the numbers are session totals rather than this turn's) |
+| `usage` | `input`, `output`, `cache_read`, `cache_write`, `cost_usd`, `cumulative` (whether the numbers are session totals rather than this turn's), `scope`: what the numbers cover, `turn` (the whole turn), `request` (one model request; a turn may report several, each to add) or `session` (when `cumulative`) |
 | `context` | `used`, `window` (tokens) |
 | `rate_limit` | `status`, `windows`: [{`label`, `used_percent`, `resets_at` (Unix seconds)}] |
 | `plan_updated` | `entries`: [{`text`, `status`: `pending`, `in_progress` or `completed`}], `explanation` |

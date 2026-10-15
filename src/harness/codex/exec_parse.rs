@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use crate::core::{AgentEvent, Parser, PlanEntry, PlanStatus, StopReason, Usage};
+use crate::core::{AgentEvent, Parser, PlanEntry, PlanStatus, StopReason, Usage, UsageScope};
 
 #[derive(Debug, Default)]
 pub struct CodexExecParser {
@@ -197,6 +197,7 @@ pub fn exec_usage(usage: &Value) -> Usage {
         cache_write: u(usage, "cache_write_input_tokens"),
         cost_usd: None,
         cumulative: false,
+        scope: UsageScope::Turn,
     }
 }
 
