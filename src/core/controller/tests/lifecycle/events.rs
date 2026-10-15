@@ -70,6 +70,13 @@ fn what_a_session_reports_is_said() {
             < at("Claude runs on vertex, chosen by its own configuration")
     );
     at("Claude Code (claude) now runs under policy auto");
+
+    // A model with none takes them all away.
+    app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(
+        Vec::new(),
+    )));
+    assert_eq!(notices(&app).last().unwrap(), "no effort levels now");
+    assert_eq!(app.controller.effort_label(HarnessId::CLAUDE), None);
 }
 
 #[test]

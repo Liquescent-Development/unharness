@@ -540,7 +540,11 @@ impl Controller {
                 .caps_of(harness)
                 .is_some_and(|c| c.effort_levels != *levels)
         {
-            notices.push(format!("effort levels now: {}", levels.join(", ")));
+            notices.push(if levels.is_empty() {
+                "no effort levels now".to_string()
+            } else {
+                format!("effort levels now: {}", levels.join(", "))
+            });
         }
         // A guess at the harness's own default gives way to what it
         // reports. A choice stays the user's, and is what the next session

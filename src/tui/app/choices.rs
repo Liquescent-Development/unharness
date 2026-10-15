@@ -25,6 +25,11 @@ impl App {
         self.controller.effort(self.controller.active)
     }
 
+    /// The effort the status line shows (`Controller::effort_label`).
+    pub fn effort_label(&self) -> Option<String> {
+        self.controller.effort_label(self.controller.active)
+    }
+
     pub fn model_label(&self) -> String {
         self.controller.model_label()
     }

@@ -122,7 +122,10 @@ Policy, model and effort changes apply from the next turn on every harness:
 | Mistral Vibe | policy: its session mode; model and effort: a new process, and a new session once it was prompted ([ACP agents](acp.md#mistral-vibe)) |
 
 Antigravity has no separate effort setting. The effort is the last part
-of its model ids, and `--effort` is never passed to it.
+of its model ids, and `--effort` is never passed to it. The status line
+and the notice of a switch to it show no effort, and neither does any
+other harness or ACP agent with no effort levels (until its session
+reports some).
 
 A sandbox change (`/sandbox`) applies to the process, so the harness is
 restarted on its session.
