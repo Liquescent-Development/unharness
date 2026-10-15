@@ -191,10 +191,12 @@ impl Controller {
 
     /// The effort shown for `harness`: none where it has no effort levels
     /// (agy's is the end of its model id; an ACP agent may report some
-    /// later), whatever was configured or stored for it.
+    /// later), whatever was configured or stored for it. With none chosen
+    /// or configured the CLI picks it, said as the model's label says it
+    /// (`ChoiceState::model_label`): no session reports the one it runs.
     pub fn effort_label(&self, harness: HarnessId) -> Option<String> {
         let levels = self.caps_of(harness)?.effort_levels;
-        (!levels.is_empty()).then(|| self.effort(harness).unwrap_or("default").to_string())
+        (!levels.is_empty()).then(|| self.effort(harness).unwrap_or("CLI default").to_string())
     }
 
     /// The model the config names for `harness`, on its provider.

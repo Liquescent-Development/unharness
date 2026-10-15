@@ -2894,7 +2894,7 @@ mod tests {
         };
         let mut app = test_app(HarnessId::CLAUDE);
         let (status, footer) = rows(&mut app);
-        assert!(status.contains("effort default"), "{status}");
+        assert!(status.contains("effort CLI default"), "{status}");
         assert!(footer.contains("^E effort"), "{footer}");
 
         // agy has none: one configured or stored is not shown either.

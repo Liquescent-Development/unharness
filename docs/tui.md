@@ -8,7 +8,10 @@ The transcript fills the window. The current state sits under the prompt:
 - a status line with the working directory and git branch, the harness,
   provider and model, effort (not for a harness with no effort levels,
   such as Antigravity), policy and sandbox level, token usage and cost,
-  the session id, any capability caveat, and key hints. On a
+  the session id, any capability caveat, and key hints. A model not
+  chosen shows as the one the session reported, marked `(default)`, or
+  as `CLI default` until it reports one (Antigravity and Codex's `exec`
+  never do); an effort not chosen shows as `CLI default`. On a
   narrow terminal the directory is shortened first, then effort, model
   and sandbox give way; the harness and its policy always stay.
 
