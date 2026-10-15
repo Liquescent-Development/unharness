@@ -175,6 +175,12 @@ pub struct Conversation {
     /// Harness → that harness's session usage totals.
     #[serde(default)]
     pub usage: HashMap<HarnessId, Usage>,
+    /// Harness → what its last turn used.
+    #[serde(default)]
+    pub turn_usage: HashMap<HarnessId, Usage>,
+    /// Harness → how full its session's context window last was.
+    #[serde(default)]
+    pub context: HashMap<HarnessId, ContextRecord>,
     /// The agent's latest plan / todo list.
     #[serde(default)]
     pub plan: Vec<PlanEntry>,
@@ -210,6 +216,24 @@ pub struct Conversation {
     pub efforts: HashMap<HarnessId, String>,
 }
 
+/// How full a harness's context window was (`ContextUsage`), and what
+/// that was measured on: a fill is only good for the session that
+/// reported it, and a window only for its model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextRecord {
+    #[serde(default)]
+    pub used: Option<u64>,
+    #[serde(default)]
+    pub window: Option<u64>,
+    /// The model it ran, as the context windows are kept by (`ModelRef::
+    /// label`, or `default`).
+    #[serde(default)]
+    pub model: String,
+    /// The vendor session `used` is of; `None` when it had none stored.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
 /// A file checkpoint taken just before the user block at `block` was sent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CheckpointRecord {
@@ -241,6 +265,8 @@ impl Conversation {
             bookmarks: HashMap::new(),
             blocks: Vec::new(),
             usage: HashMap::new(),
+            turn_usage: HashMap::new(),
+            context: HashMap::new(),
             plan: Vec::new(),
             anchors: Vec::new(),
             checkpoints: Vec::new(),
@@ -579,7 +605,52 @@ mod tests {
                 ..Default::default()
             },
         );
+        c.turn_usage.insert(
+            HarnessId::CLAUDE,
+            Usage {
+                input: 4,
+                ..Default::default()
+            },
+        );
+        c.context.insert(
+            HarnessId::CLAUDE,
+            ContextRecord {
+                used: Some(40_000),
+                window: Some(200_000),
+                model: "default".into(),
+                session: Some("claude-sess".into()),
+            },
+        );
         c
+    }
+
+    /// A conversation an unharness before #309 saved has no last turn nor
+    /// context: it opens without them. One a later unharness saved, with
+    /// fields this one does not know, opens too.
+    #[test]
+    fn a_record_without_context_or_with_more_opens() {
+        let old = serde_json::json!({
+            "id": "abc", "title": "t", "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z", "active_harness": "claude",
+            "sessions": {"claude": "s1"},
+            "usage": {"claude": {"input": 1, "output": 2, "cache_read": 0,
+                "cache_write": 0, "cost_usd": null, "cumulative": false}},
+        });
+        let c: Conversation = serde_json::from_value(old.clone()).unwrap();
+        assert!(c.turn_usage.is_empty() && c.context.is_empty());
+        assert_eq!(c.usage[&HarnessId::CLAUDE].output, 2);
+
+        let mut newer = old;
+        newer["context"] = serde_json::json!({"claude": {"used": 5, "from_the_future": 1}});
+        newer["from_the_future"] = serde_json::json!([1, 2]);
+        let c: Conversation = serde_json::from_value(newer).unwrap();
+        assert_eq!(
+            c.context[&HarnessId::CLAUDE],
+            ContextRecord {
+                used: Some(5),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

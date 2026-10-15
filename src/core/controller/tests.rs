@@ -572,6 +572,22 @@ fn saved_conversation() -> Conversation {
             ..Default::default()
         },
     );
+    c.turn_usage.insert(
+        CODEX,
+        crate::core::Usage {
+            input: 3,
+            ..Default::default()
+        },
+    );
+    c.context.insert(
+        CODEX,
+        crate::core::conversations::ContextRecord {
+            used: Some(30_000),
+            window: Some(200_000),
+            model: "default".into(),
+            session: Some("codex-1".into()),
+        },
+    );
     c.plan.push(crate::core::PlanEntry {
         text: "write the tests".into(),
         status: crate::core::PlanStatus::InProgress,
@@ -600,6 +616,14 @@ fn a_conversation_installed_is_saved_as_it_came() {
     assert_eq!(state.session_ids, saved.sessions);
     assert_eq!(state.transcript.blocks.len(), 3);
     assert_eq!(state.session_usage.input, 7);
+    assert_eq!(state.turn_usage.input, 3);
+    assert_eq!(
+        state.context,
+        crate::core::ContextUsage {
+            used: Some(30_000),
+            window: Some(200_000)
+        }
+    );
     assert_eq!(state.first_prompt.as_deref(), Some("the task"));
     assert!(state.fork_pending.contains(&CLAUDE) && state.fork_pending.contains(&CODEX));
 

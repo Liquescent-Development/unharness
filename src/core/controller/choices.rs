@@ -552,6 +552,7 @@ impl Controller {
     /// Choose the active harness's provider (`Controller::route_provider`).
     pub fn set_provider(&mut self, provider: ProviderId, front: &mut dyn Front) {
         let now = self.session_now();
+        let before = self.model_key(self.active);
         let route = match self.route_provider(self.active, provider.clone(), &now) {
             Ok(route) => route,
             Err(why) => {
@@ -559,6 +560,10 @@ impl Controller {
                 return;
             }
         };
+        // Another provider takes the model chosen on the one before.
+        if self.model_key(self.active) != before {
+            self.fresh_context();
+        }
         self.idle_start_paused = false;
         let line = provider_line(&provider);
         match route {
@@ -584,6 +589,7 @@ impl Controller {
 
     pub fn set_model(&mut self, model: String, front: &mut dyn Front) {
         let now = self.session_now();
+        let before = self.model_key(self.active);
         let (m, route) = match self.route_model(self.active, model, &now) {
             Ok(set) => set,
             Err(why) => {
@@ -591,6 +597,9 @@ impl Controller {
                 return;
             }
         };
+        if self.model_key(self.active) != before {
+            self.fresh_context();
+        }
         self.idle_start_paused = false;
         self.conversation
             .transcript

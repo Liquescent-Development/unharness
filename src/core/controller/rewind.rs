@@ -53,6 +53,9 @@ impl Controller {
                 // Rewound, it is the conversation's: a restart now would
                 // resume it from before the rewind.
                 self.mark_prompted();
+                // It holds less than it said; it says how much at its next
+                // request.
+                self.conversation.context.used = None;
             }
             None => self.forget_session(active, front),
         }
