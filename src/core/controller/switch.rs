@@ -256,11 +256,14 @@ impl Controller {
         self.restore_context();
         self.conversation.anchor_pending.clear();
         self.persist();
+        let effort = self
+            .effort_label(self.active)
+            .map(|e| format!(", effort: {e}"))
+            .unwrap_or_default();
         self.conversation.transcript.push_system(format!(
-            "Switched to {} (model: {}, effort: {}, policy: {}, sandbox: {})",
+            "Switched to {} (model: {}{effort}, policy: {}, sandbox: {})",
             self.display_name(),
             self.model_label(),
-            self.effort(self.active).unwrap_or("default"),
             self.policy_label(),
             self.sandbox_level().0
         ));

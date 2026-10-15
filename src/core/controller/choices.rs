@@ -168,6 +168,14 @@ impl Controller {
         self.choices(harness)?.effort()
     }
 
+    /// The effort shown for `harness`: none where it has no effort levels
+    /// (agy's is the end of its model id; an ACP agent may report some
+    /// later), whatever was configured or stored for it.
+    pub fn effort_label(&self, harness: HarnessId) -> Option<String> {
+        let levels = self.caps_of(harness)?.effort_levels;
+        (!levels.is_empty()).then(|| self.effort(harness).unwrap_or("default").to_string())
+    }
+
     /// The model the config names for `harness`, on its provider.
     pub(super) fn configured_model(&self, harness: HarnessId) -> Option<ModelRef> {
         let model = self

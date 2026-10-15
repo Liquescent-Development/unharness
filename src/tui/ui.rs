@@ -1537,7 +1537,8 @@ fn render_bottom(
         None => format!("policy {wanted} (unavailable)"),
     };
     // Effort goes first when the row is too narrow, then the model, then
-    // the sandbox; the harness and its policy always stay.
+    // the sandbox; the harness and its policy always stay. A harness with
+    // no effort levels shows none.
     let mut segments = vec![
         (
             format!("[{}]", app.short_name()),
@@ -1547,11 +1548,15 @@ fn render_bottom(
             0,
         ),
         (app.model_label(), Style::default().fg(Color::Yellow), 2),
-        (
-            format!("effort {}", app.current_effort().unwrap_or("default")),
+    ];
+    if let Some(effort) = app.effort_label() {
+        segments.push((
+            format!("effort {effort}"),
             Style::default().fg(Color::LightBlue),
             1,
-        ),
+        ));
+    }
+    segments.extend([
         (
             policy_text,
             Style::default().fg(effective.map_or(Color::Red, policy_color)),
@@ -1562,7 +1567,7 @@ fn render_bottom(
             Style::default().fg(sandbox_color(sandbox)),
             3,
         ),
-    ];
+    ]);
     // Dropped last of all when the row is too narrow: the remote side
     // may answer for the user.
     if let Some(remote) = app.remote_status() {
@@ -1630,7 +1635,7 @@ fn render_bottom(
     let k = |s: &'static str, c: Color| {
         Span::styled(s, Style::default().fg(c).add_modifier(Modifier::BOLD))
     };
-    let footer = Line::from(vec![
+    let mut hints = vec![
         k("Enter", Color::Cyan),
         Span::raw(" send · "),
         k("^J", Color::Cyan),
@@ -1639,8 +1644,11 @@ fn render_bottom(
         Span::raw(" harness · "),
         k("^M", Color::Magenta),
         Span::raw(" model · "),
-        k("^E", Color::LightBlue),
-        Span::raw(" effort · "),
+    ];
+    if !app.caps().effort_levels.is_empty() {
+        hints.extend([k("^E", Color::LightBlue), Span::raw(" effort · ")]);
+    }
+    hints.extend([
         k("^P", Color::Green),
         Span::raw(" policy · "),
         k("^R", Color::Blue),
@@ -1652,7 +1660,7 @@ fn render_bottom(
         k("^D", Color::Red),
         Span::raw(" quit"),
     ]);
-    let mut footer_lines = vec![footer];
+    let mut footer_lines = vec![Line::from(hints)];
     clamp_lines(&mut footer_lines, width);
     let footer = footer_lines.remove(0);
     frame.render_widget(
@@ -2007,7 +2015,9 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
                     .description
                     .clone()
                     .unwrap_or_else(|| m.display_name.clone());
-                if let Some(e) = &m.effort_levels {
+                if let Some(e) = &m.effort_levels
+                    && !e.is_empty()
+                {
                     desc.push_str(&format!("  [{}]", e.join("/")));
                 }
                 (
@@ -2869,6 +2879,41 @@ mod tests {
         assert_eq!(text(25), "[h] policy · sandbox");
         assert_eq!(text(10), "[h] policy");
         assert_eq!(text(0), "[h] policy");
+    }
+
+    #[test]
+    fn a_harness_with_no_effort_levels_shows_no_effort() {
+        use crate::core::{AgentEvent, CapsUpdate};
+        let rows = |app: &mut App| {
+            let (rows, _) = screen(app, 140, 24);
+            let n = rows.len();
+            (rows[n - 3].clone(), rows[n - 1].clone())
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        let (status, footer) = rows(&mut app);
+        assert!(status.contains("effort default"), "{status}");
+        assert!(footer.contains("^E effort"), "{footer}");
+
+        // agy has none: one configured or stored is not shown either.
+        let mut app = test_app(HarnessId::AGY);
+        assert!(app.caps().effort_levels.is_empty());
+        app.controller.choose_effort(HarnessId::AGY, "high".into());
+        let (status, footer) = rows(&mut app);
+        assert!(
+            status.contains("[Antigravity]") && status.contains("policy "),
+            "{status}"
+        );
+        assert!(!status.contains("effort"), "{status}");
+        assert!(!footer.contains("effort"), "{footer}");
+
+        // Levels a session reports bring it back.
+        app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec![
+            "low".into(),
+            "high".into(),
+        ])));
+        let (status, footer) = rows(&mut app);
+        assert!(status.contains("effort high"), "{status}");
+        assert!(footer.contains("^E effort"), "{footer}");
     }
 
     #[test]

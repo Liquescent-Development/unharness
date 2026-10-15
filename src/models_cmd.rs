@@ -105,6 +105,7 @@ fn print_models(
                     let efforts = m
                         .effort_levels
                         .as_ref()
+                        .filter(|e| !e.is_empty())
                         .map(|e| format!("  efforts: {}", e.join(",")))
                         .unwrap_or_default();
                     println!(
