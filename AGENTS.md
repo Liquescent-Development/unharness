@@ -189,9 +189,9 @@ UNHARNESS_UPDATE_FIXTURES=1 cargo test      # accept new parser output into .eve
 ## Conversations
 
 `core/conversations.rs` persists the merged transcript (`BlockRecord`), the
-harness → vendor session map, bridging bookmarks, per-harness usage, last
-turn's usage and context fill (told again only for the session and model
-measured), the active harness, and the policy, models and efforts chosen for it (never a
+harness → vendor session map, bridging bookmarks, per-harness usage and
+the last turn's usage, and the context fill (told again only for the
+session and model it was measured on), the active harness, and the policy, models and efforts chosen for it (never a
 configured default; one named in the run resuming it wins), one JSON
 file per conversation plus an index. `Controller::persist`
 runs on session start, turn end, harness switch, `/clear` (which then
