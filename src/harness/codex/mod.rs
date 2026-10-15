@@ -325,6 +325,7 @@ impl Harness for CodexHarness {
             },
             steer: app_server,
             compaction: app_server,
+            // `exec --json` reports a turn's tokens, not the window.
             context_usage: app_server,
             rate_limits: app_server,
             rewind: RewindSupport {
@@ -978,6 +979,7 @@ region = "us-east-1"
             CapsUpdate {
                 lacks: Some(Ability::ALL.to_vec()),
                 fork: Some(false),
+                context_usage: Some(false),
                 plan_mode: Some(false),
                 ask_user_question: Some(false),
                 lacks_policies: Some(vec![PermissionPolicy::Ask]),
@@ -991,8 +993,18 @@ region = "us-east-1"
         }
         assert_eq!(offered.permission_policies, exec.permission_policies);
         assert_eq!(
-            (offered.fork, offered.plan_mode, offered.ask_user_question),
-            (exec.fork, exec.plan_mode, exec.ask_user_question)
+            (
+                offered.fork,
+                offered.plan_mode,
+                offered.ask_user_question,
+                offered.context_usage
+            ),
+            (
+                exec.fork,
+                exec.plan_mode,
+                exec.ask_user_question,
+                exec.context_usage
+            )
         );
     }
 

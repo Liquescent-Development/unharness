@@ -304,6 +304,9 @@ impl Harness for AcpHarness {
             subagents: SubagentSupport::default(),
             steer: false,
             compaction: false,
+            // `usage_update` (`used`, `size`) is the agent's to send, and
+            // every one recorded does; one that does not is shown as not
+            // known yet, never as one that cannot report.
             context_usage: true,
             rate_limits: false,
             // Not in the spec; an agent known to have one declares it.
