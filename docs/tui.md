@@ -379,9 +379,11 @@ model's window (Claude says it only when a turn ends), the window that
 model last reported in any workspace is taken. Each harness's figure is
 kept with the conversation and comes back on a switch to it or a resume,
 as long as its session is the one measured and it runs the same model;
-another model, or a new session, starts the figure again. `/usage` adds
-the account's rate-limit windows, and a notice appears when
-one passes 80%.
+another model, or a new session, starts the figure again. `/usage` gives
+the tokens behind the percentage, or says that the harness never
+reports them (`Context: not reported by Antigravity (agy)`) or has not
+yet (`Context: not known yet`). It adds the account's rate-limit windows, and a notice appears
+when one passes 80%.
 
 ## Rendering
 

@@ -113,7 +113,8 @@ fn billed_line(over: &str, u: &Usage) -> String {
 
 impl App {
     /// What `/usage` says: the billed tokens of the last turn and of the
-    /// session, broken down, with their cost; how full the context is;
+    /// session, broken down, with their cost; how full the context is,
+    /// told apart from a harness that never says (as the status row does);
     /// and the account's rate limits.
     pub(super) fn usage_report(&self) -> String {
         let c = &self.controller.conversation;
@@ -121,14 +122,21 @@ impl App {
             billed_line("last turn", &c.turn_usage),
             billed_line("session", &c.session_usage),
         ];
-        if let (Some(pct), Some(used), Some(window)) =
-            (c.context.percent(), c.context.used, c.context.window)
-        {
-            lines.push(format!(
+        let context = &c.context;
+        match (context.percent(), context.used, context.window) {
+            (Some(pct), Some(used), Some(window)) => lines.push(format!(
                 "Context: {} of {} tokens ({pct}%)",
                 grouped(used),
                 grouped(window)
-            ));
+            )),
+            _ if !self.caps().context_usage => {
+                lines.push(format!("Context: not reported by {}", self.display_name()))
+            }
+            (_, Some(used), _) => lines.push(format!(
+                "Context: {} tokens, of a window not known yet",
+                grouped(used)
+            )),
+            _ => lines.push("Context: not known yet".into()),
         }
         if let Some(r) = &self.controller.rate_limit {
             lines.push(format!("Rate limits: {}", rate_limit_summary(r)));

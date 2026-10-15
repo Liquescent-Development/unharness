@@ -351,3 +351,27 @@ fn usage_breaks_billed_tokens_down() {
          Rate limits: five_hour 12% used"
     );
 }
+
+/// Context fill the harness never reports is said to be missing; one it
+/// has not reported yet is not known yet, as the status row tells them
+/// apart (#313).
+#[test]
+fn usage_tells_context_never_reported_from_not_known_yet() {
+    let mut app = test_app(HarnessId::AGY);
+    assert!(!app.caps().context_usage);
+    assert_eq!(
+        usage_text(&mut app),
+        "Billed tokens, last turn: 0 (uncached input 0, output 0, cache reads 0, cache writes 0)\n\
+         Billed tokens, session: 0 (uncached input 0, output 0, cache reads 0, cache writes 0)\n\
+         Context: not reported by Antigravity (agy)"
+    );
+
+    let mut app = test_app(HarnessId::CLAUDE);
+    assert!(app.caps().context_usage);
+    assert!(usage_text(&mut app).ends_with("\nContext: not known yet"));
+    app.on_event(AgentEvent::Context(ContextUsage {
+        used: Some(1_500),
+        window: None,
+    }));
+    assert!(usage_text(&mut app).ends_with("\nContext: 1,500 tokens, of a window not known yet"));
+}
