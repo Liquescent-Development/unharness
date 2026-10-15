@@ -1351,6 +1351,49 @@ mod tests {
         );
     }
 
+    /// A Codex app-server run's usage is Codex's own total for the thread
+    /// (cache reads apart from the input), also after a compaction that
+    /// reports a request without adding it (#311); its `usage` lines say
+    /// which are requests and which the session's.
+    #[test]
+    fn a_codex_runs_usage_is_codexs_own_total() {
+        use crate::core::Parser;
+        use crate::core::testing::fixtures_dir;
+        use crate::harness::codex::app_server_parse::CodexAppServerParser;
+        let (_dir, mut run) = headless(Format::StreamJson, false);
+        let jsonl = std::fs::read_to_string(
+            fixtures_dir("src/harness/codex/app_server_parse.rs")
+                .join("app_server_steer_and_compact.jsonl"),
+        )
+        .unwrap();
+        let mut parser = CodexAppServerParser::new();
+        let usage: Vec<AgentEvent> = jsonl
+            .lines()
+            .filter(|l| l.starts_with('{'))
+            .flat_map(|l| parser.feed(l))
+            .filter(|e| matches!(e, AgentEvent::Usage(_)))
+            .collect();
+        let mut events = vec![AgentEvent::TurnStarted];
+        events.extend(usage);
+        events.push(done());
+        feed(&mut run, events);
+        assert_eq!(run.finish(), 0);
+        let lines = lines(&run);
+        let scopes: Vec<&str> = lines
+            .iter()
+            .filter(|l| l["type"] == "usage")
+            .map(|l| l["scope"].as_str().unwrap())
+            .collect();
+        assert_eq!(scopes, ["request", "session"].repeat(3));
+        // The thread's last `total`: inputTokens 29032 with 26496 cached,
+        // outputTokens 73.
+        let result = lines.last().unwrap();
+        assert_eq!(result["usage"]["input"], 29032 - 26496);
+        assert_eq!(result["usage"]["cache_read"], 26496);
+        assert_eq!(result["usage"]["output"], 73);
+        assert_eq!(result["usage"]["cumulative"], true);
+    }
+
     /// The model can go into plan mode by itself: its writes and commands
     /// are then not answered by a rule, and its plan is not approved.
     #[test]

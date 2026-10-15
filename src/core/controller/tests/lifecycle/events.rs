@@ -322,6 +322,53 @@ fn turn_reports_replace_the_row_and_session_totals_the_session() {
     assert_eq!(row(&app), (1, 1, 100, 0));
 }
 
+/// Codex app-server reports each request's numbers and then the thread's
+/// own total: after every report the session's figure is Codex's total
+/// (cache reads apart from the input), also where adding up the requests
+/// drifts from it, after a compaction and after a rollback (#311).
+#[test]
+fn a_codex_session_reads_codexs_own_total() {
+    use crate::core::Parser;
+    use crate::core::testing::fixtures_dir;
+    use crate::harness::codex::app_server_parse::CodexAppServerParser;
+    let dir = fixtures_dir("src/harness/codex/app_server_parse.rs");
+    for case in ["app_server_steer_and_compact", "app_server_rewind"] {
+        let mut app = test_app(HarnessId::CODEX);
+        app.submit_prompt("one".into());
+        app.controller.session_alive = true;
+        let mut parser = CodexAppServerParser::new();
+        let jsonl = std::fs::read_to_string(dir.join(format!("{case}.jsonl"))).unwrap();
+        let mut updates = 0;
+        for line in jsonl.lines().filter(|l| l.starts_with('{')) {
+            for ev in parser.feed(line) {
+                if matches!(ev, AgentEvent::Usage(_)) {
+                    app.on_event(ev);
+                }
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v["method"] != "thread/tokenUsage/updated" {
+                continue;
+            }
+            updates += 1;
+            let total = &v["params"]["tokenUsage"]["total"];
+            let n = |k: &str| total[k].as_u64().unwrap();
+            let s = &app.controller.conversation.session_usage;
+            assert_eq!(
+                (s.input, s.cache_read, s.output),
+                (
+                    n("inputTokens") - n("cachedInputTokens"),
+                    n("cachedInputTokens"),
+                    n("outputTokens")
+                ),
+                "{case}, update {updates}"
+            );
+        }
+        assert!(updates >= 3, "{case}");
+    }
+}
+
 /// A Codex session under `transport = "auto"` that came to `exec` reports
 /// what it lacks of the app-server capabilities `auto` declares (#288):
 /// the TUI stops offering it. `ask` goes too, and with nothing below it the

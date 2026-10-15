@@ -10,20 +10,23 @@ ToolCallStarted id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f name=shell input={"
 PermissionRequest id=0 ToolUse shell [shell "sleep 4 && echo first-ok"]
 ToolCallDelta id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f name=shell "first-ok\\n"
 ToolCallResult id=exec-f2f77dd6-cd0a-48ce-b80e-eb1015ca3f3f error=false "first-ok\\n"
-Usage in=14456 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=2296 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=2296 out=46 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14502 window=258400
 RateLimit status=- 7d=1%
 TextDelta "done"
 TextDelta " STE"
 TextDelta "ER"
 TextDelta "ED"
-Usage in=14576 out=27 cache_read=14336 cache_write=0 cost=- cumulative=false
+Usage in=240 out=27 cache_read=14336 cache_write=0 cost=- cumulative=false
+Usage in=2536 out=73 cache_read=26496 cache_write=0 cost=- cumulative=true
 Context used=14603 window=258400
 RateLimit status=- 7d=1%
 TurnCompleted Done
 TurnStarted
 Notice "compacting context…"
 Usage in=0 out=0 cache_read=0 cache_write=0 cost=- cumulative=false
+Usage in=2536 out=73 cache_read=26496 cache_write=0 cost=- cumulative=true
 Context used=5570 window=258400
 RateLimit status=- 7d=1%
 Notice "context compacted"

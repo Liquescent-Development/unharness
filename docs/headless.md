@@ -167,7 +167,13 @@ The `json` output, and the last `stream-json` line:
 - `text` is the main agent's text, as `--format text` prints it.
 - `turns` counts the turns that ended, including ones the harness took to
   report a subagent.
-- `usage` is summed over the run; `null` when the harness reported none.
+- `usage` is summed over the run, or is the session's own total when the
+  harness reports one (`cumulative`): Codex's app-server transport does,
+  for the thread, and a resumed or forked thread carries on from its
+  earlier turns (checked on a fork and on `exec`). On
+  `transport = "exec"` the usage reported is the thread's running total
+  too, although it is labelled as the turn's (a known issue).
+  `null` when the harness reported none.
 - `warnings` holds what unharness wrote to stderr: a policy fallback, a
   missing sandbox, MCP servers left out, denials, dismissed questions,
   and changes to the harness's own configuration during the run.

@@ -4,5 +4,5 @@ TextDelta "I’ll run the command now.\\n"
 ToolCallStarted id=item_1 name=shell input={"command":"/usr/bin/zsh -lc 'echo codex-spike-ok'"}
 ToolCallResult id=item_1 error=false "codex-spike-ok\\n"
 TextDelta "done"
-Usage in=50329 out=102 cache_read=41088 cache_write=0 cost=- cumulative=false
+Usage in=9241 out=102 cache_read=41088 cache_write=0 cost=- cumulative=false
 TurnCompleted Done

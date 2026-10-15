@@ -28,6 +28,56 @@ original. All of this was checked against `scripts/fake-harness.py`
 alone, which fails `app-server --help`; no Codex without `app-server`
 was run (#288).
 
+## Token usage
+
+Codex counts cached input in its input: app-server's `inputTokens`
+includes `cachedInputTokens` (`totalTokens` is `inputTokens +
+outputTokens`), and so does exec's `input_tokens`. Both parsers take the
+cached count out of `Usage::input` (#308).
+
+`thread/tokenUsage/updated` carries `last` (the request just made) and
+`total` (the thread's). The parser reports `last` as a request's usage,
+for the turn's numbers and the context fill, and then `total` as the
+session's (`cumulative`), which replaces the session's figure (#311).
+Adding up `last` does not give `total`, in the recordings:
+
+- compaction reports `last` with every count 0 but `totalTokens` (the
+  compacted context, 5570) and leaves `total` as it was
+  (`app_server_steer_and_compact.jsonl`);
+- after `thread/revert`, `total` is the one at the turn reverted to plus
+  the new turn's (32497, then 16238 + 16266 = 32504;
+  `app_server_rewind.jsonl`): the dropped turn is no longer counted;
+- a thread forked (`thread/fork`, `excludeTurns: true`) starts from the
+  total of the thread it was forked from: its first `total` is 52729
+  with `last` 19509 (`app_server_fork.jsonl`), and the source thread's
+  last rollout ends at `total_token_usage` 33220 = 52729 − 19509. A
+  second fork of the same thread also started at 52729.
+
+A resumed thread carries on from its total too. Checked on the rollout
+files Codex wrote for the exec recordings (0.157.0, thread `01a10023`):
+the second turn, a `codex exec resume` in a process of its own, recorded
+`total_token_usage` 33299 = 16234 (the first turn's) + 17065. That a
+resume on app-server's `thread/resume` does the same is inferred, not
+recorded: the server and exec share Codex's core, which rebuilds a
+resumed or forked thread from its rollout (the 0.162.1 binary names
+`core/src/session/rollout_reconstruction.rs`; its source was not read),
+and a fork on app-server does carry its total. Also unrecorded: whether
+`thread/resume` sends a `thread/tokenUsage/updated` before the first
+turn. A saved conversation's figure is replaced by the first `total`
+after a resume either way. A new thread's first `total` is its first
+`last` (every recording), so a thread that replaces one that could not
+be resumed takes the conversation's figure for Codex back to its own.
+
+Exec's `turn.completed` `usage` is the thread's `total_token_usage` too,
+not the turn's: in the same rollout, the resumed turn's `usage`
+(`input_tokens` 50329, `cached_input_tokens` 41088, `output_tokens` 102,
+`exec_resume_command.jsonl`) is the thread's total after it, while that
+turn's two requests came to 34197. The exec parser still reports it as a
+turn's (unharness then adds it to the session's), unfixed.
+
+Unverified: whether `cacheWriteInputTokens` (always 0 in the
+recordings) is also counted in `inputTokens`.
+
 ## `turn/plan/updated`
 
 Codex `turn/plan/updated` is parsed from the 0.157.0 app-server schema; no
