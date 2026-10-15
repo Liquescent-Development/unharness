@@ -186,6 +186,7 @@ impl Controller {
         let name = self.short_name().to_string();
         self.conversation.fork_pending.remove(&harness);
         self.conversation.anchors.retain(|a| a.harness != harness);
+        self.conversation.context.used = None;
         if self.session_blank {
             // The new session's id waits in `blank_session` for the first
             // prompt; the old one is not this conversation's any more.

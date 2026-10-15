@@ -5,7 +5,7 @@ use crate::config::BridgeSummary;
 use crate::core::bridge;
 use crate::core::conversations::{CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN, save_context_windows};
 use crate::core::transcript::{Block, DEFAULT_BRIDGE_MAX_CHARS};
-use crate::core::{ContextUsage, HarnessId, ModelRef, Usage};
+use crate::core::{HarnessId, ModelRef};
 
 impl Controller {
     /// How long the bridge to `harness` may be: `bridge_max_chars` when
@@ -26,7 +26,7 @@ impl Controller {
     }
 
     /// The model `harness` runs, as the context windows are kept by.
-    fn model_key(&self, harness: HarnessId) -> String {
+    pub(super) fn model_key(&self, harness: HarnessId) -> String {
         self.model(harness)
             .map_or_else(|| "default".to_string(), ModelRef::label)
     }
@@ -222,8 +222,7 @@ impl Controller {
             .get(&next)
             .cloned()
             .unwrap_or_default();
-        self.conversation.turn_usage = Usage::default();
-        self.conversation.context = ContextUsage::default();
+        self.restore_context();
         self.conversation.anchor_pending.clear();
         self.persist();
         self.conversation.transcript.push_system(format!(
