@@ -32,7 +32,7 @@ pub use caps::{
 pub use event::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HookOutcome, PermissionDecision,
     PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption,
-    RateLimitInfo, RateLimitWindow, RemoteControl, StopReason, SubagentStatus, Usage,
+    RateLimitInfo, RateLimitWindow, RemoteControl, StopReason, SubagentStatus, Usage, UsageScope,
 };
 pub use ids::{HarnessId, ModelInfo, ModelRef, ProviderId};
 pub use mcp::{McpServer, McpTransport};

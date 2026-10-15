@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::brain;
-use crate::core::{AgentEvent, Parser, StopReason, SubagentStatus, Usage};
+use crate::core::{AgentEvent, Parser, StopReason, SubagentStatus, Usage, UsageScope};
 
 #[derive(Debug, Default)]
 pub struct AgyParser {
@@ -276,6 +276,7 @@ impl AgyParser {
                     cache_write: 0,
                     cost_usd: None,
                     cumulative: false,
+                    scope: UsageScope::Turn,
                 });
         }
         match str_of(step, "step_type") {

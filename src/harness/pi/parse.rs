@@ -8,7 +8,7 @@ use super::gate;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
-    PermissionRequest, StopReason, Usage,
+    PermissionRequest, StopReason, Usage, UsageScope,
 };
 
 #[derive(Debug, Default)]
@@ -98,6 +98,7 @@ impl PiParser {
                         cache_write: u(usage, "cacheWrite"),
                         cost_usd: usage.pointer("/cost/total").and_then(Value::as_f64),
                         cumulative: false,
+                        scope: UsageScope::Request,
                     }));
                 }
             }
@@ -497,7 +498,23 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::testing::{assert_fixture, fixtures_dir};
+    use crate::core::testing::{assert_fixture, fixtures_dir, replay};
+
+    /// pi reports usage at each `turn_end`, once per model call: a turn
+    /// that runs a tool reports two (#312).
+    #[test]
+    fn usage_is_reported_per_request() {
+        let jsonl =
+            std::fs::read_to_string(fixtures_dir(file!()).join("basic_and_bash.jsonl")).unwrap();
+        let scopes: Vec<UsageScope> = replay(&mut PiParser::new(None), &jsonl)
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::Usage(u) => Some(u.scope),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(scopes, [UsageScope::Request; 3]);
+    }
 
     #[test]
     fn fixture_gate() {

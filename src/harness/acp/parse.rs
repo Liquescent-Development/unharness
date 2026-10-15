@@ -19,6 +19,7 @@ use crate::core::rules::unwrap_shell;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, ModelInfo, ModelRef, Parser,
     PermissionKind, PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
+    UsageScope,
 };
 use crate::harness::claude::parse::tool_action as claude_tool_action;
 
@@ -438,6 +439,7 @@ impl AcpParser {
                     cache_write: u(usage, "cachedWriteTokens"),
                     cost_usd: (cost > 0.0).then_some(cost),
                     cumulative: false,
+                    scope: UsageScope::Turn,
                 }));
             }
             let stop_reason = match reason {
