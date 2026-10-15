@@ -88,6 +88,8 @@ fn vertex_models() -> ListResult {
         display_name: "Haiku".into(),
         description: None,
         effort_levels: None,
+        is_default: false,
+        cli_default: false,
     }]))
 }
 
@@ -171,6 +173,8 @@ fn model_lists_arrive_without_holding_the_screen() {
         display_name: "Haiku".into(),
         description: None,
         effort_levels: None,
+        is_default: false,
+        cli_default: false,
     };
     app.on_list(wanted.clone(), ListResult::Models(Ok(vec![model.clone()])));
     assert!(matches!(app.modal, Some(Modal::Model(_))));

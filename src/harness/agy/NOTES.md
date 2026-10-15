@@ -106,3 +106,11 @@ usage, model, effort, config, credits, skills, hooks, agents and the
 like, none for context). A step's `input_tokens` would say what one
 model call sent, but without the window it is no fill. Unverified:
 whether a later agy puts the window in `init` or `result`.
+
+## The default model
+
+agy names no model in `--output-format stream-json` (1.2.17, 1.3.1
+recordings: neither `init` nor `result` has one), so with none chosen
+the status line says `google (CLI default)` throughout (#329), and
+`agy --output-format json models` (only `id` and `label`) marks no
+default.

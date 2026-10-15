@@ -222,7 +222,11 @@ fn the_switch_notice_names_an_effort_only_where_the_harness_has_levels() {
     let mut app = test_app(HarnessId::CLAUDE);
     app.controller.choose_effort(HarnessId::AGY, "high".into());
     app.switch_harness(HarnessId::CODEX);
-    assert!(notice(&app).contains("effort: default"), "{}", notice(&app));
+    assert!(
+        notice(&app).contains("(model: openai (CLI default), effort: CLI default,"),
+        "{}",
+        notice(&app)
+    );
     app.switch_harness(HarnessId::AGY);
     let text = notice(&app);
     assert!(text.starts_with("Switched to Antigravity"), "{text}");

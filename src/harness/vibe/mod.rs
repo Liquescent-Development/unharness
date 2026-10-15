@@ -1308,6 +1308,8 @@ impl Harness for VibeHarness {
                     display_name: m.clone(),
                     description: Some(format!("on {}", p.api_base)),
                     effort_levels: None,
+                    is_default: false,
+                    cli_default: false,
                 })
                 .collect()),
             None => self.acp.list_models(binary, provider, sandbox),

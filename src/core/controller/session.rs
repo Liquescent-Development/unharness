@@ -128,6 +128,7 @@ impl Controller {
         self.session_blank = false;
         self.blank_session = None;
         self.idle_start_paused = true;
+        self.forget_reported_model(self.active);
     }
 
     /// A start is queued, or held until the CLI before it is gone.
@@ -245,6 +246,7 @@ impl Controller {
         // the anchors still owed would land on later turns (pi).
         self.conversation.anchor_pending.clear();
         self.drop_prompts(front);
+        self.forget_reported_model(self.active);
     }
 
     /// End the active harness's session. It is not alive from here on: a

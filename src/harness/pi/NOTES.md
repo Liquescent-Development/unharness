@@ -51,3 +51,11 @@ seconds a model call takes. `contextUsage.tokens` is `null`
 after a compaction until an assistant response follows; unharness then
 keeps showing the figure from before the compaction
 (`ContextUsage::merge` keeps a known half), not fixed here.
+
+## The default model
+
+With no model chosen (#329), `get_state` at session start, before the
+first prompt, names the one that runs (`data.model.id`, with its
+`provider`: `gpt-5.6-sol` on `openai-codex` in the fixtures, 0.87.1),
+shown as `<provider>/<model> (default)`. `get_available_models` marks no
+default, so the picker marks none.

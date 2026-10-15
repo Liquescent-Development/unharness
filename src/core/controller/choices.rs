@@ -20,6 +20,14 @@ pub struct ChoiceState {
     pub(super) model: Option<Pick<ModelRef>>,
     /// As `model`.
     pub(super) effort: Option<Pick<String>>,
+    /// The model the live session said it runs when none was chosen or
+    /// configured, or the one chosen is the CLI's own choice
+    /// (`ModelInfo::cli_default`): its CLI's default. It is the process's,
+    /// forgotten when that ends or another provider or a model is chosen,
+    /// and not kept
+    /// with the conversation: the CLI's configuration or an update may
+    /// change it before the next run, whose session says it again.
+    pub(super) reported_model: Option<String>,
 }
 
 impl ChoiceState {
@@ -58,6 +66,27 @@ impl ChoiceState {
             .as_ref()
             .filter(|e| e.origin != Origin::Configured)
             .map(|e| &e.value)
+    }
+
+    /// The model as the status line and a switch name it: the one chosen
+    /// or configured, unless it is the CLI's own choice (`to_cli`); else
+    /// the one the session reported, marked as the CLI's default; else
+    /// that the CLI picks it, in words no model id has. Without the
+    /// provider (`with_provider` false) where a row has no room for it.
+    pub fn model_label(&self, to_cli: bool, with_provider: bool) -> String {
+        let provider = self.provider().filter(|_| with_provider);
+        if let Some(m) = self.model().filter(|_| !to_cli) {
+            return match provider {
+                Some(_) => m.label(),
+                None => m.model.clone(),
+            };
+        }
+        match (&self.reported_model, provider) {
+            (Some(m), Some(p)) => format!("{p}/{m} (default)"),
+            (Some(m), None) => format!("{m} (default)"),
+            (None, Some(p)) => format!("{p} (CLI default)"),
+            (None, None) => "CLI default".to_string(),
+        }
     }
 }
 
@@ -170,10 +199,12 @@ impl Controller {
 
     /// The effort shown for `harness`: none where it has no effort levels
     /// (agy's is the end of its model id; an ACP agent may report some
-    /// later), whatever was configured or stored for it.
+    /// later), whatever was configured or stored for it. With none chosen
+    /// or configured the CLI picks it, said as the model's label says it
+    /// (`ChoiceState::model_label`): no session reports the one it runs.
     pub fn effort_label(&self, harness: HarnessId) -> Option<String> {
         let levels = self.caps_of(harness)?.effort_levels;
-        (!levels.is_empty()).then(|| self.effort(harness).unwrap_or("default").to_string())
+        (!levels.is_empty()).then(|| self.effort(harness).unwrap_or("CLI default").to_string())
     }
 
     /// The model the config names for `harness`, on its provider.
@@ -200,6 +231,7 @@ impl Controller {
         if changed {
             state.runs_on = None;
             state.model = None;
+            state.reported_model = None;
             self.conversation.record.models.remove(&harness);
         }
         state.provider = Some(Pick::new(provider, Origin::User));
@@ -213,8 +245,43 @@ impl Controller {
             .cloned()
             .unwrap_or_else(|| ProviderId::new("default"));
         let m = ModelRef::new(harness, provider, model);
-        self.choices.entry(harness).or_default().model = Some(Pick::new(m.clone(), Origin::User));
+        let state = self.choices.entry(harness).or_default();
+        state.model = Some(Pick::new(m.clone(), Origin::User));
+        if !self.leaves_model_to_cli(harness) {
+            self.forget_reported_model(harness);
+        }
         m
+    }
+
+    /// Whether the model chosen or configured for `harness` is the CLI's
+    /// own choice, as its list names it (`ModelInfo::cli_default`, Claude's
+    /// `default`): named as when none is. Not known before it was listed.
+    pub(super) fn leaves_model_to_cli(&self, harness: HarnessId) -> bool {
+        self.model(harness).is_some_and(|m| {
+            self.model_list(harness, &m.provider).is_some_and(|l| {
+                l.iter()
+                    .any(|i| i.cli_default && i.model_ref.model == m.model)
+            })
+        })
+    }
+
+    /// The active harness's session runs `model`: its CLI's default, when
+    /// none was chosen or configured, or the one chosen is the CLI's own
+    /// choice (`ChoiceState::reported_model`).
+    pub(super) fn model_reported(&mut self, model: &str) {
+        let to_cli = self.leaves_model_to_cli(self.active);
+        let state = self.choices.entry(self.active).or_default();
+        if state.model.is_none() || to_cli {
+            state.reported_model = Some(model.to_string());
+        }
+    }
+
+    /// `harness`'s session process is gone: the model it reported runs no
+    /// more.
+    pub(super) fn forget_reported_model(&mut self, harness: HarnessId) {
+        if let Some(state) = self.choices.get_mut(&harness) {
+            state.reported_model = None;
+        }
     }
 
     /// Choose `effort` for `harness`.
@@ -533,14 +600,23 @@ pub fn subagents_refusal(n: usize, can_stop: bool, doing: &str) -> String {
 /// Choosing the active harness's provider, model and effort, and what a
 /// choice does to its session.
 impl Controller {
+    /// The active harness's model, as `ChoiceState::model_label` names it.
     pub fn model_label(&self) -> String {
-        match self.model(self.active) {
-            Some(m) => m.label(),
-            None => match self.provider(self.active) {
-                Some(p) => format!("{p}/default"),
-                None => "default".to_string(),
-            },
-        }
+        self.model_label_of(true)
+    }
+
+    /// As `model_label`, without the provider: for a status row too narrow
+    /// for the whole label.
+    pub fn short_model_label(&self) -> String {
+        self.model_label_of(false)
+    }
+
+    fn model_label_of(&self, with_provider: bool) -> String {
+        let to_cli = self.leaves_model_to_cli(self.active);
+        self.choices(self.active).map_or_else(
+            || ChoiceState::default().model_label(to_cli, with_provider),
+            |s| s.model_label(to_cli, with_provider),
+        )
     }
 
     /// What decides whether a choice may be made now, and how it reaches
@@ -717,4 +793,55 @@ pub(super) fn provider_line(provider: &ProviderId) -> String {
 /// What is said of a provider whose harness's process starts again on it.
 pub(super) fn restart_line(provider: &ProviderId, name: &str) -> String {
     format!("Provider: {provider} ({name} restarts on it; pick a model with Ctrl+M)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A model chosen or configured is named as it is; none, by what the
+    /// session reported, marked as the CLI's default, or as the CLI's
+    /// choice before it did (#329): never as a model id it is not.
+    #[test]
+    fn the_model_label_says_whose_choice_it_is() {
+        let mut state = ChoiceState::default();
+        assert_eq!(state.model_label(false, true), "CLI default");
+        state.provider = Some(Pick::new("anthropic".into(), Origin::Harness));
+        assert_eq!(state.model_label(false, true), "anthropic (CLI default)");
+        state.reported_model = Some("claude-haiku-4-5-20251001".into());
+        assert_eq!(
+            state.model_label(false, true),
+            "anthropic/claude-haiku-4-5-20251001 (default)"
+        );
+        state.provider = None;
+        assert_eq!(
+            state.model_label(false, true),
+            "claude-haiku-4-5-20251001 (default)"
+        );
+        state.provider = Some(Pick::new("anthropic".into(), Origin::Harness));
+        for origin in [Origin::Configured, Origin::User] {
+            state.model = Some(Pick::new(
+                ModelRef::new(HarnessId::CLAUDE, "anthropic", "sonnet"),
+                origin,
+            ));
+            assert_eq!(state.model_label(false, true), "anthropic/sonnet");
+            assert_eq!(state.model_label(false, false), "sonnet");
+        }
+        // The CLI's own choice, chosen, is named as when none is.
+        state.model = Some(Pick::new(
+            ModelRef::new(HarnessId::CLAUDE, "anthropic", "default"),
+            Origin::User,
+        ));
+        assert_eq!(
+            state.model_label(true, true),
+            "anthropic/claude-haiku-4-5-20251001 (default)"
+        );
+        assert_eq!(
+            state.model_label(true, false),
+            "claude-haiku-4-5-20251001 (default)"
+        );
+        state.reported_model = None;
+        assert_eq!(state.model_label(true, true), "anthropic (CLI default)");
+        assert_eq!(state.model_label(true, false), "CLI default");
+    }
 }

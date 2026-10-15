@@ -12,6 +12,9 @@ impl Controller {
         match ev {
             AgentEvent::SessionStarted { session_id, model } => {
                 self.fill_context_window();
+                if let Some(model) = &model {
+                    self.model_reported(model);
+                }
                 // A session nobody has prompted is not saved, nor is the
                 // conversation for it: not a new one, not a fork made at its
                 // start, not one that replaced a session it could not resume.

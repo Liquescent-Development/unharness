@@ -414,41 +414,7 @@ impl Harness for CodexHarness {
             _ => query_models(binary, sandbox).unwrap_or_default(),
         };
         if !live.is_empty() {
-            return Ok(live
-                .iter()
-                .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
-                .map(|m| {
-                    let id = m
-                        .get("model")
-                        .or_else(|| m.get("id"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let efforts: Vec<String> = m
-                        .get("supportedReasoningEfforts")
-                        .and_then(Value::as_array)
-                        .map(|a| {
-                            a.iter()
-                                .filter_map(|e| e.get("reasoningEffort").and_then(Value::as_str))
-                                .map(str::to_string)
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    ModelInfo {
-                        model_ref: ModelRef::new(HarnessId::CODEX, "openai", id),
-                        display_name: m
-                            .get("displayName")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string(),
-                        description: m
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                        effort_levels: (!efforts.is_empty()).then_some(efforts),
-                    }
-                })
-                .collect());
+            return Ok(listed_models(&live));
         }
         Ok(FALLBACK_MODELS
             .iter()
@@ -457,6 +423,8 @@ impl Harness for CodexHarness {
                 display_name: name.to_string(),
                 description: Some(desc.to_string()),
                 effort_levels: None,
+                is_default: false,
+                cli_default: false,
             })
             .collect())
     }
@@ -694,6 +662,47 @@ fn auth_status(binary: &Path) -> AuthInfo {
     }
 }
 
+/// The models of a `model/list` answer's `data` that are not hidden; the
+/// one it marks `isDefault` is the default.
+fn listed_models(data: &[Value]) -> Vec<ModelInfo> {
+    data.iter()
+        .filter(|m| !m.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+        .map(|m| {
+            let id = m
+                .get("model")
+                .or_else(|| m.get("id"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let efforts: Vec<String> = m
+                .get("supportedReasoningEfforts")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.get("reasoningEffort").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            ModelInfo {
+                model_ref: ModelRef::new(HarnessId::CODEX, "openai", id),
+                display_name: m
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                description: m
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                effort_levels: (!efforts.is_empty()).then_some(efforts),
+                is_default: m.get("isDefault").and_then(Value::as_bool).unwrap_or(false),
+                cli_default: false,
+            }
+        })
+        .collect()
+}
+
 /// Ask a throwaway `codex app-server` for `model/list`.
 pub fn query_models(binary: &Path, sandbox: &Sandbox) -> Result<Vec<Value>> {
     let result = query(binary, sandbox, "model/list", json!({}))?;
@@ -754,6 +763,33 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// `model/list` marks the model Codex runs when none is chosen
+    /// (0.157.0, `fixtures/app_server_two_turns.jsonl`): the picker says so.
+    #[test]
+    fn the_listed_default_is_marked() {
+        let answer = include_str!("fixtures/app_server_two_turns.jsonl")
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| {
+                v.pointer("/result/data/0/model").is_some()
+                    && v.pointer("/result/data/0/supportedReasoningEfforts")
+                        .is_some()
+            })
+            .expect("the model/list answer");
+        let data = answer
+            .pointer("/result/data")
+            .and_then(Value::as_array)
+            .unwrap();
+        let defaults: Vec<_> = listed_models(data)
+            .into_iter()
+            .filter(|m| m.is_default)
+            .map(|m| m.model_ref.model)
+            .collect();
+        assert_eq!(defaults, ["gpt-6-astra"]);
+        let hidden = json!([{"model": "h", "hidden": true, "isDefault": true}]);
+        assert!(listed_models(hidden.as_array().unwrap()).is_empty());
     }
 
     /// A user-level role is loaded in every project: a change is reported.
