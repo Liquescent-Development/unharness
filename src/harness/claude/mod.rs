@@ -133,16 +133,24 @@ fn config_that_matters(config: &Value) -> Value {
 }
 
 impl ClaudeHarness {
-    /// Home and the directory the config is relocated to. Nothing when
-    /// relocation is off or the user already set `CLAUDE_CONFIG_DIR` (the
-    /// file is then inside that directory anyway).
-    fn relocation(&self) -> Option<(PathBuf, PathBuf)> {
+    /// Where the config is relocated to. Nothing when relocation is off or
+    /// the user already set `CLAUDE_CONFIG_DIR` (the file is then inside
+    /// that directory anyway); their environment is then passed on as it
+    /// is, so Claude keeps its login where a plain `claude` run with it
+    /// does, on macOS a Keychain entry of its own unless they also set
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
+    fn relocation(&self) -> Option<Relocation> {
         if !self.relocate_config || std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
             return None;
         }
         let home = dirs::home_dir()?;
         let dir = home.join(STATE_DIR);
-        Some((home, dir))
+        let storage_set = std::env::var_os(SECURE_STORAGE_VAR).is_some();
+        Some(Relocation {
+            home,
+            dir,
+            storage_set,
+        })
     }
 
     /// The directory for `--mcp-config` files: unharness's own state, which
@@ -159,29 +167,54 @@ impl ClaudeHarness {
 
     /// The relocated config for a probe, once `prepare` has seeded it: a
     /// probe seeds nothing, or `prepare`'s notice would never be shown.
-    fn probe_config_env(&self) -> Option<(String, String)> {
-        let (_, dir) = self.relocation()?;
-        dir.join(CONFIG_FILE).exists().then(|| {
-            (
-                "CLAUDE_CONFIG_DIR".to_string(),
-                dir.to_string_lossy().into_owned(),
-            )
-        })
+    fn probe_config_env(&self) -> Vec<(String, String)> {
+        match self.relocation() {
+            Some(to) if to.dir.join(CONFIG_FILE).exists() => {
+                relocation_env(&to.dir, to.storage_set)
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// The environment that relocates the config, seeding it if `prepare`
     /// has not.
-    fn config_env(&self) -> Result<Option<(String, String)>> {
-        let Some((home, dir)) = self.relocation() else {
-            return Ok(None);
+    fn config_env(&self) -> Result<Vec<(String, String)>> {
+        let Some(to) = self.relocation() else {
+            return Ok(Vec::new());
         };
-        seed_relocated_config(&home, &dir)?;
-        Ok(Some((
-            "CLAUDE_CONFIG_DIR".to_string(),
-            dir.to_string_lossy().into_owned(),
-        )))
+        seed_relocated_config(&to.home, &to.dir)?;
+        Ok(relocation_env(&to.dir, to.storage_set))
     }
 }
+
+/// Home, the directory the config is relocated to, and whether the user
+/// set `CLAUDE_SECURESTORAGE_CONFIG_DIR`.
+struct Relocation {
+    home: PathBuf,
+    dir: PathBuf,
+    storage_set: bool,
+}
+
+/// The variables that relocate the config to `dir`. Claude keeps its
+/// login where `CLAUDE_SECURESTORAGE_CONFIG_DIR` says, else by
+/// `CLAUDE_CONFIG_DIR`: on macOS a Keychain entry named after a hash of
+/// it, which a plain `claude` never signs in, so Claude fell back to a
+/// stale `.credentials.json` (2.1.300, #324). Empty is the default store,
+/// the one a plain `claude` uses; a value the user set (`storage_set`) is
+/// passed on as it is.
+fn relocation_env(dir: &Path, storage_set: bool) -> Vec<(String, String)> {
+    let mut env = vec![(
+        "CLAUDE_CONFIG_DIR".to_string(),
+        dir.to_string_lossy().into_owned(),
+    )];
+    if !storage_set {
+        env.push((SECURE_STORAGE_VAR.to_string(), String::new()));
+    }
+    env
+}
+
+/// Where Claude keeps its login, when it is not by `CLAUDE_CONFIG_DIR`.
+const SECURE_STORAGE_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::CLAUDE,
@@ -318,16 +351,17 @@ impl Harness for ClaudeHarness {
     }
 
     fn prepare(&self) -> Result<Option<String>> {
-        let Some((home, dir)) = self.relocation() else {
+        let Some(to) = self.relocation() else {
             return Ok(None);
         };
-        Ok(seed_relocated_config(&home, &dir)?.then(|| {
+        Ok(seed_relocated_config(&to.home, &to.dir)?.then(|| {
             format!(
                 "Claude Code now keeps its config in {dir}/{CONFIG_FILE} when run by unharness \
                  (copied from ~/{CONFIG_FILE}, which is unchanged), so that it can be updated \
-                 inside the sandbox. Export CLAUDE_CONFIG_DIR={dir} to make plain `claude` \
-                 share it, or set relocate_config = false under [harnesses.claude].",
-                dir = dir.display()
+                 inside the sandbox. Export CLAUDE_CONFIG_DIR={dir} and \
+                 {SECURE_STORAGE_VAR}= (empty, so that it keeps the same login) to make plain \
+                 `claude` share it, or set relocate_config = false under [harnesses.claude].",
+                dir = to.dir.display()
             )
         }))
     }
@@ -520,9 +554,7 @@ impl Harness for ClaudeHarness {
     fn build_print_command(&self, cfg: &PrintConfig) -> Result<Command> {
         let mut cmd = Command::new(&cfg.binary);
         cmd.current_dir(&cfg.cwd);
-        if let Some((key, value)) = self.config_env()? {
-            cmd.env(key, value);
-        }
+        cmd.envs(self.config_env()?);
         if let Some(provider) = &cfg.provider {
             apply_env(&mut cmd, &provider_env(provider)?);
         }
@@ -598,7 +630,7 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(15);
 /// write them, hence `sandbox`.
 fn initialize_answer(
     binary: &Path,
-    config: Option<(String, String)>,
+    config: Vec<(String, String)>,
     provider: &[(&str, Option<&str>)],
     sandbox: &Sandbox,
 ) -> Result<Value> {
@@ -611,7 +643,7 @@ fn initialize_answer(
 
 fn ask_initialize(
     binary: &Path,
-    config: Option<(String, String)>,
+    config: Vec<(String, String)>,
     provider: &[(&str, Option<&str>)],
     sandbox: &Sandbox,
     dir: &Path,
@@ -901,8 +933,19 @@ mod tests {
     }
 
     #[test]
+    fn the_relocated_claude_keeps_the_login_of_a_plain_one() {
+        let dir = ("CLAUDE_CONFIG_DIR".to_string(), "/h/.claude".to_string());
+        assert_eq!(
+            relocation_env(Path::new("/h/.claude"), false),
+            [dir.clone(), (SECURE_STORAGE_VAR.to_string(), String::new())]
+        );
+        // The user's own value is inherited, not replaced.
+        assert_eq!(relocation_env(Path::new("/h/.claude"), true), [dir]);
+    }
+
+    #[test]
     fn config_stays_put_unless_asked() {
-        assert_eq!(ClaudeHarness::default().config_env().unwrap(), None);
+        assert!(ClaudeHarness::default().config_env().unwrap().is_empty());
         let paths = ClaudeHarness::default().sandbox_paths().writable;
         assert!(!paths.iter().any(|p| p.ends_with(".claude.json")));
     }
