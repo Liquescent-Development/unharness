@@ -429,7 +429,9 @@ there).
 
 The model vibe runs when none is chosen (#329) is the current value of
 its model option in `session/new` (`mistral-medium-3.5` in the
-recordings, 2.26.1), shown as `agent/<model> (default)`, or
+recordings, 2.26.1), or in the `session/load` answer of a resumed
+session (`glm-5-3` in `fixtures/vibe_acp_load.jsonl`, announced by the
+ACP driver, e2e), shown as `agent/<model> (default)`, or
 `<provider>/<model> (default)` on a provider of
 `[harnesses.vibe.providers]`; neither vibe's list nor a provider's
 marks a default, so the picker marks none.

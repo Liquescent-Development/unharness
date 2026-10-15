@@ -113,7 +113,12 @@ The model an agent runs when none is chosen (#329) is the `currentValue`
 of its `model` option in `session/new`'s `configOptions`, shown as
 `agent/<value> (default)`: `opus` or `claude-fable-5-1[1m]` from
 claude-agent-acp 0.85.1, `gpt-6.1-sol` from codex-acp 2.1.1,
-`mistral-medium-3.5` from vibe-acp 2.26.1. A result without
+`mistral-medium-3.5` from vibe-acp 2.26.1. A reattached session names
+its own the same way: the spec's `session/load` and `session/resume`
+answers repeat no `sessionId`, so the driver announces the session
+(`SessionStarted`) with the answer's current model, which the parser
+alone does not show (`glm-5-3` in `fixtures/vibe_acp_load.jsonl`,
+`acp_reattached_session_names_its_model`, e2e). A result without
 `configOptions` names none: claude-agent-acp's `session/fork` result
 has none, so a fork says `agent (CLI default)`
 (`fixtures/claude_agent_acp_fork.jsonl`). No option's values mark a

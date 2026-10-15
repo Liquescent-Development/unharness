@@ -3713,6 +3713,37 @@ async fn replaced_session(fixture: &str, fork: bool) -> (Fake, String) {
     (fake, starts.join("\n"))
 }
 
+/// A session reattached by `session/load` names the model it runs: the
+/// load answer's `configOptions` (vibe-acp 2.26.1,
+/// `fixtures/vibe_acp_load.jsonl`), so that a resumed conversation shows
+/// its default model as a new session does (#329).
+#[tokio::test]
+async fn acp_reattached_session_names_its_model() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/acp/fixtures/vibe_acp_load.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("7d4ac1a9-0de3-c46a-1c64-c2469dd67154".into());
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    // Announced as the load is answered, before any prompt.
+    let started = loop {
+        if let AgentEvent::SessionStarted { session_id, model } = next_event(&mut handle).await {
+            break (session_id, model);
+        }
+    };
+    assert_eq!(
+        started,
+        (
+            "7d4ac1a9-0de3-c46a-1c64-c2469dd67154".to_string(),
+            Some("glm-5-3".to_string())
+        )
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// Sessions vibe-acp 2.26.1 did not have when asked for them.
 const MISSING_SESSION: &str = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f60";
 const MISSING_FORK_SOURCE: &str = "3c0c2f6e-5b1a-4d2e-9f7a-1b2c3d4e5f61";
