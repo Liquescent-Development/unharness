@@ -54,6 +54,7 @@ impl Controller {
             used: None,
             window: self.known_window(self.active),
         };
+        self.conversation.window_reported = false;
     }
 
     /// Keep the window the active harness's model reported, for the next

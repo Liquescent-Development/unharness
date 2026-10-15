@@ -17,6 +17,7 @@ fn leave_traces(app: &mut App) {
         used: Some(1),
         window: Some(10),
     };
+    c.window_reported = true;
     c.anchor_pending.push_back(0);
     // The screen's: a subagent's transcript in view, text selected, the
     // transcript scrolled, a picker open and a request waiting behind it.

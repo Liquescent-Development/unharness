@@ -291,3 +291,24 @@ fn a_session_renewed_for_another_model_starts_with_that_model_s_window() {
     app.with(|c, front| c.renew_now(front));
     assert_eq!(context(&app), ctx(None, None));
 }
+
+/// A window filled from the file is not saved: the file may know better
+/// when the conversation is resumed (learned in another one meanwhile).
+#[test]
+fn a_window_only_filled_is_not_saved_over_the_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    write_windows(&cwd, r#"{"codex": {"default": 258000}}"#);
+    let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
+    turn(&mut app, "claude-1", 50_000, Some(200_000));
+    switch(&mut app, HarnessId::CODEX);
+    assert_eq!(context(&app), ctx(None, Some(258_000)));
+    app.quit();
+    let saved = app.controller.conversation.record.context[&HarnessId::CODEX].clone();
+    assert_eq!(saved.window, None);
+
+    write_windows(&cwd, r#"{"codex": {"default": 400000}}"#);
+    let again = test_app_in(cwd, HarnessId::CLAUDE, Some(String::new()), false);
+    assert_eq!(again.controller.active, HarnessId::CODEX);
+    assert_eq!(context(&again), ctx(None, Some(400_000)));
+}

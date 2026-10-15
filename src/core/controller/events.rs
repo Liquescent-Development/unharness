@@ -131,6 +131,7 @@ impl Controller {
             AgentEvent::Context(c) => {
                 if let Some(window) = c.window {
                     self.learn_context_window(window);
+                    self.conversation.window_reported = true;
                 }
                 self.conversation.context.merge(c);
             }

@@ -65,6 +65,11 @@ pub struct ConversationState {
     pub session_usage: Usage,
     /// Context-window fill of the active harness's session.
     pub context: ContextUsage,
+    /// `context.window` is one a session reported, not one filled from
+    /// the context windows kept (`Controller::fill_context_window`): only
+    /// such a one is saved, so that a filled one does not stand later in
+    /// place of what the file knows by then.
+    pub window_reported: bool,
     /// How long the last turn took.
     pub generation_duration: Option<Duration>,
 }
@@ -88,6 +93,7 @@ impl ConversationState {
             turn_usage: Usage::default(),
             session_usage: record.usage.get(&active).cloned().unwrap_or_default(),
             context: ContextUsage::default(),
+            window_reported: false,
             generation_duration: None,
             record,
         }
@@ -134,6 +140,7 @@ impl Controller {
             },
             _ => ContextUsage::default(),
         };
+        c.window_reported = c.context.window.is_some();
         self.fill_context_window();
     }
 
@@ -176,7 +183,7 @@ impl Controller {
             active,
             ContextRecord {
                 used: c.context.used,
-                window: c.context.window,
+                window: c.context.window.filter(|_| c.window_reported),
                 model,
                 session: c.session_ids.get(&active).cloned(),
             },
