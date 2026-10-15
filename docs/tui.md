@@ -134,7 +134,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/provider`, `/model`, `/effort`, `/policy`, `/sandbox` | Open the matching picker |
 | `/resume` | Resume a saved conversation (every harness in it) |
 | `/sessions`, `/conversations` | List saved conversations in this workspace |
-| `/usage` | Token usage and cost, plus the account's rate-limit windows |
+| `/usage` | Billed tokens and cost for the last turn and the session, how full the context is, and the account's rate-limit windows ([Tokens and cost](#tokens-and-cost)) |
 | `/plan` | Show or hide the agent's plan checklist (plan mode is `/policy plan`) |
 | `/subagents` | Open a subagent's own transcript (and stop it from there) |
 | `/attach <path>` | Attach an image, PDF or text file to the next prompt |
@@ -346,6 +346,29 @@ attached the same way.
 > it. Where the terminal takes `Ctrl+V` for its own paste, use `/paste`.
 > In a herdr pane, unharness sees the display and ssh session the herdr
 > server was started from, not the one you are attached from now.
+
+## Tokens and cost
+
+The usage line starts with the last turn's tokens: `↑` what the model
+read (input, cache reads and cache writes), `↓` what it wrote. They stay
+until the next turn reports; where a harness reports each model request
+of a turn on its own (Codex's app-server, pi), the turn's requests are
+added up. `session 162.3M` is the billed tokens of the harness's
+session so far: uncached input, output, cache reads and cache writes,
+added up. Each harness in a conversation keeps its own, and a resume
+brings it back. It is not how full the context is (`ctx`, below): each
+request reads the cached prompt again, so on a long session most of it
+is cache reads, billed at a fraction of the input rate. The cost
+(`$41.27`) follows it where the harness reports one.
+
+`/usage` breaks the billed tokens down, for the last turn and the
+session, with the cost beside each:
+
+```
+Billed tokens, last turn: 47,271 (uncached input 18, output 249, cache reads 41,805, cache writes 5,199), $0.0158
+Billed tokens, session: 162,261,798 (uncached input 826, output 375,600, cache reads 157,702,965, cache writes 4,182,407), $41.2658
+Context: 47,022 of 200,000 tokens (23%)
+```
 
 ## Context and rate limits
 

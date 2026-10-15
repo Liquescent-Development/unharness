@@ -300,3 +300,54 @@ fn commands_that_arrive_while_a_slash_is_typed_are_listed() {
     app.update_suggestions();
     assert!(app.suggestions.iter().any(|(c, _)| c == "/hello"));
 }
+
+/// What `/usage` says last.
+fn usage_text(app: &mut TestApp) -> String {
+    use super::transcript::Block;
+    app.handle_slash_command("/usage");
+    match app.controller.conversation.transcript.blocks.last() {
+        Some(Block::System(s)) => s.clone(),
+        other => panic!("no /usage answer: {other:?}"),
+    }
+}
+
+/// `/usage` calls the status row's `session N` billed tokens and breaks
+/// it down, for the last turn and the session, with the cost (#314).
+#[test]
+fn usage_breaks_billed_tokens_down() {
+    use crate::core::{RateLimitInfo, RateLimitWindow};
+    let mut app = test_app(HarnessId::CLAUDE);
+    let turn = |input, output, cache_read, cache_write, cost| {
+        AgentEvent::Usage(Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            cost_usd: Some(cost),
+            ..Default::default()
+        })
+    };
+    app.on_event(turn(808, 375_351, 157_661_160, 4_177_208, 41.25));
+    app.on_event(turn(18, 249, 41_805, 5_199, 0.0158));
+    app.on_event(AgentEvent::Context(ContextUsage {
+        used: Some(47_022),
+        window: Some(200_000),
+    }));
+    app.on_event(AgentEvent::RateLimit(RateLimitInfo {
+        status: Some("allowed".into()),
+        windows: vec![RateLimitWindow {
+            label: "five_hour".into(),
+            used_percent: Some(12.0),
+            resets_at: None,
+        }],
+    }));
+    assert_eq!(
+        usage_text(&mut app),
+        "Billed tokens, last turn: 47,271 (uncached input 18, output 249, \
+         cache reads 41,805, cache writes 5,199), $0.0158\n\
+         Billed tokens, session: 162,261,798 (uncached input 826, output 375,600, \
+         cache reads 157,702,965, cache writes 4,182,407), $41.2658\n\
+         Context: 47,022 of 200,000 tokens (23%)\n\
+         Rate limits: five_hour 12% used"
+    );
+}
