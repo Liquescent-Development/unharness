@@ -189,11 +189,14 @@ impl CodexExecParser {
     }
 }
 
+/// `turn.completed`'s usage. Codex counts cached input in `input_tokens`;
+/// `Usage::input` leaves it out (#308).
 pub fn exec_usage(usage: &Value) -> Usage {
+    let cache_read = u(usage, "cached_input_tokens");
     Usage {
-        input: u(usage, "input_tokens"),
+        input: u(usage, "input_tokens").saturating_sub(cache_read),
         output: u(usage, "output_tokens"),
-        cache_read: u(usage, "cached_input_tokens"),
+        cache_read,
         cache_write: u(usage, "cache_write_input_tokens"),
         cost_usd: None,
         cumulative: false,
@@ -242,6 +245,28 @@ mod tests {
             &fixtures_dir(file!()),
             "exec_resume_command",
         );
+    }
+
+    /// `input_tokens` counts the cached input too; `Usage::input` does
+    /// not (#308, exec_basic.jsonl).
+    #[test]
+    fn cached_input_is_not_counted_twice() {
+        let ev = CodexExecParser::new().feed(
+            r#"{"type":"turn.completed","usage":{"input_tokens":16229,"cached_input_tokens":12160,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#,
+        );
+        let usage = ev.iter().find_map(|e| match e {
+            AgentEvent::Usage(u) => Some(u.clone()),
+            _ => None,
+        });
+        let usage = usage.expect("a usage report");
+        assert_eq!(
+            (usage.input, usage.cache_read, usage.output),
+            (4069, 12160, 5)
+        );
+        assert_eq!(usage.total_tokens(), 16234);
+        // A cache count above the input does not wrap.
+        let odd = exec_usage(&serde_json::json!({"input_tokens": 3, "cached_input_tokens": 5}));
+        assert_eq!((odd.input, odd.cache_read), (0, 5));
     }
 
     #[test]

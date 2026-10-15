@@ -18,7 +18,8 @@ TextDelta ".\\n"
 ToolCallStarted id=call_URyJHIfE1qLHUv0iwNSS9Xii name=agent input={"path":"/root/read_word"}
 SubagentStarted id=call_URyJHIfE1qLHUv0iwNSS9Xii kind=- "read_word"
 ToolCallResult id=call_URyJHIfE1qLHUv0iwNSS9Xii error=false ""
-Usage in=16167 out=84 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=4007 out=84 cache_read=12160 cache_write=0 cost=- cumulative=false
+Usage in=4007 out=84 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16251 window=258400
 RateLimit status=- 7d=2%
 ToolCallStarted id=call_TaH7ivh31FQjsjvq5pUXTuzA name=agent:wait input=null
@@ -30,11 +31,13 @@ Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii TextDelta "alpha"
 RateLimit status=- 7d=2%
 SubagentEnded id=call_URyJHIfE1qLHUv0iwNSS9Xii completed "alpha"
 ToolCallResult id=call_TaH7ivh31FQjsjvq5pUXTuzA error=false ""
-Usage in=16272 out=21 cache_read=16000 cache_write=0 cost=- cumulative=false
+Usage in=272 out=21 cache_read=16000 cache_write=0 cost=- cumulative=false
+Usage in=4279 out=105 cache_read=28160 cache_write=0 cost=- cumulative=true
 Context used=16293 window=258400
 RateLimit status=- 7d=2%
 TextDelta "alpha"
-Usage in=16353 out=5 cache_read=16128 cache_write=0 cost=- cumulative=false
+Usage in=225 out=5 cache_read=16128 cache_write=0 cost=- cumulative=false
+Usage in=4504 out=110 cache_read=44288 cache_write=0 cost=- cumulative=true
 Context used=16358 window=258400
 RateLimit status=- 7d=2%
 TurnCompleted Done
