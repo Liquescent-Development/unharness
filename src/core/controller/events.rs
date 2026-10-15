@@ -2,7 +2,7 @@
 //! conversation, the session and the turn.
 
 use super::{Controller, Front};
-use crate::core::{AgentEvent, RateLimitInfo, StopReason};
+use crate::core::{AgentEvent, RateLimitInfo, StopReason, Usage, UsageScope};
 
 impl Controller {
     /// The active harness's session reported `ev`. What it changes on
@@ -48,14 +48,7 @@ impl Controller {
                 .tool_result(&id, &output, is_error),
             AgentEvent::PermissionRequest(req) => self.on_permission_request(req, front),
             AgentEvent::PermissionWithdrawn { id } => self.withdraw_prompt(&id, front),
-            AgentEvent::Usage(u) => {
-                if u.cumulative {
-                    self.conversation.session_usage = u;
-                } else {
-                    self.conversation.session_usage.add(&u);
-                    self.conversation.turn_usage = u;
-                }
-            }
+            AgentEvent::Usage(u) => self.usage_reported(u),
             AgentEvent::PlanUpdated { entries, .. } => self.conversation.plan = entries,
             // What a subagent does goes into its own transcript, not this
             // one: several at work would otherwise drown the main agent.
@@ -265,6 +258,29 @@ impl Controller {
                     ));
                 }
                 self.finish_handoff(false, front);
+            }
+        }
+    }
+
+    /// The main agent reported `u`. The session's totals take each report
+    /// once. The turn's numbers stay what the last turn reported until
+    /// this one reports: a whole turn's numbers replace them, the first of
+    /// a turn's requests starts them again and each one after adds to
+    /// them. A report with no tokens (Claude's `/compact` gives only its
+    /// cost) replaces nothing.
+    fn usage_reported(&mut self, u: Usage) {
+        let c = &mut self.conversation;
+        if u.cumulative {
+            c.session_usage = u;
+            return;
+        }
+        c.session_usage.add(&u);
+        match u.scope {
+            UsageScope::Request if c.turn_reported => c.turn_usage.add(&u),
+            _ if u.total_tokens() == 0 => {}
+            _ => {
+                c.turn_usage = u;
+                c.turn_reported = true;
             }
         }
     }

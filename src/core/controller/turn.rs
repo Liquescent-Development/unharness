@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use super::{Action, Controller, Front, QueuedPrompt};
 use crate::core::transcript::Block;
-use crate::core::{Attachment, SessionCommand, Usage, shell};
+use crate::core::{Attachment, SessionCommand, shell};
 
 /// How long a turn has to end after an interrupt before another one ends
 /// the CLI's process instead. Every harness stopped well within it in the
@@ -18,7 +18,8 @@ impl Controller {
         self.conversation.transcript.begin_turn();
         self.generation_start = Some(Instant::now());
         self.conversation.generation_duration = None;
-        self.conversation.turn_usage = Usage::default();
+        // The last turn's numbers stay until this one reports its own.
+        self.conversation.turn_reported = false;
         front.follow();
     }
 
