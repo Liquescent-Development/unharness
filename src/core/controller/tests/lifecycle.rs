@@ -35,6 +35,7 @@ mod plan;
 mod policy;
 mod remote;
 mod rewind;
+mod send_now;
 mod session;
 mod subagents;
 mod switch;

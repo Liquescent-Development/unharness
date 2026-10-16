@@ -2,9 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Action, Controller, Front, QueuedPrompt};
+use super::{Action, Controller, Front, QueuedPrompt, SendingNow};
 use crate::core::transcript::Block;
-use crate::core::{Attachment, SessionCommand, shell};
+use crate::core::{Attachment, SendNow, SessionCommand, shell};
 
 /// How long a turn has to end after an interrupt before another one ends
 /// the CLI's process instead. Every harness stopped well within it in the
@@ -56,10 +56,23 @@ impl Controller {
             });
             return;
         }
-        if self.conversation.first_prompt.is_none() {
-            self.conversation.first_prompt = Some(text.clone());
-        }
+        let outgoing = self.outgoing(&text);
+        let mut shown = text.clone();
+        let attachments = self.take_attachments(&mut shown, front);
+        self.begin_prompted_turn(&text, shown, front);
 
+        self.ensure_session();
+        self.mark_prompted();
+        self.actions.push_back(Action::SendTurn {
+            text: outgoing,
+            attachments,
+        });
+    }
+
+    /// What goes to the harness for the prompt `text`: in front of it, what
+    /// the live session has not seen of the conversation, and the `!`
+    /// commands no agent was told of yet, which count as told from here.
+    pub(super) fn outgoing(&mut self, text: &str) -> String {
         // A command the harness runs has to start the message, so it goes
         // alone: what would have gone in front of it waits for the next
         // prompt.
@@ -125,16 +138,6 @@ impl Controller {
             }
         }
 
-        let mut shown = text.clone();
-        let attachments = self.take_attachments(&mut shown, front);
-        self.conversation.transcript.push_user(shown);
-        let block = self.conversation.transcript.blocks.len() - 1;
-        if self.caps().rewind.conversation {
-            self.conversation.anchor_pending.push_back(block);
-        }
-        self.checkpoint_files(block);
-        self.start_generation(front);
-
         let context: Vec<String> = bridge
             .map(|ctx| {
                 format!(
@@ -144,22 +147,37 @@ impl Controller {
             .into_iter()
             .chain(shell::context(&shells))
             .collect();
-        let outgoing = if context.is_empty() {
-            text
+        if context.is_empty() {
+            text.to_string()
         } else {
             format!(
                 "{}\n\n[Current task for {}]:\n{text}",
                 context.join("\n\n"),
                 self.short_name()
             )
-        };
+        }
+    }
 
-        self.ensure_session();
-        self.mark_prompted();
-        self.actions.push_back(Action::SendTurn {
-            text: outgoing,
-            attachments,
-        });
+    /// The turn of the prompt `text` begins, shown as `shown`: it is the
+    /// conversation's first prompt if none was, the transcript shows it,
+    /// its anchor is owed, and the files are checkpointed before it runs.
+    pub(super) fn begin_prompted_turn(&mut self, text: &str, shown: String, front: &mut dyn Front) {
+        self.prompt_shown(text, shown);
+        self.start_generation(front);
+    }
+
+    /// The prompt `text`, shown as `shown`, is in the transcript as the
+    /// user's, with its anchor owed and the files checkpointed.
+    fn prompt_shown(&mut self, text: &str, shown: String) {
+        if self.conversation.first_prompt.is_none() {
+            self.conversation.first_prompt = Some(text.to_string());
+        }
+        self.conversation.transcript.push_user(shown);
+        let block = self.conversation.transcript.blocks.len() - 1;
+        if self.caps().rewind.conversation {
+            self.conversation.anchor_pending.push_back(block);
+        }
+        self.checkpoint_files(block);
     }
 
     /// Hold a prompt until the running turn finishes.
@@ -249,6 +267,195 @@ impl Controller {
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
     }
 
+    /// Send `text`, with the pending attachments, at once in place of the
+    /// running turn (`/now`, Ctrl+Enter): the turn is interrupted and the
+    /// prompt is its successor, where every interrupt works, or the CLI
+    /// takes it with the interrupt (`SendNow::Native`). With `text` empty,
+    /// the oldest queued prompt; the others keep their places, and go as
+    /// usual after the new turn ends. Idle, it is what Enter does.
+    ///
+    /// What cannot go now (a handoff summary's turn, a compaction, a
+    /// choice the session was sent, no policy, a harness that cannot be
+    /// interrupted) is queued for when the turn ends, and said to be.
+    /// Asked again while one waits, the turn is pressed to end as a second
+    /// interrupt presses it ([`Controller::interrupt`]), and what was typed
+    /// queues behind the prompt.
+    pub fn send_now(&mut self, text: String, front: &mut dyn Front) {
+        let text = text.trim().to_string();
+        if !self.is_generating {
+            if !text.is_empty() {
+                self.queue_prompt(text, front);
+            } else if !self.send_next_queued(front) && !self.queued.is_empty() {
+                self.require_policy(front);
+            }
+            return;
+        }
+        if self.sending_now.is_some() {
+            if !text.is_empty() {
+                self.queued.push_front(QueuedPrompt {
+                    text,
+                    attachments: std::mem::take(front.attachments()),
+                    harness: self.active,
+                });
+                self.conversation
+                    .transcript
+                    .push_notice("queued behind the prompt being sent now");
+            }
+            self.press_interrupt(front);
+            return;
+        }
+        let (prompt, from_queue) = if text.is_empty() {
+            match self.queued.pop_front() {
+                Some(q) => (q, true),
+                None => {
+                    self.conversation
+                        .transcript
+                        .push_notice("nothing to send now: type a prompt, or queue one first");
+                    return;
+                }
+            }
+        } else {
+            let q = QueuedPrompt {
+                text,
+                attachments: std::mem::take(front.attachments()),
+                harness: self.active,
+            };
+            (q, false)
+        };
+        if let Some(why) = self.cannot_send_now() {
+            self.conversation.transcript.push_notice(format!(
+                "{why}: '{}' is queued for when the turn ends",
+                first_line(&prompt.text)
+            ));
+            if from_queue {
+                self.queued.push_front(prompt);
+            } else {
+                self.queued.push_back(prompt);
+            }
+            return;
+        }
+        // A command typed for another harness waits for the turn's end,
+        // where it goes back to the prompt box (`send_queued`).
+        let typed_elsewhere = prompt.text.starts_with('/') && prompt.harness != self.active;
+        let with_cli = (self.caps().send_now == SendNow::Native
+            && !typed_elsewhere
+            && !self.start_held)
+            .then(|| {
+                let outgoing = self.outgoing(&prompt.text);
+                let mut shown = prompt.text.clone();
+                let attachments = self.accepted(&mut shown, prompt.attachments.clone());
+                self.mark_prompted();
+                self.actions
+                    .push_back(Action::Command(SessionCommand::SendNow {
+                        text: outgoing,
+                        attachments,
+                    }));
+                shown
+            });
+        match &with_cli {
+            Some(_) => self.conversation.transcript.push_system("Sending now…"),
+            None if self.interrupted.is_none() => {
+                self.actions
+                    .push_back(Action::Command(SessionCommand::Interrupt));
+                self.conversation.transcript.push_system("Interrupting…");
+            }
+            // Asked to stop already: the prompt follows when it has.
+            None => {}
+        }
+        if self.interrupted.is_none() {
+            self.interrupted = Some((Instant::now(), false));
+        }
+        self.sending_now = Some(SendingNow {
+            prompt,
+            from_queue,
+            with_cli,
+        });
+    }
+
+    /// Why a prompt cannot be sent at once now, if it cannot.
+    fn cannot_send_now(&self) -> Option<String> {
+        let name = self.short_name();
+        if self.handoff.is_some() {
+            Some("a handoff summary is being written".into())
+        } else if self.compacting {
+            Some(format!("{name} is compacting its context"))
+        } else if self.shell.is_some() {
+            Some("a ! command is running".into())
+        } else if self.choice_pending() {
+            Some(format!(
+                "{name} has not said yet how it took the last choice"
+            ))
+        } else if self.effective_policy(self.active).is_none() {
+            Some("no permission policy is chosen".into())
+        } else if !self.caps().interrupt || !self.session_alive {
+            Some(format!("{name} cannot be interrupted now"))
+        } else {
+            None
+        }
+    }
+
+    /// The turn a prompt sent at once was to stop has ended (`p`): the
+    /// prompt's own turn begins. The CLI that has it started it by itself;
+    /// one whose interrupt ends its process is started again once it has
+    /// exited; otherwise it is sent now, ahead of the queue.
+    pub(super) fn sent_now_turn(&mut self, p: SendingNow, front: &mut dyn Front) {
+        match p.with_cli {
+            Some(shown) => self.begin_prompted_turn(&p.prompt.text, shown, front),
+            None if self.caps().send_now == SendNow::AfterExit && self.session_alive => {
+                self.sending_now = Some(SendingNow {
+                    with_cli: None,
+                    ..p
+                });
+            }
+            None => self.send_ahead(p.prompt, front),
+        }
+    }
+
+    /// Send `prompt` ahead of the queue, or hold it at the queue's head
+    /// when it cannot go now.
+    pub(super) fn send_ahead(&mut self, prompt: QueuedPrompt, front: &mut dyn Front) {
+        self.queued.push_front(prompt);
+        if !self.send_queued(0, front) {
+            self.say_held();
+        }
+    }
+
+    /// Say that the queued prompts wait for the user.
+    pub(super) fn say_held(&mut self) {
+        if !self.queued.is_empty() {
+            self.conversation.transcript.push_notice(format!(
+                "{} queued prompt(s) held; press Enter to send the next",
+                self.queued.len()
+            ));
+        }
+    }
+
+    /// The CLI took the prompt sent at once into the running turn (Claude
+    /// moved what the turn waited on to the background): it is shown
+    /// there, as a steer is, and the turn goes on, to be interrupted anew.
+    pub(super) fn sent_now_taken_in(&mut self, p: SendingNow) {
+        if let Some(shown) = p.with_cli {
+            self.prompt_shown(&p.prompt.text, shown);
+        }
+        self.interrupted = None;
+    }
+
+    /// The prompt sent at once was not, and goes back where it came from.
+    pub(super) fn give_back(&mut self, p: SendingNow, front: &mut dyn Front) {
+        let first = first_line(&p.prompt.text).to_string();
+        if p.from_queue {
+            self.queued.push_front(p.prompt);
+            self.conversation.transcript.push_notice(format!(
+                "'{first}' was not sent; it is back at the head of the queue"
+            ));
+        } else {
+            front.put_back(p.prompt.text, p.prompt.attachments);
+            self.conversation.transcript.push_notice(format!(
+                "'{first}' was not sent; it is back in the prompt box"
+            ));
+        }
+    }
+
     /// Ask the harness to summarise its context now.
     pub fn compact(&mut self, instructions: Option<String>, front: &mut dyn Front) {
         if self.is_generating {
@@ -277,10 +484,27 @@ impl Controller {
 
     /// Ask the running turn to stop. Asked again once `STOP_GRACE` has
     /// passed without the turn ending, end the CLI's process instead.
+    /// Asked while a prompt waits to be sent at once, that prompt is not
+    /// sent: it goes back where it came from, and the turn still ends.
     pub fn interrupt(&mut self, front: &mut dyn Front) {
         if !self.is_generating {
             return;
         }
+        if let Some(p) = self.sending_now.take() {
+            // The CLI that has it is asked to drop it with the turn.
+            if p.with_cli.is_some() {
+                self.actions
+                    .push_back(Action::Command(SessionCommand::Interrupt));
+            }
+            self.give_back(p, front);
+            return;
+        }
+        self.press_interrupt(front);
+    }
+
+    /// Ask the running turn to stop, or press it: see
+    /// [`Controller::interrupt`].
+    fn press_interrupt(&mut self, front: &mut dyn Front) {
         match self.interrupted {
             None => {
                 self.actions
@@ -316,6 +540,8 @@ impl Controller {
     /// session it was for starts, told the conversation (#226).
     fn end_stuck_turn(&mut self, front: &mut dyn Front) {
         let name = self.short_name();
+        // Sent as the next session's first prompt, below.
+        let sending = self.sending_now.take();
         self.conversation.transcript.push_notice(match self.handoff {
             None => format!(
                 "{name} did not stop, so its process was ended; the next prompt resumes the session"
@@ -338,11 +564,9 @@ impl Controller {
             .push_system("Turn interrupted.");
         self.finish_handoff(false, front);
         self.persist();
-        if !self.queued.is_empty() {
-            self.conversation.transcript.push_notice(format!(
-                "{} queued prompt(s) held; press Enter to send the next",
-                self.queued.len()
-            ));
+        match sending {
+            Some(p) => self.send_ahead(p.prompt, front),
+            None => self.say_held(),
         }
     }
 
@@ -368,10 +592,16 @@ impl Controller {
         shown: &mut String,
         front: &mut dyn Front,
     ) -> Vec<Attachment> {
+        let attachments = std::mem::take(front.attachments());
+        self.accepted(shown, attachments)
+    }
+
+    /// Of `attachments`, the ones the active harness accepts, as
+    /// [`Controller::take_attachments`] takes them.
+    fn accepted(&mut self, shown: &mut String, attachments: Vec<Attachment>) -> Vec<Attachment> {
         let caps = self.caps();
-        let (sent, dropped): (Vec<_>, Vec<_>) = std::mem::take(front.attachments())
-            .into_iter()
-            .partition(|a| caps.accepts(a));
+        let (sent, dropped): (Vec<_>, Vec<_>) =
+            attachments.into_iter().partition(|a| caps.accepts(a));
         for a in &dropped {
             let why = self.refusal(a);
             self.conversation
@@ -383,4 +613,9 @@ impl Controller {
         }
         sent
     }
+}
+
+/// The first line of `text`, for saying which prompt is meant.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
 }

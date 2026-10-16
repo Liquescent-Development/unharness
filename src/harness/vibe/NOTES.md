@@ -158,6 +158,13 @@ sleep 300 &` run by vibe's shell under `bypass` adopted by the reaper
 and gone after `/quit`. Unverified: the keyring and other providers,
 plugins (none installed; whether vibe updates them itself), macOS.
 
+## Sending a prompt now
+
+`/now` on vibe is ACP's: `session/cancel`, and the prompt as the next
+`session/prompt` once the cancelled one answered (`acp/NOTES.md`,
+Interrupts). vibe's own Ctrl+Enter steers its queue into the running
+turn (`turn/steer`), which ACP does not reach.
+
 ## Doctor
 
 Doctor (#172, 2.26.1): `vibe-acp --version` sets up the home it is

@@ -2,7 +2,7 @@
 //! conversation, the session and the turn.
 
 use super::{Controller, Front};
-use crate::core::{AgentEvent, RateLimitInfo, StopReason, Usage, UsageScope};
+use crate::core::{AgentEvent, RateLimitInfo, SendNow, StopReason, Usage, UsageScope};
 
 impl Controller {
     /// The active harness's session reported `ev`. What it changes on
@@ -156,7 +156,18 @@ impl Controller {
                     self.persist();
                 }
             }
-            AgentEvent::TurnAnchor { id } => self.turn_anchor(self.active, id),
+            AgentEvent::TurnAnchor { id } => {
+                // The anchor of a prompt sent at once that the CLI has, told
+                // before the turn it was to stop has ended (no other turn's
+                // anchor is owed): the CLI took it into that turn.
+                if self.is_generating
+                    && self.conversation.anchor_pending.is_empty()
+                    && let Some(p) = self.sending_now.take_if(|p| p.with_cli.is_some())
+                {
+                    self.sent_now_taken_in(p);
+                }
+                self.turn_anchor(self.active, id)
+            }
             AgentEvent::PolicyChanged(p) => self.on_policy_changed(p),
             AgentEvent::CapabilitiesChanged(update) => {
                 let report = self.report(self.active, update, self.session_alive);
@@ -182,6 +193,7 @@ impl Controller {
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 let done = stop_reason == StopReason::Done;
+                let sending = self.sending_now.take();
                 // A hook or a call of a turn cut short is not reported on.
                 if !done {
                     self.conversation.transcript.end_turn_hooks();
@@ -193,6 +205,13 @@ impl Controller {
                         .conversation
                         .transcript
                         .push_system("Turn interrupted."),
+                    // Claude ends a turn it was told to stop as an error
+                    // (`error_during_execution`): with a prompt sent at
+                    // once, that is the interrupt asked for.
+                    StopReason::Error(_) if sending.is_some() => self
+                        .conversation
+                        .transcript
+                        .push_system("Turn interrupted."),
                     StopReason::Error(e) => self.conversation.transcript.push_error(e),
                 }
                 self.check_guard();
@@ -200,16 +219,16 @@ impl Controller {
                 let held = self.handoff.is_some_and(|h| h.held);
                 self.finish_handoff(done, front);
                 self.persist();
-                // A clean finish moves on to the next queued prompt; after an
-                // interrupt or error the user decides (Enter sends it), also
-                // when a handoff summary came in between.
-                if done && !held {
+                // A prompt sent at once is the next turn. A clean finish
+                // moves on to the next queued prompt; after an interrupt or
+                // error the user decides (Enter sends it), also when a
+                // handoff summary came in between.
+                if let Some(p) = sending {
+                    self.sent_now_turn(p, front);
+                } else if done && !held {
                     self.send_next_queued(front);
-                } else if !self.queued.is_empty() {
-                    self.conversation.transcript.push_notice(format!(
-                        "{} queued prompt(s) held; press Enter to send the next",
-                        self.queued.len()
-                    ));
+                } else {
+                    self.say_held();
                 }
             }
             AgentEvent::HookStarted { id, name } => {
@@ -229,6 +248,7 @@ impl Controller {
             AgentEvent::Notice(n) => self.conversation.transcript.push_notice(n),
             AgentEvent::Error(e) => self.conversation.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {
+                let sending = self.sending_now.take();
                 self.session_alive = false;
                 // A choice it was sent will not be answered.
                 self.choice_unanswered();
@@ -256,13 +276,31 @@ impl Controller {
                 self.conversation.transcript.end_running_tools();
                 if self.is_generating {
                     self.finish_generation();
-                    self.conversation.transcript.push_error(format!(
-                        "{} exited{} before the turn completed",
-                        self.short_name(),
-                        code.map(|c| format!(" with code {c}")).unwrap_or_default()
-                    ));
+                    if sending.is_some() {
+                        self.conversation
+                            .transcript
+                            .push_system("Turn interrupted.");
+                    } else {
+                        self.conversation.transcript.push_error(format!(
+                            "{} exited{} before the turn completed",
+                            self.short_name(),
+                            code.map(|c| format!(" with code {c}")).unwrap_or_default()
+                        ));
+                    }
                 }
                 self.finish_handoff(false, front);
+                match sending {
+                    // Its interrupt ended the process (agy): the prompt
+                    // starts it again, resuming the session.
+                    Some(p)
+                        if p.with_cli.is_none() && self.caps().send_now == SendNow::AfterExit =>
+                    {
+                        self.send_ahead(p.prompt, front)
+                    }
+                    // It went with the process.
+                    Some(p) => self.give_back(p, front),
+                    None => {}
+                }
             }
         }
     }

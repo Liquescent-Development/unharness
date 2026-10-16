@@ -13,8 +13,8 @@
 //!
 //! The lifecycle of that session is here too: started early or with a
 //! prompt, committed to the conversation, replaced, renewed and ended
-//! (`session.rs`); turns, the prompts queued behind one, steering and
-//! interrupting (`turn.rs`); a switch to another harness and its handoff
+//! (`session.rs`); turns, the prompts queued behind one, steering,
+//! sending a prompt at once and interrupting (`turn.rs`); a switch to another harness and its handoff
 //! summary (`switch.rs`); the permission requests it makes
 //! (`requests.rs`); its subagents (`subagents.rs`); Remote Control
 //! (`remote.rs`); rewind and fork (`rewind.rs`); the sandbox it runs in
@@ -217,6 +217,21 @@ pub struct QueuedPrompt {
     pub harness: HarnessId,
 }
 
+/// A prompt sent at once in place of the running turn
+/// (`Controller::send_now`), until its own turn begins.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SendingNow {
+    /// As it was typed or queued, which is what goes back if it is not
+    /// sent.
+    pub(crate) prompt: QueuedPrompt,
+    /// It was the head of the queue (sent from an empty prompt box), and
+    /// goes back there; otherwise it goes back to the prompt box.
+    pub(crate) from_queue: bool,
+    /// The CLI has it already (`SendNow::Native`) and starts on it by
+    /// itself: what the transcript shows of it, once it does.
+    pub(crate) with_cli: Option<String>,
+}
+
 /// The active harness's session on the vendor's remote control.
 #[derive(Debug, Clone, Default)]
 struct RemoteSession {
@@ -320,6 +335,8 @@ pub struct Controller {
     pub tracking: Tracking,
     /// Prompts entered during a turn; one is sent each time a turn completes.
     pub queued: VecDeque<QueuedPrompt>,
+    /// The prompt sent at once, waiting for the running turn to end.
+    pub(crate) sending_now: Option<SendingNow>,
     /// The `!` command running now.
     pub shell: Option<ShellRun>,
     compacting: bool,
@@ -432,6 +449,7 @@ impl Controller {
             rate_limit: None,
             tracking: Tracking::new(launch.rules),
             queued: VecDeque::new(),
+            sending_now: None,
             shell: None,
             compacting: false,
             mcp_warned: HashSet::new(),

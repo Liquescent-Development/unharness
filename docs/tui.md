@@ -31,6 +31,7 @@ attached to the next prompt.
 |---|---|
 | `Enter` | Send the prompt. During a turn, queue it for when the turn finishes |
 | `Alt+Enter` | Steer: send the prompt into the running turn (queued where the harness cannot steer) |
+| `Ctrl+Enter`, `/now` | Send now: interrupt the running turn and send the prompt as the next one ([below](#sending-a-prompt-now)). From an empty prompt box, the oldest queued prompt. Idle, the same as `Enter`. `Ctrl+Enter` needs the kitty keyboard protocol ([below](#terminal-notes)); `/now` works everywhere |
 | `Ctrl+J`, `Shift+Enter` | New line. `Ctrl+J` works everywhere; `Shift+Enter` needs the kitty keyboard protocol ([below](#terminal-notes)) |
 | `Up` / `Down` | Move between the prompt's lines. On the first / last line, step through prompts sent from this workspace |
 | `Home` / `End`, `Ctrl+A` | Start / end of the line (`Ctrl+A` is start only) |
@@ -41,7 +42,7 @@ attached to the next prompt.
 | `/command` | One of unharness's [slash commands](#slash-commands), else the agent's own ([Agent commands](#agent-commands)). `\/` at the start sends it to the agent as typed |
 | `Ctrl+V`, `/paste` | Attach the image on the clipboard |
 | `Alt+Up` | Pull the last queued prompt back into the prompt box |
-| `Esc` | Close the autocomplete list, else interrupt the running turn, else stop the running `!` command, else clear the prompt. Never quits |
+| `Esc` | Close the autocomplete list, else take back a prompt being sent now (it goes back where it came from), else interrupt the running turn, else stop the running `!` command, else clear the prompt. Never quits |
 | `Ctrl+D`, `/quit` | Quit. `Ctrl+C` also quits when idle (and stops a `!` command first). The agent's CLI is given a few seconds to exit; while the status line says so, `Ctrl+C`, `Ctrl+D`, SIGTERM, SIGHUP or SIGQUIT stop waiting and kill it |
 
 ### Pickers
@@ -147,6 +148,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/attach <path>` | Attach an image, PDF or text file to the next prompt |
 | `/paste`, `/detach` | Attach the clipboard image; drop pending attachments |
 | `/steer <text>` | Send a message into the running turn |
+| `/now [text]` | Interrupt the running turn and send this as the next one; with no text, the oldest queued prompt ([below](#sending-a-prompt-now)) |
 | `/compact [instructions]` | Summarise the context now |
 | `/rewind` | Go back to before an earlier prompt and edit it ([below](#rewind-and-checkpoints)) |
 | `/undo-restore` | Reverse the last file restore made by `/rewind` |
@@ -224,6 +226,31 @@ A switch to another harness, a fork, `/resume`, `/clear` and quitting take
 it off. Elsewhere `/rc` is the agent's own command, if it has one.
 It is not offered in `--print` or `--no-tui` (where Claude's own `/rc`
 works).
+
+## Sending a prompt now
+
+`Ctrl+Enter` or `/now <text>` during a turn stops the turn and sends the
+prompt as the next one, with its attachments, in one step instead of `Esc`,
+a wait and `Enter`. From an empty prompt box (or a bare `/now`) it sends the
+oldest queued prompt. The other queued prompts keep their order and go as
+usual once the new turn ends. With no turn running it is the same as
+`Enter`.
+
+How the prompt gets there depends on the harness. Claude Code is sent the
+prompt together with the interrupt and starts on it by itself; it may
+instead move a running command to the background and take the prompt into
+the same turn, which then goes on, with the prompt shown in it. Codex, pi and ACP agents are
+interrupted, and the prompt goes once the agent has said the turn ended.
+Codex `exec` and Antigravity, whose interrupt ends the process, resume the
+session with it.
+
+`Esc` while the prompt waits for the turn to end takes it back: it goes back
+to the prompt box, or to the head of the queue, and the turn still ends.
+Pressed again, `Ctrl+Enter` presses the turn as a second `Esc` does, and
+after a few seconds ends the agent's process; the prompt then resumes the
+session. During a handoff summary, a compaction, a `!` command, or while a
+choice or a permission policy is still pending, the prompt is queued
+instead, with a notice.
 
 ## File references
 
@@ -563,7 +590,8 @@ a CLI's own integration reports for the pane.
 
 Most terminals send the same byte for `Enter`, `Shift+Enter` and `Ctrl+M`.
 In those, `Shift+Enter` sends the prompt and `Ctrl+M` cannot open the
-model picker (use `/model`). Terminals that implement the kitty keyboard
+model picker (use `/model`). `Ctrl+Enter` there is `Enter` (or, in some,
+`Ctrl+J`, a new line): use `/now`. Terminals that implement the kitty keyboard
 protocol (kitty, foot, Ghostty, WezTerm, Alacritty and recent iTerm2,
 among others) are asked to tell the keys apart, and in those both keys
 work as listed.
