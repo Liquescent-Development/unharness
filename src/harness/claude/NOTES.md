@@ -337,10 +337,18 @@ one hashed from a `CLAUDE_CONFIG_DIR` the user set) lives in the user's
 default keychain, so a refresh writes the same files either way, and a
 refresh not saved there splits the stores the same way. It is granted
 for `login.keychain-db`, the default keychain unless the user changed it.
-unharness does not run `security default-keychain` at spawn time to find
-out; a user whose default keychain is another file needs
-`sandbox_writable = ["~/Library/Keychains"]` (the whole directory, since
-the file alone is not enough), which `docs/sandbox.md` says.
+unharness does not run `security` at spawn time to find out. A user
+whose default keychain is another file needs the directory that holds it
+in `sandbox_writable` (the file alone is not enough), which opens all of
+it, `metadata.keychain-db` and the `<UUID>/` directory included when it
+is `~/Library/Keychains`; `docs/sandbox.md` says so. `doctor` on macOS
+asks `security default-keychain -d user` (outside the sandbox, given two
+seconds), and, for Claude with the sandbox on, warns when the answer is
+not `~/Library/Keychains/login.keychain-db` and no writable path holds
+its directory (`keychain_warning`, which names what to add and what that
+opens). The answer is the path in quotes after leading spaces; the
+parsing and the warning are unit-tested, the probe is not run anywhere
+yet.
 
 The profile text is unit-tested, and a test in `claude/mod.rs` runs
 `sandbox-exec` with Claude's profile in a home of its own on the GitHub

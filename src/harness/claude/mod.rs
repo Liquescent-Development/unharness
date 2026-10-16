@@ -259,6 +259,80 @@ fn login_keychain() -> WritableFiles {
     }
 }
 
+/// The default keychain from what `security default-keychain -d user`
+/// prints: the path in quotes, after leading spaces.
+pub fn parse_default_keychain(output: &str) -> Option<PathBuf> {
+    let line = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let path = line.strip_prefix('"')?.strip_suffix('"')?;
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// Why a confined Claude could not save a refreshed token in `keychain`,
+/// the user's default keychain, if it could not: the grant covers
+/// `login.keychain-db` only, and `writable` (`[sandbox].writable` and
+/// the harness's `sandbox_writable`) does not hold its directory. The
+/// file alone would not do: `security` renames a copy over it.
+pub fn keychain_warning(keychain: &Path, home: &Path, writable: &[PathBuf]) -> Option<String> {
+    let dir = keychain.parent()?;
+    if keychain == home.join("Library/Keychains/login.keychain-db") {
+        return None;
+    }
+    if writable
+        .iter()
+        .map(|w| crate::core::sandbox::expand_home(w, Some(home)))
+        .any(|w| w.is_absolute() && dir.starts_with(&w))
+    {
+        return None;
+    }
+    let shown = match dir.strip_prefix(home) {
+        Ok(rest) => Path::new("~").join(rest),
+        Err(_) => dir.to_path_buf(),
+    };
+    Some(format!(
+        "the default keychain is {}, which a confined Claude Code cannot write: a \
+         refreshed token is not saved there, and the next sign-in from it revokes the \
+         login. Add sandbox_writable = [\"{}\"] under [harnesses.claude], or run it \
+         with --sandbox off. That makes everything in {} writable from a session, \
+         metadata.keychain-db and the <UUID>/ data-protection keychain included, if \
+         they are there.",
+        keychain.display(),
+        shown.display(),
+        shown.display()
+    ))
+}
+
+/// The user's default keychain, asked of `security` outside the sandbox;
+/// `None` when it does not answer within two seconds.
+#[cfg(target_os = "macos")]
+pub fn default_keychain() -> Option<PathBuf> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = Command::new("/usr/bin/security")
+        .args(["default-keychain", "-d", "user"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    status.success().then_some(())?;
+    parse_default_keychain(&out)
+}
+
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::CLAUDE,
     display_name: "Claude Code (claude)",
@@ -1010,6 +1084,70 @@ mod tests {
         assert_eq!(
             login_keychain().to_string(),
             "~/Library/Keychains/{login.keychain-db*,.fl<hex>}"
+        );
+    }
+
+    #[test]
+    fn the_default_keychain_is_read_from_securitys_answer() {
+        assert_eq!(
+            parse_default_keychain("    \"/Users/u/Library/Keychains/login.keychain-db\"\n"),
+            Some(PathBuf::from(
+                "/Users/u/Library/Keychains/login.keychain-db"
+            ))
+        );
+        assert_eq!(
+            parse_default_keychain("\n  \"/Volumes/k/my keys.keychain-db\"\n"),
+            Some(PathBuf::from("/Volumes/k/my keys.keychain-db"))
+        );
+        for odd in ["", "   \n", "  \"\"", "  /no/quotes", "  \"/half"] {
+            assert_eq!(parse_default_keychain(odd), None, "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_default_keychain_the_grant_misses_is_warned_about() {
+        let home = Path::new("/Users/u");
+        let login = home.join("Library/Keychains/login.keychain-db");
+        assert_eq!(keychain_warning(&login, home, &[]), None);
+
+        let other = home.join("Library/Keychains/work.keychain-db");
+        let warning = keychain_warning(&other, home, &[]).unwrap();
+        assert!(
+            warning.contains("/Users/u/Library/Keychains/work.keychain-db")
+                && warning.contains("sandbox_writable = [\"~/Library/Keychains\"]")
+                && warning.contains("metadata.keychain-db")
+                && warning.contains("<UUID>/"),
+            "{warning}"
+        );
+        // Its directory already writable, as `~` or in full, or a parent.
+        for writable in [
+            "~/Library/Keychains",
+            "/Users/u/Library/Keychains",
+            "~/Library",
+        ] {
+            assert_eq!(
+                keychain_warning(&other, home, &[PathBuf::from(writable)]),
+                None,
+                "{writable}"
+            );
+        }
+        // The file alone, or another directory, is not enough.
+        for writable in [
+            "~/Library/Keychains/work.keychain-db",
+            "~/Library/Keychains/X",
+            "Library/Keychains",
+        ] {
+            assert!(
+                keychain_warning(&other, home, &[PathBuf::from(writable)]).is_some(),
+                "{writable}"
+            );
+        }
+        // Outside the home, the directory is named in full.
+        let away = Path::new("/Volumes/k/keys.keychain-db");
+        assert!(
+            keychain_warning(away, home, &[])
+                .unwrap()
+                .contains("sandbox_writable = [\"/Volumes/k\"]")
         );
     }
 

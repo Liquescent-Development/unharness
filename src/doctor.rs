@@ -159,6 +159,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                     .map(|p| p.display().to_string())
                     .chain(paths.writable_files.iter().map(ToString::to_string))
                     .collect();
+                let mut extra_writable = config.sandbox.writable.clone();
                 if let Some(settings) = config.harness(d.id.as_str()) {
                     own.extend(
                         settings
@@ -166,6 +167,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                             .iter()
                             .map(|p| p.display().to_string()),
                     );
+                    extra_writable.extend(settings.sandbox_writable.iter().cloned());
                 }
                 println!(
                     "      {} Sandbox: {}{}",
@@ -182,6 +184,11 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                             .to_string()
                     }
                 );
+                if level != SandboxLevel::Off
+                    && let Some(warning) = keychain_warning(d.id, &extra_writable)
+                {
+                    println!("      {} Keychain: {}", "↳".dimmed(), warning.yellow());
+                }
             }
             None => println!(
                 "  {} {} {}",
@@ -638,6 +645,24 @@ fn report_rules(root: &Path) {
 /// The policies a harness offers, `*` marking one with caveats, and then
 /// the ones it does not, which are also told apart without colour (a pipe,
 /// `NO_COLOR`).
+/// Whether a confined Claude Code on macOS could not save a refreshed
+/// token in the user's default keychain (#340). Asks `security`, outside
+/// the sandbox; nothing elsewhere.
+#[cfg(target_os = "macos")]
+fn keychain_warning(id: HarnessId, writable: &[std::path::PathBuf]) -> Option<String> {
+    if id != HarnessId::CLAUDE {
+        return None;
+    }
+    let home = dirs::home_dir()?;
+    let keychain = crate::harness::claude::default_keychain()?;
+    crate::harness::claude::keychain_warning(&keychain, &home, writable)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keychain_warning(_id: HarnessId, _writable: &[std::path::PathBuf]) -> Option<String> {
+    None
+}
+
 fn describe_policies(caps: &Capabilities) -> String {
     let mut offered = Vec::new();
     let mut not = Vec::new();
