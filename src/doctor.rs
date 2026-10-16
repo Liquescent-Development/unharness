@@ -642,9 +642,6 @@ fn report_rules(root: &Path) {
     }
 }
 
-/// The policies a harness offers, `*` marking one with caveats, and then
-/// the ones it does not, which are also told apart without colour (a pipe,
-/// `NO_COLOR`).
 /// Whether a confined Claude Code on macOS could not save a refreshed
 /// token in the user's default keychain (#340). Asks `security`, outside
 /// the sandbox; nothing elsewhere.
@@ -663,6 +660,9 @@ fn keychain_warning(_id: HarnessId, _writable: &[std::path::PathBuf]) -> Option<
     None
 }
 
+/// The policies a harness offers, `*` marking one with caveats, and then
+/// the ones it does not, which are also told apart without colour (a pipe,
+/// `NO_COLOR`).
 fn describe_policies(caps: &Capabilities) -> String {
     let mut offered = Vec::new();
     let mut not = Vec::new();
