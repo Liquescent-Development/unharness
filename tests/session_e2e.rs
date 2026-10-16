@@ -6733,19 +6733,20 @@ async fn claude_sent_now(fake: &Fake, fixture: &Path, then_interrupt: bool) -> V
     until_turn_ends(&mut handle, 2).await
 }
 
-/// The anchor told after the first turn's end and before the second's
-/// text, and the second turn's end.
+/// The anchor told after the first turn's end (an interrupted one) and
+/// before the second's text, and the second turn's end.
 fn anchored_after_the_stop(events: &[AgentEvent]) -> String {
     let stop = events
         .iter()
         .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
         .unwrap();
-    assert!(matches!(
-        &events[stop],
+    // Claude's `error_during_execution`, told as the interrupt it was.
+    assert_eq!(
+        events[stop],
         AgentEvent::TurnCompleted {
-            stop_reason: StopReason::Error(e)
-        } if e == "error_during_execution"
-    ));
+            stop_reason: StopReason::Interrupted
+        }
+    );
     let rest = &events[stop + 1..];
     let anchor = rest
         .iter()
@@ -7133,4 +7134,59 @@ async fn pi_sends_a_prompt_held_for_an_abort_pi_never_answers() {
         .filter(|v| v["type"] == "prompt")
         .collect();
     assert_eq!(prompts.len(), 2);
+}
+
+/// A plain Esc on Claude: the turn it stops ends `error_during_execution`,
+/// which the driver tells as the interrupt it was.
+#[tokio::test]
+async fn claude_tells_the_turn_an_interrupt_stopped_as_interrupted() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    // The recording up to the stopped turn's end, without the message
+    // that was sent with its interrupt.
+    let text =
+        std::fs::read_to_string(repo().join("src/harness/claude/fixtures/send_now_plain.jsonl"))
+            .unwrap();
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(">> {\"type\": \"user\"") && line.contains("now-ok") {
+            continue;
+        }
+        lines.push(line);
+        if line.contains("\"subtype\":\"error_during_execution\"") {
+            break;
+        }
+    }
+    let fixture = fake._tmp.path().join("esc.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
 }

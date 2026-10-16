@@ -148,9 +148,10 @@ fn a_turn_aborted_as_done_is_followed_by_the_prompt() {
 }
 
 /// Claude has the prompt with the interrupt and starts its turn itself:
-/// nothing is sent when the interrupted turn ends, which Claude ends as
-/// an error, shown as the interrupt it was. Its anchor comes once Claude
-/// started on it, for the prompt's block.
+/// nothing is sent when the interrupted turn ends (Claude's
+/// `error_during_execution`, which its driver tells as the interrupt it
+/// was). Its anchor comes once Claude started on it, for the prompt's
+/// block.
 #[test]
 fn claude_takes_the_prompt_with_the_interrupt() {
     let mut app = running(HarnessId::CLAUDE);
@@ -164,7 +165,7 @@ fn claude_takes_the_prompt_with_the_interrupt() {
         })]
     );
     assert_eq!(users(&app), ["go"]);
-    ended(&mut app, StopReason::Error("error_during_execution".into()));
+    ended(&mut app, StopReason::Interrupted);
     assert!(app.take_actions().is_empty());
     assert!(app.controller.is_generating);
     assert_eq!(users(&app), ["go", "now"]);
@@ -274,9 +275,33 @@ fn an_interrupt_while_it_waits_gives_it_back() {
         vec![Action::Command(SessionCommand::Interrupt)]
     );
     assert_eq!(app.front.input, "typed");
-    ended(&mut app, StopReason::Error("error_during_execution".into()));
+    ended(&mut app, StopReason::Interrupted);
     assert!(app.take_actions().is_empty());
     assert!(!app.controller.is_generating);
+    assert!(system_lines(&app).contains(&"Turn interrupted.".to_string()));
+    assert!(!notices(&app).iter().any(|n| n.contains("error_during")));
+}
+
+/// A plain Esc on Claude: its driver tells the stopped turn as
+/// interrupted, and so it is shown, not as an error.
+#[test]
+fn a_plain_interrupt_on_claude_is_shown_as_one() {
+    let mut app = running(HarnessId::CLAUDE);
+    app.interrupt();
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::Interrupt)]
+    );
+    ended(&mut app, StopReason::Interrupted);
+    assert!(system_lines(&app).contains(&"Turn interrupted.".to_string()));
+    assert!(
+        !app.controller
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Error(_)))
+    );
 }
 
 /// What cannot be sent now is queued for when the turn ends, and said to

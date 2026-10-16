@@ -196,6 +196,12 @@ no command). `system/init` advertises `interrupt_send_now_v1`,
   `cancelled` for it, the answer lists it under `cancelled`, the turn
   ends `error_during_execution`, and no turn follows.
 
+A turn an interrupt stopped ends `error_during_execution` (with
+`terminal_reason` `aborted_tools` or `aborted_streaming`): the driver
+tells the first turn end after an interrupt it sent, when it is that
+error, as `Interrupted`, also for a plain Esc (before, the TUI showed
+it as an error; `--print` already rewrote it).
+
 The driver tells the prompt's `TurnAnchor` when `command_lifecycle`
 says `started` (without lifecycle, right after the stopped turn's end):
 before that turn's `result` it went into the turn, after it it is a turn

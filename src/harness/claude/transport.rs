@@ -412,6 +412,9 @@ impl SentNow {
     }
 }
 
+/// How a turn's error starts that Claude ends when it is interrupted.
+const STOPPED: &str = "error_during_execution";
+
 /// How long the answer to `initialize` is waited for before the session
 /// goes on without it.
 const INIT_WAIT: Duration = Duration::from_secs(5);
@@ -440,6 +443,9 @@ struct Claude {
     policies_sent: VecDeque<PermissionPolicy>,
     /// The prompt sent at once that the CLI has not started on yet.
     sent_now: Option<SentNow>,
+    /// An interrupt went since the last turn's end: the turn it stops ends
+    /// with an `error_during_execution` result, which is that interrupt.
+    interrupting: bool,
 }
 
 impl Claude {
@@ -455,6 +461,7 @@ impl Claude {
             remote: None,
             policies_sent: VecDeque::new(),
             sent_now: None,
+            interrupting: false,
         }
     }
 
@@ -663,6 +670,7 @@ impl StreamProtocol for Claude {
                 format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
             )),
             SessionCommand::SendNow { text, attachments } => {
+                self.interrupting = true;
                 self.send_now(&text, &attachments, io).await;
                 Encoded::Done
             }
@@ -672,6 +680,7 @@ impl StreamProtocol for Claude {
             // `cancelled` with the uuid). Otherwise it would run after the
             // interrupt, as anything queued does.
             SessionCommand::Interrupt => {
+                self.interrupting = true;
                 let take_back = self
                     .sent_now
                     .take_if(|s| !s.stopped && s.failed.is_none())
@@ -817,7 +826,7 @@ impl StreamProtocol for Claude {
             Some(ev) => vec![ev],
             None => self.parser.feed(line),
         };
-        for ev in evs {
+        for mut ev in evs {
             if let AgentEvent::PermissionRequest(req) = &ev {
                 let (input, kind) = match &req.kind {
                     PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
@@ -839,6 +848,15 @@ impl StreamProtocol for Claude {
             }
             self.keep(&ev);
             let ended = matches!(ev, AgentEvent::TurnCompleted { .. });
+            if let AgentEvent::TurnCompleted { stop_reason } = &mut ev
+                && std::mem::take(&mut self.interrupting)
+                && matches!(stop_reason, StopReason::Error(e) if e.starts_with(STOPPED))
+            {
+                // What Claude makes of the interrupt it was sent (it ends
+                // the turn `error_during_execution`, `aborted_tools` or
+                // `aborted_streaming`), told as one.
+                *stop_reason = StopReason::Interrupted;
+            }
             io.forward(ev).await?;
             if ended {
                 for ev in self.turn_ended() {
@@ -866,6 +884,7 @@ impl StreamProtocol for Claude {
         self.remote_requests.clear();
         self.policies_sent.clear();
         self.sent_now = None;
+        self.interrupting = false;
         io.emit(AgentEvent::Restarted).await;
         self.start(io).await;
         if let Some(name) = self.remote.clone() {
