@@ -1094,6 +1094,36 @@ mod tests {
         assert!(!write(&below.join("y")));
         assert!(!write(&locked));
         assert_eq!(std::fs::read_to_string(&locked).unwrap(), "keep");
+
+        // Nor does a granted name lead to a file that is not granted: a
+        // hard link or a symlink to `metadata.keychain-db` given such a
+        // name does not write it. Making the link may be denied too.
+        let metadata = keychains.join("metadata.keychain-db");
+        std::fs::write(&metadata, "meta").unwrap();
+        let hard = keychains.join("login.keychain-db.l");
+        let soft = keychains.join("login.keychain-db.s");
+        run(format!(
+            "ln '{}' '{}' 2>/dev/null",
+            metadata.display(),
+            hard.display()
+        ));
+        run(format!(
+            "ln -s metadata.keychain-db '{}' 2>/dev/null",
+            soft.display()
+        ));
+        for (kind, link) in [("hard link", &hard), ("symlink", &soft)] {
+            if std::fs::symlink_metadata(link).is_ok() {
+                eprintln!("{kind} made inside the sandbox");
+                assert!(!write(link), "written through a {kind}");
+            } else {
+                eprintln!("{kind} denied inside the sandbox");
+            }
+            assert_eq!(
+                std::fs::read_to_string(&metadata).unwrap(),
+                "meta",
+                "{kind}"
+            );
+        }
     }
 
     #[test]
