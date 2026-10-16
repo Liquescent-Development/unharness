@@ -166,6 +166,11 @@ struct Pi {
     /// prompt would make the empty session pi made under the id pass as
     /// the one to resume next time (#214).
     baseline: bool,
+    /// `abort`s sent and not answered. pi answers one only once it is idle
+    /// (`waitForIdle`), after the aborted turn's `agent_settled`: a turn
+    /// sent meanwhile (a prompt sent at once, which follows the turn's
+    /// end) is held back until then, as pi is not idle before.
+    aborts: usize,
     held_turn: Option<String>,
 }
 
@@ -181,6 +186,7 @@ impl Pi {
             aborting: false,
             forking: false,
             baseline: resumed,
+            aborts: 0,
             held_turn: None,
         }
     }
@@ -188,6 +194,12 @@ impl Pi {
     fn next_id(&mut self) -> String {
         self.seq += 1;
         format!("u{}", self.seq)
+    }
+
+    /// A turn is held back: for a fork, a resumed session's listing, or an
+    /// abort's answer.
+    fn holding(&self) -> bool {
+        self.forking || self.baseline || self.aborts > 0
     }
 
     /// A request of ours that takes nothing but its id.
@@ -257,6 +269,7 @@ impl StreamProtocol for Pi {
                     None
                 } else {
                     self.aborting |= self.turn_open;
+                    self.aborts += 1;
                     Some(self.request("abort"))
                 }
             }
@@ -302,7 +315,7 @@ impl StreamProtocol for Pi {
             SessionCommand::Shutdown => None,
         };
         self.turn_open |= is_turn && line.is_some();
-        if (self.forking || self.baseline) && is_turn {
+        if self.holding() && is_turn {
             self.held_turn = line;
             Encoded::Done
         } else {
@@ -325,7 +338,7 @@ impl StreamProtocol for Pi {
             self.forking = false;
             let _ = io.write(&self.request("get_state")).await;
             let _ = io.write(&self.request("get_fork_messages")).await;
-            if !self.baseline
+            if !self.holding()
                 && let Some(turn) = self.held_turn.take()
             {
                 let _ = io.write(&turn).await;
@@ -400,10 +413,18 @@ impl StreamProtocol for Pi {
                     })
                     .await;
                 }
-                Some(turn) if !self.forking => {
+                Some(turn) if !self.holding() => {
                     let _ = io.write(&turn).await;
                 }
                 held => self.held_turn = held,
+            }
+        }
+        if self.aborts > 0 && is_response_to(line, "abort") {
+            self.aborts -= 1;
+            if !self.holding()
+                && let Some(turn) = self.held_turn.take()
+            {
+                let _ = io.write(&turn).await;
             }
         }
         Ok(())

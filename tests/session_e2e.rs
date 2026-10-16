@@ -6640,3 +6640,116 @@ async fn acp_vibe_turn_without_an_echo_has_an_empty_anchor() {
     );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
+
+// ---- Sending a prompt at once (`/now`, #333) ----
+
+/// The events that come within `within`, none of which may match `not`.
+async fn none_within(
+    handle: &mut SessionHandle,
+    within: Duration,
+    not: impl Fn(&AgentEvent) -> bool,
+) -> Vec<AgentEvent> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, handle.events.recv()).await {
+        assert!(!not(&ev), "{} came too early", ev.summary());
+        seen.push(ev);
+    }
+    seen
+}
+
+/// Events until (and with) the `n`th `TurnCompleted`, permission requests
+/// allowed.
+async fn until_turn_ends(handle: &mut SessionHandle, n: usize) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    let mut ended = 0;
+    while ended < n {
+        let ev = next_event(handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        ended += matches!(ev, AgentEvent::TurnCompleted { .. }) as usize;
+        events.push(ev);
+    }
+    events
+}
+
+/// `fixture` with each `(from, to)` replaced, in `fake`'s directory.
+fn rewritten(fake: &Fake, fixture: &str, name: &str, edits: &[(&str, &str)]) -> PathBuf {
+    let mut text = std::fs::read_to_string(repo().join(fixture)).unwrap();
+    for (from, to) in edits {
+        assert!(text.contains(from), "{from} not in {fixture}");
+        text = text.replace(from, to);
+    }
+    let path = fake._tmp.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// pi ends an aborted turn (`agent_settled`) before it answers `abort`,
+/// which it does once it is idle: the next prompt waits for that answer.
+#[tokio::test]
+async fn pi_sends_a_prompt_after_an_abort_only_once_it_is_answered() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer = "{\"id\":\"req-4\",\"type\":\"response\",\"command\":\"abort\",\"success\":true}";
+    let next = ">> {\"id\": \"req-7\", \"type\": \"prompt\", \"message\": \"now\"}\n\
+        {\"id\":\"req-7\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}\n\
+        {\"type\":\"agent_settled\"}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/pi/fixtures/gate_abort.jsonl",
+        "abort.jsonl",
+        &[(answer, &format!("# gate\n{answer}")), ("# exit=0\n", next)],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    loop {
+        if let AgentEvent::TurnCompleted { stop_reason } = next_event(&mut handle).await {
+            assert_eq!(stop_reason, StopReason::Interrupted);
+            break;
+        }
+    }
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    none_within(&mut handle, Duration::from_millis(500), |_| false).await;
+    let prompts = |sent: &[Value]| {
+        sent.iter()
+            .filter(|v| v["type"] == "prompt")
+            .map(|v| v["message"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prompts(&fake.sent_lines()).len(),
+        1,
+        "sent before abort's answer"
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    assert_eq!(prompts(&fake.sent_lines())[1], "now");
+}
