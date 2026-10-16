@@ -328,6 +328,7 @@ impl Harness for CodexHarness {
             // (one sent before steers the running turn); `exec` resumes
             // the thread in a new process.
             send_now: SendNow::AfterTurn,
+            take_back_sent_now: false,
             compaction: app_server,
             // `exec --json` reports a turn's tokens, not the window.
             context_usage: app_server,

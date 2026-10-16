@@ -490,14 +490,27 @@ impl Controller {
         if !self.is_generating {
             return;
         }
-        if let Some(p) = self.sending_now.take() {
-            // The CLI that has it is asked to drop it with the turn.
-            if p.with_cli.is_some() {
-                self.actions
-                    .push_back(Action::Command(SessionCommand::Interrupt));
+        match self.sending_now.take() {
+            // A CLI that cannot be made to drop it runs it all the same:
+            // it stays, and the turn is pressed as without it.
+            Some(p) if p.with_cli.is_some() && !self.caps().take_back_sent_now => {
+                self.conversation.transcript.push_notice(format!(
+                    "{} already has '{}' and runs it once the turn has stopped",
+                    self.short_name(),
+                    first_line(&p.prompt.text)
+                ));
+                self.sending_now = Some(p);
             }
-            self.give_back(p, front);
-            return;
+            Some(p) => {
+                // The CLI that has it is asked to drop it with the turn.
+                if p.with_cli.is_some() {
+                    self.actions
+                        .push_back(Action::Command(SessionCommand::Interrupt));
+                }
+                self.give_back(p, front);
+                return;
+            }
+            None => {}
         }
         self.press_interrupt(front);
     }

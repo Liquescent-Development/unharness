@@ -129,6 +129,7 @@ impl Harness for PiHarness {
             steer: true,
             // `prompt` once `abort` has answered (`transport.rs`).
             send_now: SendNow::AfterTurn,
+            take_back_sent_now: false,
             compaction: true,
             context_usage: true,
             rate_limits: false,

@@ -246,6 +246,9 @@ session with it.
 
 `Esc` while the prompt waits for the turn to end takes it back: it goes back
 to the prompt box, or to the head of the queue, and the turn still ends.
+A Claude Code whose interrupt cannot drop a queued message (one that does
+not advertise `cancel_queued`) runs the prompt all the same, and `Esc` says
+so instead.
 Pressed again, `Ctrl+Enter` presses the turn as a second `Esc` does, and
 after a few seconds ends the agent's process; the prompt then resumes the
 session. During a handoff summary, a compaction, a `!` command, or while a

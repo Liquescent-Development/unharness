@@ -7190,3 +7190,45 @@ async fn claude_tells_the_turn_an_interrupt_stopped_as_interrupted() {
         })
     ));
 }
+
+/// On a CLI whose interrupt does not take `cancel_queued`, Esc cannot take
+/// the prompt back: the driver says so at `init`, sends a plain interrupt,
+/// and still tells what becomes of the prompt.
+#[tokio::test]
+async fn claude_keeps_a_prompt_sent_now_it_cannot_take_back() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = rewritten(
+        &fake,
+        "src/harness/claude/fixtures/send_now_cancelled.jsonl",
+        "no_cancel.jsonl",
+        &[("\"interrupt_cancel_queued_v1\"", "\"x_cancel_queued\"")],
+    );
+    let events = claude_sent_now(&fake, &fixture, true).await;
+    let sent = fake.sent_lines();
+    let last = sent
+        .iter()
+        .rev()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    assert_eq!(last["request"]["subtype"], "interrupt");
+    assert!(last["request"].get("cancel_queued").is_none());
+    // Told what becomes of it: here the CLI cancelled it, and its turn
+    // fails once the stopped one has ended.
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(matches!(
+        &events[stop + 1..],
+        [
+            AgentEvent::TurnAnchor { id },
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(_)
+            },
+            ..
+        ] if id.is_empty()
+    ));
+}

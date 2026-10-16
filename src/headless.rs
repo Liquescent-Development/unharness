@@ -762,6 +762,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(q) = u.ask_user_question {
         v["ask_user_question"] = json!(q);
     }
+    if let Some(t) = u.take_back_sent_now {
+        v["take_back_sent_now"] = json!(t);
+    }
     if let Some(l) = &u.lacks {
         v["lacks"] = json!(l.iter().map(|a| a.as_str()).collect::<Vec<_>>());
     }

@@ -163,6 +163,10 @@ pub struct Capabilities {
     /// How a prompt takes the running turn's place at once
     /// (`Controller::send_now`), when `interrupt` is declared.
     pub send_now: SendNow,
+    /// With `SendNow::Native`, the CLI that has a prompt sent at once can
+    /// be made to drop it while the turn it stops has not ended (Esc then
+    /// gives it back); otherwise it runs it all the same.
+    pub take_back_sent_now: bool,
     /// Context can be compacted on request.
     pub compaction: bool,
     /// Context-window usage may be reported (`Context`). Without it the
@@ -392,6 +396,9 @@ impl Capabilities {
         if let Some(q) = update.ask_user_question {
             self.ask_user_question = q;
         }
+        if let Some(t) = update.take_back_sent_now {
+            self.take_back_sent_now = t;
+        }
         for refused in [&update.refused_policies, &update.lacks_policies]
             .into_iter()
             .flatten()
@@ -457,6 +464,7 @@ impl Capabilities {
             plan_mode: lost(self.plan_mode, session.plan_mode),
             slash_commands: lost(self.slash_commands, session.slash_commands),
             ask_user_question: lost(self.ask_user_question, session.ask_user_question),
+            take_back_sent_now: lost(self.take_back_sent_now, session.take_back_sent_now),
             lacks_policies: Some(lacked),
             ..Default::default()
         }

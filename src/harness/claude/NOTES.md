@@ -200,7 +200,12 @@ A turn an interrupt stopped ends `error_during_execution` (with
 `terminal_reason` `aborted_tools` or `aborted_streaming`): the driver
 tells the first turn end after an interrupt it sent, when it is that
 error, as `Interrupted`, also for a plain Esc (before, the TUI showed
-it as an error; `--print` already rewrote it).
+it as an error; `--print` already rewrote it). A CLI that does not
+advertise `interrupt_cancel_queued_v1` is reported at its first `init`
+as `take_back_sent_now: false`: Esc then sends a plain interrupt, the
+prompt stays with Claude, which runs it, and the TUI says so instead of
+giving it back (e2e `claude_keeps_a_prompt_sent_now_it_cannot_take_back`,
+the recording with the capability taken out).
 
 The driver tells the prompt's `TurnAnchor` when `command_lifecycle`
 says `started` (without lifecycle, right after the stopped turn's end):

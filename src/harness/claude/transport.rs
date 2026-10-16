@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use super::parse::ClaudeParser;
 use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, Attachment, Capabilities, HarnessId, McpServer, McpTransport, Parser,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
     PermissionDecision, PermissionKind, PermissionPolicy, ProviderId, SessionCommand,
     SessionConfig, SessionHandle, StopReason,
 };
@@ -446,6 +446,9 @@ struct Claude {
     /// An interrupt went since the last turn's end: the turn it stops ends
     /// with an `error_during_execution` result, which is that interrupt.
     interrupting: bool,
+    /// Whether the TUI was told that a prompt sent at once cannot be taken
+    /// back on this CLI (`take_back_sent_now`).
+    told_take_back: bool,
 }
 
 impl Claude {
@@ -462,6 +465,7 @@ impl Claude {
             policies_sent: VecDeque::new(),
             sent_now: None,
             interrupting: false,
+            told_take_back: false,
         }
     }
 
@@ -677,15 +681,16 @@ impl StreamProtocol for Claude {
             // A prompt sent at once that has not gone into a turn yet is
             // taken back with it (the user's Esc right after it), where
             // the CLI can (`interrupt_cancel_queued_v1`; it then answers
-            // `cancelled` with the uuid). Otherwise it would run after the
-            // interrupt, as anything queued does.
+            // `cancelled` with the uuid). Otherwise it runs after the
+            // interrupt, as anything queued does, and is still told
+            // (`take_back_sent_now`: the TUI keeps it).
             SessionCommand::Interrupt => {
                 self.interrupting = true;
-                let take_back = self
-                    .sent_now
-                    .take_if(|s| !s.stopped && s.failed.is_none())
-                    .is_some()
-                    && self.parser.advertises("interrupt_cancel_queued_v1");
+                let take_back = self.parser.advertises("interrupt_cancel_queued_v1")
+                    && self
+                        .sent_now
+                        .take_if(|s| !s.stopped && s.failed.is_none())
+                        .is_some();
                 let extra = if take_back {
                     json!({"cancel_queued": true})
                 } else {
@@ -784,8 +789,11 @@ impl StreamProtocol for Claude {
         // The answer to one of our `remote_control` requests, which the
         // parser would take for a generic one.
         let mut remote_answer = None;
+        let mut init = false;
         // Driver-level bookkeeping before the pure parser sees it.
         if let Ok(v) = serde_json::from_str::<Value>(line) {
+            init = v.get("type").and_then(Value::as_str) == Some("system")
+                && v.get("subtype").and_then(Value::as_str) == Some("init");
             match v.get("type").and_then(Value::as_str) {
                 Some("control_response") => {
                     let rid = v.pointer("/response/request_id").and_then(Value::as_str);
@@ -864,6 +872,17 @@ impl StreamProtocol for Claude {
                 }
             }
         }
+        // A CLI whose interrupt does not take `cancel_queued` cannot be
+        // made to drop a prompt sent at once: said once, at its first
+        // `init`.
+        if init && !self.told_take_back && !self.parser.advertises("interrupt_cancel_queued_v1") {
+            self.told_take_back = true;
+            io.forward(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                take_back_sent_now: Some(false),
+                ..Default::default()
+            }))
+            .await?;
+        }
         Ok(())
     }
 
@@ -885,6 +904,7 @@ impl StreamProtocol for Claude {
         self.policies_sent.clear();
         self.sent_now = None;
         self.interrupting = false;
+        self.told_take_back = false;
         io.emit(AgentEvent::Restarted).await;
         self.start(io).await;
         if let Some(name) = self.remote.clone() {

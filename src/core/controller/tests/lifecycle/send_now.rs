@@ -280,6 +280,26 @@ fn an_interrupt_while_it_waits_gives_it_back() {
     assert!(!app.controller.is_generating);
     assert!(system_lines(&app).contains(&"Turn interrupted.".to_string()));
     assert!(!notices(&app).iter().any(|n| n.contains("error_during")));
+
+    // A Claude that cannot be made to drop it (no `cancel_queued`): Esc
+    // leaves it with Claude, says so, and Claude's turn for it is shown.
+    let mut app = running(HarnessId::CLAUDE);
+    app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+        take_back_sent_now: Some(false),
+        ..Default::default()
+    }));
+    send_now(&mut app, "typed");
+    app.take_actions();
+    app.interrupt();
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.front.input, "");
+    assert!(has_notice(
+        &app,
+        "Claude already has 'typed' and runs it once the turn has stopped"
+    ));
+    ended(&mut app, StopReason::Interrupted);
+    assert!(app.controller.is_generating);
+    assert_eq!(users(&app), ["go", "typed"]);
 }
 
 /// A plain Esc on Claude: its driver tells the stopped turn as

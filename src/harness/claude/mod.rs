@@ -447,6 +447,9 @@ impl Harness for ClaudeHarness {
             // interrupt first, on a CLI that does not advertise it): Claude
             // starts on it by itself (NOTES.md).
             send_now: SendNow::Native,
+            // `interrupt` with `cancel_queued` drops it (2.1.288 on); a CLI
+            // that does not advertise that says so at `init`.
+            take_back_sent_now: true,
             compaction: true,
             context_usage: true,
             rate_limits: true,

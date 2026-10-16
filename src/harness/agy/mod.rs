@@ -140,6 +140,7 @@ impl Harness for AgyHarness {
             // Its interrupt ends its process; the next turn resumes the
             // conversation in a new one.
             send_now: SendNow::AfterExit,
+            take_back_sent_now: false,
             compaction: false,
             // Its stream has token counts but no window (NOTES.md).
             context_usage: false,

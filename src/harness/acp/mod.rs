@@ -307,6 +307,7 @@ impl Harness for AcpHarness {
             // answered (`stopReason: cancelled`): one sent before is
             // refused while a turn runs (vibe-acp 2.26.1).
             send_now: SendNow::AfterTurn,
+            take_back_sent_now: false,
             compaction: false,
             // `usage_update` (`used`, `size`) is the agent's to send, and
             // every one recorded does; one that does not is shown as not
