@@ -1080,6 +1080,18 @@ mod tests {
         );
     }
 
+    /// `turn/interrupt` during a command (0.162.1): answered, then the
+    /// turn `turn/completed` as `interrupted`, after which the next
+    /// prompt's `turn/start` goes (`/now`).
+    #[test]
+    fn fixture_app_server_interrupt_then_prompt() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_interrupt_then_prompt",
+        );
+    }
+
     #[test]
     fn fixture_app_server_steer_and_compact() {
         assert_fixture(

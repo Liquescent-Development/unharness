@@ -6694,6 +6694,87 @@ fn rewritten(fake: &Fake, fixture: &str, name: &str, edits: &[(&str, &str)]) -> 
     path
 }
 
+/// Codex app-server tells the interrupted turn's end on its
+/// `turn/completed`, not on the interrupt's answer: a `turn/start` sent
+/// before would steer the running turn. The next prompt then goes
+/// (`fixtures/app_server_interrupt_then_prompt.jsonl`, 0.162.1).
+#[tokio::test]
+async fn codex_app_server_ends_an_interrupted_turn_on_its_turn_completed() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let completed = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"01a14203-ddbf-79d1-ab7e-11810aa59f59\",\"turn\":{\"id\":\"01a14203-dde7";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/codex/fixtures/app_server_interrupt_then_prompt.jsonl",
+        "interrupt.jsonl",
+        &[(completed, &format!("# gate\n{completed}"))],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness.start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    none_within(&mut handle, Duration::from_millis(700), |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["method"] == "turn/interrupt")
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("now")))
+    );
+    let sent = fake.sent_lines();
+    let interrupt = sent
+        .iter()
+        .position(|v| v["method"] == "turn/interrupt")
+        .unwrap();
+    let starts: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["method"] == "turn/start")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert!(starts[1] > interrupt);
+}
+
 /// pi ends an aborted turn (`agent_settled`) before it answers `abort`,
 /// which it does once it is idle: the next prompt waits for that answer.
 #[tokio::test]
@@ -6752,4 +6833,81 @@ async fn pi_sends_a_prompt_after_an_abort_only_once_it_is_answered() {
         })
     ));
     assert_eq!(prompts(&fake.sent_lines())[1], "now");
+}
+
+/// An ACP agent's cancelled turn ends with its prompt's answer
+/// (`stopReason: cancelled`), not with the `session/cancel`: vibe-acp
+/// refuses a `session/prompt` while a turn runs. The next one goes after.
+#[tokio::test]
+async fn acp_ends_a_cancelled_turn_on_its_prompt_answer() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"cancelled\"";
+    let next = ">> {\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"session/prompt\", \"params\": {}}\n\
+        {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\"}}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/acp/fixtures/vibe_acp_interrupt.jsonl",
+        "cancel.jsonl",
+        &[
+            (answer, &format!("# gate\n{answer}")),
+            ("# exit=0 status=done\n", next),
+        ],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("create a.txt"))
+        .await
+        .unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    none_within(&mut handle, Duration::from_millis(700), |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["method"] == "session/cancel")
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    let sent = fake.sent_lines();
+    let cancel = sent
+        .iter()
+        .position(|v| v["method"] == "session/cancel")
+        .unwrap();
+    let prompts: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["method"] == "session/prompt")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1] > cancel);
 }

@@ -254,6 +254,13 @@ answered in the same session. Unverified: an elicitation open at an
 interrupt on a real agent, an agent that never reports the call ended
 (the cancel then waits 2 s).
 
+A prompt sent at once (`/now`) goes as the next `session/prompt` once the
+cancelled one has answered (`stopReason: cancelled`), which is where the
+driver tells the turn's end: vibe-acp refuses a `session/prompt` while a
+turn runs ("A turn is already running", the issue's research on 2.26.1).
+e2e `acp_ends_a_cancelled_turn_on_its_prompt_answer`, from
+`fixtures/vibe_acp_interrupt.jsonl` held at the answer. Not run live.
+
 ## Ending a session
 
 Ending a session (#161): a shutdown between turns sends `session/close`
