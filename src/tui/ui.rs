@@ -9,6 +9,7 @@ use ratatui::{
 };
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -97,6 +98,14 @@ const QUEUE_ROWS: usize = 3;
 
 /// Most plan rows shown above the prompt; the rest are summarised.
 const PLAN_ROWS: usize = 6;
+
+/// The line under the queued prompts that says how to send the first one
+/// now. Ctrl+Enter is named only where the terminal tells it from Enter
+/// (`enhanced`: the kitty keyboard protocol is on); `/now` works anywhere.
+fn send_now_hint(enhanced: bool) -> String {
+    let key = if enhanced { "Ctrl+Enter" } else { "/now" };
+    format!("  {key}: stop the turn and send the first one now · Alt+Up: edit the last")
+}
 
 /// Most subagents shown under the prompt at once.
 const SUBAGENT_ROWS: usize = 4;
@@ -247,6 +256,12 @@ fn pinned_lines(app: &App) -> Vec<Line<'static>> {
         let first_line = q.text.lines().next().unwrap_or("");
         lines.push(Line::from(Span::styled(
             format!("  Queued: {}", sanitize(&truncate_chars(first_line, 90))),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    if !app.controller.queued.is_empty() && app.controller.can_send_now() {
+        lines.push(Line::from(Span::styled(
+            send_now_hint(super::KEYBOARD_ENHANCED.load(Ordering::Relaxed)),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -3037,6 +3052,34 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Tab every workspace"), "{text}");
+    }
+
+    /// Under the queued prompts during a turn: how to send the first one
+    /// now, with the key the terminal can send.
+    #[test]
+    fn queued_prompts_say_how_to_send_one_now() {
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.controller.is_generating = true;
+        app.controller.session_alive = true;
+        app.queue_prompt("first".into());
+        assert!(app.controller.can_send_now());
+        let (rows, _) = screen(&mut app, 100, 30);
+        let text = rows.join("\n");
+        assert!(text.contains("Queued: first"), "{text}");
+        assert!(
+            text.contains("/now: stop the turn and send the first one now"),
+            "{text}"
+        );
+        assert!(send_now_hint(true).contains("Ctrl+Enter: stop the turn"));
+
+        // Not where it would only queue, nor once the turn is over.
+        app.controller.session_alive = false;
+        let (rows, _) = screen(&mut app, 100, 30);
+        assert!(!rows.join("\n").contains("/now:"));
+        app.controller.session_alive = true;
+        app.controller.is_generating = false;
+        let (rows, _) = screen(&mut app, 100, 30);
+        assert!(!rows.join("\n").contains("/now:"));
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> (Vec<String>, (u16, u16)) {

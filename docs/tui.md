@@ -234,7 +234,9 @@ prompt as the next one, with its attachments, in one step instead of `Esc`,
 a wait and `Enter`. From an empty prompt box (or a bare `/now`) it sends the
 oldest queued prompt. The other queued prompts keep their order and go as
 usual once the new turn ends. With no turn running it is the same as
-`Enter`.
+`Enter`. While prompts are queued during a turn, a line under them says
+so, naming `Ctrl+Enter` where the terminal can send it and `/now`
+elsewhere.
 
 How the prompt gets there depends on the harness. Claude Code is sent the
 prompt together with the interrupt and starts on it by itself; it may
