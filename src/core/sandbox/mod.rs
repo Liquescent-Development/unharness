@@ -495,6 +495,15 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         let Some(dir) = canonical(&expand(&files.dir)).filter(|d| d.is_dir()) else {
             continue;
         };
+        // The protected paths' denies come after the grant anyway; a
+        // harness that names one is wrong, and is told so.
+        if let Some(hit) = protected.iter().find(|p| dir.starts_with(p)) {
+            bail!(
+                "writable files in {} are inside unharness's own state ({})",
+                dir.display(),
+                hit.display()
+            );
+        }
         let files = WritableFiles {
             dir,
             names: files.names.clone(),
@@ -966,6 +975,20 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("writable file name"), "{name:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn writable_files_inside_own_state_are_refused() {
+        let mut w = world();
+        std::fs::create_dir_all(w.home.join(".local/state/unharness/keys")).unwrap();
+        for dir in ["~/.local/state/unharness", "~/.local/state/unharness/keys"] {
+            w.harness.writable_files = vec![WritableFiles {
+                dir: PathBuf::from(dir),
+                names: vec![FileName::Prefix("x")],
+            }];
+            let err = resolve(&request(&w, None), &available(), &w.env).unwrap_err();
+            assert!(err.to_string().contains("unharness's own state"), "{err}");
         }
     }
 
