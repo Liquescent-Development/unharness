@@ -17,7 +17,7 @@ use tokio::time::Instant;
 use super::parse::ClaudeParser;
 use crate::core::driver::{self, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::{
-    AgentEvent, Attachment, Capabilities, HarnessId, McpServer, McpTransport, Parser,
+    AgentEvent, Attachment, Capabilities, CapsUpdate, HarnessId, McpServer, McpTransport, Parser,
     PermissionDecision, PermissionKind, PermissionPolicy, ProviderId, SessionCommand,
     SessionConfig, SessionHandle, StopReason,
 };
@@ -379,6 +379,42 @@ fn remote_control_request(enabled: bool, name: Option<String>) -> (String, Strin
     control_request("remote_control", extra)
 }
 
+/// A prompt sent at once (`SessionCommand::SendNow`) that the CLI has not
+/// started on yet. Its `TurnAnchor` is told when it does: where that
+/// falls tells the controller whether the prompt went into the running
+/// turn (before that turn's end) or starts a turn of its own (after it).
+#[derive(Debug)]
+struct SentNow {
+    /// Its uuid, which the CLI's `command_lifecycle` lines name.
+    uuid: String,
+    /// The CLI says when it starts on a queued message
+    /// (`msg_lifecycle_v1`): the anchor waits for that. Otherwise it is
+    /// told when the turn the prompt stops has ended, since a plain
+    /// interrupt always ends that turn.
+    lifecycle: bool,
+    /// The turn it stops has ended (its `result` came).
+    stopped: bool,
+    /// It will not run, for this reason: its turn is told failed once the
+    /// turn it was to stop has ended.
+    failed: Option<String>,
+}
+
+impl SentNow {
+    /// What the controller is told of a prompt that will not run: its
+    /// turn, begun when the one before ended, failed.
+    fn failed(why: String) -> Vec<AgentEvent> {
+        vec![
+            AgentEvent::TurnAnchor { id: String::new() },
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(why),
+            },
+        ]
+    }
+}
+
+/// How a turn's error starts that Claude ends when it is interrupted.
+const STOPPED: &str = "error_during_execution";
+
 /// How long the answer to `initialize` is waited for before the session
 /// goes on without it.
 const INIT_WAIT: Duration = Duration::from_secs(5);
@@ -405,6 +441,14 @@ struct Claude {
     /// Policies set and not yet reported back: a report of one of them is
     /// not a change of Claude's own.
     policies_sent: VecDeque<PermissionPolicy>,
+    /// The prompt sent at once that the CLI has not started on yet.
+    sent_now: Option<SentNow>,
+    /// An interrupt went since the last turn's end: the turn it stops ends
+    /// with an `error_during_execution` result, which is that interrupt.
+    interrupting: bool,
+    /// Whether the TUI was told that a prompt sent at once cannot be taken
+    /// back on this CLI (`take_back_sent_now`).
+    told_take_back: bool,
 }
 
 impl Claude {
@@ -419,7 +463,118 @@ impl Claude {
             mcp_config,
             remote: None,
             policies_sent: VecDeque::new(),
+            sent_now: None,
+            interrupting: false,
+            told_take_back: false,
         }
+    }
+
+    /// Send `text` at once. Where the CLI advertises both, the message
+    /// goes first and then `interrupt` with `send_now` and its uuid: the
+    /// CLI stops the running turn for it, or moves what the turn waits on
+    /// to the background and takes it into the turn, and says which with
+    /// `command_lifecycle` (2.1.301; the issue's research found `stopped`
+    /// for a foreground command). Otherwise a plain interrupt, which ends
+    /// the turn, and the message right after it, which is the next turn.
+    /// Not `"priority":"now"`: that waits for a foreground tool to finish.
+    async fn send_now(&mut self, text: &str, attachments: &[Attachment], io: &mut Io<'_>) {
+        let (uuid, message) = match anchored_turn(text, attachments) {
+            Ok(turn) => turn,
+            // Nothing of it reaches the CLI: the turn is stopped all the
+            // same, and the prompt's own turn fails once that one ended.
+            Err(e) => {
+                self.sent_now = Some(SentNow {
+                    uuid: String::new(),
+                    lifecycle: false,
+                    stopped: false,
+                    failed: Some(e.to_string()),
+                });
+                self.write(&control_request("interrupt", json!({})).1, io)
+                    .await;
+                return;
+            }
+        };
+        let lifecycle = self.parser.advertises("msg_lifecycle_v1");
+        let lines = if lifecycle && self.parser.advertises("interrupt_send_now_v1") {
+            let interrupt = json!({"send_now": true, "message_uuid": uuid});
+            [message, control_request("interrupt", interrupt).1]
+        } else {
+            [control_request("interrupt", json!({})).1, message]
+        };
+        self.sent_now = Some(SentNow {
+            uuid,
+            lifecycle,
+            stopped: false,
+            failed: None,
+        });
+        for line in lines {
+            if !self.write(&line, io).await {
+                break;
+            }
+        }
+    }
+
+    /// Write `line`; a failure is told as `write_failed` words it.
+    async fn write(&mut self, line: &str, io: &mut Io<'_>) -> bool {
+        match io.write(line).await {
+            Ok(()) => true,
+            Err(e) => {
+                for ev in self.write_failed(e) {
+                    io.emit(ev).await;
+                }
+                false
+            }
+        }
+    }
+
+    /// What a `command_lifecycle` line says of the prompt sent at once:
+    /// the CLI started on it (its anchor), or will not run it.
+    fn lifecycle(&mut self, line: &Value) -> Vec<AgentEvent> {
+        let Some(sent) = self.sent_now.as_mut() else {
+            return Vec::new();
+        };
+        if line.get("command_uuid").and_then(Value::as_str) != Some(sent.uuid.as_str()) {
+            return Vec::new();
+        }
+        match line.get("state").and_then(Value::as_str) {
+            Some("started") => {
+                let id = std::mem::take(&mut sent.uuid);
+                self.sent_now = None;
+                vec![AgentEvent::TurnAnchor { id }]
+            }
+            Some(state @ ("refused" | "discarded" | "cancelled")) => {
+                let why = format!("claude did not run the prompt sent at once ({state})");
+                if sent.stopped {
+                    self.sent_now = None;
+                    SentNow::failed(why)
+                } else {
+                    sent.failed = Some(why);
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The running turn ended: what follows of the prompt sent at once.
+    /// Without `command_lifecycle` the next turn is the prompt's, and so
+    /// is a turn that ends before the CLI said it started on the prompt
+    /// (the turn it was to stop had ended by itself).
+    fn turn_ended(&mut self) -> Vec<AgentEvent> {
+        let Some(sent) = self.sent_now.as_mut() else {
+            return Vec::new();
+        };
+        if let Some(why) = sent.failed.take() {
+            self.sent_now = None;
+            return SentNow::failed(why);
+        }
+        if sent.lifecycle && !sent.stopped {
+            sent.stopped = true;
+            return Vec::new();
+        }
+        let id = std::mem::take(&mut sent.uuid);
+        self.sent_now = None;
+        vec![AgentEvent::TurnAnchor { id }]
     }
 
     /// What the session said that a process started again for it needs.
@@ -518,7 +673,31 @@ impl StreamProtocol for Claude {
             SessionCommand::Compact { instructions } => Encoded::Write(user_message(
                 format!("/compact {}", instructions.unwrap_or_default()).trim_end(),
             )),
-            SessionCommand::Interrupt => Encoded::Write(control_request("interrupt", json!({})).1),
+            SessionCommand::SendNow { text, attachments } => {
+                self.interrupting = true;
+                self.send_now(&text, &attachments, io).await;
+                Encoded::Done
+            }
+            // A prompt sent at once that has not gone into a turn yet is
+            // taken back with it (the user's Esc right after it), where
+            // the CLI can (`interrupt_cancel_queued_v1`; it then answers
+            // `cancelled` with the uuid). Otherwise it runs after the
+            // interrupt, as anything queued does, and is still told
+            // (`take_back_sent_now`: the TUI keeps it).
+            SessionCommand::Interrupt => {
+                self.interrupting = true;
+                let take_back = self.parser.advertises("interrupt_cancel_queued_v1")
+                    && self
+                        .sent_now
+                        .take_if(|s| !s.stopped && s.failed.is_none())
+                        .is_some();
+                let extra = if take_back {
+                    json!({"cancel_queued": true})
+                } else {
+                    json!({})
+                };
+                Encoded::Write(control_request("interrupt", extra).1)
+            }
             // Claude then tells of the stop in a turn of its own.
             SessionCommand::StopSubagent { id } => {
                 match self.parser.task_of(&id).map(str::to_string) {
@@ -610,8 +789,11 @@ impl StreamProtocol for Claude {
         // The answer to one of our `remote_control` requests, which the
         // parser would take for a generic one.
         let mut remote_answer = None;
+        let mut init = false;
         // Driver-level bookkeeping before the pure parser sees it.
         if let Ok(v) = serde_json::from_str::<Value>(line) {
+            init = v.get("type").and_then(Value::as_str) == Some("system")
+                && v.get("subtype").and_then(Value::as_str) == Some("init");
             match v.get("type").and_then(Value::as_str) {
                 Some("control_response") => {
                     let rid = v.pointer("/response/request_id").and_then(Value::as_str);
@@ -640,6 +822,11 @@ impl StreamProtocol for Claude {
                         self.pending.remove(rid);
                     }
                 }
+                Some("command_lifecycle") => {
+                    for ev in self.lifecycle(&v) {
+                        io.forward(ev).await?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -647,7 +834,7 @@ impl StreamProtocol for Claude {
             Some(ev) => vec![ev],
             None => self.parser.feed(line),
         };
-        for ev in evs {
+        for mut ev in evs {
             if let AgentEvent::PermissionRequest(req) = &ev {
                 let (input, kind) = match &req.kind {
                     PermissionKind::ToolUse { input, .. } => (input.clone(), PendingKind::Tool),
@@ -668,7 +855,33 @@ impl StreamProtocol for Claude {
                     .insert(req.id.clone(), PendingPermission { input, kind });
             }
             self.keep(&ev);
+            let ended = matches!(ev, AgentEvent::TurnCompleted { .. });
+            if let AgentEvent::TurnCompleted { stop_reason } = &mut ev
+                && std::mem::take(&mut self.interrupting)
+                && matches!(stop_reason, StopReason::Error(e) if e.starts_with(STOPPED))
+            {
+                // What Claude makes of the interrupt it was sent (it ends
+                // the turn `error_during_execution`, `aborted_tools` or
+                // `aborted_streaming`), told as one.
+                *stop_reason = StopReason::Interrupted;
+            }
             io.forward(ev).await?;
+            if ended {
+                for ev in self.turn_ended() {
+                    io.forward(ev).await?;
+                }
+            }
+        }
+        // A CLI whose interrupt does not take `cancel_queued` cannot be
+        // made to drop a prompt sent at once: said once, at its first
+        // `init`.
+        if init && !self.told_take_back && !self.parser.advertises("interrupt_cancel_queued_v1") {
+            self.told_take_back = true;
+            io.forward(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                take_back_sent_now: Some(false),
+                ..Default::default()
+            }))
+            .await?;
         }
         Ok(())
     }
@@ -689,6 +902,9 @@ impl StreamProtocol for Claude {
         self.pending.clear();
         self.remote_requests.clear();
         self.policies_sent.clear();
+        self.sent_now = None;
+        self.interrupting = false;
+        self.told_take_back = false;
         io.emit(AgentEvent::Restarted).await;
         self.start(io).await;
         if let Some(name) = self.remote.clone() {

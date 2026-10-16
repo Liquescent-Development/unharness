@@ -6640,3 +6640,595 @@ async fn acp_vibe_turn_without_an_echo_has_an_empty_anchor() {
     );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
+
+// ---- Sending a prompt at once (`/now`, #333) ----
+
+/// The events that come within `within`, none of which may match `not`.
+async fn none_within(
+    handle: &mut SessionHandle,
+    within: Duration,
+    not: impl Fn(&AgentEvent) -> bool,
+) -> Vec<AgentEvent> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + within;
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, handle.events.recv()).await {
+        assert!(!not(&ev), "{} came too early", ev.summary());
+        seen.push(ev);
+    }
+    seen
+}
+
+/// Events until (and with) the `n`th `TurnCompleted`, permission requests
+/// allowed.
+async fn until_turn_ends(handle: &mut SessionHandle, n: usize) -> Vec<AgentEvent> {
+    let mut events = Vec::new();
+    let mut ended = 0;
+    while ended < n {
+        let ev = next_event(handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+        }
+        ended += matches!(ev, AgentEvent::TurnCompleted { .. }) as usize;
+        events.push(ev);
+    }
+    events
+}
+
+/// `fixture` with each `(from, to)` replaced, in `fake`'s directory.
+fn rewritten(fake: &Fake, fixture: &str, name: &str, edits: &[(&str, &str)]) -> PathBuf {
+    let mut text = std::fs::read_to_string(repo().join(fixture)).unwrap();
+    for (from, to) in edits {
+        assert!(text.contains(from), "{from} not in {fixture}");
+        text = text.replace(from, to);
+    }
+    let path = fake._tmp.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+/// Claude in its tool call (allowed), then sent "now" at once; the events
+/// from then until the CLI has said what came of it.
+async fn claude_sent_now(fake: &Fake, fixture: &Path, then_interrupt: bool) -> Vec<AgentEvent> {
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle
+        .send(SessionCommand::SendNow {
+            text: "Stop. Reply with exactly: now-ok".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+    if then_interrupt {
+        handle.send(SessionCommand::Interrupt).await.unwrap();
+        let mut events = until_turn_ends(&mut handle, 1).await;
+        events.extend(none_within(&mut handle, Duration::from_millis(500), |_| false).await);
+        return events;
+    }
+    until_turn_ends(&mut handle, 2).await
+}
+
+/// The anchor told after the first turn's end (an interrupted one) and
+/// before the second's text, and the second turn's end.
+fn anchored_after_the_stop(events: &[AgentEvent]) -> String {
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    // Claude's `error_during_execution`, told as the interrupt it was.
+    assert_eq!(
+        events[stop],
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        }
+    );
+    let rest = &events[stop + 1..];
+    let anchor = rest
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnAnchor { .. }))
+        .expect("no anchor for the prompt sent at once");
+    let text = rest
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("now-ok")))
+        .unwrap();
+    assert!(anchor < text);
+    assert!(matches!(
+        rest.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    match &rest[anchor] {
+        AgentEvent::TurnAnchor { id } => id.clone(),
+        _ => unreachable!(),
+    }
+}
+
+/// On a CLI that advertises `interrupt_send_now_v1` (2.1.301): the message
+/// with a uuid, then `interrupt` with `send_now` naming it. The anchor is
+/// told once the CLI says it started on it, after the stopped turn's end.
+#[tokio::test]
+async fn claude_sends_now_with_the_message_named_in_the_interrupt() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/send_now.jsonl");
+    let events = claude_sent_now(&fake, &fixture, false).await;
+    let anchor = anchored_after_the_stop(&events);
+    let sent = fake.sent_lines();
+    let message = sent
+        .iter()
+        .position(|v| {
+            v["type"] == "user" && v["message"]["content"] == "Stop. Reply with exactly: now-ok"
+        })
+        .unwrap();
+    assert_eq!(sent[message]["uuid"], anchor.as_str());
+    assert!(sent[message].get("priority").is_none());
+    let interrupt = &sent[message + 1];
+    assert_eq!(interrupt["request"]["subtype"], "interrupt");
+    assert_eq!(interrupt["request"]["send_now"], true);
+    assert_eq!(interrupt["request"]["message_uuid"], anchor.as_str());
+}
+
+/// On a CLI that does not advertise it: a plain interrupt, then the
+/// message, which is the next turn. Without `command_lifecycle` either,
+/// the anchor is told right after the stopped turn's end.
+#[tokio::test]
+async fn claude_sends_now_as_an_interrupt_and_the_message_where_it_must() {
+    if !python_available() {
+        return;
+    }
+    for (name, edits) in [
+        (
+            "plain.jsonl",
+            &[("\"interrupt_send_now_v1\"", "\"x_send_now\"")][..],
+        ),
+        (
+            "plain_no_lifecycle.jsonl",
+            &[
+                ("\"interrupt_send_now_v1\"", "\"x_send_now\""),
+                ("\"msg_lifecycle_v1\"", "\"x_lifecycle\""),
+            ][..],
+        ),
+    ] {
+        let fake = Fake::new();
+        let fixture = rewritten(
+            &fake,
+            "src/harness/claude/fixtures/send_now_plain.jsonl",
+            name,
+            edits,
+        );
+        let events = claude_sent_now(&fake, &fixture, false).await;
+        let anchor = anchored_after_the_stop(&events);
+        let sent = fake.sent_lines();
+        let message = sent
+            .iter()
+            .position(|v| v["type"] == "user" && v["uuid"] == anchor.as_str())
+            .unwrap_or_else(|| panic!("{name}: {sent:?}"));
+        let interrupt = &sent[message - 1];
+        assert_eq!(interrupt["request"]["subtype"], "interrupt", "{name}");
+        assert!(interrupt["request"].get("send_now").is_none(), "{name}");
+    }
+}
+
+/// Esc right after it: `interrupt` with `cancel_queued` takes the message
+/// back, and nothing is anchored for it.
+#[tokio::test]
+async fn claude_takes_back_a_prompt_sent_now_on_an_interrupt() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/send_now_cancelled.jsonl");
+    let events = claude_sent_now(&fake, &fixture, true).await;
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(
+        !events[stop..]
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnAnchor { .. } | AgentEvent::TurnStarted)),
+        "{:?}",
+        events[stop..]
+            .iter()
+            .map(|e| e.summary())
+            .collect::<Vec<_>>()
+    );
+    let sent = fake.sent_lines();
+    let last = sent
+        .iter()
+        .rev()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    assert_eq!(last["request"]["subtype"], "interrupt");
+    assert_eq!(last["request"]["cancel_queued"], true);
+}
+
+/// Codex app-server tells the interrupted turn's end on its
+/// `turn/completed`, not on the interrupt's answer: a `turn/start` sent
+/// before would steer the running turn. The next prompt then goes
+/// (`fixtures/app_server_interrupt_then_prompt.jsonl`, 0.162.1).
+#[tokio::test]
+async fn codex_app_server_ends_an_interrupted_turn_on_its_turn_completed() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let completed = "{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"01a14203-ddbf-79d1-ab7e-11810aa59f59\",\"turn\":{\"id\":\"01a14203-dde7";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/codex/fixtures/app_server_interrupt_then_prompt.jsonl",
+        "interrupt.jsonl",
+        &[(completed, &format!("# gate\n{completed}"))],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let harness = unharness::harness::codex::CodexHarness::new(
+        unharness::harness::codex::CodexTransport::AppServer,
+    );
+    let mut handle = harness.start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    none_within(&mut handle, Duration::from_millis(700), |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["method"] == "turn/interrupt")
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("now")))
+    );
+    let sent = fake.sent_lines();
+    let interrupt = sent
+        .iter()
+        .position(|v| v["method"] == "turn/interrupt")
+        .unwrap();
+    let starts: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["method"] == "turn/start")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert!(starts[1] > interrupt);
+}
+
+/// pi ends an aborted turn (`agent_settled`) before it answers `abort`,
+/// which it does once it is idle: the next prompt waits for that answer.
+#[tokio::test]
+async fn pi_sends_a_prompt_after_an_abort_only_once_it_is_answered() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer = "{\"id\":\"req-4\",\"type\":\"response\",\"command\":\"abort\",\"success\":true}";
+    let next = ">> {\"id\": \"req-7\", \"type\": \"prompt\", \"message\": \"now\"}\n\
+        {\"id\":\"req-7\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}\n\
+        {\"type\":\"agent_settled\"}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/pi/fixtures/gate_abort.jsonl",
+        "abort.jsonl",
+        &[(answer, &format!("# gate\n{answer}")), ("# exit=0\n", next)],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    loop {
+        if let AgentEvent::TurnCompleted { stop_reason } = next_event(&mut handle).await {
+            assert_eq!(stop_reason, StopReason::Interrupted);
+            break;
+        }
+    }
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    none_within(&mut handle, Duration::from_millis(500), |_| false).await;
+    let prompts = |sent: &[Value]| {
+        sent.iter()
+            .filter(|v| v["type"] == "prompt")
+            .map(|v| v["message"].clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        prompts(&fake.sent_lines()).len(),
+        1,
+        "sent before abort's answer"
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    assert_eq!(prompts(&fake.sent_lines())[1], "now");
+}
+
+/// An ACP agent's cancelled turn ends with its prompt's answer
+/// (`stopReason: cancelled`), not with the `session/cancel`: vibe-acp
+/// refuses a `session/prompt` while a turn runs. The next one goes after.
+#[tokio::test]
+async fn acp_ends_a_cancelled_turn_on_its_prompt_answer() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"cancelled\"";
+    let next = ">> {\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"session/prompt\", \"params\": {}}\n\
+        {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":8402,\"inputTokens\":8389,\"outputTokens\":13}}}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/acp/fixtures/vibe_acp_interrupt.jsonl",
+        "cancel.jsonl",
+        &[
+            (answer, &format!("# gate\n{answer}")),
+            ("# exit=0 status=done\n", next),
+        ],
+    );
+    let gate = fake._tmp.path().join("gate");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.env
+        .push(("UNHARNESS_FAKE_GATE".into(), gate.display().to_string()));
+    let mut handle = vibe_acp().start_session(cfg).unwrap();
+    handle
+        .send(SessionCommand::turn("create a.txt"))
+        .await
+        .unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    none_within(&mut handle, Duration::from_millis(700), |e| {
+        matches!(e, AgentEvent::TurnCompleted { .. })
+    })
+    .await;
+    assert!(
+        fake.sent_lines()
+            .iter()
+            .any(|v| v["method"] == "session/cancel")
+    );
+    std::fs::write(&gate, "").unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    let sent = fake.sent_lines();
+    let cancel = sent
+        .iter()
+        .position(|v| v["method"] == "session/cancel")
+        .unwrap();
+    let prompts: Vec<usize> = sent
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v["method"] == "session/prompt")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1] > cancel);
+}
+
+/// pi that never answers `abort` (a dialog it waits in, #89) does not hold
+/// the next prompt for good: it goes after `ABORT_WAIT`, said to.
+#[tokio::test]
+async fn pi_sends_a_prompt_held_for_an_abort_pi_never_answers() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer =
+        "{\"id\":\"req-4\",\"type\":\"response\",\"command\":\"abort\",\"success\":true}\n";
+    let next = ">> {\"id\": \"req-7\", \"type\": \"prompt\", \"message\": \"now\"}\n\
+        {\"id\":\"req-7\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}\n\
+        {\"type\":\"agent_settled\"}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/pi/fixtures/gate_abort.jsonl",
+        "unanswered.jsonl",
+        &[(answer, ""), ("# exit=0\n", next)],
+    );
+    let mut handle = pi_harness(&fake)
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    while !matches!(
+        next_event(&mut handle).await,
+        AgentEvent::TurnCompleted { .. }
+    ) {}
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Notice(n) if n.starts_with("pi did not answer the interrupt")
+    )));
+    let prompts: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["type"] == "prompt")
+        .collect();
+    assert_eq!(prompts.len(), 2);
+}
+
+/// A plain Esc on Claude: the turn it stops ends `error_during_execution`,
+/// which the driver tells as the interrupt it was.
+#[tokio::test]
+async fn claude_tells_the_turn_an_interrupt_stopped_as_interrupted() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    // The recording up to the stopped turn's end, without the message
+    // that was sent with its interrupt.
+    let text =
+        std::fs::read_to_string(repo().join("src/harness/claude/fixtures/send_now_plain.jsonl"))
+            .unwrap();
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.starts_with(">> {\"type\": \"user\"") && line.contains("now-ok") {
+            continue;
+        }
+        lines.push(line);
+        if line.contains("\"subtype\":\"error_during_execution\"") {
+            break;
+        }
+    }
+    let fixture = fake._tmp.path().join("esc.jsonl");
+    std::fs::write(&fixture, lines.join("\n") + "\n").unwrap();
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle.send(SessionCommand::Interrupt).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted
+        })
+    ));
+}
+
+/// On a CLI whose interrupt does not take `cancel_queued`, Esc cannot take
+/// the prompt back: the driver says so at `init`, sends a plain interrupt,
+/// and still tells what becomes of the prompt.
+#[tokio::test]
+async fn claude_keeps_a_prompt_sent_now_it_cannot_take_back() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = rewritten(
+        &fake,
+        "src/harness/claude/fixtures/send_now_cancelled.jsonl",
+        "no_cancel.jsonl",
+        &[("\"interrupt_cancel_queued_v1\"", "\"x_cancel_queued\"")],
+    );
+    let events = claude_sent_now(&fake, &fixture, true).await;
+    let sent = fake.sent_lines();
+    let last = sent
+        .iter()
+        .rev()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    assert_eq!(last["request"]["subtype"], "interrupt");
+    assert!(last["request"].get("cancel_queued").is_none());
+    // Told what becomes of it: here the CLI cancelled it, and its turn
+    // fails once the stopped one has ended.
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(matches!(
+        &events[stop + 1..],
+        [
+            AgentEvent::TurnAnchor { id },
+            AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Error(_)
+            },
+            ..
+        ] if id.is_empty()
+    ));
+}

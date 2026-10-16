@@ -122,6 +122,9 @@ impl Controller {
         self.conversation
             .transcript
             .push_error("session driver is gone");
+        if let Some(p) = self.sending_now.take() {
+            self.give_back(p, front);
+        }
         self.session_alive = false;
         self.choice_unanswered();
         self.forget_refusals(front);
@@ -263,6 +266,10 @@ impl Controller {
         self.idle_start_paused = false;
         self.drop_subagents();
         self.drop_prompts(front);
+        // A prompt sent at once goes with the session it was for.
+        if let Some(p) = self.sending_now.take() {
+            self.give_back(p, front);
+        }
         // The next session reports where it runs.
         self.process_ended(self.active);
         self.forget_refusals(front);

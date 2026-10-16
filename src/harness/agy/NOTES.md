@@ -51,6 +51,15 @@ strings), a model other than the default family's, MCP tool
 steps, what agy's own interface writes to `settings.json` when a
 workspace is trusted there (`trustedWorkspaces`).
 
+## Sending a prompt now
+
+agy has no interrupt (1.3.5 ignores `interrupt`, `steer` and `cancel` on
+stdin, the issue's research): `/now` kills the process as an interrupt
+does (`SendNow::AfterExit`), and once it has exited the prompt starts it
+again on the conversation (`--conversation <id>`). Esc between the
+turn's end and the exit takes the prompt back as it does during the
+turn. Checked by controller tests only, not live.
+
 ## Subagents
 
 Subagents (agy 1.3.1, `fixtures/subagent_*.jsonl`, `brain.rs`): an

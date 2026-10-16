@@ -165,6 +165,7 @@ impl StreamProtocol for Agy {
             SessionCommand::StopSubagent { .. }
             | SessionCommand::RemoteControl { .. }
             | SessionCommand::Steer { .. }
+            | SessionCommand::SendNow { .. }
             | SessionCommand::Compact { .. }
             | SessionCommand::Rewind { .. }
             | SessionCommand::RespondPermission { .. } => Encoded::Unsupported,

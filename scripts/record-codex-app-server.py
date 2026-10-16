@@ -44,6 +44,9 @@ def main() -> int:
     ap.add_argument("--idle-timeout", type=float, default=180.0)
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--interrupt-after", type=float, metavar="SECONDS",
+                    help="interrupt the main turn this long after its first command starts "
+                         "(the next prompt then follows its turn/completed, as unharness's /now sends it)")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
     ap.add_argument("--fork-thread", help="branch this existing thread (thread/fork) instead of starting one")
     ap.add_argument("--rewind", action="store_true",
@@ -138,8 +141,14 @@ def main() -> int:
     # Every prompt has been answered; waiting for sub-agents to finish.
     finishing = False
 
+    # When the main turn is interrupted (--interrupt-after).
+    interrupt_at = None
+
     last = time.time()
     while True:
+        if interrupt_at is not None and time.time() >= interrupt_at:
+            interrupt_at = None
+            request("turn/interrupt", {"threadId": thread_id, "turnId": turn_id})
         try:
             line = lines.get(timeout=0.2)
         except queue.Empty:
@@ -228,6 +237,10 @@ def main() -> int:
             turn_id = (params.get("turn") or {}).get("id")
             if compact_id is None:
                 turn_ids.append(turn_id)
+        if (args.interrupt_after is not None and interrupt_at is None and main_active
+                and method == "item/started" and len(turn_ids) == 1
+                and (params.get("item") or {}).get("type") == "commandExecution"):
+            interrupt_at = time.time() + args.interrupt_after
         if (args.steer and not steered and method == "item/started"
                 and (params.get("item") or {}).get("type") == "commandExecution"):
             steered = True

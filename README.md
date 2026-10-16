@@ -125,6 +125,7 @@ caveat in the TUI instead of failing silently:
 | Subagents: task description and progress in words | yes | no (a name and its tool calls) | no | no | no (Antigravity: a role) |
 | Subagents: stop one | yes | yes | no | no | no |
 | Steer a running turn | yes | yes | yes | no (queued) | no (queued) |
+| Send a prompt now (`/now`) | yes, with the interrupt | yes | yes | yes | yes (the session resumed) |
 | Compact on request | yes | yes | yes | no | no |
 | Context-window gauge | yes | yes | yes | yes | no |
 | Rate-limit windows | yes | yes | no | no | no |
@@ -167,6 +168,7 @@ Read more in [Permissions](docs/permissions.md) and [Sandbox](docs/sandbox.md).
 | Key | Action |
 |---|---|
 | `Enter` / `Alt+Enter` | Send (queued during a turn) / steer the running turn |
+| `Ctrl+Enter`, `/now` | Interrupt the running turn and send the prompt next |
 | `Esc` | Interrupt the running turn |
 | `@` | Reference a file, with fuzzy search |
 | `Ctrl+H` · `Ctrl+M` · `Ctrl+E` · `Ctrl+P` | Harness · model · effort · policy |

@@ -316,6 +316,10 @@ pub struct CapsUpdate {
     /// The agent asks the user questions (`Capabilities::ask_user_question`):
     /// an ACP agent is seen to once it sends a form elicitation.
     pub ask_user_question: Option<bool>,
+    /// Whether a prompt sent at once that the CLI already has can be taken
+    /// back (`Capabilities::take_back_sent_now`): Claude says at
+    /// `system/init` whether its interrupt takes `cancel_queued`.
+    pub take_back_sent_now: Option<bool>,
     /// What the live session cannot do although its harness declares it
     /// (Codex under `transport = "auto"` that came to `exec`): taken out of
     /// what is offered, and refused by the driver if asked all the same.
@@ -417,6 +421,9 @@ impl CapsUpdate {
         }
         if newer.ask_user_question.is_some() {
             self.ask_user_question = newer.ask_user_question;
+        }
+        if newer.take_back_sent_now.is_some() {
+            self.take_back_sent_now = newer.take_back_sent_now;
         }
         if newer.lacks.is_some() {
             self.lacks = newer.lacks;
@@ -789,6 +796,9 @@ impl AgentEvent {
                 }
                 if let Some(q) = u.ask_user_question {
                     parts.push(format!("ask_user_question={q}"));
+                }
+                if let Some(t) = u.take_back_sent_now {
+                    parts.push(format!("take_back_sent_now={t}"));
                 }
                 if let Some(l) = &u.lacks {
                     let l: Vec<&str> = l.iter().map(|a| a.as_str()).collect();

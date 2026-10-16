@@ -160,6 +160,13 @@ pub struct Capabilities {
     pub subagents: SubagentSupport,
     /// A message can be injected into the running turn.
     pub steer: bool,
+    /// How a prompt takes the running turn's place at once
+    /// (`Controller::send_now`), when `interrupt` is declared.
+    pub send_now: SendNow,
+    /// With `SendNow::Native`, the CLI that has a prompt sent at once can
+    /// be made to drop it while the turn it stops has not ended (Esc then
+    /// gives it back); otherwise it runs it all the same.
+    pub take_back_sent_now: bool,
     /// Context can be compacted on request.
     pub compaction: bool,
     /// Context-window usage may be reported (`Context`). Without it the
@@ -195,6 +202,25 @@ pub struct Capabilities {
     /// Remote Control: claude.ai/code and the Claude app), and taken off it
     /// (`SessionCommand::RemoteControl`).
     pub remote_control: bool,
+}
+
+/// How a prompt sent at once takes the running turn's place
+/// (`Controller::send_now`, `/now`): what the controller waits for before
+/// that prompt's turn begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SendNow {
+    /// The turn is interrupted, and the prompt is sent as the next turn
+    /// once the interrupted one's end is told (Codex, pi, ACP agents):
+    /// each driver sends it only when its CLI can take it.
+    #[default]
+    AfterTurn,
+    /// The interrupt ends the CLI's process (agy): the prompt starts it
+    /// again, resuming the session, once it has exited.
+    AfterExit,
+    /// The CLI takes the prompt with the interrupt and starts its turn by
+    /// itself, or takes it into the running turn
+    /// (`SessionCommand::SendNow`, Claude Code).
+    Native,
 }
 
 /// What a harness declares and a live session of it can lack, of what no
@@ -370,6 +396,9 @@ impl Capabilities {
         if let Some(q) = update.ask_user_question {
             self.ask_user_question = q;
         }
+        if let Some(t) = update.take_back_sent_now {
+            self.take_back_sent_now = t;
+        }
         for refused in [&update.refused_policies, &update.lacks_policies]
             .into_iter()
             .flatten()
@@ -435,6 +464,7 @@ impl Capabilities {
             plan_mode: lost(self.plan_mode, session.plan_mode),
             slash_commands: lost(self.slash_commands, session.slash_commands),
             ask_user_question: lost(self.ask_user_question, session.ask_user_question),
+            take_back_sent_now: lost(self.take_back_sent_now, session.take_back_sent_now),
             lacks_policies: Some(lacked),
             ..Default::default()
         }

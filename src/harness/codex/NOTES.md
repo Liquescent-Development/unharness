@@ -28,6 +28,22 @@ original. All of this was checked against `scripts/fake-harness.py`
 alone, which fails `app-server --help`; no Codex without `app-server`
 was run (#288).
 
+## Interrupting and sending the next prompt
+
+`turn/interrupt` during a command (0.162.1,
+`fixtures/app_server_interrupt_then_prompt.jsonl`,
+`record-codex-app-server.py --interrupt-after 3`): answered `{}`, then
+`turn/completed` with `status: interrupted`, then the next prompt's
+`turn/start` ran as a turn of its own. The driver tells the turn's end on
+`turn/completed` only (a `turn/start` while the turn is active steers
+it), so `/now` sends the prompt then (e2e
+`codex_app_server_ends_an_interrupted_turn_on_its_turn_completed`). A
+`turn/steer` sent while the command ran and interrupted 4 s later
+(twice, recorded, not committed) was each time taken up first (a
+`userMessage` item for it before the interrupt), so a steer dropped by
+an interrupt was not reproduced. `exec`'s interrupt kills the turn's
+process; the next turn resumes the thread.
+
 ## Token usage
 
 Codex counts cached input in its input: app-server's `inputTokens`

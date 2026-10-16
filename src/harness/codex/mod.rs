@@ -26,8 +26,8 @@ use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 use crate::core::{
     Capabilities, Choices, HarnessId, McpChannel, McpServer, McpSupport, McpTransport, ModelRef,
-    PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle,
-    SubagentSupport,
+    PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig,
+    SessionHandle, SubagentSupport,
 };
 
 /// What Codex's own sandbox holds to. The permission policy has no say in
@@ -324,6 +324,11 @@ impl Harness for CodexHarness {
                 report_turn: false,
             },
             steer: app_server,
+            // `turn/start` once the interrupted turn is `turn/completed`
+            // (one sent before steers the running turn); `exec` resumes
+            // the thread in a new process.
+            send_now: SendNow::AfterTurn,
+            take_back_sent_now: false,
             compaction: app_server,
             // `exec --json` reports a turn's tokens, not the window.
             context_usage: app_server,

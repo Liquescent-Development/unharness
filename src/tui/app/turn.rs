@@ -1,5 +1,5 @@
-//! Turns as the keys reach them: sending a prompt, queueing and steering,
-//! compacting, interrupting. What they do is the controller's
+//! Turns as the keys reach them: sending a prompt, queueing, steering and
+//! sending one at once, compacting, interrupting. What they do is the controller's
 //! (`core::controller`, `turn.rs`).
 
 use super::App;
@@ -35,6 +35,13 @@ impl App {
     /// Inject a message into the running turn, where the harness can; queue it otherwise.
     pub fn steer(&mut self, text: String) {
         self.with(|c, screen| c.steer(text, screen));
+    }
+
+    /// Send the prompt at once in place of the running turn (Ctrl+Enter,
+    /// `/now`); with `text` empty, the oldest queued prompt. Idle, what
+    /// Enter does.
+    pub fn send_now(&mut self, text: String) {
+        self.with(|c, screen| c.send_now(text, screen));
     }
 
     /// Ask the harness to summarise its context now.

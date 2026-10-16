@@ -682,7 +682,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('v')) => app.request_clipboard(),
         (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
-            if app.controller.is_generating {
+            if app.controller.is_generating || app.controller.sending_now() {
                 app.interrupt();
             } else if app.controller.shell.is_some() {
                 app.stop_shell();
@@ -741,7 +741,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             // An open list is what Esc closes, also while a turn runs.
             if !app.suggestions.is_empty() {
                 app.close_suggestions();
-            } else if app.controller.is_generating {
+            } else if app.controller.is_generating || app.controller.sending_now() {
                 app.interrupt();
             } else if app.controller.shell.is_some() {
                 app.stop_shell();
@@ -750,6 +750,13 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             }
         }
         (_, KeyCode::Enter) => {
+            // Ctrl+Enter, where the terminal tells it from Enter (the kitty
+            // keyboard protocol; elsewhere it arrives as Enter, or as
+            // Ctrl+J): send now, an empty prompt box the queue's head.
+            if ctrl && app.input.trim().is_empty() {
+                app.send_now(String::new());
+                return;
+            }
             if app.input.trim().is_empty() {
                 // Idle with prompts held back (after an interrupt or error,
                 // or for want of a policy, which is then asked for again).
@@ -778,6 +785,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             }
             match shell::classify(&text) {
                 shell::Typed::Shell(command) => app.run_shell(command),
+                shell::Typed::Prompt(text) if ctrl => app.send_now(text.to_string()),
                 shell::Typed::Prompt(text) if alt => app.steer(text.to_string()),
                 // Sent now when idle, after the running turn otherwise.
                 shell::Typed::Prompt(text) => app.queue_prompt(text.to_string()),
@@ -1036,6 +1044,61 @@ mod tests {
         assert!(app.suggestions.is_empty());
         handle_key(&mut app, NONE, KeyCode::Up);
         assert_eq!(app.input, "remember me");
+    }
+
+    /// Ctrl+Enter during a turn sends the prompt at once: the turn is
+    /// interrupted and the prompt follows it. From an empty prompt box it
+    /// is the queue's head; `/now` does the same; Esc takes it back.
+    #[test]
+    fn ctrl_enter_and_now_send_the_prompt_at_once() {
+        use crate::core::{AgentEvent, SessionCommand, StopReason};
+        let mut app = test_app(HarnessId::CODEX);
+        type_text(&mut app, "first");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        app.controller.session_alive = true;
+        app.take_actions();
+
+        type_text(&mut app, "now");
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Enter);
+        assert!(app.input.is_empty());
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Interrupt)]
+        );
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        assert_eq!(app.take_actions(), vec![Action::turn("now")]);
+
+        // An empty prompt box: the head of the queue.
+        type_text(&mut app, "queued");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Enter);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Interrupt)]
+        );
+        assert!(app.controller.queued.is_empty());
+        // Esc takes it back, to the head of the queue.
+        handle_key(&mut app, NONE, KeyCode::Esc);
+        assert_eq!(app.controller.queued.len(), 1);
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Interrupted,
+        });
+        app.take_actions();
+
+        // `/now <text>` idle is Enter.
+        type_text(&mut app, "/now later");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(app.take_actions(), vec![Action::turn("later")]);
+        // And `/now` alone during a turn sends the queue's head at once.
+        type_text(&mut app, "/now");
+        handle_key(&mut app, NONE, KeyCode::Enter);
+        assert_eq!(
+            app.take_actions(),
+            vec![Action::Command(SessionCommand::Interrupt)]
+        );
+        assert!(app.controller.queued.is_empty());
     }
 
     #[test]

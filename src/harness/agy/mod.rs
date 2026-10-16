@@ -21,7 +21,8 @@ use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy,
-    PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle,
+    SubagentSupport,
 };
 
 #[derive(Default)]
@@ -136,6 +137,10 @@ impl Harness for AgyHarness {
                 report_turn: false,
             },
             steer: false,
+            // Its interrupt ends its process; the next turn resumes the
+            // conversation in a new one.
+            send_now: SendNow::AfterExit,
+            take_back_sent_now: false,
             compaction: false,
             // Its stream has token counts but no window (NOTES.md).
             context_usage: false,
