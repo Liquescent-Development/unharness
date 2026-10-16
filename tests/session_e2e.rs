@@ -7022,7 +7022,7 @@ async fn acp_ends_a_cancelled_turn_on_its_prompt_answer() {
     let fake = Fake::new();
     let answer = "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"stopReason\":\"cancelled\"";
     let next = ">> {\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"session/prompt\", \"params\": {}}\n\
-        {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\"}}\n";
+        {\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"stopReason\":\"end_turn\",\"usage\":{\"totalTokens\":8402,\"inputTokens\":8389,\"outputTokens\":13}}}\n";
     let fixture = rewritten(
         &fake,
         "src/harness/acp/fixtures/vibe_acp_interrupt.jsonl",
