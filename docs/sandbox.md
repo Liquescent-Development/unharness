@@ -133,6 +133,32 @@ directory.
   Sessions still work, but "always allow" rules, trust and MCP approvals
   given in a confined session are forgotten after it.
 
+**Claude Code's login on macOS.** Claude Code keeps its login in the
+Keychain, and when it refreshes its token the old refresh token stops
+working. If the new one cannot be saved there, the next `claude` that
+signs in from the Keychain presents the old one, and the server signs
+out every copy ("OAuth token revoked"). So on macOS a confined Claude
+Code may write these files in `~/Library/Keychains`, and nothing else
+there:
+
+- `login.keychain-db`, the login keychain;
+- `login.keychain-db.*`, the copy macOS writes and renames over it;
+- `.fl<hex>`, its empty lock files.
+
+`metadata.keychain-db` and the `<UUID>` directory beside them stay
+unwritable. The cost: an agent in a confined Claude Code session on macOS
+can rewrite or remove your login keychain's files. The items in it stay
+encrypted, but a removed or damaged file loses them. Other harnesses,
+and Claude Code on Linux (which keeps its login in
+`~/.claude/.credentials.json`), get nothing here.
+
+The grant is for `login.keychain-db` whichever Keychain entry holds the
+login. If your default keychain is another file (`security
+default-keychain` names it), the grant does not cover it: add
+`sandbox_writable = ["~/Library/Keychains"]` under `[harnesses.claude]`,
+which opens the whole directory, since macOS writes a copy beside the
+file and renames it over it, so the file alone is not enough.
+
 **Self-updates.** A confined Claude Code cannot update itself, because its
 installed binaries are not writable.
 

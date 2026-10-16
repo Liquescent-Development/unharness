@@ -28,6 +28,11 @@ home directory, both denied: it carries on without updating the file.
 With `CLAUDE_CONFIG_DIR` set, the file, its lock and its temp files are
 in that directory instead (checked: no denials, signed in from the
 copied file), which is what `relocate_config` uses.
+On macOS a confined Claude may write the login keychain's files by name
+(`~/Library/Keychains/login.keychain-db*` and `.fl<hex>`,
+`SandboxPaths::writable_files`, a Seatbelt regex anchored to the
+directory), so that a refreshed token is saved (#340); traced on a Mac,
+see `src/harness/claude/NOTES.md`. Landlock leaves such grants out.
 Landlock cannot protect a file in a directory where the CLI creates
 files, and every CLI does so beside its config (Codex's SQLite files in
 `~/.codex`, pi's lock files in `~/.pi/agent`, Claude's relocated config),
