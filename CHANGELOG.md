@@ -2,6 +2,25 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.11.0 - 2026-10-16
+
+### Added
+
+- Send a prompt now: `/now [text]`, or `Ctrl+Enter` where the terminal tells it from `Enter`, stops the running turn and sends the prompt as the next one; from an empty prompt box it sends the oldest queued prompt, and `Esc` while it waits takes it back. It works on every harness, and Claude Code is sent the prompt together with the interrupt. See [Sending a prompt now](https://github.com/Liquescent-Development/unharness/blob/main/docs/tui.md#sending-a-prompt-now).
+- While prompts are queued during a turn, a line under them says how to send the first one now (`Ctrl+Enter` where the terminal can send it, `/now` elsewhere).
+- `capabilities_changed` in `--print` and `--no-tui` can carry `take_back_sent_now`. See [Headless](https://github.com/Liquescent-Development/unharness/blob/main/docs/headless.md).
+
+### Changed
+
+- With no model chosen, the status line and the "Switched to" notice name the model the CLI says it runs, as `<provider>/<model> (default)`, or `<provider> (CLI default)` until it says; they used to show `anthropic/default`. An effort not chosen reads `CLI default`.
+- The model picker marks the model a harness's list calls its default (Codex).
+
+### Fixed
+
+- An interrupted Claude Code turn is shown as "Turn interrupted." instead of an error.
+- Choosing Claude's "Default (recommended)" model no longer shows it as `anthropic/default`.
+- A harness without effort levels (agy) shows no effort in the status line, the switch notice, the footer, the model picker or `unharness models`.
+
 ## 0.10.1 - 2026-10-15
 
 ### Changed
