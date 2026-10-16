@@ -452,6 +452,12 @@ impl Controller {
         self.sending_now.is_some()
     }
 
+    /// Whether [`Controller::send_now`] would stop the running turn for a
+    /// prompt now, rather than queue it.
+    pub fn can_send_now(&self) -> bool {
+        self.is_generating && self.sending_now.is_none() && self.cannot_send_now().is_none()
+    }
+
     /// Say that the queued prompts wait for the user.
     pub(super) fn say_held(&mut self) {
         if !self.queued.is_empty() {
