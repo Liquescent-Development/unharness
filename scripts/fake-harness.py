@@ -14,8 +14,9 @@ the `scripts/record-*.py` recorders:
   # ...      ignored
   {...}      written to stdout
 
-Every stdin line is appended to the file named by $UNHARNESS_FAKE_LOG so the
-test can assert on what the driver sent. All command-line arguments are
+Every stdin line is appended to the file named by $UNHARNESS_FAKE_LOG as it
+arrives, also while the replay waits at a `# gate`, so the test can assert on
+what the driver sent, and on what it sent too early. All command-line arguments are
 ignored (the driver passes vendor flags). The fixture path comes from
 $UNHARNESS_FAKE_FIXTURE. Set $UNHARNESS_FAKE_EXIT_CODE to control the exit
 status after the fixture is exhausted (default 0; a `# exit=N` line in the
@@ -44,8 +45,10 @@ for the sandbox tests: `write:<path>` and `read:<path>` entries separated by
 """
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 
@@ -97,13 +100,25 @@ def main() -> int:
         with open(path, "w") as f:
             f.write(f"{os.getpid()} {child.pid}\n")
 
+    # Read on a thread, and logged as it comes: a line sent while the
+    # replay is held at a gate is seen then.
+    stdin_lines = queue.Queue()
+
+    def pump_stdin():
+        for line in sys.stdin:
+            if log:
+                log.write(line if line.endswith("\n") else line + "\n")
+                log.flush()
+            stdin_lines.put(line)
+        stdin_lines.put(None)
+
+    threading.Thread(target=pump_stdin, daemon=True).start()
+
     def read_stdin_line():
-        line = sys.stdin.readline()
-        if not line:
-            return None
-        if log:
-            log.write(line if line.endswith("\n") else line + "\n")
-            log.flush()
+        line = stdin_lines.get()
+        if line is None:
+            # Seen again by whatever reads next.
+            stdin_lines.put(None)
         return line
 
     # Recorded request ids, and the ids the client sent in their place.
