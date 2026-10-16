@@ -141,8 +141,8 @@ out every copy ("OAuth token revoked"). So on macOS a confined Claude
 Code may write these files in `~/Library/Keychains`, and nothing else
 there:
 
-- `login.keychain-db`, the login keychain;
-- `login.keychain-db.*`, the copy macOS writes and renames over it;
+- `login.keychain-db*`: the login keychain, `login.keychain-db`, and
+  the copy macOS writes beside it and renames over it;
 - `.fl<hex>`, its empty lock files.
 
 `metadata.keychain-db` and the `<UUID>` directory beside them stay
@@ -154,10 +154,15 @@ and Claude Code on Linux (which keeps its login in
 
 The grant is for `login.keychain-db` whichever Keychain entry holds the
 login. If your default keychain is another file (`security
-default-keychain` names it), the grant does not cover it: add
-`sandbox_writable = ["~/Library/Keychains"]` under `[harnesses.claude]`,
-which opens the whole directory, since macOS writes a copy beside the
-file and renames it over it, so the file alone is not enough.
+default-keychain` names it, and `unharness doctor` warns), the grant
+does not cover it. Add the directory that holds it (usually
+`~/Library/Keychains`) to `sandbox_writable` under `[harnesses.claude]`,
+for example `sandbox_writable = ["~/Library/Keychains"]`. The file
+alone is not enough, since macOS writes a copy beside it and renames it
+over it. This makes the whole directory writable from a session: for
+`~/Library/Keychains` that includes `metadata.keychain-db` and the
+`<UUID>` directory, the data-protection keychain, which an agent could
+then also rewrite or remove.
 
 **Self-updates.** A confined Claude Code cannot update itself, because its
 installed binaries are not writable.
