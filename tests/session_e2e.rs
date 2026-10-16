@@ -7087,3 +7087,50 @@ async fn acp_ends_a_cancelled_turn_on_its_prompt_answer() {
     assert_eq!(prompts.len(), 2);
     assert!(prompts[1] > cancel);
 }
+
+/// pi that never answers `abort` (a dialog it waits in, #89) does not hold
+/// the next prompt for good: it goes after `ABORT_WAIT`, said to.
+#[tokio::test]
+async fn pi_sends_a_prompt_held_for_an_abort_pi_never_answers() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let answer =
+        "{\"id\":\"req-4\",\"type\":\"response\",\"command\":\"abort\",\"success\":true}\n";
+    let next = ">> {\"id\": \"req-7\", \"type\": \"prompt\", \"message\": \"now\"}\n\
+        {\"id\":\"req-7\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true,\"data\":{\"disposition\":\"started\"}}\n\
+        {\"type\":\"agent_settled\"}\n";
+    let fixture = rewritten(
+        &fake,
+        "src/harness/pi/fixtures/gate_abort.jsonl",
+        "unanswered.jsonl",
+        &[(answer, ""), ("# exit=0\n", next)],
+    );
+    let mut handle = pi_harness(&fake)
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("echo hi")).await.unwrap();
+    loop {
+        if let AgentEvent::PermissionRequest(_) = next_event(&mut handle).await {
+            handle.send(SessionCommand::Interrupt).await.unwrap();
+            break;
+        }
+    }
+    while !matches!(
+        next_event(&mut handle).await,
+        AgentEvent::TurnCompleted { .. }
+    ) {}
+    handle.send(SessionCommand::turn("now")).await.unwrap();
+    let events = until_turn_ends(&mut handle, 1).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AgentEvent::Notice(n) if n.starts_with("pi did not answer the interrupt")
+    )));
+    let prompts: Vec<Value> = fake
+        .sent_lines()
+        .into_iter()
+        .filter(|v| v["type"] == "prompt")
+        .collect();
+    assert_eq!(prompts.len(), 2);
+}

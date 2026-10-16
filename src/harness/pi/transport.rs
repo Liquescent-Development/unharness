@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Value, json};
 use tokio::process::Command;
+use tokio::time::Instant;
 
 use super::gate;
 use super::parse::PiParser;
@@ -82,6 +84,12 @@ fn take_gate_dialogs(pending: &mut HashMap<String, PendingKind>) -> Vec<String> 
 }
 
 /// Whether `line` is pi's response to `command`.
+/// Whether `line` is pi's event of type `kind`.
+fn is_event(line: &str, kind: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .is_ok_and(|v| v.get("type").and_then(Value::as_str) == Some(kind))
+}
+
 fn is_response_to(line: &str, command: &str) -> bool {
     serde_json::from_str::<Value>(line).is_ok_and(|v| {
         v.get("type").and_then(Value::as_str) == Some("response")
@@ -171,8 +179,17 @@ struct Pi {
     /// sent meanwhile (a prompt sent at once, which follows the turn's
     /// end) is held back until then, as pi is not idle before.
     aborts: usize,
+    /// A turn is held for an abort's answer until then, at the latest
+    /// ([`ABORT_WAIT`]).
+    abort_wait: Option<Instant>,
     held_turn: Option<String>,
 }
+
+/// How long a turn held for an abort's answer waits for it: pi answers
+/// once it is idle, right after the aborted turn's end, and one that never
+/// does (a dialog it waits in, #89, or an answer lost) would hold every
+/// later turn.
+const ABORT_WAIT: Duration = Duration::from_secs(2);
 
 impl Pi {
     fn new(session_id: String, resumed: bool, policy: PermissionPolicy) -> Self {
@@ -187,6 +204,7 @@ impl Pi {
             forking: false,
             baseline: resumed,
             aborts: 0,
+            abort_wait: None,
             held_turn: None,
         }
     }
@@ -200,6 +218,18 @@ impl Pi {
     /// abort's answer.
     fn holding(&self) -> bool {
         self.forking || self.baseline || self.aborts > 0
+    }
+
+    /// The held turn goes, unless something still holds it.
+    async fn release(&mut self, io: &mut Io<'_>) {
+        if self.aborts == 0 {
+            self.abort_wait = None;
+        }
+        if !self.holding()
+            && let Some(turn) = self.held_turn.take()
+        {
+            let _ = io.write(&turn).await;
+        }
     }
 
     /// A request of ours that takes nothing but its id.
@@ -262,6 +292,7 @@ impl StreamProtocol for Pi {
                     // A turn held for a fork has not reached pi: it
                     // is dropped, and ends here.
                     self.turn_open = false;
+                    self.abort_wait = None;
                     io.emit(AgentEvent::TurnCompleted {
                         stop_reason: StopReason::Interrupted,
                     })
@@ -318,6 +349,9 @@ impl StreamProtocol for Pi {
         };
         self.turn_open |= is_turn && line.is_some();
         if self.holding() && is_turn {
+            if self.aborts > 0 {
+                self.abort_wait = Some(Instant::now() + ABORT_WAIT);
+            }
             self.held_turn = line;
             Encoded::Done
         } else {
@@ -423,13 +457,32 @@ impl StreamProtocol for Pi {
         }
         if self.aborts > 0 && is_response_to(line, "abort") {
             self.aborts -= 1;
-            if !self.holding()
-                && let Some(turn) = self.held_turn.take()
-            {
-                let _ = io.write(&turn).await;
-            }
+            self.release(io).await;
+        }
+        // pi runs a turn of its own: what an abort was answering is over.
+        if self.aborts > 0 && self.held_turn.is_none() && is_event(line, "agent_start") {
+            self.aborts = 0;
         }
         Ok(())
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.abort_wait
+    }
+
+    /// pi did not answer an abort in time: the turn held for it goes,
+    /// and later ones are no longer held for that answer.
+    async fn on_deadline(&mut self, io: &mut Io<'_>) {
+        self.abort_wait = None;
+        if self.aborts == 0 {
+            return;
+        }
+        self.aborts = 0;
+        io.emit(AgentEvent::Notice(
+            "pi did not answer the interrupt in time; the prompt is sent all the same".into(),
+        ))
+        .await;
+        self.release(io).await;
     }
 
     fn shutdown(&mut self) -> Shutdown {

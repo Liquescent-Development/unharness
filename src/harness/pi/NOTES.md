@@ -67,5 +67,9 @@ ends (`agent_settled`, which the driver tells as the end) before `abort`
 is answered; pi answers it once it is idle. A turn sent meanwhile (`/now`
 sends the prompt once the turn's end is told) is held until that answer
 (`Pi::aborts`; e2e `pi_sends_a_prompt_after_an_abort_only_once_it_is_answered`,
-the fixture held at the answer). Not checked live: a `prompt` sent before
+the fixture held at the answer), for 2 s at most (`ABORT_WAIT`): an abort
+pi never answers (a dialog it waits in, #89) sends the turn then, with a
+notice, and holds nothing after it (e2e
+`pi_sends_a_prompt_held_for_an_abort_pi_never_answers`); an
+`agent_start` of pi's own also ends the wait. Not checked live: a `prompt` sent before
 the answer (whether pi refuses it or queues it).
