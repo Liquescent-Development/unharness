@@ -682,7 +682,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('v')) => app.request_clipboard(),
         (false, KeyCode::Enter) if shift && !alt => app.insert_newline(),
         (true, KeyCode::Char('c')) => {
-            if app.controller.is_generating {
+            if app.controller.is_generating || app.controller.sending_now() {
                 app.interrupt();
             } else if app.controller.shell.is_some() {
                 app.stop_shell();
@@ -741,7 +741,7 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
             // An open list is what Esc closes, also while a turn runs.
             if !app.suggestions.is_empty() {
                 app.close_suggestions();
-            } else if app.controller.is_generating {
+            } else if app.controller.is_generating || app.controller.sending_now() {
                 app.interrupt();
             } else if app.controller.shell.is_some() {
                 app.stop_shell();

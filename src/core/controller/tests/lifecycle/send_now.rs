@@ -512,6 +512,18 @@ fn agy_is_started_again_with_the_prompt() {
         ]
     );
     assert!(!notices(&app).iter().any(|n| n.contains("exited")));
+
+    // Esc while it waits for the exit takes it back; the exit then starts
+    // nothing.
+    let mut app = running(HarnessId::AGY);
+    send_now(&mut app, "now");
+    app.take_actions();
+    ended(&mut app, StopReason::Interrupted);
+    assert!(app.controller.sending_now());
+    app.interrupt();
+    assert_eq!(app.front.input, "now");
+    app.on_event(AgentEvent::ProcessExited { code: None });
+    assert!(app.take_actions().is_empty());
 }
 
 /// Codex `exec` kills the turn's process and resumes the thread in the

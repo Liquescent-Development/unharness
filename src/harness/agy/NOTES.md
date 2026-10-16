@@ -56,8 +56,9 @@ workspace is trusted there (`trustedWorkspaces`).
 agy has no interrupt (1.3.5 ignores `interrupt`, `steer` and `cancel` on
 stdin, the issue's research): `/now` kills the process as an interrupt
 does (`SendNow::AfterExit`), and once it has exited the prompt starts it
-again on the conversation (`--conversation <id>`). Checked by controller
-tests only, not live.
+again on the conversation (`--conversation <id>`). Esc between the
+turn's end and the exit takes the prompt back as it does during the
+turn. Checked by controller tests only, not live.
 
 ## Subagents
 

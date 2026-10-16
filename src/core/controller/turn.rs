@@ -446,6 +446,12 @@ impl Controller {
         }
     }
 
+    /// A prompt is being sent at once, also once the turn it stopped has
+    /// ended while the CLI's process is still to exit (`SendNow::AfterExit`).
+    pub fn sending_now(&self) -> bool {
+        self.sending_now.is_some()
+    }
+
     /// Say that the queued prompts wait for the user.
     pub(super) fn say_held(&mut self) {
         if !self.queued.is_empty() {
@@ -513,9 +519,6 @@ impl Controller {
     /// Asked while a prompt waits to be sent at once, that prompt is not
     /// sent: it goes back where it came from, and the turn still ends.
     pub fn interrupt(&mut self, front: &mut dyn Front) {
-        if !self.is_generating {
-            return;
-        }
         match self.sending_now.take() {
             // A CLI that cannot be made to drop it runs it all the same:
             // it stays, and the turn is pressed as without it.
@@ -538,7 +541,9 @@ impl Controller {
             }
             None => {}
         }
-        self.press_interrupt(front);
+        if self.is_generating {
+            self.press_interrupt(front);
+        }
     }
 
     /// Ask the running turn to stop, or press it: see
