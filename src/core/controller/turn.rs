@@ -394,13 +394,24 @@ impl Controller {
         }
     }
 
-    /// The turn a prompt sent at once was to stop has ended (`p`): the
-    /// prompt's own turn begins. The CLI that has it started it by itself;
-    /// one whose interrupt ends its process is started again once it has
-    /// exited; otherwise it is sent now, ahead of the queue.
-    pub(super) fn sent_now_turn(&mut self, p: SendingNow, front: &mut dyn Front) {
+    /// The turn a prompt sent at once was to stop has ended (`p`), as
+    /// `interrupted` says (otherwise it failed): the prompt's own turn
+    /// begins. The CLI that has it started it by itself; one whose
+    /// interrupt ends its process is started again once it has exited;
+    /// otherwise it is sent now, ahead of the queue. After a turn that
+    /// failed, what was not sent yet goes back to the user.
+    pub(super) fn sent_now_turn(
+        &mut self,
+        p: SendingNow,
+        interrupted: bool,
+        front: &mut dyn Front,
+    ) {
         match p.with_cli {
             Some(shown) => self.begin_prompted_turn(&p.prompt.text, shown, front),
+            None if !interrupted => {
+                self.give_back(p, front);
+                self.say_held();
+            }
             None if self.caps().send_now == SendNow::AfterExit && self.session_alive => {
                 self.sending_now = Some(SendingNow {
                     with_cli: None,

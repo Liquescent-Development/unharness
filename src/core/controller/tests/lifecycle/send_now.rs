@@ -324,6 +324,25 @@ fn a_plain_interrupt_on_claude_is_shown_as_one() {
     );
 }
 
+/// A turn that failed while the prompt waited was not the interrupt: the
+/// error is shown, and the prompt, not sent, goes back.
+#[test]
+fn a_failed_turn_gives_it_back_and_shows_the_error() {
+    let mut app = running(HarnessId::CODEX);
+    app.queue_prompt("later".into());
+    send_now(&mut app, "now");
+    app.take_actions();
+    ended(
+        &mut app,
+        StopReason::Error("codex: stream disconnected".into()),
+    );
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.front.input, "now");
+    assert!(notices(&app).contains(&"codex: stream disconnected".to_string()));
+    assert!(!system_lines(&app).contains(&"Turn interrupted.".to_string()));
+    assert_eq!(queued(&app), ["later"]);
+}
+
 /// What cannot be sent now is queued for when the turn ends, and said to
 /// be; nothing is interrupted.
 #[test]
@@ -514,6 +533,12 @@ fn a_cli_gone_meanwhile_gives_it_back() {
     assert!(app.take_actions().is_empty());
     assert_eq!(app.front.input, "now");
     assert!(!app.controller.is_generating);
+    assert!(
+        notices(&app).contains(&"Codex exited with code 1 before the turn completed".to_string()),
+        "{:?}",
+        notices(&app)
+    );
+    assert!(!system_lines(&app).contains(&"Turn interrupted.".to_string()));
 }
 
 fn users_block(app: &TestApp, text: &str) -> usize {

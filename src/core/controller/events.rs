@@ -193,6 +193,7 @@ impl Controller {
             }
             AgentEvent::TurnCompleted { stop_reason } => {
                 let done = stop_reason == StopReason::Done;
+                let failed = matches!(stop_reason, StopReason::Error(_));
                 let sending = self.sending_now.take();
                 // A hook or a call of a turn cut short is not reported on.
                 if !done {
@@ -202,13 +203,6 @@ impl Controller {
                 match stop_reason {
                     StopReason::Done => {}
                     StopReason::Interrupted => self
-                        .conversation
-                        .transcript
-                        .push_system("Turn interrupted."),
-                    // Claude ends a turn it was told to stop as an error
-                    // (`error_during_execution`): with a prompt sent at
-                    // once, that is the interrupt asked for.
-                    StopReason::Error(_) if sending.is_some() => self
                         .conversation
                         .transcript
                         .push_system("Turn interrupted."),
@@ -224,7 +218,7 @@ impl Controller {
                 // error the user decides (Enter sends it), also when a
                 // handoff summary came in between.
                 if let Some(p) = sending {
-                    self.sent_now_turn(p, front);
+                    self.sent_now_turn(p, !failed, front);
                 } else if done && !held {
                     self.send_next_queued(front);
                 } else {
@@ -274,9 +268,14 @@ impl Controller {
                 self.check_guard();
                 self.process_gone(front);
                 self.conversation.transcript.end_running_tools();
+                // The interrupt asked for, where it ends the process.
+                let ended_by_interrupt = matches!(code, None | Some(0))
+                    && sending.as_ref().is_some_and(|p| {
+                        p.with_cli.is_none() && self.caps().send_now == SendNow::AfterExit
+                    });
                 if self.is_generating {
                     self.finish_generation();
-                    if sending.is_some() {
+                    if ended_by_interrupt {
                         self.conversation
                             .transcript
                             .push_system("Turn interrupted.");
@@ -292,11 +291,7 @@ impl Controller {
                 match sending {
                     // Its interrupt ended the process (agy): the prompt
                     // starts it again, resuming the session.
-                    Some(p)
-                        if p.with_cli.is_none() && self.caps().send_now == SendNow::AfterExit =>
-                    {
-                        self.send_ahead(p.prompt, front)
-                    }
+                    Some(p) if ended_by_interrupt => self.send_ahead(p.prompt, front),
                     // It went with the process.
                     Some(p) => self.give_back(p, front),
                     None => {}
