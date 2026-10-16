@@ -1341,6 +1341,7 @@ impl StreamProtocol for Driver {
             SessionCommand::StopSubagent { .. }
             | SessionCommand::RemoteControl { .. }
             | SessionCommand::Steer { .. }
+            | SessionCommand::SendNow { .. }
             | SessionCommand::Rewind { .. }
             | SessionCommand::Compact { .. } => return Encoded::Unsupported,
             SessionCommand::Interrupt => {

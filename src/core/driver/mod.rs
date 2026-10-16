@@ -41,7 +41,7 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use super::caps::Capabilities;
+use super::caps::{Capabilities, SendNow};
 use super::event::{AgentEvent, StopReason};
 use super::ids::HarnessId;
 use super::jsonrpc::{self, RequestId, RpcMessage};
@@ -739,6 +739,10 @@ fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (Refusal, bool) {
     let notice = Refusal::Notice;
     match cmd {
         SessionCommand::Steer { .. } => (notice("steer a running turn"), caps.steer),
+        SessionCommand::SendNow { .. } => (
+            notice("take a prompt in place of the running turn"),
+            caps.send_now == SendNow::Native,
+        ),
         SessionCommand::Compact { .. } => (Refusal::Compaction, caps.compaction),
         SessionCommand::Rewind { .. } => (Refusal::Rewind, caps.rewind.conversation),
         SessionCommand::Interrupt => (notice("interrupt a turn"), caps.interrupt),

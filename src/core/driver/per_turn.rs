@@ -174,6 +174,7 @@ async fn drive(
                     SessionCommand::StopSubagent { .. }
                     | SessionCommand::RemoteControl { .. }
                     | SessionCommand::Steer { .. }
+                    | SessionCommand::SendNow { .. }
                     | SessionCommand::Compact { .. }
                     | SessionCommand::Rewind { .. }
                     | SessionCommand::RespondPermission { .. } => {

@@ -208,6 +208,9 @@ pub struct ClaudeParser {
     /// The text of an API error's assistant message, held for the turn's
     /// result, which repeats it as the error.
     api_error: Option<String>,
+    /// What the CLI advertised it can do (`capabilities` of `system/init`),
+    /// as of the last `init`.
+    advertised: HashSet<String>,
 }
 
 /// The most permission requests kept for their hooks. One is dropped
@@ -280,6 +283,12 @@ impl ClaudeParser {
 
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Whether the CLI advertised `capability` (`system/init`'s
+    /// `capabilities`, such as `interrupt_send_now_v1`).
+    pub fn advertises(&self, capability: &str) -> bool {
+        self.advertised.contains(capability)
     }
 
     /// The task id of the running subagent that the tool call `id` spawned.
@@ -571,6 +580,13 @@ impl ClaudeParser {
                         session_id: sid,
                         model: opt_str(val, "model"),
                     });
+                }
+                if let Some(caps) = val.get("capabilities").and_then(Value::as_array) {
+                    self.advertised = caps
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect();
                 }
                 // Every turn starts with an `init`; say it once per server.
                 for server in val
@@ -2018,6 +2034,30 @@ mod tests {
             r#"{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"completed"}}"#,
         )
         .is_empty());
+    }
+
+    /// `/now` on 2.1.301: the message, then `interrupt` with `send_now`
+    /// and its uuid, during a foreground command. The CLI answers
+    /// `stopped`, the turn ends `error_during_execution`, and the message
+    /// runs as the next turn (`command_lifecycle` `started` after the
+    /// `result`, which the driver reads).
+    #[test]
+    fn fixture_send_now() {
+        fixture("send_now");
+    }
+
+    /// The same as a plain interrupt and then the message, as sent to a CLI
+    /// that does not advertise `interrupt_send_now_v1`.
+    #[test]
+    fn fixture_send_now_plain() {
+        fixture("send_now_plain");
+    }
+
+    /// `/now`, then Esc at once: `interrupt` with `cancel_queued` takes the
+    /// message back (`command_lifecycle` `cancelled`), and no turn follows.
+    #[test]
+    fn fixture_send_now_cancelled() {
+        fixture("send_now_cancelled");
     }
 
     #[test]

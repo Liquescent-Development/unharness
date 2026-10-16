@@ -22,7 +22,7 @@ use crate::core::guard::Guarded;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, Choices, HarnessId, McpSupport, ModelRef, PermissionPolicy, PolicySupport,
-    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 #[derive(Default)]
@@ -127,6 +127,8 @@ impl Harness for PiHarness {
             plan_updates: false,
             subagents: SubagentSupport::default(),
             steer: true,
+            // `prompt` once `abort` has answered (`transport.rs`).
+            send_now: SendNow::AfterTurn,
             compaction: true,
             context_usage: true,
             rate_limits: false,

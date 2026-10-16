@@ -518,6 +518,7 @@ impl AppServer {
             }
             // Not sent here: `encode`'s and the driver's (`shutdown`).
             SessionCommand::RemoteControl { .. }
+            | SessionCommand::SendNow { .. }
             | SessionCommand::SetProvider(_)
             | SessionCommand::Shutdown => Ok(()),
         }
@@ -705,8 +706,10 @@ impl StreamProtocol for AppServer {
 
     async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
         match cmd {
-            // Codex has none, and does not declare it.
-            SessionCommand::RemoteControl { .. } => Encoded::Unsupported,
+            // Codex has none, and does not declare them.
+            SessionCommand::RemoteControl { .. } | SessionCommand::SendNow { .. } => {
+                Encoded::Unsupported
+            }
             SessionCommand::SetProvider(p) => Encoded::Restart {
                 command: Box::new(self.restart_on(p)),
                 then: None,

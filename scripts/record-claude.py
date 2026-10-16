@@ -12,6 +12,14 @@ line in both directions to the fixture file:
 Usage:
   scripts/record-claude.py OUT.jsonl [--model haiku] [--allow|--deny] PROMPT [PROMPT...]
 
+With --send-now TEXT the recorder sends TEXT at once while the first tool
+call runs, as unharness's /now does on a CLI that advertises
+`interrupt_send_now_v1`: the message, then `interrupt` with `send_now` and the
+message's uuid (--send-now-plain: a plain `interrupt`, then the message).
+--send-now-cancel takes it back at once (`interrupt` with `cancel_queued`).
+--wait-after keeps reading that long after the last `result`, for a turn the
+CLI starts by itself.
+
 With --remote-control the session is put on Remote Control before the first
 prompt, and after the last local prompt the recorder keeps the session open
 for what arrives from claude.ai/code or the Claude app, until --until-file
@@ -55,6 +63,18 @@ def main() -> int:
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--file", help="attach this PDF or text file to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
+    ap.add_argument("--send-now", metavar="TEXT",
+                    help="send this at once (interrupting the turn) while the first tool call runs")
+    ap.add_argument("--send-now-after", type=float, default=3.0, metavar="SECONDS",
+                    help="how long after the first tool call starts --send-now goes")
+    ap.add_argument("--send-now-plain", action="store_true",
+                    help="send --send-now as a plain interrupt and then the message")
+    ap.add_argument("--send-now-cancel", action="store_true",
+                    help="right after --send-now, take it back (interrupt with cancel_queued)")
+    ap.add_argument("--interrupt-after", type=float, metavar="SECONDS",
+                    help="send a plain interrupt this long after the first tool call starts")
+    ap.add_argument("--wait-after", type=float, default=0.0, metavar="SECONDS",
+                    help="after the last result, read on until nothing has come for this long")
     ap.add_argument("--answer-delay", type=float, default=0.0,
                     help="answer permission requests this many seconds late, as a person would")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
@@ -96,6 +116,8 @@ def main() -> int:
                             stderr=subprocess.PIPE, env=env, text=True, bufsize=1)
     out = open(args.out, "w")
     lock = threading.Lock()
+    # Lines go to stdin from timers too: one at a time, in the order recorded.
+    send_lock = threading.Lock()
 
     def record(prefix: str, line: str) -> None:
         with lock:
@@ -104,9 +126,10 @@ def main() -> int:
 
     def send(obj: dict) -> None:
         line = json.dumps(obj)
-        record(">> ", line)
-        proc.stdin.write(line + "\n")
-        proc.stdin.flush()
+        with send_lock:
+            record(">> ", line)
+            proc.stdin.write(line + "\n")
+            proc.stdin.flush()
 
     def pump_stderr() -> None:
         for line in proc.stderr:
@@ -193,6 +216,8 @@ def main() -> int:
     running_tasks = []
     tasks_stopped = False
     steered = False
+    # The first tool call has started: what is timed from it is armed.
+    tool_seen = False
     compacted = False
     rewound = False
     plan_rejected = False
@@ -208,6 +233,8 @@ def main() -> int:
         drain()
 
     last_activity = time.time()
+    # Prompts are done; closing once nothing has come for --wait-after.
+    finishing = False
     while True:
         try:
             line = lines.get(timeout=0.2)
@@ -216,6 +243,10 @@ def main() -> int:
         if line is None:
             break
         if not line:
+            if finishing and time.time() - last_activity > args.wait_after:
+                proc.stdin.close()
+                drain()
+                break
             if remote_waiting and args.until_file and os.path.exists(args.until_file):
                 sys.stderr.write("until-file found\n")
                 close_remote()
@@ -237,6 +268,35 @@ def main() -> int:
                 and any(b.get("type") == "tool_use" for b in obj.get("message", {}).get("content", []))):
             steered = True
             send({"type": "user", "message": {"role": "user", "content": args.steer}, "priority": "next"})
+        if (not tool_seen and t == "assistant"
+                and any(b.get("type") == "tool_use" for b in obj.get("message", {}).get("content", []))):
+            tool_seen = True
+            if args.send_now:
+                def send_now():
+                    message_id = str(uuid.uuid4())
+                    message = {"type": "user", "uuid": message_id,
+                               "message": {"role": "user", "content": args.send_now}}
+                    if args.send_now_plain:
+                        send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                              "request": {"subtype": "interrupt"}})
+                        send(message)
+                    else:
+                        send(message)
+                        send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                              "request": {"subtype": "interrupt", "send_now": True,
+                                          "message_uuid": message_id}})
+                    if args.send_now_cancel:
+                        send({"type": "control_request", "request_id": str(uuid.uuid4()),
+                              "request": {"subtype": "interrupt", "cancel_queued": True}})
+                timer = threading.Timer(args.send_now_after, send_now)
+                timer.daemon = True
+                timer.start()
+            if args.interrupt_after is not None:
+                timer = threading.Timer(args.interrupt_after, lambda: send(
+                    {"type": "control_request", "request_id": str(uuid.uuid4()),
+                     "request": {"subtype": "interrupt"}}))
+                timer.daemon = True
+                timer.start()
         if t == "control_request":
             req = obj.get("request", {})
             rid = obj.get("request_id")
@@ -327,6 +387,8 @@ def main() -> int:
                 if not remote_waiting:
                     remote_waiting = True
                     sys.stderr.write("[remote_control] local prompts done; waiting for remote turns\n")
+            elif args.wait_after:
+                finishing = True
             else:
                 proc.stdin.close()
                 drain()

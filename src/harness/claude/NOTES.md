@@ -166,6 +166,49 @@ Claude exits without a result (`on_exit`). A subagent's is shown as
 text. Unverified: an `error_…` result live (none recorded), and a
 synthetic message a result does not follow.
 
+## Sending a prompt now
+
+`SessionCommand::SendNow` (`/now`, #333), recorded on 2.1.301 with
+haiku against a foreground `python3 -c "import time; time.sleep(25)"`
+(`record-claude.py --send-now … --extra=--replay-user-messages`; a
+`sleep 25 && …` is refused by Claude Code itself, so the first try ran
+no command). `system/init` advertises `interrupt_send_now_v1`,
+`msg_lifecycle_v1` and `interrupt_cancel_queued_v1` (also on 2.1.288).
+
+- The message with our uuid, then `interrupt` with `send_now: true` and
+  its `message_uuid` (`fixtures/send_now.jsonl`): `command_lifecycle`
+  `queued` for it, the interrupt answered `send_now: "stopped"` with it
+  in `still_queued`, the turn's `result` `error_during_execution`
+  (`terminal_reason: aborted_tools`), then `command_lifecycle` `started`
+  for it, a new `init`, and its turn. The binary's schema says the CLI
+  may instead move what the turn waits on to the background and take
+  the message into the running turn (`send_now: "delivering"`), and
+  that with `message_uuid` a message the turn has already taken answers
+  `nothing_waiting` and does nothing (so a race with a turn that ends by
+  itself cannot stop the prompt's own turn). Not seen live: the
+  background move.
+- Where the CLI advertises neither, a plain `interrupt` and then the
+  message (`fixtures/send_now_plain.jsonl`): `still_queued: []`, the
+  same `result`, then the message's turn. A plain interrupt always ends
+  the turn, so the message cannot go into it.
+- `interrupt` with `cancel_queued: true` right after (Esc while it
+  waits; `fixtures/send_now_cancelled.jsonl`): `command_lifecycle`
+  `cancelled` for it, the answer lists it under `cancelled`, the turn
+  ends `error_during_execution`, and no turn follows.
+
+The driver tells the prompt's `TurnAnchor` when `command_lifecycle`
+says `started` (without lifecycle, right after the stopped turn's end):
+before that turn's `result` it went into the turn, after it it is a turn
+of its own, and the controller shows it accordingly. A `refused`,
+`discarded` or `cancelled` lifecycle ends the prompt's turn failed. Not
+`"priority":"now"`: during a foreground tool it moved the shell to the
+background and the turn ended only with the command, about 22 s later
+(the issue's research). Messages queued at the CLI survive a plain
+interrupt and run after it: a steer (`priority: next`) not yet taken up
+when Esc came started a turn by itself and ran the command again
+(2.1.301, recorded, not committed), which the controller shows as a turn
+nobody sent, and after which it sends the next queued prompt.
+
 ## Compaction
 
 A compaction ends with a `system` `compact_boundary` whose

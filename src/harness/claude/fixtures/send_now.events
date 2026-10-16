@@ -1,0 +1,28 @@
+HookStarted id=05488c9c-90c0-4aad-9d67-3aec183f8479 SessionStart:startup
+HookEnded id=05488c9c-90c0-4aad-9d67-3aec183f8479 SessionStart:startup ok ""
+CapabilitiesChanged models=13 provider=anthropic commands=71
+SessionStarted id=62c78627-2e1c-4bc4-86ce-c094c0fdc948 model=claude-haiku-5-5
+TurnStarted
+Context used=22849 window=-
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "{\"command\": \"python3 -c"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash " \\\"import time; time.sle"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "ep(25)\\\"; echo"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash " first-ok"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "\", \"description\": \"S"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "leep "
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "25 seconds then echo"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash " first-ok"
+ToolCallDelta id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash "\"}"
+ToolCallStarted id=toolu_014AFwfimK6GNC7FhGHq1qnm name=Bash input={"command":"python3 -c \"import time; time.sleep(25)\"; e...
+PermissionRequest id=ce6e769a-3627-4586-84b1-68ef518f0745 ToolUse Bash [shell "python3 -c \"import time; time.sleep(25)\"; echo f...]
+RateLimit status=allowed five_hour=8% seven_day=55%
+ToolCallResult id=toolu_014AFwfimK6GNC7FhGHq1qnm error=true "The user doesn't want to proceed with this tool use. The ..."
+Usage in=2 out=108 cache_read=15142 cache_write=7705 cost=0.0017 cumulative=false
+Context used=- window=1000000
+TurnCompleted Error "error_during_execution"
+TurnStarted
+Context used=28905 window=-
+TextDelta "now-ok"
+Usage in=2 out=6 cache_read=22847 cache_write=6056 cost=0.0014 cumulative=false
+Context used=- window=1000000
+TurnCompleted Done

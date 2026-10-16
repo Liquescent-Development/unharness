@@ -165,6 +165,14 @@ pub enum SessionCommand {
         text: String,
         attachments: Vec<Attachment>,
     },
+    /// Send this prompt at once in place of the running turn
+    /// (`Capabilities::send_now` is `SendNow::Native`): the CLI stops the
+    /// turn, or takes the prompt into it, and starts on it by itself. Its
+    /// `TurnAnchor` is told once it does.
+    SendNow {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
     /// Drop the user turn `anchor` (a `TurnAnchor` id) and everything after
     /// it from the session (`Capabilities::rewind`). Files are not touched.
     Rewind {

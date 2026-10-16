@@ -275,7 +275,9 @@ impl StreamProtocol for Pi {
             }
             // pi reports no subagents, so none can be running, and has no
             // remote control.
-            SessionCommand::StopSubagent { .. } | SessionCommand::RemoteControl { .. } => {
+            SessionCommand::StopSubagent { .. }
+            | SessionCommand::RemoteControl { .. }
+            | SessionCommand::SendNow { .. } => {
                 return Encoded::Unsupported;
             }
             SessionCommand::RespondPermission { id, decision } => match self.pending.remove(&id) {

@@ -9,7 +9,8 @@ the `scripts/record-*.py` recorders:
              it reads one line from stdin (content is logged, not checked).
              When both carry a `request_id`, later lines that name the
              recorded one name the client's instead, so that an answer
-             reaches the request it was for.
+             reaches the request it was for; so with a user message's
+             `uuid` (Claude's `command_lifecycle` names it).
   !! text    written to stderr
   # ...      ignored
   {...}      written to stdout
@@ -121,7 +122,8 @@ def main() -> int:
             stdin_lines.put(None)
         return line
 
-    # Recorded request ids, and the ids the client sent in their place.
+    # Recorded request ids (and user message uuids), and the ids the
+    # client sent in their place.
     request_ids = {}
 
     def request_id(text):
@@ -129,7 +131,11 @@ def main() -> int:
             value = json.loads(text)
         except ValueError:
             return None
-        return value.get("request_id") if isinstance(value, dict) else None
+        if not isinstance(value, dict):
+            return None
+        if value.get("type") == "user":
+            return value.get("uuid")
+        return value.get("request_id")
 
     with open(fixture) as f:
         for raw in f:

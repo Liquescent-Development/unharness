@@ -6694,6 +6694,182 @@ fn rewritten(fake: &Fake, fixture: &str, name: &str, edits: &[(&str, &str)]) -> 
     path
 }
 
+/// Claude in its tool call (allowed), then sent "now" at once; the events
+/// from then until the CLI has said what came of it.
+async fn claude_sent_now(fake: &Fake, fixture: &Path, then_interrupt: bool) -> Vec<AgentEvent> {
+    let harness = unharness::harness::claude::ClaudeHarness::default();
+    let mut handle = harness
+        .start_session(fake.config(fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::turn("sleep")).await.unwrap();
+    loop {
+        let ev = next_event(&mut handle).await;
+        if let AgentEvent::PermissionRequest(req) = &ev {
+            handle
+                .send(SessionCommand::RespondPermission {
+                    id: req.id.clone(),
+                    decision: PermissionDecision::Allow {
+                        updated_input: None,
+                    },
+                })
+                .await
+                .unwrap();
+            break;
+        }
+    }
+    handle
+        .send(SessionCommand::SendNow {
+            text: "Stop. Reply with exactly: now-ok".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .unwrap();
+    if then_interrupt {
+        handle.send(SessionCommand::Interrupt).await.unwrap();
+        let mut events = until_turn_ends(&mut handle, 1).await;
+        events.extend(none_within(&mut handle, Duration::from_millis(500), |_| false).await);
+        return events;
+    }
+    until_turn_ends(&mut handle, 2).await
+}
+
+/// The anchor told after the first turn's end and before the second's
+/// text, and the second turn's end.
+fn anchored_after_the_stop(events: &[AgentEvent]) -> String {
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(matches!(
+        &events[stop],
+        AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Error(e)
+        } if e == "error_during_execution"
+    ));
+    let rest = &events[stop + 1..];
+    let anchor = rest
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnAnchor { .. }))
+        .expect("no anchor for the prompt sent at once");
+    let text = rest
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TextDelta(t) if t.contains("now-ok")))
+        .unwrap();
+    assert!(anchor < text);
+    assert!(matches!(
+        rest.last(),
+        Some(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done
+        })
+    ));
+    match &rest[anchor] {
+        AgentEvent::TurnAnchor { id } => id.clone(),
+        _ => unreachable!(),
+    }
+}
+
+/// On a CLI that advertises `interrupt_send_now_v1` (2.1.301): the message
+/// with a uuid, then `interrupt` with `send_now` naming it. The anchor is
+/// told once the CLI says it started on it, after the stopped turn's end.
+#[tokio::test]
+async fn claude_sends_now_with_the_message_named_in_the_interrupt() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/send_now.jsonl");
+    let events = claude_sent_now(&fake, &fixture, false).await;
+    let anchor = anchored_after_the_stop(&events);
+    let sent = fake.sent_lines();
+    let message = sent
+        .iter()
+        .position(|v| {
+            v["type"] == "user" && v["message"]["content"] == "Stop. Reply with exactly: now-ok"
+        })
+        .unwrap();
+    assert_eq!(sent[message]["uuid"], anchor.as_str());
+    assert!(sent[message].get("priority").is_none());
+    let interrupt = &sent[message + 1];
+    assert_eq!(interrupt["request"]["subtype"], "interrupt");
+    assert_eq!(interrupt["request"]["send_now"], true);
+    assert_eq!(interrupt["request"]["message_uuid"], anchor.as_str());
+}
+
+/// On a CLI that does not advertise it: a plain interrupt, then the
+/// message, which is the next turn. Without `command_lifecycle` either,
+/// the anchor is told right after the stopped turn's end.
+#[tokio::test]
+async fn claude_sends_now_as_an_interrupt_and_the_message_where_it_must() {
+    if !python_available() {
+        return;
+    }
+    for (name, edits) in [
+        (
+            "plain.jsonl",
+            &[("\"interrupt_send_now_v1\"", "\"x_send_now\"")][..],
+        ),
+        (
+            "plain_no_lifecycle.jsonl",
+            &[
+                ("\"interrupt_send_now_v1\"", "\"x_send_now\""),
+                ("\"msg_lifecycle_v1\"", "\"x_lifecycle\""),
+            ][..],
+        ),
+    ] {
+        let fake = Fake::new();
+        let fixture = rewritten(
+            &fake,
+            "src/harness/claude/fixtures/send_now_plain.jsonl",
+            name,
+            edits,
+        );
+        let events = claude_sent_now(&fake, &fixture, false).await;
+        let anchor = anchored_after_the_stop(&events);
+        let sent = fake.sent_lines();
+        let message = sent
+            .iter()
+            .position(|v| v["type"] == "user" && v["uuid"] == anchor.as_str())
+            .unwrap_or_else(|| panic!("{name}: {sent:?}"));
+        let interrupt = &sent[message - 1];
+        assert_eq!(interrupt["request"]["subtype"], "interrupt", "{name}");
+        assert!(interrupt["request"].get("send_now").is_none(), "{name}");
+    }
+}
+
+/// Esc right after it: `interrupt` with `cancel_queued` takes the message
+/// back, and nothing is anchored for it.
+#[tokio::test]
+async fn claude_takes_back_a_prompt_sent_now_on_an_interrupt() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/send_now_cancelled.jsonl");
+    let events = claude_sent_now(&fake, &fixture, true).await;
+    let stop = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+        .unwrap();
+    assert!(
+        !events[stop..]
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnAnchor { .. } | AgentEvent::TurnStarted)),
+        "{:?}",
+        events[stop..]
+            .iter()
+            .map(|e| e.summary())
+            .collect::<Vec<_>>()
+    );
+    let sent = fake.sent_lines();
+    let last = sent
+        .iter()
+        .rev()
+        .find(|v| v["type"] == "control_request")
+        .unwrap();
+    assert_eq!(last["request"]["subtype"], "interrupt");
+    assert_eq!(last["request"]["cancel_queued"], true);
+}
+
 /// Codex app-server tells the interrupted turn's end on its
 /// `turn/completed`, not on the interrupt's answer: a `turn/start` sent
 /// before would steer the running turn. The next prompt then goes

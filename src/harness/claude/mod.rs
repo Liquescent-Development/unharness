@@ -22,7 +22,8 @@ use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, Choices, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy,
-    PolicySupport, ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle,
+    SubagentSupport,
 };
 
 #[derive(Debug, Default)]
@@ -442,6 +443,10 @@ impl Harness for ClaudeHarness {
                 report_turn: true,
             },
             steer: true,
+            // The prompt, then `interrupt` with `send_now` (or a plain
+            // interrupt first, on a CLI that does not advertise it): Claude
+            // starts on it by itself (NOTES.md).
+            send_now: SendNow::Native,
             compaction: true,
             context_usage: true,
             rate_limits: true,

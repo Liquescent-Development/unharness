@@ -32,7 +32,7 @@ use super::{
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
     Capabilities, Choices, HarnessId, McpChannel, McpSupport, PermissionPolicy, PolicySupport,
-    ProviderId, RewindSupport, SessionConfig, SessionHandle, SubagentSupport,
+    ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle, SubagentSupport,
 };
 
 /// Agents with a native ACP mode: (id, display name, command). Each is
@@ -303,6 +303,10 @@ impl Harness for AcpHarness {
             plan_updates: true,
             subagents: SubagentSupport::default(),
             steer: false,
+            // The next `session/prompt` goes once the cancelled one has
+            // answered (`stopReason: cancelled`): one sent before is
+            // refused while a turn runs (vibe-acp 2.26.1).
+            send_now: SendNow::AfterTurn,
             compaction: false,
             // `usage_update` (`used`, `size`) is the agent's to send, and
             // every one recorded does; one that does not is shown as not
