@@ -422,9 +422,23 @@ impl Controller {
         }
     }
 
-    /// Send `prompt` ahead of the queue, or hold it at the queue's head
-    /// when it cannot go now.
+    /// Send `prompt`, the one sent at once, and nothing else: one that
+    /// cannot go now waits at the queue's head, and a command typed for
+    /// another harness goes back to the prompt box; the queue is held
+    /// either way.
     pub(super) fn send_ahead(&mut self, prompt: QueuedPrompt, front: &mut dyn Front) {
+        if prompt.text.starts_with('/') && prompt.harness != self.active {
+            let first = first_line(&prompt.text).to_string();
+            self.conversation.transcript.push_notice(format!(
+                "'{first}' was typed for {}; it is back in the prompt box",
+                self.registry()
+                    .get(prompt.harness)
+                    .map_or(prompt.harness.as_str(), |h| h.descriptor().short_name)
+            ));
+            front.put_back(prompt.text, prompt.attachments);
+            self.say_held();
+            return;
+        }
         self.queued.push_front(prompt);
         if !self.send_queued(0, front) {
             self.say_held();

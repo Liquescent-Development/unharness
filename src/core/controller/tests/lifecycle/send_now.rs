@@ -343,6 +343,32 @@ fn a_failed_turn_gives_it_back_and_shows_the_error() {
     assert_eq!(queued(&app), ["later"]);
 }
 
+/// The prompt sent at once from the queue's head was a command typed for
+/// another harness: it goes back to the prompt box, and nothing else is
+/// sent in its place; the queue is held.
+#[test]
+fn only_its_own_prompt_is_sent() {
+    let mut app = running(HarnessId::CODEX);
+    app.controller
+        .queued
+        .push_back(crate::core::controller::QueuedPrompt {
+            text: "/review".into(),
+            attachments: Vec::new(),
+            harness: HarnessId::CLAUDE,
+        });
+    app.queue_prompt("later".into());
+    send_now(&mut app, "");
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Command(SessionCommand::Interrupt)]
+    );
+    ended(&mut app, StopReason::Interrupted);
+    assert!(app.take_actions().is_empty());
+    assert_eq!(app.front.input, "/review");
+    assert_eq!(queued(&app), ["later"]);
+    assert!(notices(&app).iter().any(|n| n.contains("held")));
+}
+
 /// What cannot be sent now is queued for when the turn ends, and said to
 /// be; nothing is interrupted.
 #[test]
