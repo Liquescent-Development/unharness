@@ -304,6 +304,7 @@ impl Controller {
             self.press_interrupt(front);
             return;
         }
+        front.prompt_submitted();
         let (prompt, from_queue) = if text.is_empty() {
             match self.queued.pop_front() {
                 Some(q) => (q, true),
