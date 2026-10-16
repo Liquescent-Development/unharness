@@ -152,11 +152,12 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                 );
 
                 let (level, _) = sandbox.level(h.default_sandbox());
-                let mut own: Vec<String> = h
-                    .sandbox_paths()
+                let paths = h.sandbox_paths();
+                let mut own: Vec<String> = paths
                     .writable
                     .iter()
                     .map(|p| p.display().to_string())
+                    .chain(paths.writable_files.iter().map(ToString::to_string))
                     .collect();
                 if let Some(settings) = config.harness(d.id.as_str()) {
                     own.extend(

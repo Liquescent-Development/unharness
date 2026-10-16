@@ -244,6 +244,7 @@ impl Harness for AcpHarness {
         };
         SandboxPaths {
             writable: state.iter().map(PathBuf::from).collect(),
+            ..Default::default()
         }
     }
 

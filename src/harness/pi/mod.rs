@@ -95,6 +95,7 @@ impl Harness for PiHarness {
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
             writable: vec![PathBuf::from("~/.pi")],
+            ..Default::default()
         }
     }
 

@@ -469,6 +469,7 @@ impl Harness for CodexHarness {
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
             writable: vec![codex_home()],
+            ..Default::default()
         }
     }
 

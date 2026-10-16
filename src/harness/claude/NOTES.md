@@ -287,6 +287,63 @@ passes on empty; and no settings file can set either. So a `claude` run from
 a session uses the session's config and login, which is what it would
 use in a shell that exports both; nothing to undo.
 
-Unverified: a session in unharness on macOS with the fix, and a token
-refresh there inside Seatbelt (the refreshed token written back to the
-default Keychain entry from a confined Claude).
+A token refresh inside Seatbelt could not reach the Keychain, and that
+revoked the login about once per token lifetime (#340, seen on a Mac;
+releases 0.10.1 to 0.11.0, since the relocation shares the default
+entry). When the access token is due, Claude refreshes
+it and the server rotates the refresh token. A confined Claude could not
+write `~/Library/Keychains/login.keychain-db`: `security` writes that
+file itself, and the profile denied every write outside the writable
+paths. Claude's secure storage then fell back to the plaintext
+`~/.claude/.credentials.json` (`secureStorage.fallbackLegs`, read in the
+2.1.302 binary), which is writable in the sandbox. The Keychain kept the
+old refresh token. The next Claude signing in from it (a plain `claude`,
+or a later session) presented it once it needed a refresh, the server
+saw a rotated token reused, and it revoked the whole grant.
+
+Traced on the Mac on 2026-10-16 with Claude Code 2.1.302 installed:
+`security add-generic-password -U` run twice under `sandbox-exec`, a
+create and then an update (what a refresh does), each with a
+deny-all-writes profile plus the writes below:
+
+| Extra writes allowed | create | update |
+|---|---|---|
+| none | 161 (EPERM) | 161 |
+| `(literal "~/Library/Keychains/login.keychain-db")` | 161 | 161 |
+| `(regex #"^~/Library/Keychains/(login\.keychain-db.*\|\.fl[0-9A-Fa-f]+)$")` | 0 | 0 |
+| any file directly in `~/Library/Keychains` | 0 | 0 |
+| `(subpath "~/Library/Keychains")` | 0 | 0 |
+
+The literal alone fails because `security` writes a
+`login.keychain-db.sb-<hex>-<rand>` sibling and renames it over the
+database; the `.fl<hex>` files are zero-byte locks. The directory also
+holds `metadata.keychain-db` and a `<UUID>/` directory (the
+data-protection keychain), which no row needed.
+
+So on macOS `sandbox_paths` grants those files by name
+(`login_keychain`, `SandboxPaths::writable_files`): Seatbelt gets
+`^<home>/Library/Keychains/(login\.keychain-db[^/]*|\.fl[0-9A-Fa-f]+)$`,
+with the home path escaped. That is the traced row narrowed to names
+without a `/`, so a directory given such a name takes nothing inside
+it. `metadata.keychain-db` and the `<UUID>/` directory stay unwritable,
+and unharness's own directories keep their denies after it. The cost is
+in `docs/sandbox.md`: an agent in a confined Claude can rewrite or remove
+those files. Linux has no Keychain: the plaintext store is the only one
+there, writable on both sides, and Landlock gets nothing new.
+
+The grant does not depend on the relocation or on the user's variables.
+Every entry Claude uses (the default `Claude Code-credentials`, or the
+one hashed from a `CLAUDE_CONFIG_DIR` the user set) lives in the user's
+default keychain, so a refresh writes the same files either way, and a
+refresh not saved there splits the stores the same way. It is granted
+for `login.keychain-db`, the default keychain unless the user changed it.
+unharness does not run `security default-keychain` at spawn time to find
+out; a user whose default keychain is another file needs
+`sandbox_writable = ["~/Library/Keychains"]` (the whole directory, since
+the file alone is not enough), which `docs/sandbox.md` says.
+
+The profile text is unit-tested, and a test in `claude/mod.rs` runs
+`sandbox-exec` with Claude's profile in a home of its own on the GitHub
+macOS job, with plain file writes. Unverified: a confined Claude left
+running past `expiresAt` on a Mac, then a plain `claude` and a new
+session both still signed in.

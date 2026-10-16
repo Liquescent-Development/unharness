@@ -19,7 +19,7 @@ use super::{
 };
 use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
-use crate::core::sandbox::{Sandbox, SandboxPaths};
+use crate::core::sandbox::{FileName, Sandbox, SandboxPaths, WritableFiles};
 use crate::core::{
     Capabilities, Choices, HarnessId, McpChannel, McpSupport, ModelRef, PermissionPolicy,
     PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle,
@@ -217,6 +217,48 @@ fn relocation_env(dir: &Path, storage_set: bool) -> Vec<(String, String)> {
 /// Where Claude keeps its login, when it is not by `CLAUDE_CONFIG_DIR`.
 const SECURE_STORAGE_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
+/// What a confined Claude writes, on macOS when `macos` is set.
+fn sandbox_paths_on(macos: bool) -> SandboxPaths {
+    // `~/.claude.json` is not here: Claude never writes it in place, so
+    // the grant would only let an agent edit it (see `relocate_config`).
+    // Not `~/.local/share/claude`, `~/.local/state/claude` or
+    // `~/.cache/claude`: the installed binaries and the updater's
+    // staging. A confined Claude does not update itself.
+    let mut writable = vec![state_dir(), PathBuf::from("~/.cache/claude-cli-nodejs")];
+    // The messaging socket of each process.
+    if let Some(run) = dirs::runtime_dir() {
+        writable.push(run.join("cc-socks"));
+    }
+    SandboxPaths {
+        writable,
+        writable_files: if macos {
+            vec![login_keychain()]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// The login keychain's files, which Claude on macOS writes when it
+/// refreshes its OAuth token: the server rotates the refresh token, and
+/// one not saved there is presented again by the next Claude signing in
+/// from the Keychain, which revokes the grant (#340). `security` writes
+/// `login.keychain-db.sb-<hex>-<rand>` and renames it over the database,
+/// and locks with zero-byte `.fl<hex>` files; `metadata.keychain-db` and
+/// the `<UUID>/` directory beside them stay unwritable. Granted whichever
+/// entry holds the login (the default one, or the one hashed from a
+/// `CLAUDE_CONFIG_DIR` the user set): all are in this file. A default
+/// keychain in another file is not looked up (see NOTES.md).
+fn login_keychain() -> WritableFiles {
+    WritableFiles {
+        dir: Path::new("~").join("Library/Keychains"),
+        names: vec![
+            FileName::Prefix("login.keychain-db"),
+            FileName::HexSuffix(".fl"),
+        ],
+    }
+}
+
 pub static DESCRIPTOR: HarnessDescriptor = HarnessDescriptor {
     id: HarnessId::CLAUDE,
     display_name: "Claude Code (claude)",
@@ -391,17 +433,7 @@ impl Harness for ClaudeHarness {
     }
 
     fn sandbox_paths(&self) -> SandboxPaths {
-        // `~/.claude.json` is not here: Claude never writes it in place, so
-        // the grant would only let an agent edit it (see `relocate_config`).
-        // Not `~/.local/share/claude`, `~/.local/state/claude` or
-        // `~/.cache/claude`: the installed binaries and the updater's
-        // staging. A confined Claude does not update itself.
-        let mut writable = vec![state_dir(), PathBuf::from("~/.cache/claude-cli-nodejs")];
-        // The messaging socket of each process.
-        if let Some(run) = dirs::runtime_dir() {
-            writable.push(run.join("cc-socks"));
-        }
-        SandboxPaths { writable }
+        sandbox_paths_on(cfg!(target_os = "macos"))
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -958,6 +990,110 @@ mod tests {
         assert!(ClaudeHarness::default().config_env().unwrap().is_empty());
         let paths = ClaudeHarness::default().sandbox_paths().writable;
         assert!(!paths.iter().any(|p| p.ends_with(".claude.json")));
+    }
+
+    #[test]
+    fn the_login_keychain_is_writable_on_macos_only() {
+        assert!(sandbox_paths_on(false).writable_files.is_empty());
+        assert_eq!(sandbox_paths_on(true).writable_files, [login_keychain()]);
+        assert_eq!(
+            sandbox_paths_on(true).writable,
+            sandbox_paths_on(false).writable
+        );
+        assert_eq!(
+            ClaudeHarness::default()
+                .sandbox_paths()
+                .writable_files
+                .is_empty(),
+            !cfg!(target_os = "macos")
+        );
+        assert_eq!(
+            login_keychain().to_string(),
+            "~/Library/Keychains/{login.keychain-db*,.fl<hex>}"
+        );
+    }
+
+    /// Run on the GitHub mirror's macOS job: `sandbox-exec` with the
+    /// profile a confined Claude gets, in a home of its own, with plain
+    /// writes (never `security`, which would touch the runner's keychain).
+    #[test]
+    fn a_confined_claude_writes_the_login_keychain_and_nothing_beside_it() {
+        use crate::core::sandbox::{
+            self, SandboxBackend, SandboxEnv, SandboxLevel, SandboxRequest, seatbelt::Seatbelt,
+        };
+        use std::sync::Arc;
+
+        if !cfg!(target_os = "macos") {
+            eprintln!("skipping: macOS only");
+            return;
+        }
+        let backend: Arc<dyn SandboxBackend> =
+            Arc::new(Seatbelt::detect().expect("sandbox-exec on macOS"));
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let keychains = home.join("Library/Keychains");
+        for dir in ["ws", "home/Library/Keychains/X", "home/Library/Keychains2"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        // Protected although its name is granted: the deny comes after.
+        let locked = keychains.join("login.keychain-db.locked");
+        std::fs::write(&locked, "keep").unwrap();
+        let sandbox = sandbox::resolve(
+            &SandboxRequest {
+                explicit: Some(SandboxLevel::WorkspaceWrite),
+                default: SandboxLevel::WorkspaceWrite,
+                workspace: &root.join("ws"),
+                harness: &sandbox_paths_on(true),
+                extra_writable: &[],
+                extra_readable: &[],
+                extra_deny_read: &[],
+            },
+            &Ok(backend),
+            &SandboxEnv {
+                home: Some(home.clone()),
+                scratch: vec![PathBuf::from("/dev")],
+                protected: vec![locked.clone()],
+            },
+        )
+        .unwrap();
+        let run = |script: String| -> bool {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.arg("-c").arg(script);
+            sandbox.wrap(cmd).unwrap().status().unwrap().success()
+        };
+        let write = |path: &Path| run(format!("printf x 2>/dev/null > '{}'", path.display()));
+
+        for name in ["login.keychain-db", "login.keychain-db.sb-x", ".flABC123"] {
+            assert!(write(&keychains.join(name)), "{name} not writable");
+        }
+        // What `security` does: write a sibling and rename it over the db.
+        assert!(run(format!(
+            "cd '{}' && printf y > login.keychain-db.sb-1a-2b && \
+             mv login.keychain-db.sb-1a-2b login.keychain-db",
+            keychains.display()
+        )));
+        assert_eq!(
+            std::fs::read_to_string(keychains.join("login.keychain-db")).unwrap(),
+            "y"
+        );
+
+        for path in [
+            keychains.join("metadata.keychain-db"),
+            keychains.join("X/y"),
+            keychains.join(".flXYZ"),
+            home.join("Library/Keychains2/login.keychain-db"),
+            home.join("Library/login.keychain-db"),
+        ] {
+            assert!(!write(&path), "{} writable", path.display());
+            assert!(!path.exists(), "{}", path.display());
+        }
+        // A directory may take a granted name, but nothing goes inside it.
+        let below = keychains.join("login.keychain-db.d");
+        run(format!("mkdir '{}'", below.display()));
+        assert!(!write(&below.join("y")));
+        assert!(!write(&locked));
+        assert_eq!(std::fs::read_to_string(&locked).unwrap(), "keep");
     }
 
     #[test]

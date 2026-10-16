@@ -85,6 +85,77 @@ impl FromStr for SandboxLevel {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SandboxPaths {
     pub writable: Vec<PathBuf>,
+    /// Files a CLI writes in a directory the rest of which stays
+    /// unwritable. Only Seatbelt grants these; see `WritableFiles`.
+    pub writable_files: Vec<WritableFiles>,
+}
+
+/// Files directly inside `dir`, picked by name, that a CLI may write while
+/// the rest of `dir` stays unwritable: Claude's login keychain on macOS
+/// (#340). Seatbelt grants them with one regex anchored to `dir`, which
+/// reaches no deeper than it. Landlock grants only whole paths and what is
+/// beneath them, so it leaves these out: there they stay unwritable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritableFiles {
+    pub dir: PathBuf,
+    pub names: Vec<FileName>,
+}
+
+/// A file name, or a family of them, in `WritableFiles::dir`. There is no
+/// way to write a pattern by hand: the text is a literal (escaped where it
+/// becomes a regex) and refused if it holds a `/`, so a grant never reaches
+/// below its directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileName {
+    /// This name, alone or followed by anything without a `/`: a file and
+    /// the siblings a writer renames over it.
+    Prefix(&'static str),
+    /// This name followed by one or more hexadecimal digits.
+    HexSuffix(&'static str),
+}
+
+impl FileName {
+    /// The literal part of the name.
+    pub fn literal(&self) -> &'static str {
+        match self {
+            FileName::Prefix(s) | FileName::HexSuffix(s) => s,
+        }
+    }
+
+    /// Why this name cannot be granted, if it cannot: it is empty, or
+    /// holds a `/`, a `"` (which would end the profile's regex) or a
+    /// control character.
+    pub fn refusal(&self) -> Option<String> {
+        let s = self.literal();
+        let why = if s.is_empty() {
+            "is empty"
+        } else if s.contains('/') {
+            "contains a '/'"
+        } else if s.contains('"') {
+            "contains a '\"'"
+        } else if s.chars().any(char::is_control) {
+            "contains a control character"
+        } else {
+            return None;
+        };
+        Some(format!("writable file name {s:?} {why}"))
+    }
+}
+
+impl fmt::Display for FileName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FileName::Prefix(s) => write!(f, "{s}*"),
+            FileName::HexSuffix(s) => write!(f, "{s}<hex>"),
+        }
+    }
+}
+
+impl fmt::Display for WritableFiles {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<String> = self.names.iter().map(ToString::to_string).collect();
+        write!(f, "{}/{{{}}}", self.dir.display(), names.join(","))
+    }
 }
 
 /// Credential locations no harness process may read, relative to the home
@@ -155,6 +226,9 @@ pub struct SandboxProfile {
     /// Everything the process may write, the workspace included at
     /// `WorkspaceWrite`.
     pub writable: Vec<PathBuf>,
+    /// Files it may write by name in a directory otherwise unwritable; the
+    /// directory is canonical and exists. Seatbelt only.
+    pub writable_files: Vec<WritableFiles>,
     pub deny_read: Vec<PathBuf>,
     /// Readable although inside a denied path: the workspace, the writable
     /// paths and `[sandbox].readable`.
@@ -413,6 +487,22 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
     for p in req.extra_writable {
         add(expand(p));
     }
+    let mut writable_files: Vec<WritableFiles> = Vec::new();
+    for files in &req.harness.writable_files {
+        if let Some(why) = files.names.iter().find_map(FileName::refusal) {
+            bail!("{why} (in {})", files.dir.display());
+        }
+        let Some(dir) = canonical(&expand(&files.dir)).filter(|d| d.is_dir()) else {
+            continue;
+        };
+        let files = WritableFiles {
+            dir,
+            names: files.names.clone(),
+        };
+        if !writable_files.contains(&files) {
+            writable_files.push(files);
+        }
+    }
 
     let readable: Vec<PathBuf> = req
         .extra_readable
@@ -471,6 +561,7 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         level,
         workspace,
         writable,
+        writable_files,
         deny_read,
         allow_read,
         protected,
@@ -662,6 +753,7 @@ mod tests {
         };
         let harness = SandboxPaths {
             writable: vec![PathBuf::from("~/.vendor"), PathBuf::from("~/.missing")],
+            ..Default::default()
         };
         World {
             _tmp: tmp,
@@ -810,6 +902,70 @@ mod tests {
                 err.contains("push.token") && err.contains("cannot be enforced"),
                 "{err}"
             );
+        }
+    }
+
+    #[test]
+    fn writable_files_keep_their_directory_canonical_and_skip_a_missing_one() {
+        let mut w = world();
+        std::fs::create_dir_all(w.home.join("Library/Keychains")).unwrap();
+        let keychain = WritableFiles {
+            dir: PathBuf::from("~/Library/Keychains"),
+            names: vec![
+                FileName::Prefix("login.keychain-db"),
+                FileName::HexSuffix(".fl"),
+            ],
+        };
+        w.harness.writable_files = vec![
+            keychain.clone(),
+            keychain.clone(),
+            WritableFiles {
+                dir: PathBuf::from("~/Library/Missing"),
+                names: vec![FileName::Prefix("x")],
+            },
+        ];
+        for level in [SandboxLevel::WorkspaceWrite, SandboxLevel::ReadOnly] {
+            let p = active(resolve(&request(&w, Some(level)), &available(), &w.env).unwrap());
+            assert_eq!(
+                p.writable_files,
+                [WritableFiles {
+                    dir: w.home.join("Library/Keychains"),
+                    names: keychain.names.clone(),
+                }]
+            );
+            // The directory itself is not writable.
+            assert!(
+                !p.writable
+                    .iter()
+                    .any(|d| d.starts_with(w.home.join("Library"))),
+                "{:?}",
+                p.writable
+            );
+        }
+        assert_eq!(
+            keychain.to_string(),
+            "~/Library/Keychains/{login.keychain-db*,.fl<hex>}"
+        );
+    }
+
+    #[test]
+    fn a_writable_file_name_that_could_reach_further_is_refused() {
+        let mut w = world();
+        std::fs::create_dir_all(w.home.join("Library/Keychains")).unwrap();
+        for name in [
+            FileName::Prefix("X/y"),
+            FileName::Prefix(""),
+            FileName::HexSuffix("a\"b"),
+            FileName::Prefix("a\nb"),
+        ] {
+            w.harness.writable_files = vec![WritableFiles {
+                dir: PathBuf::from("~/Library/Keychains"),
+                names: vec![FileName::Prefix("login.keychain-db"), name],
+            }];
+            let err = resolve(&request(&w, None), &available(), &w.env)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("writable file name"), "{name:?}: {err}");
         }
     }
 
