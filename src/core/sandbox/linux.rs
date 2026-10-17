@@ -112,6 +112,8 @@ fn ruleset(profile: &SandboxProfile) -> Result<OwnedFd> {
     for path in &profile.writable {
         created = allow(created, path, all)?;
     }
+    // Not `profile.writable_files`: Landlock grants a path and everything
+    // beneath it, never files by name, so these stay unwritable here.
     // A CLI's reaper is unharness's own binary (`core::reaper`): it runs
     // also where reading its directory is denied, which this file alone
     // does not open up.
@@ -246,6 +248,7 @@ mod tests {
             level: SandboxLevel::WorkspaceWrite,
             workspace: root.join("ws"),
             writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            writable_files: vec![],
             deny_read: vec![root.join("secret"), root.join("code")],
             allow_read: vec![root.join("code/proj")],
             protected: vec![],
@@ -318,6 +321,39 @@ mod tests {
     }
 
     #[test]
+    fn files_granted_by_name_stay_unwritable() {
+        if let Err(why) = Landlock::detect() {
+            eprintln!("skipping: {why}");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("ws")).unwrap();
+        std::fs::create_dir_all(root.join("keychains")).unwrap();
+        let profile = SandboxProfile {
+            level: SandboxLevel::WorkspaceWrite,
+            workspace: root.join("ws"),
+            writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            writable_files: vec![super::super::WritableFiles {
+                dir: root.join("keychains"),
+                names: vec![super::super::FileName::Prefix("login.keychain-db")],
+            }],
+            deny_read: vec![],
+            allow_read: vec![],
+            protected: vec![],
+        };
+        let file = root.join("keychains/login.keychain-db");
+        assert_ne!(
+            run(
+                &profile,
+                &format!("echo x > {} 2>/dev/null", file.display())
+            ),
+            Some(0)
+        );
+        assert!(!file.exists());
+    }
+
+    #[test]
     fn a_denied_file_leaves_its_neighbour_readable() {
         if let Err(why) = Landlock::detect() {
             eprintln!("skipping: {why}");
@@ -334,6 +370,7 @@ mod tests {
             level: SandboxLevel::WorkspaceWrite,
             workspace: root.join("ws"),
             writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            writable_files: vec![],
             deny_read: vec![root.join("demo/other.token")],
             allow_read: vec![root.join("ws"), root.join("demo/push.token")],
             protected: vec![],
@@ -387,6 +424,7 @@ mod tests {
             level: SandboxLevel::WorkspaceWrite,
             workspace: root.join("ws"),
             writable: vec![root.join("ws"), PathBuf::from("/dev")],
+            writable_files: vec![],
             deny_read: vec![],
             allow_read: vec![],
             protected: vec![],

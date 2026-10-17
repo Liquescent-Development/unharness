@@ -4440,6 +4440,7 @@ impl Confined {
                 workspace: &root.join("ws"),
                 harness: &SandboxPaths {
                     writable: vec![root.join("state")],
+                    ..Default::default()
                 },
                 extra_writable: &[],
                 extra_readable: &[],

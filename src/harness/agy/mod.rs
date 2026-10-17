@@ -85,6 +85,7 @@ impl Harness for AgyHarness {
     fn sandbox_paths(&self) -> SandboxPaths {
         SandboxPaths {
             writable: vec![PathBuf::from("~/.gemini/antigravity-cli")],
+            ..Default::default()
         }
     }
 

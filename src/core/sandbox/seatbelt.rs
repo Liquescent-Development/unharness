@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use super::{SandboxBackend, SandboxProfile};
+use super::{FileName, SandboxBackend, SandboxProfile, WritableFiles};
 
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
@@ -53,9 +53,9 @@ impl SandboxBackend for Seatbelt {
     }
 }
 
-/// Everything is allowed except writes outside the writable paths and reads
-/// of the denied ones. Later rules win, so the denies inside a writable path
-/// come last.
+/// Everything is allowed except writes outside the writable paths and files
+/// and reads of the denied ones. Later rules win, so the denies inside a
+/// writable path come last.
 pub fn seatbelt_profile(profile: &SandboxProfile) -> String {
     let subpaths = |paths: &[std::path::PathBuf]| -> String {
         paths
@@ -69,6 +69,15 @@ pub fn seatbelt_profile(profile: &SandboxProfile) -> String {
             "(allow file-write*{})\n",
             subpaths(&profile.writable)
         ));
+    }
+    let files: String = profile
+        .writable_files
+        .iter()
+        .filter_map(files_regex)
+        .map(|re| format!(" (regex #\"{re}\")"))
+        .collect();
+    if !files.is_empty() {
+        out.push_str(&format!("(allow file-write*{files})\n"));
     }
     if !profile.protected.is_empty() {
         out.push_str(&format!(
@@ -94,6 +103,45 @@ pub fn seatbelt_profile(profile: &SandboxProfile) -> String {
     out
 }
 
+/// A regex for `files`: their names directly inside the directory, whose
+/// path is matched literally. Nothing when the path cannot be put in a
+/// `#"…"` literal (a `"` or a control character in it, or not UTF-8), so
+/// the files stay unwritable; `profile` has refused such names already.
+fn files_regex(files: &WritableFiles) -> Option<String> {
+    let literal = |s: &str| -> Option<String> {
+        if s.contains('"') || s.chars().any(char::is_control) {
+            return None;
+        }
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            if "\\.^$|?*+()[]{}".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        Some(out)
+    };
+    let dir = literal(files.dir.to_str()?)?;
+    let names = files
+        .names
+        .iter()
+        .map(|name| {
+            if name.refusal().is_some() {
+                return None;
+            }
+            let text = literal(name.literal())?;
+            Some(match name {
+                FileName::Prefix(_) => format!("{text}[^/]*"),
+                FileName::HexSuffix(_) => format!("{text}[0-9A-Fa-f]+"),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!("^{dir}/({})$", names.join("|")))
+}
+
 fn quote(path: &Path) -> String {
     let escaped = path
         .to_string_lossy()
@@ -116,9 +164,20 @@ mod tests {
                 PathBuf::from("/Users/u/code"),
                 PathBuf::from("/private/tmp"),
             ],
+            writable_files: vec![],
             deny_read: vec![PathBuf::from("/Users/u/.ssh")],
             allow_read: vec![PathBuf::from("/Users/u/code")],
             protected: vec![PathBuf::from("/Users/u/Library/unharness")],
+        }
+    }
+
+    fn keychain(dir: &str) -> WritableFiles {
+        WritableFiles {
+            dir: PathBuf::from(dir),
+            names: vec![
+                FileName::Prefix("login.keychain-db"),
+                FileName::HexSuffix(".fl"),
+            ],
         }
     }
 
@@ -133,6 +192,53 @@ mod tests {
              (deny file-write* (subpath \"/Users/u/Library/unharness\"))\n\
              (deny file-read* (subpath \"/Users/u/.ssh\"))\n"
         );
+    }
+
+    #[test]
+    fn writable_files_come_after_the_writable_paths_and_before_the_protected_ones() {
+        let mut p = profile();
+        p.writable_files = vec![keychain("/Users/u/Library/Keychains")];
+        assert_eq!(
+            seatbelt_profile(&p),
+            "(version 1)\n\
+             (allow default)\n\
+             (deny file-write*)\n\
+             (allow file-write* (subpath \"/Users/u/code\") (subpath \"/private/tmp\"))\n\
+             (allow file-write* (regex #\"^/Users/u/Library/Keychains/\
+             (login\\.keychain-db[^/]*|\\.fl[0-9A-Fa-f]+)$\"))\n\
+             (deny file-write* (subpath \"/Users/u/Library/unharness\"))\n\
+             (deny file-read* (subpath \"/Users/u/.ssh\"))\n"
+        );
+    }
+
+    #[test]
+    fn the_directory_of_writable_files_is_matched_literally() {
+        assert_eq!(
+            files_regex(&keychain(
+                "/Users/a.b (c)+[d]{e}|f^g$h?i*j\\k/Library/Keychains"
+            ))
+            .unwrap(),
+            "^/Users/a\\.b \\(c\\)\\+\\[d\\]\\{e\\}\\|f\\^g\\$h\\?i\\*j\\\\k/Library/Keychains/\
+             (login\\.keychain-db[^/]*|\\.fl[0-9A-Fa-f]+)$"
+        );
+    }
+
+    #[test]
+    fn writable_files_that_cannot_be_written_down_are_left_out() {
+        let mut p = profile();
+        p.writable_files = vec![
+            keychain("/Users/u\"/Library/Keychains"),
+            keychain("/Users/u\n/Library/Keychains"),
+            WritableFiles {
+                dir: PathBuf::from("/Users/u/Library/Keychains"),
+                names: vec![FileName::Prefix("ok"), FileName::Prefix("X/y")],
+            },
+            WritableFiles {
+                dir: PathBuf::from("/Users/u/Library/Keychains"),
+                names: vec![],
+            },
+        ];
+        assert!(!seatbelt_profile(&p).contains("regex"));
     }
 
     #[test]
