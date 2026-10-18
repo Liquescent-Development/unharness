@@ -191,6 +191,35 @@ pub(crate) fn is_home_in(dir: &Path, home: Option<&Path>) -> bool {
     is_resolved_home(dir, resolved_home(home).as_deref())
 }
 
+/// Why [`find_workspace_root`] found no root for `dir`, and what to do,
+/// for the user.
+pub fn no_workspace_reason(dir: &Path) -> String {
+    no_workspace_reason_in(dir, dirs::home_dir().as_deref())
+}
+
+/// [`no_workspace_reason`] with the home directory given.
+fn no_workspace_reason_in(dir: &Path, home: Option<&Path>) -> String {
+    let home = resolved_home(home);
+    if is_resolved_home(dir, home.as_deref()) {
+        return "the home directory is never a workspace; 'unharness init' makes a project \
+                directory one"
+            .to_string();
+    }
+    let below_home = dir
+        .ancestors()
+        .skip(1)
+        .any(|above| is_resolved_home(above, home.as_deref()));
+    format!(
+        "no .git, .agents or AGENTS.md in this directory or above it{}; 'unharness init' \
+         makes this directory one",
+        if below_home {
+            " up to the home directory, which is never a workspace"
+        } else {
+            ""
+        }
+    )
+}
+
 fn resolved_home(home: Option<&Path>) -> Option<PathBuf> {
     home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()))
 }
@@ -203,7 +232,7 @@ fn is_resolved_home(dir: &Path, home: Option<&Path>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_root_below;
+    use super::{no_workspace_reason_in, workspace_root_below};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -267,6 +296,26 @@ mod tests {
             Some(project.clone())
         );
         assert_eq!(workspace_root_below(&below, None), Some(project));
+    }
+
+    #[test]
+    fn why_there_is_no_root_says_where_the_search_went() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = home_in(tmp.path());
+        let folder = dir(home.join("code/folder"));
+        let outside = dir(tmp.path().join("srv/folder"));
+        let in_home = no_workspace_reason_in(&home, Some(&home));
+        assert!(in_home.starts_with("the home directory is never a workspace"));
+        let below = no_workspace_reason_in(&folder, Some(&home));
+        assert!(
+            below.contains("or above it up to the home directory, which is never"),
+            "{below}"
+        );
+        let elsewhere = no_workspace_reason_in(&outside, Some(&home));
+        assert!(
+            elsewhere.contains("or above it; 'unharness init' makes this directory one"),
+            "{elsewhere}"
+        );
     }
 
     #[cfg(unix)]

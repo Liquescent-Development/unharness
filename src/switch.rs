@@ -38,9 +38,9 @@ pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<
         // read by no run there (`Config::load_effective`).
         let Some(root) = ws_root else {
             bail!(
-                "there is no workspace here to save the default harness for: no .git, .agents \
-                 or AGENTS.md in this directory or above it, below the home directory. Run \
-                 'unharness switch {target} --global', or 'unharness init' first"
+                "there is no workspace here to save the default harness for: {}; or run \
+                 'unharness switch {target} --global'",
+                crate::sync::no_workspace_reason(cwd)
             );
         };
         let store = Config::workspace_store()
