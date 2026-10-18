@@ -2,6 +2,18 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.11.2 - 2026-10-18
+
+### Changed
+
+- The home directory is never found as a workspace. Started in a folder below it with no `.git`, `.agents` or `AGENTS.md` up to the home directory, that folder is the workspace on its own; it used to be the home directory whenever that had one of them (often a `~/.agents` another tool made). Conversations, settings, allow rules and checkpoints kept for the home directory from such folders are no longer shown there; `unharness init` makes a folder a workspace. See [The workspace](https://github.com/Liquescent-Development/unharness/blob/main/docs/usage.md#the-workspace).
+- `unharness init` refuses the home directory, and `unharness switch` without `--global` refuses where there is no workspace, instead of saving a choice no run reads.
+- `unharness doctor`, `sync` and `switch` say why there is no workspace.
+
+### Fixed
+
+- Started in a folder of projects below a home directory with `~/.agents`, a session no longer fails with "the workspace /Users/<you> contains unharness's own state", and unharness no longer syncs rules and commands into the home directory.
+
 ## 0.11.1 - 2026-10-18
 
 ### Fixed
