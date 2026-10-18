@@ -354,9 +354,7 @@ pub fn run_doctor(cwd: &Path, config: &Config) -> Result<ExitCode> {
                 }
             }
         }
-        None => {
-            println!("  Not inside a recognized workspace (no .git, .agents or AGENTS.md found)")
-        }
+        None => println!("  No workspace: {}", crate::sync::no_workspace_reason(cwd)),
     }
     println!();
 

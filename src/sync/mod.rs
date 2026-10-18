@@ -139,9 +139,33 @@ pub(crate) mod testing {
     }
 }
 
+/// The workspace a run started in `start_dir` belongs to: the nearest
+/// directory, `start_dir` or one above it, that holds `.git`, `.agents`
+/// or `AGENTS.md`. `None` when there is none, and callers take
+/// `start_dir` as the workspace; nothing is synced then.
+///
+/// The home directory is never one, and the walk stops when it reaches
+/// it. Other tools keep global skills in `~/.agents`, and dotfiles live
+/// in a `~/.git`: either made the home directory the workspace of every
+/// folder below it that had no marker of its own, so that auto-sync
+/// wrote the vendors' global settings (`~/.claude/commands`) and the
+/// sandbox refused the workspace for holding unharness's own state
+/// (#343). Started in the home directory itself there is no root either:
+/// the workspace is then the home directory, nothing is synced, and the
+/// sandbox refuses it as it did. A directory outside the home directory
+/// is walked up to `/` as before.
 pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
+    workspace_root_below(start_dir, dirs::home_dir().as_deref())
+}
+
+/// [`find_workspace_root`] with the home directory given.
+fn workspace_root_below(start_dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let home = resolved_home(home);
     let mut current = start_dir.to_path_buf();
     loop {
+        if is_resolved_home(&current, home.as_deref()) {
+            return None;
+        }
         if current.join(".git").exists()
             || current.join(".agents").exists()
             || current.join("AGENTS.md").exists()
@@ -149,8 +173,189 @@ pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
             return Some(current);
         }
         if !current.pop() {
-            break;
+            return None;
         }
     }
-    None
+}
+
+/// Whether `dir` is the home directory, which is never a workspace
+/// ([`find_workspace_root`]). The two are compared as they resolve, so a
+/// home named through a link, or reached through one, is still the home
+/// directory.
+pub fn is_home_dir(dir: &Path) -> bool {
+    is_home_in(dir, dirs::home_dir().as_deref())
+}
+
+/// [`is_home_dir`] with the home directory given.
+pub(crate) fn is_home_in(dir: &Path, home: Option<&Path>) -> bool {
+    is_resolved_home(dir, resolved_home(home).as_deref())
+}
+
+/// Why [`find_workspace_root`] found no root for `dir`, and what to do,
+/// for the user.
+pub fn no_workspace_reason(dir: &Path) -> String {
+    no_workspace_reason_in(dir, dirs::home_dir().as_deref())
+}
+
+/// [`no_workspace_reason`] with the home directory given.
+fn no_workspace_reason_in(dir: &Path, home: Option<&Path>) -> String {
+    let home = resolved_home(home);
+    if is_resolved_home(dir, home.as_deref()) {
+        return "the home directory is never a workspace; 'unharness init' makes a project \
+                directory one"
+            .to_string();
+    }
+    let below_home = dir
+        .ancestors()
+        .skip(1)
+        .any(|above| is_resolved_home(above, home.as_deref()));
+    format!(
+        "no .git, .agents or AGENTS.md in this directory or above it{}; 'unharness init' \
+         makes this directory one",
+        if below_home {
+            " up to the home directory, which is never a workspace"
+        } else {
+            ""
+        }
+    )
+}
+
+fn resolved_home(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()))
+}
+
+fn is_resolved_home(dir: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|home| {
+        dir == home || dir.canonicalize().is_ok_and(|resolved| resolved == home)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{no_workspace_reason_in, workspace_root_below};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn dir(path: PathBuf) -> PathBuf {
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn home_in(tmp: &Path) -> PathBuf {
+        dir(tmp.join("home"))
+    }
+
+    #[test]
+    fn a_marker_in_the_home_directory_is_not_a_root_for_a_folder_below_it() {
+        for marker in [".agents", ".git", "AGENTS.md"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = home_in(tmp.path());
+            if marker == "AGENTS.md" {
+                fs::write(home.join(marker), "# rules").unwrap();
+            } else {
+                dir(home.join(marker));
+            }
+            let folder = dir(home.join("code/apex/apex-data"));
+            assert_eq!(workspace_root_below(&folder, Some(&home)), None, "{marker}");
+        }
+    }
+
+    #[test]
+    fn a_marker_below_the_home_directory_is_still_a_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = home_in(tmp.path());
+        dir(home.join(".agents"));
+        let repo = dir(home.join("code/repo"));
+        dir(repo.join(".git"));
+        let below = dir(repo.join("src/sync"));
+        assert_eq!(
+            workspace_root_below(&below, Some(&home)),
+            Some(repo.clone())
+        );
+        assert_eq!(workspace_root_below(&repo, Some(&home)), Some(repo));
+    }
+
+    #[test]
+    fn started_in_the_home_directory_there_is_no_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = home_in(tmp.path());
+        dir(home.join(".agents"));
+        dir(home.join(".git"));
+        assert_eq!(workspace_root_below(&home, Some(&home)), None);
+    }
+
+    #[test]
+    fn a_folder_outside_the_home_directory_is_walked_up_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = home_in(tmp.path());
+        let project = dir(tmp.path().join("srv/project"));
+        fs::write(project.join("AGENTS.md"), "# rules").unwrap();
+        let below = dir(project.join("a/b"));
+        assert_eq!(
+            workspace_root_below(&below, Some(&home)),
+            Some(project.clone())
+        );
+        assert_eq!(workspace_root_below(&below, None), Some(project));
+    }
+
+    #[test]
+    fn a_marker_above_the_home_directory_is_not_a_root_for_a_folder_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        dir(tmp.path().join(".git"));
+        let home = home_in(tmp.path());
+        let code = dir(home.join("code"));
+        assert_eq!(workspace_root_below(&code, Some(&home)), None);
+        assert_eq!(workspace_root_below(&home, Some(&home)), None);
+        // From outside the home directory it still is.
+        let other = dir(tmp.path().join("srv/other"));
+        assert_eq!(
+            workspace_root_below(&other, Some(&home)),
+            Some(tmp.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn why_there_is_no_root_says_where_the_search_went() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = home_in(tmp.path());
+        let folder = dir(home.join("code/folder"));
+        let outside = dir(tmp.path().join("srv/folder"));
+        let in_home = no_workspace_reason_in(&home, Some(&home));
+        assert!(in_home.starts_with("the home directory is never a workspace"));
+        let below = no_workspace_reason_in(&folder, Some(&home));
+        assert!(
+            below.contains("or above it up to the home directory, which is never"),
+            "{below}"
+        );
+        let elsewhere = no_workspace_reason_in(&outside, Some(&home));
+        assert!(
+            elsewhere.contains("or above it; 'unharness init' makes this directory one"),
+            "{elsewhere}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_home_directory_named_through_a_link_still_ends_the_walk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = dir(tmp.path().join("private/home"));
+        dir(real.join(".agents"));
+        let link = tmp.path().join("home");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let folder = dir(real.join("code/folder"));
+        // The home directory named by the link, the folder by its own path.
+        assert_eq!(workspace_root_below(&folder, Some(&link)), None);
+        assert_eq!(workspace_root_below(&real, Some(&link)), None);
+        // The home directory named as it is, the folder through the link.
+        assert_eq!(
+            workspace_root_below(&link.join("code/folder"), Some(&real)),
+            None
+        );
+        assert_eq!(workspace_root_below(&link, Some(&real)), None);
+        // A home named with a trailing component that comes back to it.
+        assert_eq!(
+            workspace_root_below(&folder, Some(&link.join("code/.."))),
+            None
+        );
+    }
 }

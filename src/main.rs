@@ -108,7 +108,7 @@ fn handle_sync(cwd: &std::path::Path) -> Result<()> {
                 println!("  {} {}", "[!]".yellow().bold(), w);
             }
         }
-        None => println!("No workspace detected (not inside a git or unharness repo)"),
+        None => println!("No workspace: {}", sync::no_workspace_reason(cwd)),
     }
 
     println!();

@@ -34,7 +34,15 @@ pub fn switch_default_harness(cwd: &Path, target: &str, global: bool) -> Result<
             path.display()
         );
     } else {
-        let root = ws_root.unwrap_or_else(|| cwd.to_path_buf());
+        // Settings saved for a directory that is no workspace root would be
+        // read by no run there (`Config::load_effective`).
+        let Some(root) = ws_root else {
+            bail!(
+                "there is no workspace here to save the default harness for: {}; or run \
+                 'unharness switch {target} --global'",
+                crate::sync::no_workspace_reason(cwd)
+            );
+        };
         let store = Config::workspace_store()
             .ok_or_else(|| anyhow::anyhow!("Could not determine user config directory"))?;
         let mut cfg = Config::load_workspace_in(&store, &root)?.unwrap_or_default();
