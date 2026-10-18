@@ -14,7 +14,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 | `unharness doctor` | Harnesses, sign-in, capabilities, sandbox, MCP servers, skills CLI and allow rules; exits 1 when a harness table in the config is wrong |
 | `unharness models [-H <harness>] [--provider <p>]` | Providers and models per harness |
 | `unharness sessions [--clear]` | Saved conversations in this workspace; `--clear` removes them, the prompt history and the checkpoints |
-| `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file |
+| `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file in the current directory; not in your home directory (see [The workspace](#the-workspace)) |
 | `unharness sync` | Refreshes the `CLAUDE.md` / `GEMINI.md` symlinks to `AGENTS.md` and projects `.agents/commands` and `.agents/agents` (see [Rules, skills, commands and subagents](skills.md)) |
 | `unharness switch <harness> [-g]` | Sets the default harness for this workspace, or globally with `-g` |
 | `unharness skills <args…>` | Manages skills (see [Rules, skills, commands and subagents](skills.md)) |
@@ -73,7 +73,7 @@ directory unharness was started in is then what the sandbox and
 `accept-edits` take as the workspace, nothing is synced, there are no
 workspace settings, workspace allow rules or file checkpoints, and
 conversations are kept under unharness's state directory. `unharness
-init` in a directory below your home directory makes it a workspace.
+init` makes the directory a workspace; it refuses your home directory.
 Started in your home directory, the default `workspace-write` sandbox
 refuses to start, since unharness's own state is there: run from a
 project directory, or with `--sandbox read-only` or `--sandbox off`.

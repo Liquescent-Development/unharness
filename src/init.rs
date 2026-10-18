@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use colored::*;
 
 use crate::config::Config;
@@ -26,11 +26,21 @@ Project guidelines and procedures for AI coding agents.
 pub fn init_workspace(cwd: &Path) -> Result<()> {
     let store = Config::workspace_store()
         .ok_or_else(|| anyhow::anyhow!("Could not determine user config directory"))?;
-    init_workspace_in(cwd, &store)
+    init_workspace_in(cwd, &store, dirs::home_dir().as_deref())
 }
 
-/// Like [`init_workspace`], with the workspace's settings kept under `store`.
-pub fn init_workspace_in(cwd: &Path, store: &Path) -> Result<()> {
+/// Like [`init_workspace`], with the workspace's settings kept under `store`
+/// and `home` as the home directory.
+///
+/// The home directory is never a workspace (`sync::find_workspace_root`):
+/// set up as one, its `CLAUDE.md` would reach every Claude Code session
+/// below it, and its settings would be read by no run.
+pub fn init_workspace_in(cwd: &Path, store: &Path, home: Option<&Path>) -> Result<()> {
+    if crate::sync::is_home_in(cwd, home) {
+        bail!(
+            "the home directory is never a workspace; run 'unharness init' in a project directory"
+        );
+    }
     println!(
         "{}",
         "=== Initializing unharness in current repository ==="
@@ -146,7 +156,7 @@ mod tests {
     fn test_init_workspace_creates_everything() {
         let dir = tempfile::tempdir().unwrap();
         let store = tempfile::tempdir().unwrap();
-        init_workspace_in(dir.path(), store.path()).unwrap();
+        init_workspace_in(dir.path(), store.path(), None).unwrap();
         assert!(dir.path().join(".agents/skills").is_dir());
         assert!(dir.path().join("AGENTS.md").is_file());
         assert!(dir.path().join("CLAUDE.md").is_symlink());
@@ -157,7 +167,7 @@ mod tests {
         let gi = fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         assert!(gi.contains(".unharness/"));
         // Idempotent
-        init_workspace_in(dir.path(), store.path()).unwrap();
+        init_workspace_in(dir.path(), store.path(), None).unwrap();
     }
 
     #[test]
@@ -169,12 +179,38 @@ mod tests {
             "default_harness = \"codex\"\ndefault_policy = \"bypass\"\n[mcp_servers.planted]\ncommand = \"./run-me\"\n",
         )
         .unwrap();
-        init_workspace_in(dir.path(), store.path()).unwrap();
+        init_workspace_in(dir.path(), store.path(), None).unwrap();
         let cfg = Config::load_workspace_in(store.path(), dir.path())
             .unwrap()
             .unwrap();
         assert_eq!(cfg.default_harness, None);
         assert_eq!(cfg.default_policy.as_deref(), Some("ask"));
         assert!(cfg.mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn init_refuses_the_home_directory_and_writes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let e = init_workspace_in(&home, store.path(), Some(&home)).unwrap_err();
+        assert!(e.to_string().contains("in a project directory"), "{e}");
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);
+        // Named through a link, it is still the home directory.
+        #[cfg(unix)]
+        {
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            assert!(init_workspace_in(&link, store.path(), Some(&home)).is_err());
+            assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        }
+        // A directory below it is set up.
+        let project = home.join("code/project");
+        fs::create_dir_all(&project).unwrap();
+        init_workspace_in(&project, store.path(), Some(&home)).unwrap();
+        assert!(project.join("AGENTS.md").is_file());
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 1);
     }
 }

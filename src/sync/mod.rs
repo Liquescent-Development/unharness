@@ -158,19 +158,12 @@ pub fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
     workspace_root_below(start_dir, dirs::home_dir().as_deref())
 }
 
-/// [`find_workspace_root`] with the home directory given. It is compared
-/// with each directory on the way up as both resolve, so a home reached
-/// through a link, or named through one, still ends the walk.
+/// [`find_workspace_root`] with the home directory given.
 fn workspace_root_below(start_dir: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    let home = home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()));
-    let is_home = |dir: &Path| {
-        home.as_deref().is_some_and(|home| {
-            dir == home || dir.canonicalize().is_ok_and(|resolved| resolved == home)
-        })
-    };
+    let home = resolved_home(home);
     let mut current = start_dir.to_path_buf();
     loop {
-        if is_home(&current) {
+        if is_resolved_home(&current, home.as_deref()) {
             return None;
         }
         if current.join(".git").exists()
@@ -183,6 +176,29 @@ fn workspace_root_below(start_dir: &Path, home: Option<&Path>) -> Option<PathBuf
             return None;
         }
     }
+}
+
+/// Whether `dir` is the home directory, which is never a workspace
+/// ([`find_workspace_root`]). The two are compared as they resolve, so a
+/// home named through a link, or reached through one, is still the home
+/// directory.
+pub fn is_home_dir(dir: &Path) -> bool {
+    is_home_in(dir, dirs::home_dir().as_deref())
+}
+
+/// [`is_home_dir`] with the home directory given.
+pub(crate) fn is_home_in(dir: &Path, home: Option<&Path>) -> bool {
+    is_resolved_home(dir, resolved_home(home).as_deref())
+}
+
+fn resolved_home(home: Option<&Path>) -> Option<PathBuf> {
+    home.map(|h| h.canonicalize().unwrap_or_else(|_| h.to_path_buf()))
+}
+
+fn is_resolved_home(dir: &Path, home: Option<&Path>) -> bool {
+    home.is_some_and(|home| {
+        dir == home || dir.canonicalize().is_ok_and(|resolved| resolved == home)
+    })
 }
 
 #[cfg(test)]
