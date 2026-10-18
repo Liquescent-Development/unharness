@@ -2,6 +2,12 @@
 
 What changed in each release of unharness. The section for a version is also the notes of its GitHub release.
 
+## 0.11.1 - 2026-10-18
+
+### Fixed
+
+- On macOS, Claude Code run in the sandbox can save a refreshed sign-in to the login Keychain. It could not, so it kept the refreshed token in `~/.claude/.credentials.json` while a plain `claude` used the old one from the Keychain, and Claude's server then revoked the login ("OAuth token revoked"), asking you to sign in again. The sandbox now lets Claude write only `login.keychain-db` and the files the Keychain writes beside it, and `unharness doctor` warns when your default keychain is another file. See [Sandbox](https://github.com/Liquescent-Development/unharness/blob/main/docs/sandbox.md#things-to-know).
+
 ## 0.11.0 - 2026-10-16
 
 ### Added
