@@ -16,9 +16,10 @@ limits around every harness.
 
 By default a confined harness can:
 
-- **write** only inside the workspace, the harness's own state directories
-  (`~/.claude`, `~/.codex`, `~/.pi`, …; `unharness doctor` lists them), the
-  temp directories, and herdr's runtime directory;
+- **write** only inside the [workspace](usage.md#the-workspace), the
+  harness's own state directories (`~/.claude`, `~/.codex`, `~/.pi`, …;
+  `unharness doctor` lists them), the temp directories, and herdr's runtime
+  directory;
 - **read** everything except credential locations: `~/.gnupg`, `~/.aws`,
   `~/.azure`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.config/gcloud`,
   `~/.netrc`, `~/.npmrc`, `~/.pypirc`, `~/.git-credentials` and shell

@@ -51,6 +51,33 @@ So pi, Mistral Vibe and ACP agents are chosen only when none of the first three 
 in, and ahead of any harness that is known to be signed out. `unharness
 doctor` shows the choice as "Active Default".
 
+## The workspace
+
+The workspace is the directory a session works in: the sandbox lets the
+agent write there, `sync` keeps its rules and commands, and its settings,
+allow rules, checkpoints and conversations are its own. unharness takes
+the nearest directory holding `.git`, `.agents` or `AGENTS.md`, starting
+with the one it was started in and going up, so a session started in a
+repository's `src/` has the whole repository. `unharness doctor` shows
+it as "Root".
+
+Your home directory is never the workspace found this way, and the
+search stops below it: a `~/.agents` that another tool keeps skills in,
+or a `~/.git` for dotfiles, does not make your home directory the
+workspace of a folder below it. Outside your home directory the search
+goes on up to `/`.
+
+When no directory on the way holds one of them, or unharness is started
+in your home directory itself, there is no workspace root. The
+directory unharness was started in is then what the sandbox and
+`accept-edits` take as the workspace, nothing is synced, there are no
+workspace settings, workspace allow rules or file checkpoints, and
+conversations are kept under unharness's state directory. `unharness
+init` in a directory below your home directory makes it a workspace.
+Started in your home directory, the default `workspace-write` sandbox
+refuses to start, since unharness's own state is there: run from a
+project directory, or with `--sandbox read-only` or `--sandbox off`.
+
 ## Conversations
 
 A conversation is what you resume. unharness saves each one under
