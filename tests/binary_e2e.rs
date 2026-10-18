@@ -1111,8 +1111,11 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
 #[test]
 fn switch_saves_a_default_harness_only_where_a_run_reads_it() {
     let tmp = scratch_with_config(
-        "[harnesses.picked]\nprotocol = \"acp\"\ncommand = [\"/bin/sh\"]\n\
-         display_name = \"Picked Agent\"\n",
+        "default_harness = \"other\"\n\
+         [harnesses.picked]\nprotocol = \"acp\"\ncommand = [\"/bin/sh\"]\n\
+         display_name = \"Picked Agent\"\n\
+         [harnesses.other]\nprotocol = \"acp\"\ncommand = [\"/bin/sh\"]\n\
+         display_name = \"Other Agent\"\n",
     );
     let root = tmp.path();
     std::fs::create_dir_all(root.join("home/.agents")).unwrap();
@@ -1141,15 +1144,32 @@ fn switch_saves_a_default_harness_only_where_a_run_reads_it() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let active_default = || {
+        let out = unharness_at(root, &folder, &["doctor"]);
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let line = stdout.lines().find(|l| l.starts_with("Active Default: "));
+        line.unwrap_or_else(|| panic!("{stdout}")).to_string()
+    };
+    assert_eq!(active_default(), "Active Default: Other Agent (/bin/sh)");
     let out = unharness_at(root, &folder, &["switch", "picked"]);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let out = unharness_at(root, &folder, &["doctor"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Active Default: Picked Agent"), "{stdout}");
+    assert_eq!(active_default(), "Active Default: Picked Agent (/bin/sh)");
+    let saved: Vec<_> = std::fs::read_dir(root.join("config/unharness/workspaces"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    assert_eq!(saved.len(), 1, "{saved:?}");
+    assert!(
+        std::fs::read_to_string(&saved[0])
+            .unwrap()
+            .contains("default_harness = \"picked\""),
+        "{saved:?}"
+    );
 }
 
 /// `switch` and `models` with a `[harnesses.vibe]` table whose modes do
