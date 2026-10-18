@@ -299,6 +299,22 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_above_the_home_directory_is_not_a_root_for_a_folder_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        dir(tmp.path().join(".git"));
+        let home = home_in(tmp.path());
+        let code = dir(home.join("code"));
+        assert_eq!(workspace_root_below(&code, Some(&home)), None);
+        assert_eq!(workspace_root_below(&home, Some(&home)), None);
+        // From outside the home directory it still is.
+        let other = dir(tmp.path().join("srv/other"));
+        assert_eq!(
+            workspace_root_below(&other, Some(&home)),
+            Some(tmp.path().to_path_buf())
+        );
+    }
+
+    #[test]
     fn why_there_is_no_root_says_where_the_search_went() {
         let tmp = tempfile::tempdir().unwrap();
         let home = home_in(tmp.path());
