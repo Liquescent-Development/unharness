@@ -16,7 +16,7 @@ unharness --no-tui                          # run the vendor's own TUI instead
 | `unharness sessions [--clear]` | Saved conversations in this workspace; `--clear` removes them, the prompt history and the checkpoints |
 | `unharness init` | Sets up `AGENTS.md`, `.agents/skills`, the rules symlinks and the workspace config file in the current directory; not in your home directory (see [The workspace](#the-workspace)) |
 | `unharness sync` | Refreshes the `CLAUDE.md` / `GEMINI.md` symlinks to `AGENTS.md` and projects `.agents/commands` and `.agents/agents` (see [Rules, skills, commands and subagents](skills.md)) |
-| `unharness switch <harness> [-g]` | Sets the default harness for this workspace, or globally with `-g` |
+| `unharness switch <harness> [-g]` | Sets the default harness for this workspace, or globally with `-g`; where there is no [workspace root](#the-workspace), only `-g` |
 | `unharness skills <args…>` | Manages skills (see [Rules, skills, commands and subagents](skills.md)) |
 | `unharness update [<version>] [--check] [--prerelease]` | Updates unharness itself when the shell installer put it there; otherwise says what to run (see [Updating](../README.md#updating)) |
 
@@ -71,12 +71,13 @@ When no directory on the way holds one of them, or unharness is started
 in your home directory itself, there is no workspace root. The
 directory unharness was started in is then what the sandbox and
 `accept-edits` take as the workspace, nothing is synced, there are no
-workspace settings, workspace allow rules or file checkpoints, and
-conversations are kept under unharness's state directory. `unharness
-init` makes the directory a workspace; it refuses your home directory.
-Started in your home directory, the default `workspace-write` sandbox
-refuses to start, since unharness's own state is there: run from a
-project directory, or with `--sandbox read-only` or `--sandbox off`.
+workspace settings (`unharness switch` without `-g` refuses), workspace
+allow rules or file checkpoints, and conversations are kept under
+unharness's state directory. `unharness init` makes the directory a
+workspace; it refuses your home directory. Started in your home
+directory, the default `workspace-write` sandbox refuses to start, since
+unharness's own state is there: run from a project directory, or with
+`--sandbox read-only` or `--sandbox off`.
 
 ## Conversations
 

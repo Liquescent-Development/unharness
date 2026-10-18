@@ -1005,9 +1005,14 @@ fn scratch_with_config(config: &str) -> tempfile::TempDir {
 }
 
 fn unharness_in(root: &Path, args: &[&str]) -> std::process::Output {
+    unharness_at(root, &root.join("ws"), args)
+}
+
+/// [`unharness_in`] started in `dir`.
+fn unharness_at(root: &Path, dir: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_unharness"))
         .args(args)
-        .current_dir(root.join("ws"))
+        .current_dir(dir)
         .env("PATH", root.join("bin"))
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("config"))
@@ -1096,6 +1101,55 @@ fn doctor_reports_a_wrong_harness_table_and_shows_no_built_in_for_it() {
         ) && !stdout.contains("unknown harness"),
         "{stdout}"
     );
+}
+
+/// `switch` without `--global` in a folder below the home directory that
+/// no marker makes a workspace saves nothing, since no run there would
+/// read it, and says what to do; once `init` has made the folder a
+/// workspace, the harness it saves is the one a run there takes (#345).
+/// Neither the folder nor the home directory gets a marker meanwhile.
+#[test]
+fn switch_saves_a_default_harness_only_where_a_run_reads_it() {
+    let tmp = scratch_with_config(
+        "[harnesses.picked]\nprotocol = \"acp\"\ncommand = [\"/bin/sh\"]\n\
+         display_name = \"Picked Agent\"\n",
+    );
+    let root = tmp.path();
+    std::fs::create_dir_all(root.join("home/.agents")).unwrap();
+    let folder = root.join("home/code/folder");
+    std::fs::create_dir_all(&folder).unwrap();
+
+    let out = unharness_at(root, &folder, &["switch", "picked"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("there is no workspace here to save the default harness for")
+            && stderr.contains("'unharness switch picked --global'"),
+        "{stderr}"
+    );
+    assert!(!root.join("config/unharness/workspaces").exists());
+    assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+
+    // The home directory is not set up as a workspace either.
+    let out = unharness_at(root, &root.join("home"), &["init"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(!root.join("home/AGENTS.md").exists());
+
+    let out = unharness_at(root, &folder, &["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = unharness_at(root, &folder, &["switch", "picked"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = unharness_at(root, &folder, &["doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Active Default: Picked Agent"), "{stdout}");
 }
 
 /// `switch` and `models` with a `[harnesses.vibe]` table whose modes do
