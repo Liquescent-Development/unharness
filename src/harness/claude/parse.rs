@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
+use crate::core::transcript::truncate_chars;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
     ModelRef, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
@@ -613,14 +614,7 @@ impl ClaudeParser {
                     str_at(val, "error")
                 )));
             }
-            "permission_denied" => {
-                let tool = opt_str(val, "tool_name")
-                    .or_else(|| opt_str(val, "tool"))
-                    .unwrap_or_else(|| "tool".to_string());
-                out.push(AgentEvent::Notice(format!(
-                    "permission denied for {tool} (no prompt available in this mode)"
-                )));
-            }
+            "permission_denied" => out.push(AgentEvent::Notice(denied_notice(val))),
             // `post_tokens` is Claude Code's own estimate of what the
             // compacted context holds, the size it shows itself until the
             // next request reports one. It counts the kept messages only,
@@ -1279,6 +1273,93 @@ fn hook_outcome(val: &Value) -> HookVerdict {
     HookVerdict::Ended(HookOutcome::Failed, output.to_string())
 }
 
+/// Longest reason a denial notice carries; the tool result beside it has
+/// the whole of what Claude told the model.
+const DENIAL_REASON_MAX: usize = 120;
+
+/// The `decision_reason`s with which Claude's auto mode denies a call its
+/// classifier gave no verdict on (2.1.302: `CLASSIFIER_UNAVAILABLE_REASON`,
+/// and the start of the reasons for repeated responses without a verdict
+/// and for a verdict that could not be read).
+const NO_VERDICT_REASONS: [&str; 3] = [
+    "Classifier unavailable",
+    "Auto mode unavailable",
+    "Auto mode could not evaluate",
+];
+
+/// The notice for a `system` `permission_denied`: a call Claude denied
+/// without asking us (NOTES.md, "Denied calls"). It says who denied it
+/// (`decision_reason_type`) and why: a `decision_reason_code` in words of
+/// our own, else Claude's `decision_reason`, else the first sentence of
+/// its `message`, which is the tool result the transcript shows in full,
+/// else nothing.
+fn denied_notice(val: &Value) -> String {
+    let tool = opt_str(val, "tool_name")
+        .or_else(|| opt_str(val, "tool"))
+        .unwrap_or_else(|| "a tool".to_string());
+    let tool = match opt_str(val, "agent_id").filter(|a| !a.is_empty()) {
+        Some(_) => format!("{tool} in a subagent"),
+        None => tool,
+    };
+    let kind = str_at(val, "decision_reason_type");
+    let code = str_at(val, "decision_reason_code");
+    let given = opt_str(val, "decision_reason")
+        .map(|r| one_line(&r))
+        .filter(|r| !r.is_empty());
+    let no_verdict = kind == "classifier"
+        && (code == "classifier_transcript_too_long"
+            || given
+                .as_deref()
+                .is_some_and(|r| NO_VERDICT_REASONS.iter().any(|n| r.starts_with(n))));
+    let reason = match code {
+        "classifier_transcript_too_long" => {
+            Some("the conversation is too long for its classifier".to_string())
+        }
+        "outside_reads_blocked" => Some(
+            "reads outside the working directories are blocked \
+             (permissions.blockReadsOutsideWorkingDirectories)"
+                .to_string(),
+        ),
+        "memory_paused" => Some("memory is paused for this session".to_string()),
+        _ => given.or_else(|| {
+            opt_str(val, "message")
+                .map(|m| first_sentence(&one_line(&m)))
+                .filter(|m| !m.is_empty())
+        }),
+    }
+    .map(|r| truncate_chars(r.trim_end_matches('.'), DENIAL_REASON_MAX));
+    let who = match kind {
+        "classifier" => "Claude's auto mode",
+        "hook" => "a Claude hook",
+        "safetyCheck" => "Claude's safety check",
+        "rule" => "Claude's permission rules",
+        "mode" => "Claude's permission mode",
+        _ => "Claude",
+    };
+    let did = if no_verdict {
+        "could not check"
+    } else {
+        "denied"
+    };
+    match reason {
+        Some(reason) => format!("{who} {did} {tool}: {reason}"),
+        None => format!("{who} {did} {tool}"),
+    }
+}
+
+/// `s` with each run of whitespace, line breaks among them, one space.
+fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `s` up to the end of its first sentence: a full stop and a space.
+fn first_sentence(s: &str) -> String {
+    match s.find(". ") {
+        Some(end) => s[..end].to_string(),
+        None => s.to_string(),
+    }
+}
+
 /// A failed turn's error, from its result's `subtype` and text. The
 /// subtype leads only when it names the failure (`error_max_turns`,
 /// `error_during_execution`, …); an API or sign-in error comes as a
@@ -1358,6 +1439,181 @@ mod tests {
     #[test]
     fn fixture_write_denied_auto_mode() {
         fixture("write_denied");
+    }
+
+    /// The notice for a `permission_denied` line with these fields beside
+    /// `tool_name` `Bash`. The lines are written by hand in the shape
+    /// 2.1.302's `emitPermissionDenied` gives them (NOTES.md, "Denied
+    /// calls"); only the old shape, with `message` alone, was recorded.
+    fn denied(fields: serde_json::Value) -> Vec<AgentEvent> {
+        let mut line = serde_json::json!({
+            "type": "system",
+            "subtype": "permission_denied",
+            "tool_name": "Bash",
+            "tool_use_id": "toolu_01",
+            "uuid": "u1",
+            "session_id": "s1",
+        });
+        for (k, v) in fields.as_object().unwrap() {
+            line[k] = v.clone();
+        }
+        ClaudeParser::new().feed(&line.to_string())
+    }
+
+    fn notice(text: &str) -> Vec<AgentEvent> {
+        vec![AgentEvent::Notice(text.into())]
+    }
+
+    /// #347: the classifier gave no verdict (the response ended before
+    /// it), and the notice said "no prompt available in this mode".
+    #[test]
+    fn a_classifier_without_a_verdict_could_not_check() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "classifier",
+                "decision_reason": "Classifier unavailable",
+                "message": "The server-side auto mode classifier gave no verdict (the response \
+                    ended before its verdict arrived), so auto mode cannot determine the safety \
+                    of Bash. This is a transient failure of the check, not a judgment about the \
+                    action: a later response may get a verdict. You may try the action again \
+                    once, as-is.",
+            })),
+            notice("Claude's auto mode could not check Bash: Classifier unavailable")
+        );
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "classifier",
+                "decision_reason_code": "classifier_transcript_too_long",
+                "decision_reason": "Auto mode classifier transcript exceeded context window; \
+                    will try to compact the conversation before the next request",
+                "message": "Bash was not reviewed and did not run: the conversation is too \
+                    long for auto mode's classifier.",
+            })),
+            notice(
+                "Claude's auto mode could not check Bash: the conversation is too long for its classifier"
+            )
+        );
+    }
+
+    /// A verdict: the classifier's reason, on one line and cut short.
+    #[test]
+    fn a_classifier_block_gives_its_reason() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "classifier",
+                "decision_reason": "Deletes the user's\nhome directory.",
+                "message": "Permission for this action has been denied. Reason: …",
+            })),
+            notice("Claude's auto mode denied Bash: Deletes the user's home directory")
+        );
+        let long = "x".repeat(300);
+        let events = denied(serde_json::json!({
+            "decision_reason_type": "classifier",
+            "decision_reason": long,
+            "message": "m",
+        }));
+        let [AgentEvent::Notice(text)] = events.as_slice() else {
+            panic!("{events:?}")
+        };
+        assert!(text.ends_with('…'), "{text}");
+        assert!(text.chars().count() < 160, "{text}");
+    }
+
+    /// A code names a reason in words of our own, whoever decided it.
+    #[test]
+    fn a_reason_code_is_said_in_words() {
+        let outside = "reads outside the working directories are blocked \
+                       (permissions.blockReadsOutsideWorkingDirectories)";
+        assert_eq!(
+            denied(serde_json::json!({
+                "tool_name": "Read",
+                "decision_reason_type": "other",
+                "decision_reason_code": "outside_reads_blocked",
+                "decision_reason": "Reads outside the working directories are blocked \
+                    (permissions.blockReadsOutsideWorkingDirectories). Add the directory \
+                    with /add-dir, or remove that setting.",
+                "message": "m",
+            })),
+            notice(&format!("Claude denied Read: {outside}"))
+        );
+        // A safety check's circuit breaker gives no `decision_reason`.
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "safetyCheck",
+                "decision_reason_code": "outside_reads_blocked",
+                "message": "m",
+            })),
+            notice(&format!("Claude's safety check denied Bash: {outside}"))
+        );
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "other",
+                "decision_reason_code": "memory_paused",
+                "decision_reason": "Memory is paused for this session; only the user can \
+                    turn it back on.",
+                "message": "m",
+            })),
+            notice("Claude denied Bash: memory is paused for this session")
+        );
+    }
+
+    /// Without a `decision_reason` (a rule, a mode), the first sentence of
+    /// the tool result Claude gave the model.
+    #[test]
+    fn without_a_reason_the_message_says_why() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "mode",
+                "message": "Permission to use Bash has been denied because Claude Code is \
+                    running in don't ask mode. Do not retry.",
+            })),
+            notice(
+                "Claude's permission mode denied Bash: Permission to use Bash has been denied because Claude Code is running in don't ask mode"
+            )
+        );
+        assert_eq!(
+            denied(serde_json::json!({
+                "tool_name": "SandboxNetworkAccess",
+                "decision_reason_type": "asyncAgent",
+                "decision_reason": "no approval surface in this session; permission request \
+                    denied automatically",
+                "message": "Permission for this tool use was denied. It requires approval.",
+            })),
+            notice(
+                "Claude denied SandboxNetworkAccess: no approval surface in this session; permission request denied automatically"
+            )
+        );
+    }
+
+    /// A subagent's call says so: the main transcript has no such call.
+    #[test]
+    fn a_subagent_s_denial_says_so() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "agent_id": "a1b2",
+                "decision_reason_type": "hook",
+                "decision_reason": "blocked by policy",
+                "message": "m",
+            })),
+            notice("a Claude hook denied Bash in a subagent: blocked by policy")
+        );
+    }
+
+    /// The recorded shape (`write_denied.jsonl`: `message` alone), and a
+    /// line with nothing to say why: no reason made up.
+    #[test]
+    fn an_older_or_bare_denial() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "tool_name": "Write",
+                "message": "Claude requested permissions to write to /WORKSPACE/spike.txt, \
+                    but you haven't granted it yet.",
+            })),
+            notice(
+                "Claude denied Write: Claude requested permissions to write to /WORKSPACE/spike.txt, but you haven't granted it yet"
+            )
+        );
+        assert_eq!(denied(serde_json::json!({})), notice("Claude denied Bash"));
     }
 
     #[test]
