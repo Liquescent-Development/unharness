@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde_json::Value;
 
+use crate::core::text::sanitize;
 use crate::core::transcript::truncate_chars;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
@@ -1292,9 +1293,15 @@ const NO_VERDICT_REASONS: [&str; 3] = [
 /// (`decision_reason_type`) and why: a `decision_reason_code` in words of
 /// our own, else Claude's `decision_reason`, else its `message`, which is
 /// the tool result the transcript shows in full, else nothing; on one
-/// line and cut short.
+/// line and cut short. What the model wrote can be in it (a command in
+/// `message`, a classifier's or hook's reason), and `--print` writes a
+/// notice to the terminal as it is, so it is taken through [`one_line`].
 fn denied_notice(val: &Value) -> String {
-    let tool = match opt_str(val, "tool_name").or_else(|| opt_str(val, "tool")) {
+    let tool = opt_str(val, "tool_name")
+        .or_else(|| opt_str(val, "tool"))
+        .map(|t| one_line(&t))
+        .filter(|t| !t.is_empty());
+    let tool = match tool {
         // Claude's name for a network connection it was asked to allow.
         Some(t) if t == "SandboxNetworkAccess" => "a network connection".to_string(),
         Some(t) => t,
@@ -1353,9 +1360,26 @@ fn denied_notice(val: &Value) -> String {
     }
 }
 
-/// `s` with each run of whitespace, line breaks among them, one space.
+/// `s` on one line, to be shown as it is: escape sequences and other
+/// control characters out ([`sanitize`]), and the marks that change how
+/// the text around them is shown (zero-width and direction marks,
+/// embeddings, overrides and isolates, the byte order mark); each run of
+/// whitespace, line breaks among it, one space.
 fn one_line(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    let shown: String = sanitize(s)
+        .chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{061C}'
+                    | '\u{200B}'..='\u{200F}'
+                    | '\u{202A}'..='\u{202E}'
+                    | '\u{2060}'..='\u{2069}'
+                    | '\u{FEFF}'
+            )
+        })
+        .collect();
+    shown.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// A failed turn's error, from its result's `subtype` and text. The
@@ -1603,6 +1627,24 @@ mod tests {
             })),
             notice(
                 "Claude denied a network connection: no approval surface in this session; permission request denied automatically"
+            )
+        );
+    }
+
+    /// What the model wrote reaches the terminal under `--print`: no
+    /// escape sequence, control character or direction mark gets through.
+    #[test]
+    fn a_denial_notice_carries_no_escapes() {
+        assert_eq!(
+            denied(serde_json::json!({
+                "tool_name": "Ba\u{1b}[2Jsh",
+                "decision_reason_type": "rule",
+                "message": "Permission to use Bash with command echo \u{1b}]8;;https://x.test\u{7}\
+                    hi\u{1b}]8;;\u{1b}\\ \u{1b}[31mred\u{1b}[0m a\u{202E}b\u{2066}c\r\nd\u{7} \
+                    has been denied.",
+            })),
+            notice(
+                "Claude's permission rules denied Bash: Permission to use Bash with command echo hi red abc d has been denied"
             )
         );
     }

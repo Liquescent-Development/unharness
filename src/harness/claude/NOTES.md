@@ -221,7 +221,10 @@ one line and cut at 120 characters, else nothing. It is not cut at a
 full stop, which may be inside a command (`Permission to use Bash with
 command git commit -m "Fix bug. Add test" has been denied.`). "In a
 subagent" when `agent_id` is set; `SandboxNetworkAccess` is "a network
-connection". Before, it always said "no prompt available in this
+connection". The model can write part of it (a command in `message`, a
+classifier's or hook's reason) and `--print` writes notices to the
+terminal as they are, so escape sequences, control characters and
+direction marks are taken out. Before, it always said "no prompt available in this
 mode", which was ours and was wrong for the classifier (#347, seen on
 0.11.2 with a dropped connection). Only the old shape is recorded
 (`fixtures/write_denied.jsonl`, `message` alone, from before these
