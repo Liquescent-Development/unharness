@@ -1290,13 +1290,16 @@ const NO_VERDICT_REASONS: [&str; 3] = [
 /// The notice for a `system` `permission_denied`: a call Claude denied
 /// without asking us (NOTES.md, "Denied calls"). It says who denied it
 /// (`decision_reason_type`) and why: a `decision_reason_code` in words of
-/// our own, else Claude's `decision_reason`, else the first sentence of
-/// its `message`, which is the tool result the transcript shows in full,
-/// else nothing.
+/// our own, else Claude's `decision_reason`, else its `message`, which is
+/// the tool result the transcript shows in full, else nothing; on one
+/// line and cut short.
 fn denied_notice(val: &Value) -> String {
-    let tool = opt_str(val, "tool_name")
-        .or_else(|| opt_str(val, "tool"))
-        .unwrap_or_else(|| "a tool".to_string());
+    let tool = match opt_str(val, "tool_name").or_else(|| opt_str(val, "tool")) {
+        // Claude's name for a network connection it was asked to allow.
+        Some(t) if t == "SandboxNetworkAccess" => "a network connection".to_string(),
+        Some(t) => t,
+        None => "a tool".to_string(),
+    };
     let tool = match opt_str(val, "agent_id").filter(|a| !a.is_empty()) {
         Some(_) => format!("{tool} in a subagent"),
         None => tool,
@@ -1306,11 +1309,13 @@ fn denied_notice(val: &Value) -> String {
     let given = opt_str(val, "decision_reason")
         .map(|r| one_line(&r))
         .filter(|r| !r.is_empty());
-    let no_verdict = kind == "classifier"
-        && (code == "classifier_transcript_too_long"
-            || given
+    // The code is the classifier's whatever the type it comes with.
+    let too_long = code == "classifier_transcript_too_long";
+    let no_verdict = too_long
+        || kind == "classifier"
+            && given
                 .as_deref()
-                .is_some_and(|r| NO_VERDICT_REASONS.iter().any(|n| r.starts_with(n))));
+                .is_some_and(|r| NO_VERDICT_REASONS.iter().any(|n| r.starts_with(n)));
     let reason = match code {
         "classifier_transcript_too_long" => {
             Some("the conversation is too long for its classifier".to_string())
@@ -1323,12 +1328,13 @@ fn denied_notice(val: &Value) -> String {
         "memory_paused" => Some("memory is paused for this session".to_string()),
         _ => given.or_else(|| {
             opt_str(val, "message")
-                .map(|m| first_sentence(&one_line(&m)))
+                .map(|m| one_line(&m))
                 .filter(|m| !m.is_empty())
         }),
     }
-    .map(|r| truncate_chars(r.trim_end_matches('.'), DENIAL_REASON_MAX));
+    .map(|r| truncate_chars(r.strip_suffix('.').unwrap_or(&r), DENIAL_REASON_MAX));
     let who = match kind {
+        _ if too_long => "Claude's auto mode",
         "classifier" => "Claude's auto mode",
         "hook" => "a Claude hook",
         "safetyCheck" => "Claude's safety check",
@@ -1336,28 +1342,20 @@ fn denied_notice(val: &Value) -> String {
         "mode" => "Claude's permission mode",
         _ => "Claude",
     };
-    let did = if no_verdict {
-        "could not check"
+    let what = if no_verdict {
+        format!("{who} could not check {tool} and denied it")
     } else {
-        "denied"
+        format!("{who} denied {tool}")
     };
     match reason {
-        Some(reason) => format!("{who} {did} {tool}: {reason}"),
-        None => format!("{who} {did} {tool}"),
+        Some(reason) => format!("{what}: {reason}"),
+        None => what,
     }
 }
 
 /// `s` with each run of whitespace, line breaks among them, one space.
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// `s` up to the end of its first sentence: a full stop and a space.
-fn first_sentence(s: &str) -> String {
-    match s.find(". ") {
-        Some(end) => s[..end].to_string(),
-        None => s.to_string(),
-    }
 }
 
 /// A failed turn's error, from its result's `subtype` and text. The
@@ -1478,7 +1476,7 @@ mod tests {
                     action: a later response may get a verdict. You may try the action again \
                     once, as-is.",
             })),
-            notice("Claude's auto mode could not check Bash: Classifier unavailable")
+            notice("Claude's auto mode could not check Bash and denied it: Classifier unavailable")
         );
         assert_eq!(
             denied(serde_json::json!({
@@ -1490,7 +1488,18 @@ mod tests {
                     long for auto mode's classifier.",
             })),
             notice(
-                "Claude's auto mode could not check Bash: the conversation is too long for its classifier"
+                "Claude's auto mode could not check Bash and denied it: the conversation is too long for its classifier"
+            )
+        );
+        // The code is auto mode's whatever the type beside it.
+        assert_eq!(
+            denied(serde_json::json!({
+                "decision_reason_type": "other",
+                "decision_reason_code": "classifier_transcript_too_long",
+                "message": "m",
+            })),
+            notice(
+                "Claude's auto mode could not check Bash and denied it: the conversation is too long for its classifier"
             )
         );
     }
@@ -1547,28 +1556,41 @@ mod tests {
         );
         assert_eq!(
             denied(serde_json::json!({
-                "decision_reason_type": "other",
+                "tool_name": "Write",
+                "decision_reason_type": "safetyCheck",
                 "decision_reason_code": "memory_paused",
-                "decision_reason": "Memory is paused for this session; only the user can \
-                    turn it back on.",
-                "message": "m",
+                "decision_reason": "memory access blocked by /pause-memory",
+                "message": "Cannot write to memory while it is paused for this session; only \
+                    the user can turn it back on.",
             })),
-            notice("Claude denied Bash: memory is paused for this session")
+            notice("Claude's safety check denied Write: memory is paused for this session")
         );
     }
 
-    /// Without a `decision_reason` (a rule, a mode), the first sentence of
-    /// the tool result Claude gave the model.
+    /// Without a `decision_reason` (a rule, a mode), the tool result
+    /// Claude gave the model, cut short but not at a full stop, which may
+    /// be inside a command.
     #[test]
     fn without_a_reason_the_message_says_why() {
         assert_eq!(
             denied(serde_json::json!({
-                "decision_reason_type": "mode",
-                "message": "Permission to use Bash has been denied because Claude Code is \
-                    running in don't ask mode. Do not retry.",
+                "decision_reason_type": "rule",
+                "message": "Permission to use Bash with command git commit -m \"Fix bug. Add \
+                    test\" has been denied.",
             })),
             notice(
-                "Claude's permission mode denied Bash: Permission to use Bash has been denied because Claude Code is running in don't ask mode"
+                "Claude's permission rules denied Bash: Permission to use Bash with command git commit -m \"Fix bug. Add test\" has been denied"
+            )
+        );
+        let events = denied(serde_json::json!({
+            "decision_reason_type": "mode",
+            "message": "Permission to use Bash has been denied because Claude Code is \
+                running in don't ask mode. Do not retry it, and do not claim that it ran.",
+        }));
+        assert_eq!(
+            events,
+            notice(
+                "Claude's permission mode denied Bash: Permission to use Bash has been denied because Claude Code is running in don't ask mode. Do not retry it, and do not cl…"
             )
         );
         assert_eq!(
@@ -1580,7 +1602,7 @@ mod tests {
                 "message": "Permission for this tool use was denied. It requires approval.",
             })),
             notice(
-                "Claude denied SandboxNetworkAccess: no approval surface in this session; permission request denied automatically"
+                "Claude denied a network connection: no approval surface in this session; permission request denied automatically"
             )
         );
     }

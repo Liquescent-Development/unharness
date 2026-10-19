@@ -197,7 +197,8 @@ unset is left out. The SDK schema describes it:
 - `decision_reason_code` is one of `classifier_transcript_too_long`,
   `outside_reads_blocked` (`permissions.blockReadsOutsideWorkingDirectories`)
   and `memory_paused`, "absent for every other reason; new values are
-  additive".
+  additive". Memory paused is denied as a `safetyCheck` with the reason
+  `memory access blocked by /pause-memory`.
 - Not written for a PreToolUse hook's deny, a deny rule overriding a
   hook, or a Read, Edit or Write refused by a path-scoped deny rule;
   `result.permission_denials` is "the authoritative record".
@@ -212,11 +213,15 @@ not evaluate this action` (a verdict it could not read), or the code
 own reason.
 
 The notice says who denied the call (the type: auto mode, a hook, a
-safety check, permission rules, the permission mode, else Claude), "could
-not check" for those no-verdict reasons, and why: a code in words of our
-own, else `decision_reason`, else the first sentence of `message`, on
-one line and cut at 120 characters, else nothing; "in a subagent" when
-`agent_id` is set. Before, it always said "no prompt available in this
+safety check, permission rules, the permission mode, else Claude; auto
+mode for `classifier_transcript_too_long` whatever the type), "could
+not check … and denied it" for those no-verdict reasons, and why: a
+code in words of our own, else `decision_reason`, else `message`, on
+one line and cut at 120 characters, else nothing. It is not cut at a
+full stop, which may be inside a command (`Permission to use Bash with
+command git commit -m "Fix bug. Add test" has been denied.`). "In a
+subagent" when `agent_id` is set; `SandboxNetworkAccess` is "a network
+connection". Before, it always said "no prompt available in this
 mode", which was ours and was wrong for the classifier (#347, seen on
 0.11.2 with a dropped connection). Only the old shape is recorded
 (`fixtures/write_denied.jsonl`, `message` alone, from before these
