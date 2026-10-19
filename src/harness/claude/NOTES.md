@@ -166,6 +166,72 @@ Claude exits without a result (`on_exit`). A subagent's is shown as
 text. Unverified: an `error_…` result live (none recorded), and a
 synthetic message a result does not follow.
 
+## Denied calls
+
+A call Claude denies by itself, before any prompt, comes as `system`
+`permission_denied` (#347). With `--permission-prompt-tool stdio` an
+`ask` reaches us as a `can_use_tool` request, and our answer writes no
+such line; what does is a deny decided before the prompt: Claude's
+auto-mode classifier, a deny rule, a mode (`dontAsk`), a safety check,
+a hook, a network request with nobody to approve it
+(`tool_name: "SandboxNetworkAccess"`). Read in the 2.1.302 binary
+(`emitPermissionDenied`, and a second site that writes the same fields
+for a deny decided "pre-ask"): `tool_name`, `tool_use_id`, `agent_id`
+(set for a subagent's call), `decision_reason_type`,
+`decision_reason_code`, `decision_reason`, `message`; a field left
+unset is left out. The SDK schema describes it:
+
+- `message` is "the rejection message returned to the model in the
+  tool_result", so the transcript already shows it in full, under the
+  call. For the classifier it is a paragraph written for the model.
+- `decision_reason_type` is the kind of `decisionReason`: `rule`,
+  `mode`, `subcommandResults`, `permissionPromptTool`, `hook`,
+  `asyncAgent`, `sandboxOverride`, `workingDir`, `safetyCheck`,
+  `classifier` or `other`.
+- `decision_reason` is the "human-readable reason from the deciding
+  component": the reason of a `classifier`, `hook`, `asyncAgent`,
+  `sandboxOverride` or `workingDir` decision, of `safetyCheck` unless
+  its circuit breaker is `outsideReadsBlocked` or `unfinishedCheck`,
+  and of `other` but for two auto-mode holds; none for `rule`, `mode`,
+  `subcommandResults` and `permissionPromptTool`.
+- `decision_reason_code` is one of `classifier_transcript_too_long`,
+  `outside_reads_blocked` (`permissions.blockReadsOutsideWorkingDirectories`)
+  and `memory_paused`, "absent for every other reason; new values are
+  additive". Memory paused is denied as a `safetyCheck` with the reason
+  `memory access blocked by /pause-memory`.
+- Not written for a PreToolUse hook's deny, a deny rule overriding a
+  hook, or a Read, Edit or Write refused by a path-scoped deny rule;
+  `result.permission_denials` is "the authoritative record".
+
+The classifier denies a call it got no verdict on with the reason
+`Classifier unavailable` (the response ended before the verdict, a
+timeout, a server error, the API saying to wait; which one is in
+`message` only), `Auto mode unavailable — stopped after repeated
+responses with no safety verdict`, a reason starting `Auto mode could
+not evaluate this action` (a verdict it could not read), or the code
+`classifier_transcript_too_long`; a verdict comes with the classifier's
+own reason.
+
+The notice says who denied the call (the type: auto mode, a hook, a
+safety check, permission rules, the permission mode, else Claude; auto
+mode for `classifier_transcript_too_long` whatever the type), "could
+not check … and denied it" for those no-verdict reasons, and why: a
+code in words of our own, else `decision_reason`, else `message`, on
+one line and cut at 120 characters, else nothing. It is not cut at a
+full stop, which may be inside a command (`Permission to use Bash with
+command git commit -m "Fix bug. Add test" has been denied.`). "In a
+subagent" when `agent_id` is set; `SandboxNetworkAccess` is "a network
+connection". The model can write part of it (a command in `message`, a
+classifier's or hook's reason) and `--print` writes notices to the
+terminal as they are, so escape sequences, control characters and
+direction marks are taken out. Before, it always said "no prompt available in this
+mode", which was ours and was wrong for the classifier (#347, seen on
+0.11.2 with a dropped connection). Only the old shape is recorded
+(`fixtures/write_denied.jsonl`, `message` alone, from before these
+fields); the new shapes in the parser's tests are written by hand from
+the 2.1.302 binary, since a classifier denial cannot be brought about
+on purpose. Unverified live: every new field.
+
 ## Sending a prompt now
 
 `SessionCommand::SendNow` (`/now`, #333), recorded on 2.1.301 with

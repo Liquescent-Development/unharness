@@ -15,7 +15,7 @@ ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "spike.txt"
 ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "\", \"content\": \"hello"
 ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "\"}"
 ToolCallStarted id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write input={"content":"hello","file_path":"/WORKSPACE/spike.txt"}
-Notice "permission denied for Write (no prompt available in this ..."
+Notice "Claude denied Write: Claude requested permissions to writ..."
 ToolCallResult id=toolu_01NWbUzXmddzNpqwyaHRv714 error=true "Claude requested permissions to write to /WORKSPACE/spike..."
 RateLimit status=allowed five_hour=28% seven_day=4%
 Context used=25484 window=-
