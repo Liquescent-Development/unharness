@@ -2,7 +2,7 @@
 //! conversation, the session and the turn.
 
 use super::{Controller, Front};
-use crate::core::{AgentEvent, RateLimitInfo, SendNow, StopReason, Usage, UsageScope};
+use crate::core::{AgentEvent, SendNow, StopReason, Usage, UsageScope};
 
 impl Controller {
     /// The active harness's session reported `ev`. What it changes on
@@ -131,16 +131,7 @@ impl Controller {
                 }
                 self.conversation.context.merge(c);
             }
-            AgentEvent::RateLimit(r) => {
-                // Warn once each time a window crosses the threshold.
-                let was_high = self.rate_limit.as_ref().is_some_and(rate_limit_high);
-                if !was_high && rate_limit_high(&r) {
-                    self.conversation
-                        .transcript
-                        .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
-                }
-                self.rate_limit = Some(r);
-            }
+            AgentEvent::RateLimit(r) => self.rate_limit_reported(r),
             AgentEvent::RewindFailed { reason } => {
                 let name = self.short_name();
                 if self.is_generating {
@@ -321,30 +312,5 @@ impl Controller {
                 c.turn_reported = true;
             }
         }
-    }
-}
-
-/// Percentage of a rate-limit window at which the user is warned.
-const RATE_LIMIT_WARN_PERCENT: f32 = 80.0;
-
-fn rate_limit_high(r: &RateLimitInfo) -> bool {
-    r.windows
-        .iter()
-        .any(|w| w.used_percent.is_some_and(|p| p >= RATE_LIMIT_WARN_PERCENT))
-}
-
-pub fn rate_limit_summary(r: &RateLimitInfo) -> String {
-    let windows: Vec<String> = r
-        .windows
-        .iter()
-        .map(|w| match w.used_percent {
-            Some(p) => format!("{} {p:.0}% used", w.label),
-            None => w.label.clone(),
-        })
-        .collect();
-    match (&r.status, windows.is_empty()) {
-        (Some(s), true) => s.clone(),
-        (Some(s), false) if s != "allowed" => format!("{s} ({})", windows.join(", ")),
-        _ => windows.join(", "),
     }
 }

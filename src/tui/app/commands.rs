@@ -146,7 +146,8 @@ impl App {
             )),
             _ => lines.push("Context: not known yet".into()),
         }
-        if let Some(r) = &self.controller.rate_limit {
+        let status = self.controller.account_status(self.controller.active);
+        if let Some(r) = status.and_then(|s| s.rate_limit.as_ref()) {
             lines.push(format!("Rate limits: {}", rate_limit_summary(r)));
         }
         lines.join("\n")
