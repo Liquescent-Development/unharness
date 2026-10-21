@@ -85,7 +85,6 @@ says `refreshing…` until the answer comes or ten seconds pass.
 |---|---|---|
 | Claude Code (2.1.305) | control request `get_usage`, `skip_behaviors: true` | `rate_limits`' windows, `utilization` 0 to 100, `resets_at` ISO 8601 (`iso8601_to_unix`), `model_scoped` |
 | Codex app-server (0.162.1) | `account/rateLimits/read`, `account/read` (`params: {}`), under the names `rate-limits` and `account` | as the notification; `account`'s `type`, `email`, `planType` |
-
 | agy (1.3.6) | a run of `agy --print=/usage --output-format stream-json` apart (`Capabilities::status_probe`, `Harness::query_status`), in the session's sandbox, with or without a session: its print-mode reports are refused on stream-json input ("unavailable with --input-format stream-json; run it as its own --print /usage invocation") | `command_result`'s `command.data.groups[].buckets[]`: `remaining_fraction` 0 to 1 (read as used), `reset_time` ISO 8601, `window` (`weekly`); each bucket a window named after its group (`Gemini weekly`, `Claude and GPT weekly`) |
 
 The probe is a list job of the TUI's (`ListRequest::Status`), on a

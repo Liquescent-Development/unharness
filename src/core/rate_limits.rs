@@ -214,8 +214,18 @@ pub fn iso8601_to_unix(s: &str) -> Option<i64> {
         "Z" | "" => 0,
         o => {
             let sign = if o.starts_with('-') { -1 } else { 1 };
-            let (oh, om) = o[1..].split_once(':').unwrap_or((&o[1..], "0"));
-            sign * (num(oh)? * 3600 + num(om)? * 60)
+            // `+05:30`, `+0530` or `+05`.
+            let o = &o[1..];
+            let (oh, om) = match o.split_once(':') {
+                Some(parts) => parts,
+                None if o.len() == 4 => o.split_at(2),
+                None => (o, "0"),
+            };
+            let (oh, om) = (num(oh)?, num(om)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 3600 + om * 60)
         }
     };
     // Days from 1970-01-01 to the date (Howard Hinnant's days_from_civil).
@@ -479,6 +489,16 @@ mod tests {
             iso8601_to_unix("2026-10-20T22:40:00-05:00"),
             Some(1_792_554_000)
         );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T09:10:00+0530"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T08:40:00+05"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(iso8601_to_unix("2026-10-21T08:40:00+0x"), None);
+        assert_eq!(iso8601_to_unix("2026-10-21T08:40:00+24:00"), None);
         assert_eq!(iso8601_to_unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
         assert_eq!(iso8601_to_unix("2026-13-01T00:00:00Z"), None);
         assert_eq!(iso8601_to_unix("yesterday"), None);

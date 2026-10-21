@@ -38,8 +38,9 @@ impl AccountStatus {
 /// The least time between two status queries to one harness.
 const QUERY_EVERY: Duration = Duration::from_secs(10);
 
-/// How long an answer to a status query is shown as coming.
-const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// How long an answer to a status query is shown as coming: longer than
+/// a CLI run apart to ask is given (agy's 15 s).
+const ANSWER_WAIT: Duration = Duration::from_secs(20);
 
 /// Each harness's [`AccountStatus`], for those that reported any.
 pub type Accounts = HashMap<HarnessId, AccountStatus>;

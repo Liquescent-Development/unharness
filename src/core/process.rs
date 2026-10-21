@@ -534,6 +534,12 @@ impl ProbeProcess {
         Ok(())
     }
 
+    /// Close stdin, for a child asked nothing on it: one that read it
+    /// would otherwise wait for its deadline.
+    pub fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
+
     /// The next stdout line, waiting until `deadline` at most.
     pub fn next_line(
         &self,

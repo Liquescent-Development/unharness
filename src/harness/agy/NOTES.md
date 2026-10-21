@@ -141,4 +141,10 @@ fraction below 1, a group with more than one bucket. `/credits` answered
 `/credits failed: retrieving credits: no credits info found` on the same
 account, and is not read. Checked live in the TUI on 1.4.3 (agy updated
 itself meanwhile): `/status` before the first prompt showed both weekly
-buckets with their reset, and `r` asked again.
+buckets with their reset, and `r` asked again. Only an agy of 1.1.11 or
+later is run, the first whose print mode answers `/usage` itself (its
+changelog, as for `/skills`); before it the prompt went to the model.
+A run with no bucket in its answer is a failure ("reported no quota"):
+agy signed out says so on stderr, which a probe does not read. stdin is
+closed. Not checked: the run beside a session of agy in the same
+workspace, or during its turn.

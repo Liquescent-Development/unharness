@@ -196,10 +196,11 @@ impl AgyParser {
             // A print-mode report, which stream-json input refuses:
             // `--print=/usage`, run apart for `/status` (1.3.6).
             "command_result" => {
-                if v.pointer("/command/name").and_then(Value::as_str) == Some("usage") {
-                    out.push(AgentEvent::RateLimit(usage_report(
-                        v.pointer("/command/data").unwrap_or(&Value::Null),
-                    )));
+                if v.pointer("/command/name").and_then(Value::as_str) == Some("usage")
+                    && let Some(r) =
+                        usage_report(v.pointer("/command/data").unwrap_or(&Value::Null))
+                {
+                    out.push(AgentEvent::RateLimit(r));
                 }
             }
             "result" => {
@@ -393,7 +394,7 @@ fn u(v: &Value, key: &str) -> u64 {
 /// `/usage`'s report: models in a group share a quota, one bucket per
 /// window (`weekly`), told as the fraction left and an ISO 8601 reset.
 /// Each bucket is a window, named after its group (`Gemini weekly`).
-fn usage_report(data: &Value) -> RateLimitInfo {
+fn usage_report(data: &Value) -> Option<RateLimitInfo> {
     let mut windows = Vec::new();
     for group in data
         .get("groups")
@@ -429,10 +430,10 @@ fn usage_report(data: &Value) -> RateLimitInfo {
             });
         }
     }
-    RateLimitInfo {
+    (!windows.is_empty()).then(|| RateLimitInfo {
         windows,
         ..Default::default()
-    }
+    })
 }
 
 #[cfg(test)]
@@ -494,6 +495,21 @@ mod tests {
                 ("Claude and GPT weekly", 0, None)
             ]
         );
+    }
+
+    /// A usage report with no bucket is no report.
+    #[test]
+    fn usage_without_buckets_is_not_a_report() {
+        for data in [
+            r#"{}"#,
+            r#"{"groups":[]}"#,
+            r#"{"groups":[{"name":"Gemini Models","buckets":[]}]}"#,
+        ] {
+            let line = format!(
+                r#"{{"event":"command_result","command":{{"name":"usage","data":{data}}}}}"#
+            );
+            assert!(AgyParser::new(None).feed(&line).is_empty(), "{data}");
+        }
     }
 
     #[test]
