@@ -396,7 +396,11 @@ impl<O: Write, E: Write> Headless<O, E> {
                     .map_or(0, |d| d.as_secs() as i64);
                 for n in self.limit_watch.observe(&self.limits, now) {
                     let line = format!("{}: {}", self.name, n.text);
-                    self.note(&line);
+                    if n.stops {
+                        self.warn(line);
+                    } else {
+                        self.note(&line);
+                    }
                 }
             }
             // The session `--resume` named is gone, and the one the harness

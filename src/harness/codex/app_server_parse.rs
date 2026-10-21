@@ -138,10 +138,13 @@ impl CodexAppServerParser {
             self.rate_secondary = Some(w);
         }
         out.push(AgentEvent::RateLimit(RateLimitInfo {
-            status: limits
-                .get("rateLimitReachedType")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            // `null` once no limit is reached (0.157.0 to 0.162.1), which has to
+            // replace one reached before.
+            status: match limits.get("rateLimitReachedType") {
+                Some(Value::String(s)) => Some(s.clone()),
+                Some(Value::Null) => Some("allowed".to_string()),
+                _ => None,
+            },
             window: None,
             windows: self
                 .rate_primary
@@ -974,6 +977,26 @@ fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
 mod tests {
     use super::*;
     use crate::core::testing::{assert_fixture, fixtures_dir, replay};
+
+    /// A limit reached, then lifted: `null` replaces what was reached.
+    #[test]
+    fn a_null_reached_type_says_no_limit_is_reached() {
+        let line = |reached: &str| {
+            format!(
+                r#"{{"method":"account/rateLimits/updated","params":{{"rateLimits":{{"limitId":"codex","primary":{{"usedPercent":3,"windowDurationMins":300,"resetsAt":1793161907}},"rateLimitReachedType":{reached}}}}}}}"#
+            )
+        };
+        let mut p = CodexAppServerParser::new();
+        let mut merged = RateLimitInfo::default();
+        for (reached, is) in [(r#""rate_limit_reached""#, true), ("null", false)] {
+            for ev in p.feed(&line(reached)) {
+                if let AgentEvent::RateLimit(r) = ev {
+                    merged.merge(r);
+                }
+            }
+            assert_eq!(merged.reached(), is, "{reached}");
+        }
+    }
 
     /// `thread/tokenUsage/updated` comes once per model request: a turn
     /// that edits a file reports two (#312).

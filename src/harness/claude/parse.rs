@@ -2648,6 +2648,13 @@ mod tests {
         assert_eq!(r.windows.len(), 2);
     }
 
+    /// Past a threshold and then rejected, hand-written in the shape #344
+    /// showed: only `RateLimit` events, each naming its window.
+    #[test]
+    fn fixture_rate_limit_warning() {
+        fixture("rate_limit_warning");
+    }
+
     /// `get_usage` before the prompt and after it (2.1.305): its windows,
     /// on the scale `rate_limit_event`'s are on.
     #[test]

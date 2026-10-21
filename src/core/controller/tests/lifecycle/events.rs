@@ -128,6 +128,66 @@ fn rate_limit_warns_once_per_step_not_per_event() {
     );
 }
 
+/// A limit reached is said as an error, or as a notice where extra usage
+/// covers it; Codex's `null` once it is lifted re-arms it, and the status
+/// line stops showing it.
+#[test]
+fn a_limit_reached_is_said_again_after_it_was_lifted() {
+    use crate::core::rate_limits::marker;
+    use crate::core::transcript::Block;
+    use crate::core::{Overage, RateLimitInfo, RateLimitWindow};
+    let limit = |status: &str, pct: f32| {
+        AgentEvent::RateLimit(RateLimitInfo {
+            status: Some(status.into()),
+            windows: vec![RateLimitWindow {
+                label: "5h".into(),
+                used_percent: Some(pct),
+                resets_at: None,
+            }],
+            ..Default::default()
+        })
+    };
+    let errors = |app: &TestApp| {
+        app.controller
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Error(_)))
+            .count()
+    };
+    let mut app = test_app(HarnessId::CODEX);
+    app.on_event(limit("rate_limit_reached", 100.0));
+    assert_eq!(errors(&app), 1);
+    // What the parser makes of `"rateLimitReachedType":null`.
+    app.on_event(limit("allowed", 3.0));
+    let r = app.controller.account_status(HarnessId::CODEX).unwrap();
+    assert!(!r.rate_limit.as_ref().unwrap().reached());
+    assert_eq!(marker(r.rate_limit.as_ref().unwrap(), 0), None);
+    app.on_event(limit("rate_limit_reached", 100.0));
+    assert_eq!(errors(&app), 2);
+
+    let mut app = test_app(HarnessId::CLAUDE);
+    let mut covered = RateLimitInfo {
+        status: Some("rejected".into()),
+        overage: Some(Overage {
+            status: Some("allowed".into()),
+            in_use: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    covered.window = Some("five_hour".into());
+    app.on_event(AgentEvent::RateLimit(covered));
+    assert_eq!(errors(&app), 0);
+    assert!(
+        notices(&app)
+            .last()
+            .unwrap()
+            .ends_with("extra usage covers what follows")
+    );
+}
+
 /// Rate limits are the account's of the harness that reported them: they
 /// are not shown for another, and each warns on its own.
 #[test]

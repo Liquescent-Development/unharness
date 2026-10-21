@@ -421,13 +421,14 @@ gives the tokens behind the percentage, or says that the harness never
 reports them or has not yet.
 
 When one of the account's rate-limit windows nears its limit, a notice
-says so once, with the time the window starts over (`Claude Code: 82%
-of the 5-hour limit used; it resets at 15:00`), and again at 90% and
-95%, or after the window started over; Claude's own warning for a window
+says so once, with the time the window starts over (`Claude Code
+(claude): 82% of the 5-hour limit used; it resets at 15:00`), and again
+at 90% and 95%, or after the window started over; Claude's own warning for a window
 below 80% is said once too. A limit reached is said once, as an error
 unless extra usage covers what follows. Meanwhile the usage line shows
 the window nearest its limit (`5h 82%`), in red once a limit stops use.
-`--print` says the same once on stderr (`text` and `json`).
+`--print` says the same once on stderr (`text` and `json`), a limit
+that stops use as a warning.
 
 ## Status
 

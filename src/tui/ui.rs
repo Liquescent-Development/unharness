@@ -1641,7 +1641,7 @@ fn render_bottom(
         .controller
         .account_status(app.controller.active)
         .and_then(|s| s.rate_limit.as_ref())
-        .and_then(rate_limits::marker)
+        .and_then(|r| rate_limits::marker(r, unix_now()))
     {
         left2
             .spans
@@ -1763,6 +1763,13 @@ const SPLIT_LEFT_MIN: usize = 12;
 /// Left text and right text on one row; the left side is shortened first
 /// when the terminal is too narrow for both. Then one goes: the right
 /// side where it must stay (`keep_right`), else the left.
+/// Seconds since the Unix epoch, now.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 fn render_split(
     frame: &mut Frame,
     row: Rect,
@@ -1780,21 +1787,36 @@ fn render_split(
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     } else if rw + SPLIT_LEFT_MIN <= width {
         // Keep the right side; show the tail of the left (paths end in the
-        // interesting part).
-        let room = width - rw - 2;
-        let text: String = left.spans.iter().map(|s| s.content.as_ref()).collect();
-        let tail: String = text
-            .chars()
-            .rev()
-            .take(room.saturating_sub(1))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        // interesting part), each span in its own style.
+        let room = width - rw - 3;
+        let mut tail = Vec::new();
+        let mut used = 0;
+        for span in left.spans.iter().rev() {
+            let w = span.content.width();
+            if used + w <= room {
+                tail.push(span.clone());
+                used += w;
+                continue;
+            }
+            let mut chars = Vec::new();
+            for c in span.content.chars().rev() {
+                let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                if used + cw > room {
+                    break;
+                }
+                used += cw;
+                chars.push(c);
+            }
+            tail.push(Span::styled(
+                chars.into_iter().rev().collect::<String>(),
+                span.style,
+            ));
+            break;
+        }
         let style = left.spans.first().map(|s| s.style).unwrap_or_default();
-        let mut spans = vec![Span::styled(format!("…{tail}"), style)];
-        let used = unicode_width::UnicodeWidthStr::width(tail.as_str()) + 1;
-        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + rw))));
+        let mut spans = vec![Span::styled("…", style)];
+        spans.extend(tail.into_iter().rev());
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(used + 1 + rw))));
         spans.extend(right.spans);
         frame.render_widget(Paragraph::new(Line::from(spans)), row);
     } else {
@@ -5268,23 +5290,39 @@ mod tests {
         assert!(!screen(&mut app).contains("Plan ·"));
     }
 
-    /// A context figure not known yet is left out of the usage row; one
-    /// A window near its limit shows in the status bar while it is (#344).
+    /// A window near its limit shows in the status bar while it is (#344),
+    /// in its colour also where the row is cut to fit.
     #[test]
     fn a_window_near_its_limit_shows_in_the_status_bar() {
         use crate::core::{AgentEvent, RateLimitInfo, RateLimitWindow};
-        let usage_row = |app: &mut App| {
-            let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        let row_at = |app: &mut App, width: u16| {
+            let mut term = Terminal::new(TestBackend::new(width, 30)).unwrap();
             term.draw(|f| render(f, app)).unwrap();
             let buf = term.backend().buffer().clone();
             (0..30)
                 .map(|y| {
-                    (0..120)
-                        .map(|x| buf[(x, y)].symbol().to_string())
-                        .collect::<String>()
+                    (0..width)
+                        .map(|x| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg))
+                        .collect::<Vec<_>>()
                 })
-                .find(|row| row.contains("· session "))
+                .find(|row| {
+                    row.iter()
+                        .map(|(s, _)| s.as_str())
+                        .collect::<String>()
+                        .contains("5h")
+                        || row
+                            .iter()
+                            .map(|(s, _)| s.as_str())
+                            .collect::<String>()
+                            .contains("· session ")
+                })
                 .expect("a usage row")
+        };
+        let usage_row = |app: &mut App| {
+            row_at(app, 120)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect::<String>()
         };
         let limit = |pct: f32| {
             AgentEvent::RateLimit(RateLimitInfo {
@@ -5302,8 +5340,15 @@ mod tests {
         assert!(!usage_row(&mut app).contains("5h"));
         app.on_event(limit(83.0));
         assert!(usage_row(&mut app).contains("· 5h 83%"));
+        let narrow = row_at(&mut app, 40);
+        let text: String = narrow.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(text.contains('…') && text.contains("5h 83%"), "{text}");
+        let at = text.find("5h 83%").unwrap();
+        let col = text[..at].chars().count();
+        assert_eq!(narrow[col].1, Color::Yellow);
     }
 
+    /// A context figure not known yet is left out of the usage row; one
     /// the harness never reports is shown missing, as its capabilities
     /// say, also once its session says it lacks them (#313).
     #[test]

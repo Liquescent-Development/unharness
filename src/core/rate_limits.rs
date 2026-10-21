@@ -16,6 +16,11 @@ const WARN_STEPS: [u8; 3] = [80, 90, 95];
 /// over.
 const RESET_SLACK: i64 = 600;
 
+/// How far (percent) below the first step use has to fall for a window
+/// warned of to be warned of again in the same period, so that use
+/// hovering at a step is not.
+const REARM_MARGIN: u8 = 10;
+
 /// One thing to tell the user.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LimitNotice {
@@ -37,6 +42,7 @@ impl LimitWatch {
     /// What to tell the user of `r`, all that the harness reported of its
     /// limits so far ([`RateLimitInfo::merge`]), at `now` (Unix seconds).
     pub fn observe(&mut self, r: &RateLimitInfo, now: i64) -> Vec<LimitNotice> {
+        let r = &current(r, now);
         let mut out = Vec::new();
         for w in &r.windows {
             if let Some((_, Some(then))) = self.warned.get(&w.label)
@@ -55,11 +61,18 @@ impl LimitWatch {
         self.reached = reached;
         for w in &r.windows {
             let step = step(w, r);
+            let warned = self.warned.get(&w.label).map_or(0, |(s, _)| *s);
             if step == 0 {
-                self.warned.remove(&w.label);
+                // One the vendor alone warned of (Claude names one window
+                // per event) is warned of again only once it started over.
+                if warned >= WARN_STEPS[0]
+                    && w.used_percent.unwrap_or(0.0) < f32::from(WARN_STEPS[0] - REARM_MARGIN)
+                {
+                    self.warned.remove(&w.label);
+                }
                 continue;
             }
-            if step > self.warned.get(&w.label).map_or(0, |(s, _)| *s) {
+            if step > warned {
                 if !reached {
                     out.push(LimitNotice {
                         text: near_text(w, now),
@@ -131,8 +144,10 @@ fn reached_text(r: &RateLimitInfo, now: i64) -> String {
 }
 
 /// What the status line shows while a window nears or reached its limit:
-/// the nearest one, as `5h 82%`, and whether a limit stops use.
-pub fn marker(r: &RateLimitInfo) -> Option<(String, bool)> {
+/// the nearest one, as `5h 82%`, and whether a limit stops use, at `now`
+/// (Unix seconds).
+pub fn marker(r: &RateLimitInfo, now: i64) -> Option<(String, bool)> {
+    let r = &current(r, now);
     let w = r.windows.iter().filter(|w| step(w, r) > 0).max_by(|a, b| {
         (step(a, r), a.used_percent.unwrap_or(0.0))
             .partial_cmp(&(step(b, r), b.used_percent.unwrap_or(0.0)))
@@ -148,6 +163,22 @@ pub fn marker(r: &RateLimitInfo) -> Option<(String, bool)> {
         None => return None,
     };
     Some((text, stops))
+}
+
+/// What of `r` still holds at `now`: a window that reset since it was
+/// reported is left out, and with it a status that named it.
+fn current(r: &RateLimitInfo, now: i64) -> RateLimitInfo {
+    let past = |w: &RateLimitWindow| w.resets_at.is_some_and(|at| at <= now);
+    let mut r = r.clone();
+    if r.windows
+        .iter()
+        .any(|w| past(w) && r.window.as_deref() == Some(w.label.as_str()))
+    {
+        r.status = None;
+        r.window = None;
+    }
+    r.windows.retain(|w| !past(w));
+    r
 }
 
 /// Unix seconds `at` on the local clock, from `now`: `at 15:00` the same
@@ -337,16 +368,62 @@ mod tests {
     #[test]
     fn the_marker_shows_the_nearest_window() {
         assert_eq!(
-            marker(&limits("allowed", vec![window("five_hour", 50.0, 0)])),
+            marker(
+                &limits("allowed", vec![window("five_hour", 50.0, 9_000)]),
+                1_000
+            ),
             None
         );
         let r = limits(
             "allowed",
-            vec![window("five_hour", 82.0, 0), window("seven_day", 91.0, 0)],
+            vec![
+                window("five_hour", 82.0, 9_000),
+                window("seven_day", 91.0, 9_000),
+            ],
         );
-        assert_eq!(marker(&r), Some(("7d 91%".into(), false)));
-        let r = limits("rejected", vec![window("five_hour", 100.0, 0)]);
-        assert_eq!(marker(&r), Some(("5h 100%".into(), true)));
+        assert_eq!(marker(&r, 1_000), Some(("7d 91%".into(), false)));
+        let mut r = limits("rejected", vec![window("five_hour", 100.0, 9_000)]);
+        r.window = Some("five_hour".into());
+        assert_eq!(marker(&r, 1_000), Some(("5h 100%".into(), true)));
+        // Once the window reset, until the CLI next reports.
+        assert_eq!(marker(&r, 9_000), None);
+    }
+
+    /// Use hovering at a step, or Claude naming another window between
+    /// the events that name one, is not warned of again.
+    #[test]
+    fn a_window_is_not_warned_of_again_until_well_below_its_step() {
+        let mut watch = LimitWatch::default();
+        let at = |pct| limits("allowed", vec![window("five_hour", pct, 9_000)]);
+        assert_eq!(texts(&mut watch, &at(80.5)).len(), 1);
+        assert!(texts(&mut watch, &at(79.5)).is_empty());
+        assert!(texts(&mut watch, &at(80.5)).is_empty());
+
+        let mut watch = LimitWatch::default();
+        let naming = |name: &str| {
+            let mut r = limits(
+                "allowed_warning",
+                vec![
+                    window("five_hour", 30.0, 9_000),
+                    window("seven_day", 76.0, 90_000),
+                ],
+            );
+            r.window = Some(name.into());
+            r
+        };
+        assert_eq!(texts(&mut watch, &naming("seven_day")).len(), 1);
+        for _ in 0..3 {
+            assert!(texts(&mut watch, &naming("five_hour")).len() <= 1);
+            assert!(texts(&mut watch, &naming("seven_day")).is_empty());
+        }
+    }
+
+    /// A report of a window that reset since is not told as current.
+    #[test]
+    fn a_window_already_reset_is_not_told() {
+        let mut watch = LimitWatch::default();
+        let r = limits("allowed", vec![window("five_hour", 92.0, 500)]);
+        assert!(texts(&mut watch, &r).is_empty());
     }
 
     #[test]

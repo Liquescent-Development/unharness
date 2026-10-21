@@ -13,6 +13,6 @@ TextDelta " there"
 Usage in=4311 out=34 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4311 out=34 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16505 window=258400
-RateLimit status=- limit=codex 7d=3%@1791952414
+RateLimit status=allowed limit=codex 7d=3%@1791952414
 Account plan=prolite auth=- email=- org=- credits=62500.0000000000
 TurnCompleted Done

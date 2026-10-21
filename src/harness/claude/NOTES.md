@@ -439,7 +439,8 @@ Each `rate_limit_event`'s `rate_limit_info` has, besides the windows in
 `allowed`); it is kept as the window a status other than `allowed` is
 about. Past a warning threshold every event says `allowed_warning`
 (2.1.302, with `utilization` and `surpassedThreshold` beside it, seen
-live in #344, not recorded): the parser adds no notice, the controller
+live in #344, not recorded; `fixtures/rate_limit_warning.jsonl` is
+hand-written in that shape): the parser adds no notice, the controller
 says it once (`docs/dev/status.md`, Telling the user).
 
 `/status` sends `get_usage` (`{"skip_behaviors": true}`, which spares
