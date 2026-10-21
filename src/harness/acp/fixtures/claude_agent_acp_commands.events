@@ -7,6 +7,7 @@ CapabilitiesChanged commands=69 slash_commands=true
 Context used=21899 window=1000000
 TextDelta "HELLO world"
 Context used=21899 window=1000000
+RateLimit status=allowed five_hour=19%@1791354600 seven_day=11%@1791871200 overage=rejected(org_level_disabled)
 Context used=21899 window=1000000
 Usage in=2 out=7 cache_read=10345 cache_write=11545 cost=0.0946 cumulative=false
 TurnCompleted Done

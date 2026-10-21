@@ -12,6 +12,7 @@ Context used=27532 window=200000
 TextDelta "PELICAN-42"
 Context used=27588 window=200000
 Context used=27588 window=200000
+RateLimit status=allowed five_hour=6%@1791180000 seven_day=38%@1791266400 overage=rejected(org_level_disabled)
 Context used=27588 window=200000
 Usage in=18 out=172 cache_read=23139 cache_write=27522 cost=0.0592 cumulative=false
 TurnCompleted Done

@@ -6,6 +6,7 @@ CapabilitiesChanged commands=63 slash_commands=true
 Context used=25328 window=1000000
 Context used=25509 window=1000000
 Context used=25509 window=1000000
+RateLimit status=allowed five_hour=18%@1791180000 seven_day=39%@1791266400 seven_day_overage_included=74%@1791266400 overage=rejected(org_level_disabled)
 ToolCallStarted id=toolu_01EtFXMAAhLezqbMDcYryyWW name=ToolSearch input={"max_results":1,"query":"select:mcp__probe__magic_word"}
 ToolCallResult id=toolu_01EtFXMAAhLezqbMDcYryyWW error=false "Tool: mcp__probe__magic_word"
 Context used=25618 window=1000000
