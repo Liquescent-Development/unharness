@@ -410,6 +410,8 @@ impl AccountInfo {
 /// unharness's sum of what each response billed leaves out.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionStats {
+    /// The session counted, as the CLI names it.
+    pub session_id: Option<String>,
     pub user_messages: Option<u64>,
     pub assistant_messages: Option<u64>,
     pub tool_calls: Option<u64>,

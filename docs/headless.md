@@ -93,7 +93,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `usage` | `input`, `output`, `cache_read`, `cache_write`, `cost_usd`, `cumulative` (whether the numbers are session totals rather than this turn's), `scope`: what the numbers cover, `turn` (the whole turn), `request` (one model request; a turn may report several, each to add) or `session` (when `cumulative`) |
 | `context` | `used`, `window` (tokens) |
 | `rate_limit` | `status`, `window` (the label of the window `status` is about when it is not `allowed`, or null), `windows`: [{`label`, `used_percent`, `resets_at` (Unix seconds)}], `limit` (which of the account's limits, or null), `overage`: {`status`, `in_use`, `disabled_reason`, `resets_at`} or null |
-| `session_stats` | the CLI's own count of its whole session (pi): `user_messages`, `assistant_messages`, `tool_calls`, `tokens`, `cost_usd`; any may be null. It covers turns of a session it was forked from, which `usage` does not |
+| `session_stats` | the CLI's own count of its whole session (pi): `user_messages`, `assistant_messages`, `tool_calls`, `tokens`, `cost_usd`; any may be null. It covers turns of a session it was forked from, which `usage` does not. pi is asked for it once a turn ended, so it comes after that turn's `turn_completed`, and may be missing where pi exits first |
 | `account` | `plan`, `auth` (how the CLI signs in), `credits`: {`has_credits`, `unlimited`, `balance` (a decimal string)} or null; any may be null. The account's email and organization are left out |
 | `plan_updated` | `entries`: [{`text`, `status`: `pending`, `in_progress` or `completed`}], `explanation` |
 | `subagent_started` | `id`, `description`, `kind` |

@@ -513,7 +513,7 @@ fn status_asks_agy_apart_and_shows_its_answer() {
 }
 
 /// pi's own count of its session shows beside unharness's, while that
-/// session runs.
+/// session is the conversation's.
 #[test]
 fn status_shows_pi_s_own_count_of_its_session() {
     use crate::core::SessionStats;
@@ -523,6 +523,7 @@ fn status_shows_pi_s_own_count_of_its_session() {
         model: None,
     });
     app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s1".into()),
         user_messages: Some(2),
         assistant_messages: Some(2),
         tool_calls: Some(1),
@@ -543,12 +544,29 @@ fn status_shows_pi_s_own_count_of_its_session() {
         ..Default::default()
     }));
     assert!(!status_section(&app, "Usage").contains("pi's count"));
-    // Another session's count is not this one's.
+    // Another session's count is not this one's, also one that came
+    // after it started.
     app.on_event(AgentEvent::SessionStarted {
         session_id: "s2".into(),
         model: None,
     });
     assert!(!status_section(&app, "Usage").contains("pi's count"));
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s1".into()),
+        user_messages: Some(3),
+        tokens: Some(12_000),
+        ..Default::default()
+    }));
+    assert!(!status_section(&app, "Usage").contains("pi's count"));
+    // A cost without its tokens is still said.
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s2".into()),
+        user_messages: Some(1),
+        cost_usd: Some(0.5),
+        ..Default::default()
+    }));
+    let usage = status_section(&app, "Usage");
+    assert!(usage.contains("pi's count: $0.5000 · 1 prompt"), "{usage}");
 }
 
 /// Without an account reported, what the CLI said at startup.

@@ -100,16 +100,21 @@ impl Controller {
     }
 
     /// `harness`'s own count of its session, while that session is the
-    /// one it runs.
+    /// conversation's for it.
     pub fn session_stats(&self, harness: HarnessId) -> Option<&SessionStats> {
         let (session, stats) = self.session_stats.get(&harness)?;
         (self.conversation.session_ids.get(&harness) == Some(session)).then_some(stats)
     }
 
-    /// The active harness counted its session.
+    /// The active harness counted a session: the one it names, else the
+    /// one it runs.
     pub(super) fn session_stats_reported(&mut self, stats: SessionStats) {
-        if let Some(id) = self.conversation.session_ids.get(&self.active) {
-            self.session_stats.insert(self.active, (id.clone(), stats));
+        let id = stats
+            .session_id
+            .clone()
+            .or_else(|| self.conversation.session_ids.get(&self.active).cloned());
+        if let Some(id) = id {
+            self.session_stats.insert(self.active, (id, stats));
         }
     }
 

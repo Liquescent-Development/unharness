@@ -484,14 +484,11 @@ fn session_stats_rows(name: &str, st: &SessionStats) -> Vec<StatusRow> {
         format!("{} {}", grouped(n), if n == 1 { one } else { many })
     };
     let mut parts = Vec::new();
-    if let Some(t) = st.tokens {
-        parts.push(format!(
-            "{} tokens{}",
-            grouped(t),
-            st.cost_usd
-                .map(|c| format!(", ${c:.4}"))
-                .unwrap_or_default()
-        ));
+    match (st.tokens, st.cost_usd) {
+        (Some(t), Some(c)) => parts.push(format!("{} tokens, ${c:.4}", grouped(t))),
+        (Some(t), None) => parts.push(format!("{} tokens", grouped(t))),
+        (None, Some(c)) => parts.push(format!("${c:.4}")),
+        (None, None) => {}
     }
     let counts: Vec<String> = [
         st.user_messages.map(|n| plural(n, "prompt", "prompts")),

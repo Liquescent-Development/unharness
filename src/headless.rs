@@ -1821,6 +1821,31 @@ mod tests {
         }
     }
 
+    /// pi's count of its session, as `stream-json` writes it: who the
+    /// session is stays out.
+    #[test]
+    fn session_stats_are_written_as_counted() {
+        let v = event_json(&AgentEvent::SessionStats(crate::core::SessionStats {
+            session_id: Some("s1".into()),
+            user_messages: Some(2),
+            assistant_messages: Some(2),
+            tool_calls: None,
+            tokens: Some(10_236),
+            cost_usd: Some(0.0282),
+        }));
+        assert_eq!(
+            v,
+            json!({
+                "type": "session_stats",
+                "user_messages": 2,
+                "assistant_messages": 2,
+                "tool_calls": null,
+                "tokens": 10_236,
+                "cost_usd": 0.0282,
+            })
+        );
+    }
+
     /// Claude reports its limits with every API call; near one, a text
     /// run says so once per step, not once per event (#344).
     #[test]
