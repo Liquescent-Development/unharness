@@ -8,7 +8,7 @@ use super::gate;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
-    PermissionRequest, StopReason, Usage, UsageScope,
+    PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
 };
 
 #[derive(Debug, Default)]
@@ -421,6 +421,18 @@ impl PiParser {
                     out.push(AgentEvent::Context(ContextUsage {
                         used: c.get("tokens").and_then(Value::as_u64),
                         window: c.get("contextWindow").and_then(Value::as_u64),
+                    }));
+                }
+                // Its own count, apart from the per-response usage
+                // unharness sums: it covers the whole session file.
+                if let Some(d) = v.get("data").filter(|d| d.get("tokens").is_some()) {
+                    let n = |p: &str| d.pointer(p).and_then(Value::as_u64);
+                    out.push(AgentEvent::SessionStats(SessionStats {
+                        user_messages: n("/userMessages"),
+                        assistant_messages: n("/assistantMessages"),
+                        tool_calls: n("/toolCalls"),
+                        tokens: n("/tokens/total"),
+                        cost_usd: d.get("cost").and_then(Value::as_f64),
                     }));
                 }
             }

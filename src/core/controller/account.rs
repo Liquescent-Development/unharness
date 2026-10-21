@@ -8,7 +8,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::{Action, Controller};
 use crate::core::rate_limits::LimitWatch;
-use crate::core::{AccountInfo, AgentEvent, HarnessId, RateLimitInfo, SessionCommand};
+use crate::core::{
+    AccountInfo, AgentEvent, HarnessId, RateLimitInfo, SessionCommand, SessionStats,
+};
 
 /// What one harness reported of its account.
 #[derive(Debug, Clone, Default)]
@@ -95,6 +97,20 @@ impl Controller {
         let status = self.accounts.entry(harness).or_default();
         status.awaiting = false;
         status.failed = None;
+    }
+
+    /// `harness`'s own count of its session, while that session is the
+    /// one it runs.
+    pub fn session_stats(&self, harness: HarnessId) -> Option<&SessionStats> {
+        let (session, stats) = self.session_stats.get(&harness)?;
+        (self.conversation.session_ids.get(&harness) == Some(session)).then_some(stats)
+    }
+
+    /// The active harness counted its session.
+    pub(super) fn session_stats_reported(&mut self, stats: SessionStats) {
+        if let Some(id) = self.conversation.session_ids.get(&self.active) {
+            self.session_stats.insert(self.active, (id.clone(), stats));
+        }
     }
 
     /// What `harness` reported of its account in this run.

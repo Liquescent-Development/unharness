@@ -975,6 +975,14 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 "resets_at": o.resets_at,
             })),
         }),
+        AgentEvent::SessionStats(s) => json!({
+            "type": "session_stats",
+            "user_messages": s.user_messages,
+            "assistant_messages": s.assistant_messages,
+            "tool_calls": s.tool_calls,
+            "tokens": s.tokens,
+            "cost_usd": s.cost_usd,
+        }),
         // Not who the account is: the output may be shared.
         AgentEvent::Account(a) => json!({
             "type": "account",

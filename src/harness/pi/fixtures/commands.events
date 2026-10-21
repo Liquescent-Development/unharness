@@ -9,6 +9,7 @@ TextDelta " world"
 Usage in=1326 out=7 cache_read=0 cache_write=0 cost=0.0054 cumulative=false
 TurnCompleted Done
 Context used=1333 window=272000
+SessionStats user=1 assistant=1 tools=0 tokens=1333 cost=0.0054
 TurnAnchor id=5a56a07b
 TurnStarted
 Usage in=0 out=0 cache_read=0 cache_write=0 cost=0.0000 cumulative=false
@@ -21,4 +22,5 @@ TextDelta "I"
 Usage in=79 out=9 cache_read=1408 cache_write=0 cost=0.0011 cumulative=false
 TurnCompleted Done
 Context used=1496 window=272000
+SessionStats user=2 assistant=3 tools=0 tokens=2829 cost=0.0065
 TurnAnchor id=9d6c3956

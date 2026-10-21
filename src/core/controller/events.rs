@@ -133,6 +133,7 @@ impl Controller {
             }
             AgentEvent::RateLimit(r) => self.rate_limit_reported(self.active, r),
             AgentEvent::Account(a) => self.account_reported(self.active, a),
+            AgentEvent::SessionStats(s) => self.session_stats_reported(s),
             AgentEvent::RewindFailed { reason } => {
                 let name = self.short_name();
                 if self.is_generating {

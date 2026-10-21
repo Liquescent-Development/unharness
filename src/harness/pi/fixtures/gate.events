@@ -20,4 +20,5 @@ TextDelta "finished"
 Usage in=3342 out=23 cache_read=0 cache_write=0 cost=0.0138 cumulative=false
 TurnCompleted Done
 Context used=3365 window=272000
+SessionStats user=1 assistant=4 tools=3 tokens=13241 cost=0.0217
 TurnAnchor id=0e7a7f55
