@@ -7,7 +7,7 @@ ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "-ok echo"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash " command"
 ToolCallDelta id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash "\"}"
 ToolCallStarted id=toolu_01SccNz2ZVer9C2FALNTmJvR name=Bash input={"command":"echo spike-ok","description":"Run the spike-o...
-RateLimit status=allowed five_hour=27% seven_day=4%
+RateLimit status=allowed five_hour=27%@1791004800 seven_day=4%@1791266400 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_01SccNz2ZVer9C2FALNTmJvR error=false "spike-ok"
 Context used=22853 window=-
 TextDelta "done"

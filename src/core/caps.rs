@@ -175,6 +175,9 @@ pub struct Capabilities {
     pub context_usage: bool,
     /// Account rate-limit windows are reported (`RateLimit`).
     pub rate_limits: bool,
+    /// The CLI can be asked for its account's rate limits and plan
+    /// (`SessionCommand::QueryStatus`), not only told them with a turn.
+    pub status_query: bool,
     pub rewind: RewindSupport,
     /// A session can be branched into a new one (`SessionConfig::fork`).
     pub fork: bool,
@@ -384,6 +387,9 @@ impl Capabilities {
         if let Some(c) = update.context_usage {
             self.context_usage = c;
         }
+        if let Some(q) = update.status_query {
+            self.status_query = q;
+        }
         if let Some(h) = update.mcp_http {
             self.mcp.http = h;
         }
@@ -460,6 +466,7 @@ impl Capabilities {
             resume_by_id: lost(self.resume_by_id, session.resume_by_id),
             fork: lost(self.fork, session.fork),
             context_usage: lost(self.context_usage, session.context_usage),
+            status_query: lost(self.status_query, session.status_query),
             mcp_http: lost(self.mcp.http, session.mcp.http),
             plan_mode: lost(self.plan_mode, session.plan_mode),
             slash_commands: lost(self.slash_commands, session.slash_commands),

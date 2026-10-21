@@ -1,10 +1,12 @@
 SessionStarted id=01a10023-e1c2-7e82-a9e5-4d53ffccb2be model=gpt-6-astra
 TurnStarted
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 TextDelta "pong"
 Usage in=2288 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2288 out=5 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14453 window=258400
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 TurnCompleted Done
 TurnStarted
 TextDelta "I"
@@ -21,10 +23,10 @@ ToolCallResult id=exec-722d1b12-9048-4332-be64-a48abfe3e8a4 error=false "codex-a
 Usage in=4817 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=7105 out=51 cache_read=24320 cache_write=0 cost=- cumulative=true
 Context used=17023 window=258400
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1791589030
 TextDelta "done"
 Usage in=315 out=5 cache_read=16768 cache_write=0 cost=- cumulative=false
 Usage in=7420 out=56 cache_read=41088 cache_write=0 cost=- cumulative=true
 Context used=17088 window=258400
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1791589030
 TurnCompleted Done

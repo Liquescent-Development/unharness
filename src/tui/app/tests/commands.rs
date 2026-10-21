@@ -56,6 +56,10 @@ fn app_with_claude_commands() -> TestApp {
             },
             command("model", None),
             command("Deploy", None),
+            HarnessCommand {
+                aliases: vec!["cost".into(), "stats".into()],
+                ..command("usage", None)
+            },
         ]),
         ..Default::default()
     }));
@@ -130,6 +134,16 @@ fn unharness_s_own_command_wins_unless_escaped() {
     assert_eq!(said[2], "/new is Claude's own command: passed on");
     assert!(said[3].starts_with("unharness does not see what Claude's /new changes"));
     assert!(said[3].ends_with("(unharness's /clear starts a new conversation)"));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+
+    // Claude's `/usage` under another name only shows something, as
+    // unharness's does: nothing to warn about.
+    app.handle_slash_command("/cost");
+    assert_eq!(app.take_actions(), vec![Action::turn("/cost")]);
+    let said = notices(&app);
+    assert_eq!(said[4..], ["/cost is Claude's own command: passed on"]);
 }
 
 /// A `/` prompt queued for one harness is not sent to another, where
@@ -301,20 +315,50 @@ fn commands_that_arrive_while_a_slash_is_typed_are_listed() {
     assert!(app.suggestions.iter().any(|(c, _)| c == "/hello"));
 }
 
-/// What `/usage` says last.
-fn usage_text(app: &mut TestApp) -> String {
-    use super::transcript::Block;
-    app.handle_slash_command("/usage");
-    match app.controller.conversation.transcript.blocks.last() {
-        Some(Block::System(s)) => s.clone(),
-        other => panic!("no /usage answer: {other:?}"),
-    }
+/// The rows of a section of what `/status` shows now, one per line.
+fn status_section(app: &TestApp, title: &str) -> String {
+    let report = app.status_report(std::time::SystemTime::now());
+    let section = report
+        .sections
+        .iter()
+        .find(|s| s.title == title)
+        .unwrap_or_else(|| panic!("no {title} in /status"));
+    section
+        .rows
+        .iter()
+        .map(|r| format!("{}: {}", r.label, r.value))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// `/usage` calls the status row's `session N` billed tokens and breaks
+/// `/status` and `/usage` open the overlay and leave the transcript as
+/// it was.
+#[test]
+fn status_opens_an_overlay_not_a_block() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    let blocks = app.controller.conversation.transcript.blocks.len();
+    for cmd in ["/status", "/usage"] {
+        app.handle_slash_command(cmd);
+        assert!(matches!(app.modal, Some(Modal::Status(_))), "{cmd}");
+        app.modal = None;
+    }
+    assert_eq!(app.controller.conversation.transcript.blocks.len(), blocks);
+    let titles: Vec<&str> = app
+        .status_report(std::time::SystemTime::now())
+        .sections
+        .iter()
+        .map(|s| s.title)
+        .collect();
+    assert_eq!(
+        titles,
+        ["Session", "Account", "Usage", "Context", "Rate limits"]
+    );
+}
+
+/// `/status` calls the status row's `session N` billed tokens and breaks
 /// it down, for the last turn and the session, with the cost (#314).
 #[test]
-fn usage_breaks_billed_tokens_down() {
+fn status_breaks_billed_tokens_down() {
     use crate::core::{RateLimitInfo, RateLimitWindow};
     let mut app = test_app(HarnessId::CLAUDE);
     let turn = |input, output, cache_read, cache_write, cost| {
@@ -340,52 +384,103 @@ fn usage_breaks_billed_tokens_down() {
             used_percent: Some(12.0),
             resets_at: None,
         }],
+        ..Default::default()
     }));
     assert_eq!(
-        usage_text(&mut app),
-        "Billed tokens, last turn: 47,271 (uncached input 18, output 249, \
+        status_section(&app, "Usage"),
+        "Last turn: 47,271 (uncached input 18, output 249, \
          cache reads 41,805, cache writes 5,199), $0.0158\n\
-         Billed tokens, session: 162,261,798 (uncached input 826, output 375,600, \
-         cache reads 157,702,965, cache writes 4,182,407), $41.2658\n\
-         Context: 47,022 of 200,000 tokens (23%)\n\
-         Rate limits: five_hour 12% used"
+         Session: 162,261,798 (uncached input 826, output 375,600, \
+         cache reads 157,702,965, cache writes 4,182,407), $41.2658"
+    );
+    assert_eq!(
+        status_section(&app, "Context"),
+        "Filled: 47,022 of 200,000 tokens (23%)"
+    );
+    assert_eq!(
+        status_section(&app, "Rate limits"),
+        "Status: allowed\nfive hour: █░░░░░░░░░  12% used\n: as of 0s ago"
     );
 }
 
 /// Context fill the harness never reports is said to be missing; one it
 /// has not reported yet is not known yet, as the status row tells them
-/// apart (#313).
+/// apart (#313). So are rate limits.
 #[test]
-fn usage_tells_context_never_reported_from_not_known_yet() {
-    let mut app = test_app(HarnessId::AGY);
+fn status_tells_never_reported_from_not_known_yet() {
+    let app = test_app(HarnessId::AGY);
     assert!(!app.caps().context_usage);
     assert_eq!(
-        usage_text(&mut app),
-        "Billed tokens, last turn: 0 (uncached input 0, output 0, cache reads 0, cache writes 0)\n\
-         Billed tokens, session: 0 (uncached input 0, output 0, cache reads 0, cache writes 0)\n\
-         Context: not reported by Antigravity (agy)"
+        status_section(&app, "Context"),
+        ": not reported by Antigravity (agy)"
+    );
+    assert_eq!(
+        status_section(&app, "Rate limits"),
+        ": not reported by Antigravity (agy)"
     );
 
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.caps().context_usage);
-    assert!(usage_text(&mut app).ends_with("\nContext: not known yet"));
+    assert_eq!(status_section(&app, "Context"), "Filled: not known yet");
+    assert_eq!(
+        status_section(&app, "Rate limits"),
+        ": none yet: Claude Code (claude) reports them with a turn"
+    );
     // The window a model last reported, before the session says how full.
     app.controller.conversation.context.window = Some(200_000);
-    assert!(usage_text(&mut app).ends_with("\nContext: not known yet, of a 200,000-token window"));
+    assert_eq!(
+        status_section(&app, "Context"),
+        "Filled: not known yet, of a 200,000-token window"
+    );
     app.controller.conversation.context.window = None;
     app.on_event(AgentEvent::Context(ContextUsage {
         used: Some(1_500),
         window: None,
     }));
-    assert!(usage_text(&mut app).ends_with("\nContext: 1,500 tokens, of a window not known yet"));
+    assert_eq!(
+        status_section(&app, "Context"),
+        "Filled: 1,500 tokens, of a window not known yet"
+    );
 }
 
+/// The account a harness reported is shown, and only for that harness.
 #[test]
-fn grouped_puts_digits_in_threes() {
-    use super::super::commands::grouped;
-    assert_eq!(grouped(0), "0");
-    assert_eq!(grouped(999), "999");
-    assert_eq!(grouped(1_000), "1,000");
-    assert_eq!(grouped(100_000), "100,000");
-    assert_eq!(grouped(u64::MAX), "18,446,744,073,709,551,615");
+fn status_shows_the_account_of_the_active_harness() {
+    use crate::core::{AccountInfo, Credits};
+    let mut app = test_app(HarnessId::CODEX);
+    app.on_event(AgentEvent::Account(AccountInfo {
+        plan: Some("prolite".into()),
+        auth: Some("chatgpt".into()),
+        credits: Some(Credits {
+            has_credits: true,
+            unlimited: false,
+            balance: Some("62500.0000000000".into()),
+        }),
+        ..Default::default()
+    }));
+    assert_eq!(
+        status_section(&app, "Account"),
+        "Plan: prolite\nSigned in with: chatgpt\nCredits: 62500"
+    );
+    // Switched to directly: `/switch` refuses a harness not installed,
+    // and CI has none.
+    app.switch_harness(HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
+    assert!(!status_section(&app, "Account").contains("prolite"));
+}
+
+/// Without an account reported, what the CLI said at startup.
+#[test]
+fn status_falls_back_to_the_sign_in_found_at_startup() {
+    let mut app = test_app(HarnessId::CLAUDE);
+    for o in &mut app.harness_options {
+        o.auth = crate::harness::AuthInfo {
+            authenticated: true,
+            details: Some("plan: Claude Max".into()),
+        };
+    }
+    assert_eq!(
+        status_section(&app, "Account"),
+        "Signed in: yes, at startup\n: plan: Claude Max"
+    );
 }

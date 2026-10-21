@@ -90,6 +90,7 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
                 used_percent: Some(pct),
                 resets_at: None,
             }],
+            ..Default::default()
         })
     };
     let mut app = test_app(HarnessId::CLAUDE);
@@ -103,9 +104,69 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
         base + 1
     );
     assert_eq!(
-        rate_limit_summary(app.controller.rate_limit.as_ref().unwrap()),
+        rate_limit_summary(
+            app.controller
+                .account_status(HarnessId::CLAUDE)
+                .and_then(|s| s.rate_limit.as_ref())
+                .unwrap()
+        ),
         "five_hour 90% used"
     );
+}
+
+/// Rate limits are the account's of the harness that reported them: they
+/// are not shown for another, and each warns on its own.
+#[test]
+fn rate_limits_stay_with_the_harness_that_reported_them() {
+    use crate::core::{RateLimitInfo, RateLimitWindow};
+    let limit = |pct: f32| {
+        AgentEvent::RateLimit(RateLimitInfo {
+            status: Some("allowed".into()),
+            windows: vec![RateLimitWindow {
+                label: "five_hour".into(),
+                used_percent: Some(pct),
+                resets_at: None,
+            }],
+            ..Default::default()
+        })
+    };
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.on_event(limit(85.0));
+    app.switch_harness(HarnessId::CODEX);
+    assert!(app.controller.account_status(HarnessId::CODEX).is_none());
+    assert!(app.controller.account_status(HarnessId::CLAUDE).is_some());
+    let before = notices(&app).len();
+    app.on_event(limit(90.0));
+    assert_eq!(notices(&app).len(), before + 1, "Codex warns for itself");
+}
+
+/// A CLI that answers a status query is asked when `/status` opens, not
+/// again a moment later, and not before its session runs.
+#[test]
+fn status_queries_go_to_a_live_session_and_not_too_often() {
+    use crate::core::{CapsUpdate, RateLimitInfo, SessionCommand};
+    let query = || Action::Command(SessionCommand::QueryStatus);
+    let mut app = test_app(HarnessId::CLAUDE);
+    app.on_event(AgentEvent::CapabilitiesChanged(CapsUpdate {
+        status_query: Some(true),
+        ..Default::default()
+    }));
+    app.take_actions();
+    app.with(|c, _| c.query_status());
+    assert!(!app.take_actions().contains(&query()), "no session yet");
+    app.controller.session_alive = true;
+    app.with(|c, _| c.query_status());
+    app.with(|c, _| c.query_status());
+    let sent = app.take_actions();
+    assert_eq!(sent.iter().filter(|a| **a == query()).count(), 1);
+    let asking = |app: &TestApp| {
+        app.controller
+            .account_status(HarnessId::CLAUDE)
+            .is_some_and(|s| s.asking())
+    };
+    assert!(asking(&app));
+    app.on_event(AgentEvent::RateLimit(RateLimitInfo::default()));
+    assert!(!asking(&app));
 }
 
 /// A hook whose end will not come is not left running, nor called failed.

@@ -227,6 +227,9 @@ async fn event_loop(
     // The `!` command at work.
     let mut shell: Option<LineProcess> = None;
     let mut needs_redraw = true;
+    // The second `/status` was last drawn in: its countdowns move once a
+    // second.
+    let mut status_second = 0;
     // File lists for `@` completion, walked off this task.
     let (files_tx, mut files_rx) = tokio::sync::mpsc::unbounded_channel();
     // Provider and model lists, which may start the harness's CLI.
@@ -276,6 +279,12 @@ async fn event_loop(
                     needs_redraw = true;
                 }
                 needs_redraw |= app.tick_mouse();
+                if matches!(app.modal, Some(modal::Modal::Status(_))) {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    needs_redraw |= std::mem::replace(&mut status_second, now) != now;
+                }
             }
             ev = async {
                 match session.as_mut() {

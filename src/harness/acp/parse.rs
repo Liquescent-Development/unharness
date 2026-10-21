@@ -21,7 +21,9 @@ use crate::core::{
     PermissionKind, PermissionRequest, PlanEntry, PlanStatus, StopReason, ToolAction, Usage,
     UsageScope,
 };
-use crate::harness::claude::parse::tool_action as claude_tool_action;
+use crate::harness::claude::parse::{
+    rate_limit_info as claude_rate_limit_info, tool_action as claude_tool_action,
+};
 
 /// Provider id shown for ACP agents (they pick their own backend).
 pub const PROVIDER: &str = "agent";
@@ -506,6 +508,10 @@ impl AcpParser {
                 let window = update.get("size").and_then(Value::as_u64);
                 if used.is_some() || window.is_some() {
                     out.push(AgentEvent::Context(ContextUsage { used, window }));
+                }
+                // claude-agent-acp passes on Claude's `rate_limit_info`.
+                if let Some(info) = update.pointer("/_meta/_claude~1rateLimit") {
+                    out.push(AgentEvent::RateLimit(claude_rate_limit_info(info)));
                 }
                 if let Some(total) = update.pointer("/cost/amount").and_then(Value::as_f64) {
                     if !std::mem::take(&mut self.cost_baseline_pending) {

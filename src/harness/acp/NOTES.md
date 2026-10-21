@@ -457,3 +457,13 @@ vibe-acp's `_auth/status` answers without a session (`authenticated`,
 and `initialize`, too slow for `quick_auth`. Unverified: an agent that
 fails `prompt` with -32000, `env_var` and spec terminal methods from a
 real agent, `authenticate` with vibe's `browser-auth`.
+
+## Rate limits
+
+claude-agent-acp 0.85.1 passes Claude's `rate_limit_info` on in each
+`usage_update`'s `_meta["_claude/rateLimit"]` (all six
+`claude_agent_acp*` recordings): the same fields as Claude Code's
+`rate_limit_event`, read with the same `rate_limit_info`, so `/status`
+shows its windows, reset times and overage. The agent does not declare
+`rate_limits` (no other ACP agent recorded sends any); what it reports is
+shown all the same. codex-acp 2.1.1 and vibe-acp 2.26.1 send none.

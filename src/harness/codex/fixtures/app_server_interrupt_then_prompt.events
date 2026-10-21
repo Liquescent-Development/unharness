@@ -1,6 +1,7 @@
 Notice "codex: WARNING: proceeding, even though we could not crea..."
 SessionStarted id=01a14203-ddbf-79d1-ab7e-11810aa59f59 model=gpt-6.1-sol
 TurnStarted
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 TextDelta "I"
 TextDelta "’ll"
 TextDelta " run"
@@ -18,11 +19,12 @@ PermissionRequest id=0 ToolUse shell [shell "sleep 20 && echo first-ok"]
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=false
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=true
 Context used=14679 window=475000
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1792681364
+Account plan=prolite auth=- email=- org=- credits=62500.0000000000
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=false
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=true
 Context used=14679 window=475000
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1792681364
 TurnCompleted Interrupted
 TurnStarted
 TextDelta "now"
@@ -30,6 +32,6 @@ TextDelta "-ok"
 Usage in=1685 out=6 cache_read=14592 cache_write=0 cost=- cumulative=false
 Usage in=4019 out=63 cache_read=26880 cache_write=0 cost=- cumulative=true
 Context used=16283 window=475000
-RateLimit status=- 7d=0%
+RateLimit status=- limit=codex 7d=0%@1792681364
 TurnCompleted Done
 Notice "codex: \u{1b}[2m2026-10-16T00:02:01.544856Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m..."

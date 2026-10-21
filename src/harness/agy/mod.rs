@@ -146,6 +146,7 @@ impl Harness for AgyHarness {
             // Its stream has token counts but no window (NOTES.md).
             context_usage: false,
             rate_limits: false,
+            status_query: false,
             rewind: RewindSupport::default(),
             fork: false,
             // Servers are only read from agy's own config (`agy mcp add`

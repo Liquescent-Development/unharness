@@ -754,6 +754,10 @@ fn asks(cmd: &SessionCommand, caps: &Capabilities) -> (Refusal, bool) {
         SessionCommand::RemoteControl { .. } => {
             (notice("go on remote control"), caps.remote_control)
         }
+        SessionCommand::QueryStatus => (
+            notice("report its account's limits on request"),
+            caps.status_query,
+        ),
         // What every harness takes.
         SessionCommand::SendTurn { .. } => (notice("take a turn"), true),
         SessionCommand::SetModel(_) => (notice("change its model"), true),

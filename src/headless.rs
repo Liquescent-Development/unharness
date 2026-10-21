@@ -753,6 +753,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(p) = u.plan_mode {
         v["plan_mode"] = json!(p);
     }
+    if let Some(q) = u.status_query {
+        v["status_query"] = json!(q);
+    }
     if let Some(s) = u.slash_commands {
         v["slash_commands"] = json!(s);
     }
@@ -941,6 +944,24 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 "used_percent": w.used_percent,
                 "resets_at": w.resets_at,
             })).collect::<Vec<_>>(),
+            "limit": r.limit,
+            "overage": r.overage.as_ref().map(|o| json!({
+                "status": o.status,
+                "in_use": o.in_use,
+                "disabled_reason": o.disabled_reason,
+                "resets_at": o.resets_at,
+            })),
+        }),
+        // Not who the account is: the output may be shared.
+        AgentEvent::Account(a) => json!({
+            "type": "account",
+            "plan": a.plan,
+            "auth": a.auth,
+            "credits": a.credits.as_ref().map(|c| json!({
+                "has_credits": c.has_credits,
+                "unlimited": c.unlimited,
+                "balance": c.balance,
+            })),
         }),
         AgentEvent::TurnAnchor { id } => json!({"type": "turn_anchor", "id": id}),
         AgentEvent::RewindFailed { reason } => json!({"type": "rewind_failed", "reason": reason}),

@@ -1,4 +1,5 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=c5c7b04b-2a12-4764-bef2-f93efb2a3594 model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21708 window=-
@@ -20,7 +21,7 @@ ToolCallDelta id=toolu_01W3WYmPTRBZHjGJHCbvzTwf name=Agent "\"}"
 ToolCallStarted id=toolu_01W3WYmPTRBZHjGJHCbvzTwf name=Agent input={"description":"Sleep then read a.txt","prompt":"Run the ...
 SubagentStarted id=toolu_01W3WYmPTRBZHjGJHCbvzTwf kind=general-purpose "Sleep then read a.txt"
 ToolCallResult id=toolu_01W3WYmPTRBZHjGJHCbvzTwf error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=39% seven_day=28%
+RateLimit status=allowed five_hour=39%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Context used=23192 window=-
 TextDelta "Agent"
 TextDelta " launched"

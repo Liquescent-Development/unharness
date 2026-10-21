@@ -6,6 +6,7 @@ CapabilitiesChanged commands=0 slash_commands=false
 Context used=20234 window=1000000
 TextDelta "pong"
 Context used=20234 window=1000000
+RateLimit status=allowed five_hour=46%@1791074400 seven_day=20%@1791266400 seven_day_overage_included=39%@1791266400 overage=rejected(org_level_disabled)
 Context used=20234 window=1000000
 Usage in=2 out=4 cache_read=10738 cache_write=9490 cost=0.1937 cumulative=false
 TurnCompleted Done

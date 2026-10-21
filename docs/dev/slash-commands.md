@@ -51,7 +51,12 @@ unsent `!` output wait for the next prompt, whose bridge then also tells
 the command's turn (a switch keeps the held start). A queued `/` prompt goes only to the harness it was
 typed for. One of the agent's that does what one of unharness's does
 (`/clear`, `/model`, `/compact` and their aliases) is warned about, not
-followed: unharness's model, transcript and bridge are not updated.
+followed: unharness's model, transcript and bridge are not updated. One
+named like a command of unharness's that only shows something
+(`/status`, `/usage`, `/help`, `/conversations`, `/skills`, `/allow`)
+is passed on without the warning: Claude's `/cost` and `/stats` are its
+`/usage` under other names. An agent's own `/status` (codex-acp lists
+one) is hidden by unharness's and sent as `\/status`.
 Checked in the TUI (pty): Claude ran `/hello world` and `\/context`, and
 pi's list came from `get_commands`. Unverified: codex-acp's commands
 (its recordings listed none, so it is not taken to run any), an unknown

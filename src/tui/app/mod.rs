@@ -29,7 +29,6 @@ pub use crate::core::controller::Action;
 
 // The files below, and their tests, reach these through this module
 // (`super::transcript`, `super::shell`, ...), as when they were one file.
-use crate::core::controller::rate_limit_summary;
 use crate::core::transcript;
 
 mod accessors;
@@ -47,12 +46,14 @@ mod rewind;
 mod sandbox;
 mod session;
 mod shell_command;
+mod status;
 mod subagents;
 mod suggestions;
 mod switch;
 mod turn;
 
 pub use front::Screen;
+pub use status::{LABEL_WIDTH, StatusReport, Tone, padded};
 
 /// A list the TUI wants from a harness. Asking may start the CLI and
 /// take seconds (Claude on Bedrock gives up after 15), so it is done off
@@ -415,6 +416,7 @@ impl App {
                 installed: probe.binary.is_some(),
                 version: probe.version,
                 interactive_permissions: h.capabilities().interactive_permissions,
+                auth: probe.auth,
             });
         }
 

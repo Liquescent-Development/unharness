@@ -1,6 +1,7 @@
 HookStarted id=7f22de83-2733-4648-b2c9-99238df63f34 SessionStart:startup
 HookEnded id=7f22de83-2733-4648-b2c9-99238df63f34 SessionStart:startup ok ""
 CapabilitiesChanged models=13 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=359bf15b-88b6-4f50-b839-48814c566c72 model=claude-haiku-5-5
 TurnStarted
 Context used=24287 window=-
@@ -21,7 +22,7 @@ ToolCallDelta id=toolu_01RauLfgWgXMnz6xsNX9s4CR name=Bash "ate greet.py and find
 ToolCallDelta id=toolu_01RauLfgWgXMnz6xsNX9s4CR name=Bash " Hello"
 ToolCallDelta id=toolu_01RauLfgWgXMnz6xsNX9s4CR name=Bash "\"}"
 ToolCallStarted id=toolu_01RauLfgWgXMnz6xsNX9s4CR name=Bash input={"command":"find /WORKSPACE -name greet.py -not -path '*/...
-RateLimit status=allowed five_hour=7% seven_day=30%
+RateLimit status=allowed five_hour=7%@1791601200 seven_day=30%@1791871200 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_01RauLfgWgXMnz6xsNX9s4CR error=false "/WORKSPACE/greet.py\\n/WORKSPACE/greet.py:2:    return \"He..."
 Context used=30269 window=-
 ToolCallDelta id=toolu_01LzQrLatBwgAyawZ48zjHvF name=Write "{\"file_path\": \"/HOME"

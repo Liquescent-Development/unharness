@@ -1,6 +1,7 @@
 HookStarted id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup
 HookEnded id=b5ea8249-2ed5-4b05-91e6-86739b3f0f73 SessionStart:startup ok ""
 CapabilitiesChanged models=12 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 HookStarted id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit
 HookEnded id=aa32cd0f-3386-4d03-b357-94a1a076dd49 UserPromptSubmit ok "prompt-hook-context"
 SessionStarted id=ccd8a477-177b-4874-be0c-b14fa46bca99 model=claude-haiku-4-5-20251001
@@ -40,7 +41,7 @@ ToolCallStarted id=toolu_015pAsabN9vnsJatcauhW7nR name=Write input={"content":"h
 PermissionRequest id=ebea8532-416b-45aa-ac61-fbcf826ca9bc ToolUse Write [edit /WORKSPACE/note.txt]
 HookStarted id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write
 HookEnded id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write failed "post-write-failed"
-RateLimit status=allowed five_hour=28% seven_day=4%
+RateLimit status=allowed five_hour=28%@1791336600 seven_day=4%@1791871200 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_015pAsabN9vnsJatcauhW7nR error=false "File created successfully at: /WORKSPACE/note.txt (file s..."
 Context used=26760 window=-
 TextDelta "The"

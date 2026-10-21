@@ -1,4 +1,5 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=311ac6f9-792a-4d5c-9c4d-997b64065dbd model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21712 window=-
@@ -51,11 +52,11 @@ ToolCallDelta id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 name=Agent "\"}"
 ToolCallStarted id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 name=Agent input={"description":"Read c.txt and report the single word","p...
 SubagentStarted id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 kind=Explore "Read c.txt and report the single word"
 ToolCallResult id=toolu_01Y5DDYLCDH6Y3Scwd1JVzB7 error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=36% seven_day=28%
+RateLimit status=allowed five_hour=36%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Sub parent=toolu_01QY9Vc91ArRcFox5LhXUL6q ToolCallStarted id=toolu_01DAReoNFf1SsMfJmGF1bhDB name=Read input={"file_path":"/WORKSPACE/a.txt"}
 SubagentProgress id=toolu_01QY9Vc91ArRcFox5LhXUL6q "Reading a.txt"
 Sub parent=toolu_01QY9Vc91ArRcFox5LhXUL6q ToolCallResult id=toolu_01DAReoNFf1SsMfJmGF1bhDB error=false "1\talpha\\n2\t"
-RateLimit status=allowed five_hour=37% seven_day=28%
+RateLimit status=allowed five_hour=37%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Context used=24342 window=-
 Sub parent=toolu_01KCWj1751WUKmd8pafeHeyE ToolCallStarted id=toolu_01WEw55YQavaboULDKxVrHTt name=Read input={"file_path":"/WORKSPACE/b.txt"}
 SubagentProgress id=toolu_01KCWj1751WUKmd8pafeHeyE "Reading b.txt"

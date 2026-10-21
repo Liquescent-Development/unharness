@@ -1,4 +1,5 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=f51e46ef-d52d-4731-b8a9-36570ae452d3 model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21795 window=-
@@ -10,7 +11,7 @@ ToolCallDelta id=toolu_015e7N1kg4wv5PqoFZ4mBxFc name=ToolSearch "\", \"max_resul
 ToolCallDelta id=toolu_015e7N1kg4wv5PqoFZ4mBxFc name=ToolSearch "}"
 ToolCallStarted id=toolu_015e7N1kg4wv5PqoFZ4mBxFc name=ToolSearch input={"max_results":5,"query":"select:TaskCreate,TaskUpdate"}
 ToolCallResult id=toolu_015e7N1kg4wv5PqoFZ4mBxFc error=false "[tool_reference]\\n[tool_reference]"
-RateLimit status=allowed five_hour=36% seven_day=19%
+RateLimit status=allowed five_hour=36%@1791074400 seven_day=19%@1791266400 overage=rejected(org_level_disabled)
 Context used=24757 window=-
 ToolCallDelta id=toolu_01TJEMd1MWYEa5ZTRtu79vz7 name=TaskCreate "{\"subject\": \"say hello"
 ToolCallDelta id=toolu_01TJEMd1MWYEa5ZTRtu79vz7 name=TaskCreate "\", \"description\": \"Say"

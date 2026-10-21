@@ -134,6 +134,7 @@ impl Harness for PiHarness {
             compaction: true,
             context_usage: true,
             rate_limits: false,
+            status_query: false,
             rewind: RewindSupport {
                 conversation: true,
                 anchors_survive_fork: true,

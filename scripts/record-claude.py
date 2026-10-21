@@ -46,6 +46,9 @@ def redact(line: str, cwd: str) -> str:
         line = line.replace(home, "/HOME")
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
     line = re.sub(r"sk-ant-[A-Za-z0-9_-]+", "sk-ant-REDACTED", line)
+    # The account's organization, named in initialize's answer: a name
+    # that is not an email address would pass the line above.
+    line = re.sub(r'"(organization|orgName)":"(?:[^"\\]|\\.)*"', r'"\1":"Example Org"', line)
     # Remote Control's environment and bridge session ids, also inside URLs.
     line = re.sub(r"\b(env|session|cse)_[A-Za-z0-9]{12,}", r"\1_REDACTED", line)
     return line
@@ -78,6 +81,9 @@ def main() -> int:
     ap.add_argument("--answer-delay", type=float, default=0.0,
                     help="answer permission requests this many seconds late, as a person would")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--get-usage", action="store_true",
+                    help="ask for the account's usage (get_usage, as /status does) before the "
+                         "first prompt and after the last")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
     ap.add_argument("--stop-tasks", action="store_true",
@@ -209,7 +215,17 @@ def main() -> int:
         turn_ids.append(str(uuid.uuid4()))
         send({"type": "user", "uuid": turn_ids[-1], "message": {"role": "user", "content": content}})
 
+    def get_usage():
+        request_id = str(uuid.uuid4())
+        send({"type": "control_request", "request_id": request_id,
+              "request": {"subtype": "get_usage", "skip_behaviors": True}})
+        return request_id
+
+    if args.get_usage:
+        get_usage()
     send_turn(first)
+    # The get_usage after the last prompt: its answer ends the recording.
+    final_usage = None
 
     rewind_id = None
     # Subagent tasks that have started and not yet reported an end.
@@ -264,6 +280,11 @@ def main() -> int:
         except json.JSONDecodeError:
             continue
         t = obj.get("type")
+        if (final_usage and t == "control_response"
+                and obj.get("response", {}).get("request_id") == final_usage):
+            proc.stdin.close()
+            drain()
+            break
         if (args.steer and not steered and t == "assistant"
                 and any(b.get("type") == "tool_use" for b in obj.get("message", {}).get("content", []))):
             steered = True
@@ -389,6 +410,8 @@ def main() -> int:
                     sys.stderr.write("[remote_control] local prompts done; waiting for remote turns\n")
             elif args.wait_after:
                 finishing = True
+            elif args.get_usage and not final_usage:
+                final_usage = get_usage()
             else:
                 proc.stdin.close()
                 drain()

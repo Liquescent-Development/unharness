@@ -11,6 +11,7 @@ TextDelta "p"
 TextDelta "ineapple"
 Context used=23903 window=200000
 Context used=23903 window=200000
+RateLimit status=allowed five_hour=24%@1791772200 seven_day=47%@1791871200 overage=rejected(org_level_disabled)
 Context used=23903 window=200000
 Usage in=10 out=60 cache_read=23493 cache_write=340 cost=0.0033 cumulative=false
 TurnCompleted Done

@@ -10,13 +10,18 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, ContextUsage, HookOutcome, Parser, PermissionKind, PermissionRequest, PlanEntry,
-    PlanStatus, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
-    SubagentStatus, ToolAction, Usage, UsageScope,
+    AccountInfo, AgentEvent, ContextUsage, Credits, HookOutcome, Parser, PermissionKind,
+    PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption, RateLimitInfo,
+    RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
 pub const ELICITATION_PREFIX: &str = "MCP ";
+
+/// The names `/status`'s requests go under (`account/rateLimits/read`,
+/// `account/read`), so that their answers are told apart.
+pub(super) const RATE_LIMITS_ID: &str = "rate-limits";
+pub(super) const ACCOUNT_ID: &str = "account";
 
 #[derive(Debug, Default)]
 pub struct CodexAppServerParser {
@@ -26,6 +31,9 @@ pub struct CodexAppServerParser {
     /// Rate-limit updates are sparse; a null window keeps its last value.
     rate_primary: Option<RateLimitWindow>,
     rate_secondary: Option<RateLimitWindow>,
+    /// The plan and credits the last rate-limit update gave, told again
+    /// only when they change.
+    account: AccountInfo,
     /// Sub-agent thread id → the item that spawned it. Sub-agent threads
     /// report on the same stream as the main thread.
     children: HashMap<String, String>,
@@ -119,6 +127,73 @@ fn mcp_call(item: &Value) -> Option<(String, String)> {
 }
 
 impl CodexAppServerParser {
+    /// A rate-limit report (`account/rateLimits/updated`'s, or the answer
+    /// to `account/rateLimits/read`): its windows, and the plan and
+    /// credits when they changed.
+    fn rate_limits(&mut self, limits: &Value, out: &mut Vec<AgentEvent>) {
+        if let Some(w) = rate_window(limits.get("primary")) {
+            self.rate_primary = Some(w);
+        }
+        if let Some(w) = rate_window(limits.get("secondary")) {
+            self.rate_secondary = Some(w);
+        }
+        out.push(AgentEvent::RateLimit(RateLimitInfo {
+            status: limits
+                .get("rateLimitReachedType")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            windows: self
+                .rate_primary
+                .iter()
+                .chain(self.rate_secondary.iter())
+                .cloned()
+                .collect(),
+            limit: limits
+                .get("limitId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            overage: None,
+        }));
+        let account = AccountInfo {
+            plan: text_at(limits, "planType"),
+            credits: credits(limits.get("credits")),
+            ..Default::default()
+        };
+        if account != AccountInfo::default() && account != self.account {
+            self.account = account.clone();
+            out.push(AgentEvent::Account(account));
+        }
+    }
+
+    /// The answer to one of the requests `/status` makes (by name, as the
+    /// transport sends them).
+    fn status_answer(&mut self, id: &Value, result: &Value) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        match id.as_str() {
+            Some(RATE_LIMITS_ID) => {
+                if let Some(limits) = result.get("rateLimits").filter(|l| l.is_object()) {
+                    self.rate_limits(limits, &mut out);
+                }
+            }
+            // `{type, email, planType}`; null when nobody is signed in.
+            Some(ACCOUNT_ID) => {
+                if let Some(a) = result.get("account").filter(|a| a.is_object()) {
+                    let account = AccountInfo {
+                        plan: text_at(a, "planType"),
+                        auth: text_at(a, "type"),
+                        email: text_at(a, "email"),
+                        ..Default::default()
+                    };
+                    if account != AccountInfo::default() {
+                        out.push(AgentEvent::Account(account));
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -153,6 +228,11 @@ impl Parser for CodexAppServerParser {
                     .and_then(Value::as_str)
                     .unwrap_or("request failed")
             ))],
+            Some(RpcMessage::Response {
+                id,
+                result: Some(result),
+                ..
+            }) => self.status_answer(&id, &result),
             Some(RpcMessage::Response { .. }) => vec![],
             None => vec![AgentEvent::Notice(line.to_string())],
         }
@@ -409,25 +489,7 @@ impl CodexAppServerParser {
                 });
             }
             "account/rateLimits/updated" => {
-                let limits = p.get("rateLimits").unwrap_or(&Value::Null);
-                if let Some(w) = rate_window(limits.get("primary")) {
-                    self.rate_primary = Some(w);
-                }
-                if let Some(w) = rate_window(limits.get("secondary")) {
-                    self.rate_secondary = Some(w);
-                }
-                out.push(AgentEvent::RateLimit(RateLimitInfo {
-                    status: limits
-                        .get("rateLimitReachedType")
-                        .and_then(Value::as_str)
-                        .map(str::to_string),
-                    windows: self
-                        .rate_primary
-                        .iter()
-                        .chain(self.rate_secondary.iter())
-                        .cloned()
-                        .collect(),
-                }));
+                self.rate_limits(p.get("rateLimits").unwrap_or(&Value::Null), &mut out)
             }
             "turn/completed" => {
                 self.turn_started = false;
@@ -481,7 +543,17 @@ impl CodexAppServerParser {
                     out.push(AgentEvent::Notice(error));
                 }
             }
-            // thread/status/changed, account/updated, remoteControl/*,
+            "account/updated" => {
+                let account = AccountInfo {
+                    plan: text_at(p, "planType"),
+                    auth: text_at(p, "authMode"),
+                    ..Default::default()
+                };
+                if account != AccountInfo::default() {
+                    out.push(AgentEvent::Account(account));
+                }
+            }
+            // thread/status/changed, remoteControl/*,
             // serverRequest/resolved, item/updated…
             _ => {}
         }
@@ -860,6 +932,24 @@ fn wrap_sub(parent: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
         .collect()
 }
 
+/// A non-empty string field of `v`.
+fn text_at(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// A rate-limit update's `credits`: `{hasCredits, unlimited, balance}`.
+fn credits(c: Option<&Value>) -> Option<Credits> {
+    let c = c.filter(|c| c.is_object())?;
+    Some(Credits {
+        has_credits: c.get("hasCredits").and_then(Value::as_bool) == Some(true),
+        unlimited: c.get("unlimited").and_then(Value::as_bool) == Some(true),
+        balance: text_at(c, "balance"),
+    })
+}
+
 /// A `primary` / `secondary` rate-limit window, labelled by its length (`5h`, `7d`).
 fn rate_window(w: Option<&Value>) -> Option<RateLimitWindow> {
     let w = w.filter(|w| w.is_object())?;
@@ -970,6 +1060,18 @@ mod tests {
         }
         let odd = token_usage(&serde_json::json!({"inputTokens": 3, "cachedInputTokens": 5}));
         assert_eq!((odd.input, odd.cache_read), (0, 5));
+    }
+
+    /// The answers to `/status`'s reads, before the turn and after it
+    /// (0.162.1): the same windows, plan and credits as the notification,
+    /// and the account's sign-in and email.
+    #[test]
+    fn fixture_app_server_account_read() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_account_read",
+        );
     }
 
     #[test]

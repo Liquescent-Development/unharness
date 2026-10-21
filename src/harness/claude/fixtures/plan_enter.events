@@ -1,6 +1,7 @@
 HookStarted id=cc76caad-6751-48bf-878b-9b752c70f39b SessionStart:startup
 HookEnded id=cc76caad-6751-48bf-878b-9b752c70f39b SessionStart:startup ok ""
 CapabilitiesChanged models=13 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=258434cc-cb37-4013-bb2a-6277dccec1df model=claude-haiku-5-5
 TurnStarted
 Context used=22731 window=-
@@ -11,7 +12,7 @@ ToolCallDelta id=toolu_01Ew6Q9L4mosm2mVwivZrwT5 name=ToolSearch "\", \"max_resul
 ToolCallDelta id=toolu_01Ew6Q9L4mosm2mVwivZrwT5 name=ToolSearch "}"
 ToolCallStarted id=toolu_01Ew6Q9L4mosm2mVwivZrwT5 name=ToolSearch input={"max_results":2,"query":"select:EnterPlanMode,ExitPlanMo...
 ToolCallResult id=toolu_01Ew6Q9L4mosm2mVwivZrwT5 error=false "[tool_reference]\\n[tool_reference]"
-RateLimit status=allowed five_hour=7% seven_day=30%
+RateLimit status=allowed five_hour=7%@1791601200 seven_day=30%@1791871200 overage=rejected(org_level_disabled)
 Context used=27868 window=-
 ToolCallStarted id=toolu_01S1ry6mixaMj8hbLpRUcpDh name=EnterPlanMode input={}
 PolicyChanged plan

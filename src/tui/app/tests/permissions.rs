@@ -330,6 +330,29 @@ fn a_request_behind_a_picker_opens_when_the_picker_closes() {
     }
 }
 
+/// `/status` holds nothing up: a request takes its place, and it scrolls
+/// and closes with the keys a picker does.
+#[test]
+fn a_request_takes_the_place_of_status() {
+    let mut app = test_app(HarnessId::PI);
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::TurnStarted);
+    app.handle_slash_command("/status");
+    if let Some(Modal::Status(m)) = &mut app.modal {
+        m.scroll_max = 3;
+    }
+    app.handle_modal_key(key(KeyCode::Down));
+    app.handle_modal_key(key(KeyCode::PageDown));
+    assert!(matches!(&app.modal, Some(Modal::Status(m)) if m.scroll == 3));
+    app.on_event(pi_gate_request("g1", "cq query"));
+    assert_eq!(app.modal.as_ref().and_then(Modal::request_id), Some("g1"));
+    app.handle_modal_key(key(KeyCode::Char('y')));
+    assert!(app.take_actions().ends_with(&[allowed("g1")]));
+    app.handle_slash_command("/status");
+    app.handle_modal_key(key(KeyCode::Char('q')));
+    assert!(app.modal.is_none());
+}
+
 #[test]
 fn a_request_of_a_session_the_picker_ends_goes_with_it() {
     let mut app = test_app(HarnessId::PI);

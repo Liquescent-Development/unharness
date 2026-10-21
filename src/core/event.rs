@@ -118,6 +118,8 @@ pub enum AgentEvent {
     },
     Context(ContextUsage),
     RateLimit(RateLimitInfo),
+    /// What the harness's CLI said of the account it runs on.
+    Account(AccountInfo),
     /// Vendor id of the user turn the harness just accepted (rewind / fork target).
     TurnAnchor {
         id: String,
@@ -281,6 +283,87 @@ pub struct RateLimitInfo {
     /// Vendor status string when one is reported (`allowed`, `rejected`...).
     pub status: Option<String>,
     pub windows: Vec<RateLimitWindow>,
+    /// Which of the account's limits this is, where it has several
+    /// (Codex's `limitId`).
+    pub limit: Option<String>,
+    /// What may be used past the limits, where the vendor says.
+    pub overage: Option<Overage>,
+}
+
+impl RateLimitInfo {
+    /// Take what `newer` reports: its status, overage and limit when it
+    /// has them, and each of its windows in place of the one of that
+    /// label. A window it does not mention stays (a report that names only
+    /// the window in force).
+    pub fn merge(&mut self, newer: RateLimitInfo) {
+        if newer.status.is_some() {
+            self.status = newer.status;
+        }
+        if newer.limit.is_some() {
+            self.limit = newer.limit;
+        }
+        if newer.overage.is_some() {
+            self.overage = newer.overage;
+        }
+        for w in newer.windows {
+            match self.windows.iter_mut().find(|o| o.label == w.label) {
+                Some(old) => *old = w,
+                None => self.windows.push(w),
+            }
+        }
+    }
+}
+
+/// The account a harness's CLI runs on, as far as it says. Any field may
+/// be unknown.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AccountInfo {
+    /// The subscription (`Claude Max`, `prolite`).
+    pub plan: Option<String>,
+    /// How the CLI signs in (`firstParty`, `vertex`, `chatgpt`, `apikey`).
+    pub auth: Option<String>,
+    pub email: Option<String>,
+    pub organization: Option<String>,
+    pub credits: Option<Credits>,
+}
+
+impl AccountInfo {
+    /// Keep the known fields of `self`, take the rest from `newer`.
+    pub fn merge(&mut self, newer: AccountInfo) {
+        let AccountInfo {
+            plan,
+            auth,
+            email,
+            organization,
+            credits,
+        } = newer;
+        self.plan = plan.or(self.plan.take());
+        self.auth = auth.or(self.auth.take());
+        self.email = email.or(self.email.take());
+        self.organization = organization.or(self.organization.take());
+        self.credits = credits.or(self.credits.take());
+    }
+}
+
+/// Credits an account can spend past its plan (Codex's).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Credits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    /// As the vendor gives it (a decimal string, `62500.0000000000`).
+    pub balance: Option<String>,
+}
+
+/// Use past the rate limits, paid apart (Claude's "extra usage").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Overage {
+    /// Vendor status string (`allowed`, `rejected`...).
+    pub status: Option<String>,
+    pub in_use: bool,
+    /// Why it cannot be used, when it cannot.
+    pub disabled_reason: Option<String>,
+    /// Unix seconds.
+    pub resets_at: Option<i64>,
 }
 
 /// A partial capability update; `None` leaves the declared value alone.
@@ -294,6 +377,8 @@ pub struct CapsUpdate {
     pub fork: Option<bool>,
     /// Context-window usage may be reported (`Capabilities::context_usage`).
     pub context_usage: Option<bool>,
+    /// The CLI answers a status query (`Capabilities::status_query`).
+    pub status_query: Option<bool>,
     /// The agent takes MCP servers reached over HTTP (`McpSupport::http`).
     pub mcp_http: Option<bool>,
     pub plan_mode: Option<bool>,
@@ -397,6 +482,9 @@ impl CapsUpdate {
         }
         if newer.context_usage.is_some() {
             self.context_usage = newer.context_usage;
+        }
+        if newer.status_query.is_some() {
+            self.status_query = newer.status_query;
         }
         if newer.mcp_http.is_some() {
             self.mcp_http = newer.mcp_http;
@@ -744,21 +832,60 @@ impl AgentEvent {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".into())
             ),
-            AgentEvent::RateLimit(r) => format!(
-                "RateLimit status={} {}",
-                r.status.as_deref().unwrap_or("-"),
-                r.windows
-                    .iter()
-                    .map(|w| format!(
-                        "{}={}",
+            AgentEvent::RateLimit(r) => {
+                let mut parts = vec![format!("status={}", r.status.as_deref().unwrap_or("-"))];
+                if let Some(limit) = &r.limit {
+                    parts.push(format!("limit={limit}"));
+                }
+                parts.extend(r.windows.iter().map(|w| {
+                    format!(
+                        "{}={}@{}",
                         w.label,
                         w.used_percent
                             .map(|p| format!("{p:.0}%"))
-                            .unwrap_or_else(|| "?".into())
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
+                            .unwrap_or_else(|| "?".into()),
+                        w.resets_at
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "-".into())
+                    )
+                }));
+                if let Some(o) = &r.overage {
+                    parts.push(format!(
+                        "overage={}{}{}",
+                        o.status.as_deref().unwrap_or("-"),
+                        if o.in_use { ",in_use" } else { "" },
+                        o.disabled_reason
+                            .as_deref()
+                            .map(|d| format!("({d})"))
+                            .unwrap_or_default()
+                    ));
+                }
+                format!("RateLimit {}", parts.join(" "))
+            }
+            // Who the account is stays out of fixtures, redacted or not.
+            AgentEvent::Account(a) => {
+                let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+                let set = |v: &Option<String>| if v.is_some() { "set" } else { "-" };
+                format!(
+                    "Account plan={} auth={} email={} org={} credits={}",
+                    or_dash(&a.plan),
+                    or_dash(&a.auth),
+                    set(&a.email),
+                    set(&a.organization),
+                    a.credits
+                        .as_ref()
+                        .map(|c| if c.unlimited {
+                            "unlimited".to_string()
+                        } else {
+                            format!(
+                                "{}{}",
+                                c.balance.as_deref().unwrap_or("?"),
+                                if c.has_credits { "" } else { ",none" }
+                            )
+                        })
+                        .unwrap_or_else(|| "-".into())
+                )
+            }
             AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),
             AgentEvent::RewindFailed { reason } => format!("RewindFailed {:?}", short(reason)),
             AgentEvent::CapabilitiesChanged(u) => {
@@ -777,6 +904,9 @@ impl AgentEvent {
                 }
                 if let Some(p) = u.plan_mode {
                     parts.push(format!("plan_mode={p}"));
+                }
+                if let Some(q) = u.status_query {
+                    parts.push(format!("status_query={q}"));
                 }
                 if let Some(m) = &u.models {
                     parts.push(format!("models={}", m.len()));
@@ -859,6 +989,59 @@ mod tests {
         assert_eq!(PlanStatus::parse("in_progress"), PlanStatus::InProgress);
         assert_eq!(PlanStatus::parse("completed"), PlanStatus::Completed);
         assert_eq!(PlanStatus::parse("whatever"), PlanStatus::Pending);
+    }
+
+    #[test]
+    fn rate_limit_merge_replaces_windows_by_label() {
+        let window = |label: &str, pct: f32| RateLimitWindow {
+            label: label.into(),
+            used_percent: Some(pct),
+            resets_at: None,
+        };
+        let mut r = RateLimitInfo {
+            status: Some("allowed".into()),
+            windows: vec![window("five_hour", 10.0), window("seven_day", 40.0)],
+            ..Default::default()
+        };
+        r.merge(RateLimitInfo {
+            status: Some("allowed_warning".into()),
+            windows: vec![window("five_hour", 90.0)],
+            ..Default::default()
+        });
+        assert_eq!(r.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(
+            r.windows,
+            [window("five_hour", 90.0), window("seven_day", 40.0)]
+        );
+        r.merge(RateLimitInfo {
+            windows: vec![window("seven_day_opus", 5.0)],
+            limit: Some("codex".into()),
+            ..Default::default()
+        });
+        assert_eq!(r.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(r.limit.as_deref(), Some("codex"));
+        assert_eq!(r.windows.len(), 3);
+    }
+
+    #[test]
+    fn account_merge_keeps_what_is_known() {
+        let mut a = AccountInfo {
+            plan: Some("Claude Max".into()),
+            email: Some("user@example.com".into()),
+            ..Default::default()
+        };
+        a.merge(AccountInfo {
+            plan: Some("Claude Pro".into()),
+            auth: Some("firstParty".into()),
+            ..Default::default()
+        });
+        assert_eq!(a.plan.as_deref(), Some("Claude Pro"));
+        assert_eq!(a.auth.as_deref(), Some("firstParty"));
+        assert_eq!(a.email.as_deref(), Some("user@example.com"));
+        // Who the account is never reaches a fixture.
+        let summary = AgentEvent::Account(a).summary();
+        assert!(!summary.contains("example.com"), "{summary}");
+        assert!(summary.contains("email=set"), "{summary}");
     }
 
     #[test]

@@ -164,6 +164,7 @@ impl StreamProtocol for Agy {
             // no remote control.
             SessionCommand::StopSubagent { .. }
             | SessionCommand::RemoteControl { .. }
+            | SessionCommand::QueryStatus
             | SessionCommand::Steer { .. }
             | SessionCommand::SendNow { .. }
             | SessionCommand::Compact { .. }

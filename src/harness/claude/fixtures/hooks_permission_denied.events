@@ -1,6 +1,7 @@
 HookStarted id=6d503964-5bb7-4caf-bf26-523b980b5d21 SessionStart:startup
 HookEnded id=6d503964-5bb7-4caf-bf26-523b980b5d21 SessionStart:startup ok ""
 CapabilitiesChanged models=12 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=677c5743-8170-4cff-9aeb-dee7efa79d76 model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=22893 window=-
@@ -12,7 +13,7 @@ ToolCallDelta id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash "\"}"
 ToolCallStarted id=toolu_01YWfAt9DUkD7P3QgEwgk4yA name=Bash input={"command":"echo hi","description":"Echo \"hi\" to stdout"}
 HookStarted id=cc95e196-6a8e-4d21-b446-6b14d917a833 PreToolUse:Bash
 HookEnded id=cc95e196-6a8e-4d21-b446-6b14d917a833 PreToolUse:Bash ok "echo is harmless"
-RateLimit status=allowed five_hour=41% seven_day=6%
+RateLimit status=allowed five_hour=41%@1791336600 seven_day=6%@1791871200 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_01YWfAt9DUkD7P3QgEwgk4yA error=false "hi"
 Context used=26456 window=-
 ToolCallDelta id=toolu_01Br2ZqjQqQhgxPUzhy47iTF name=Write "{\"file_path\": \"/"

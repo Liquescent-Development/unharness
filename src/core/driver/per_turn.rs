@@ -173,6 +173,7 @@ async fn drive(
                     // harness declares.
                     SessionCommand::StopSubagent { .. }
                     | SessionCommand::RemoteControl { .. }
+                    | SessionCommand::QueryStatus
                     | SessionCommand::Steer { .. }
                     | SessionCommand::SendNow { .. }
                     | SessionCommand::Compact { .. }

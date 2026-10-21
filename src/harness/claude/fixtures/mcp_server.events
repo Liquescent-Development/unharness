@@ -1,4 +1,5 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=3894ae7d-3c9d-4dea-91f9-90bab0d716a9 model=claude-haiku-4-5-20251001
 Notice "MCP server 'broken' failed to start"
 TurnStarted
@@ -11,7 +12,7 @@ ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "\", \"max_resul
 ToolCallDelta id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch "}"
 ToolCallStarted id=toolu_016SChCrgcugneGNhV1eoigh name=ToolSearch input={"max_results":1,"query":"select:mcp__probe__magic_word"}
 ToolCallResult id=toolu_016SChCrgcugneGNhV1eoigh error=false "[tool_reference]"
-RateLimit status=allowed five_hour=18% seven_day=39%
+RateLimit status=allowed five_hour=18%@1791180000 seven_day=39%@1791266400 overage=rejected(org_level_disabled)
 Context used=26294 window=-
 ToolCallStarted id=toolu_01NmbVvr95iibs7emosMArLA name=mcp__probe__magic_word input={}
 PermissionRequest id=a427695e-c0f0-4955-a681-16a55a6e407e ToolUse mcp__probe__magic_word [mcp probe/magic_word]

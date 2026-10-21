@@ -1,6 +1,7 @@
 HookStarted id=bf82b57f-0145-4cb2-8022-362d1b5ea1f3 SessionStart:startup
 HookEnded id=bf82b57f-0145-4cb2-8022-362d1b5ea1f3 SessionStart:startup ok ""
 CapabilitiesChanged models=12 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=eb690459-6244-4a7f-931e-8eca5e2eb29e model=claude-haiku-4-5-20251001
 Notice "MCP server 'plugin:cq:cq' failed to start"
 TurnStarted
@@ -34,7 +35,7 @@ ToolCallDelta id=toolu_016XXTUH47M2RjLTyAC5Laqq name=Agent "\"}"
 ToolCallStarted id=toolu_016XXTUH47M2RjLTyAC5Laqq name=Agent input={"description":"Outer agent","prompt":"Use the Agent tool...
 SubagentStarted id=toolu_016XXTUH47M2RjLTyAC5Laqq kind=general-purpose "Outer agent"
 ToolCallResult id=toolu_016XXTUH47M2RjLTyAC5Laqq error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=7% seven_day=2%
+RateLimit status=allowed five_hour=7%@1791336600 seven_day=2%@1791871200 overage=rejected(org_level_disabled)
 Context used=27740 window=-
 TextDelta "launched"
 Usage in=18 out=909 cache_read=38018 cache_write=12818 cost=0.0340 cumulative=false

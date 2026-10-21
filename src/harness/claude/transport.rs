@@ -5,7 +5,7 @@
 //! `control_request` lines (because we pass `--permission-prompt-tool stdio`)
 //! and are answered with `control_response` lines.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -425,6 +425,8 @@ struct Claude {
     pending: HashMap<String, PendingPermission>,
     /// Our `remote_control` requests: whether each turns it on.
     remote_requests: HashMap<String, bool>,
+    /// Our `get_usage` requests (`/status`) not answered yet.
+    usage_requests: HashSet<String>,
     /// Our `initialize` request while it is not answered, and until when
     /// that is waited for.
     awaiting_init: Option<(String, Instant)>,
@@ -457,6 +459,7 @@ impl Claude {
             parser: ClaudeParser::new(),
             pending: HashMap::new(),
             remote_requests: HashMap::new(),
+            usage_requests: HashSet::new(),
             awaiting_init: None,
             session_id: cfg.resume.clone().filter(|_| !cfg.fork),
             cfg,
@@ -767,6 +770,12 @@ impl StreamProtocol for Claude {
                 self.remote_requests.insert(id, enabled);
                 Encoded::Write(line)
             }
+            // Answered with the account's windows, which the parser reads.
+            SessionCommand::QueryStatus => {
+                let (id, line) = control_request("get_usage", json!({"skip_behaviors": true}));
+                self.usage_requests.insert(id);
+                Encoded::Write(line)
+            }
             // The driver's (`shutdown`).
             SessionCommand::Shutdown => Encoded::Done,
         }
@@ -801,6 +810,17 @@ impl StreamProtocol for Claude {
                         && rid == self.awaiting_init.as_ref().map(|(id, _)| id.as_str())
                     {
                         self.awaiting_init = None;
+                    }
+                    // A CLI that cannot say (an older one, or "not
+                    // supported in this context") is not asked again, and
+                    // its refusal is no error of the session's.
+                    if rid.is_some_and(|r| self.usage_requests.remove(r))
+                        && v.pointer("/response/subtype").and_then(Value::as_str) == Some("error")
+                    {
+                        remote_answer = Some(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                            status_query: Some(false),
+                            ..Default::default()
+                        }));
                     }
                     if let Some(enabled) = rid.and_then(|r| self.remote_requests.remove(r)) {
                         remote_answer = Some(AgentEvent::RemoteControl(
@@ -901,6 +921,7 @@ impl StreamProtocol for Claude {
         self.parser = ClaudeParser::new();
         self.pending.clear();
         self.remote_requests.clear();
+        self.usage_requests.clear();
         self.policies_sent.clear();
         self.sent_now = None;
         self.interrupting = false;

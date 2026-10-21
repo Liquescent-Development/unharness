@@ -1,4 +1,5 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=ab28a153-99ac-41e0-98f2-fbbdca6b69d9 model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21708 window=-
@@ -20,7 +21,7 @@ ToolCallDelta id=toolu_011y6Dip65t8XBj1dmGwC4b2 name=Agent "\"}"
 ToolCallStarted id=toolu_011y6Dip65t8XBj1dmGwC4b2 name=Agent input={"description":"Sleep then read a.txt","prompt":"Run the ...
 SubagentStarted id=toolu_011y6Dip65t8XBj1dmGwC4b2 kind=general-purpose "Sleep then read a.txt"
 ToolCallResult id=toolu_011y6Dip65t8XBj1dmGwC4b2 error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=36% seven_day=28%
+RateLimit status=allowed five_hour=36%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Context used=23151 window=-
 TextDelta "Agent"
 TextDelta " launched"
@@ -48,7 +49,7 @@ TextDelta " You"
 TextDelta "'ll"
 Sub parent=toolu_011y6Dip65t8XBj1dmGwC4b2 ToolCallStarted id=toolu_01Y8LuS9Q68xbFvN8hmwMAKL name=Bash input={"command":"sleep 20","description":"Sleep for 20 seconds"}
 SubagentProgress id=toolu_011y6Dip65t8XBj1dmGwC4b2 "Running Sleep for 20 seconds"
-RateLimit status=allowed five_hour=37% seven_day=28%
+RateLimit status=allowed five_hour=37%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 TextDelta " be"
 TextDelta " not"
 TextDelta "ified when it compl"

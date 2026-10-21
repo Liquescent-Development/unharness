@@ -1,3 +1,4 @@
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 SessionStarted id=01a1054f-4ed3-7ca3-b222-cb016ec039c6 model=gpt-6-astra
 TurnStarted
 ToolCallStarted id=call_829787f9f33c4f69ad892b7a2b966dbf name=agent input={"path":"/root/read_word"}
@@ -6,7 +7,8 @@ ToolCallResult id=call_829787f9f33c4f69ad892b7a2b966dbf error=false ""
 Usage in=4033 out=78 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4033 out=78 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16271 window=258400
-RateLimit status=- 7d=2%
+RateLimit status=- limit=codex 7d=2%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 TextDelta "Spawn"
 TextDelta "ed"
 TextDelta " the"
@@ -16,6 +18,6 @@ TextDelta "."
 Usage in=292 out=10 cache_read=16000 cache_write=0 cost=- cumulative=false
 Usage in=4325 out=88 cache_read=28160 cache_write=0 cost=- cumulative=true
 Context used=16302 window=258400
-RateLimit status=- 7d=2%
+RateLimit status=- limit=codex 7d=2%@1791589030
 TurnCompleted Done
 SubagentEnded id=call_829787f9f33c4f69ad892b7a2b966dbf stopped -

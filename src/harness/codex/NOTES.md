@@ -155,3 +155,29 @@ Codex retried an unreachable Ollama without end. Unverified: what a
 resumed thread does with a `modelProvider` other than its own,
 `amazon-bedrock`, `lmstudio`, a provider defined only in a project's
 `.codex/config.toml` (`config/read` is asked without a `cwd`).
+
+## Account and rate limits
+
+App-server 0.157.0 sends `account/updated` (`authMode`: `chatgpt`,
+`planType`: `prolite`) at start, and `account/rateLimits/updated` after
+requests: `limitId` (`codex`), `primary` and `secondary` windows
+(`usedPercent` 0 to 100, `windowDurationMins`, `resetsAt` in Unix
+seconds; a null window keeps its last value), `credits`
+(`hasCredits`, `unlimited`, `balance` as a decimal string, `62500` or
+`62500.0000000000`), `planType` and `rateLimitReachedType`. The first
+is read as `AgentEvent::Account`; the second as `RateLimit`, and as
+`Account` (plan and credits) when those change. `exec` reports none of
+it.
+
+Asked on `/status` (0.162.1, `app_server_account_read.jsonl`, recorded
+with `record-codex-app-server.py --read-account`):
+`account/rateLimits/read` (no params) answers `rateLimits` in the
+shape of the notification, plus `rateLimitsByLimitId`,
+`rateLimitResetCredits` and `accountId` (redacted by the recorder);
+`account/read` refuses a missing `params` (`-32600`) and with `{}`
+answers `account` (`type`: `chatgpt`, `email`, `planType`) and
+`workspaceRouting` (its `chatgptAccountId` redacted). They go under the
+names `rate-limits` and `account`, which the parser reads; an error to
+either turns `status_query` off for the session, quietly. Unverified: the
+answers under an API key, and `account/usage/read` (lifetime and daily
+token counts), not asked.

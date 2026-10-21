@@ -8,7 +8,7 @@ use crate::core::sandbox::SandboxLevel;
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
-use crate::harness::ModelInfo;
+use crate::harness::{AuthInfo, ModelInfo};
 
 #[derive(Debug, Clone)]
 pub struct ListPicker<T> {
@@ -103,6 +103,8 @@ pub struct HarnessOption {
     pub installed: bool,
     pub version: Option<String>,
     pub interactive_permissions: bool,
+    /// Whether the CLI was signed in when unharness started, and to what.
+    pub auth: AuthInfo,
 }
 
 /// The policy picker. `save` is where the selected policy is to be saved
@@ -605,6 +607,25 @@ pub enum Modal {
     Confirm(ConfirmModal),
     Select(SelectModal),
     Input(InputModal),
+    /// `/status`: what it shows is built from the state each time it is
+    /// drawn.
+    Status(StatusModal),
+}
+
+/// `/status`'s overlay: how far it is scrolled.
+#[derive(Debug, Clone, Default)]
+pub struct StatusModal {
+    /// Lines it is scrolled down.
+    pub scroll: u16,
+    /// The furthest it can scroll, as last drawn.
+    pub scroll_max: u16,
+}
+
+impl StatusModal {
+    pub fn scroll_by(&mut self, lines: i32) {
+        let max = i32::from(self.scroll_max);
+        self.scroll = (i32::from(self.scroll) + lines).clamp(0, max) as u16;
+    }
 }
 
 impl Modal {
@@ -615,9 +636,16 @@ impl Modal {
         match self {
             Modal::Plan(m) => m.scroll_by(lines),
             Modal::Question(m) => m.scroll_preview(lines),
+            Modal::Status(m) => m.scroll_by(lines),
             _ => return false,
         }
         true
+    }
+
+    /// Gives way to a harness's request: a request does not wait behind
+    /// it but takes its place, so that leaving it open holds nothing up.
+    pub fn yields(&self) -> bool {
+        matches!(self, Modal::Status(_))
     }
 
     /// Build the right prompt modal for a harness request.

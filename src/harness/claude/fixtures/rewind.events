@@ -1,9 +1,10 @@
 CapabilitiesChanged models=12 provider=anthropic commands=67
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=3ebacf93-b3e6-4636-beb3-5170a460942e model=claude-haiku-4-5-20251001
 TurnStarted
 Context used=21777 window=-
 TextDelta "ok"
-RateLimit status=allowed five_hour=54% seven_day=21%
+RateLimit status=allowed five_hour=54%@1791074400 seven_day=21%@1791266400 overage=rejected(org_level_disabled)
 Usage in=10 out=75 cache_read=13803 cache_write=7964 cost=0.0177 cumulative=false
 Context used=- window=200000
 TurnCompleted Done

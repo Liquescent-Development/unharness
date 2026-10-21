@@ -131,7 +131,7 @@ pub(super) fn policy_picker(ask: PolicyAsk) -> Modal {
 
 impl Front for Screen<'_> {
     fn dialog_open(&self) -> bool {
-        self.modal.is_some()
+        self.modal.as_ref().is_some_and(|m| !m.yields())
     }
 
     fn ask(&mut self, req: PermissionRequest, plan: Option<PlanAsk>) {

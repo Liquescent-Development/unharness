@@ -52,10 +52,11 @@ use crate::core::registry::Registry;
 use crate::core::sandbox::{SandboxLevel, SandboxSetup};
 use crate::core::{
     Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef,
-    PermissionPolicy, PolicySupport, ProviderId, RateLimitInfo, Rules, SessionCommand,
+    PermissionPolicy, PolicySupport, ProviderId, Rules, SessionCommand,
 };
 use crate::harness::{Harness, resolve_binary};
 
+mod account;
 mod choices;
 mod conversation;
 mod events;
@@ -74,9 +75,9 @@ mod switch;
 mod tracking;
 mod turn;
 
+pub use account::{AccountStatus, Accounts, rate_limit_summary};
 pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow, subagents_refusal};
 pub use conversation::{ConversationState, Keeping};
-pub use events::rate_limit_summary;
 pub use front::{Front, PlanAsk, PolicyAsk};
 pub use open::{Greeting, Opening};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
@@ -320,7 +321,8 @@ pub struct Controller {
     /// When the running turn was asked to stop, and whether the user has
     /// been told it has not yet.
     pub(crate) interrupted: Option<(Instant, bool)>,
-    pub rate_limit: Option<RateLimitInfo>,
+    /// What each harness reported of its account in this run.
+    accounts: Accounts,
     /// What it tracks of the session's events as any front end would. The
     /// TUI drives the subagents at work (`subagent_started`, `_progress`,
     /// `_tool_started`, `_ended`, `clear_subagents`, `awaited`) and its
@@ -446,7 +448,7 @@ impl Controller {
             is_generating: false,
             generation_start: None,
             interrupted: None,
-            rate_limit: None,
+            accounts: Accounts::new(),
             tracking: Tracking::new(launch.rules),
             queued: VecDeque::new(),
             sending_now: None,
