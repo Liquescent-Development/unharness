@@ -53,7 +53,7 @@ mod switch;
 mod turn;
 
 pub use front::Screen;
-pub use status::{LABEL_WIDTH, StatusReport, Tone};
+pub use status::{LABEL_WIDTH, StatusReport, Tone, padded};
 
 /// A list the TUI wants from a harness. Asking may start the CLI and
 /// take seconds (Claude on Bedrock gives up after 15), so it is done off

@@ -64,7 +64,7 @@ impl StatusReport {
         for s in &self.sections {
             out.push(s.title.to_string());
             for r in &s.rows {
-                out.push(format!("  {:<LABEL_WIDTH$}{}", r.label, r.value));
+                out.push(format!("  {}{}", padded(&r.label), r.value));
             }
         }
         out.join("\n")
@@ -73,6 +73,14 @@ impl StatusReport {
 
 /// Columns of a row's label.
 pub const LABEL_WIDTH: usize = 16;
+
+/// `label` in its column, with a space after one too long for it.
+pub fn padded(label: &str) -> String {
+    match label.chars().count() {
+        n if n < LABEL_WIDTH => format!("{label:<LABEL_WIDTH$}"),
+        _ => format!("{label} "),
+    }
+}
 
 /// Percentage of a rate-limit window drawn as a warning.
 const WARN_PERCENT: f32 = 80.0;
@@ -212,7 +220,12 @@ impl App {
         let active = c.active;
         let option = self.harness_options.iter().find(|o| o.id == active);
         let mut harness = self.display_name().to_string();
-        if let Some(v) = option.and_then(|o| o.version.as_deref()) {
+        // `codex-cli 0.162.1`, `2.1.305 (Claude Code)`: the number.
+        let version = option.and_then(|o| o.version.as_deref()).and_then(|v| {
+            v.split_whitespace()
+                .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))
+        });
+        if let Some(v) = version {
             harness.push_str(&format!(" {v}"));
         }
         if let Some(b) = self.harness_binary() {
@@ -370,7 +383,7 @@ impl App {
             rows.push(StatusRow::new(
                 self.registry()
                     .get(*id)
-                    .map(|h| h.descriptor().display_name)
+                    .map(|h| h.descriptor().short_name)
                     .unwrap_or(id.as_str()),
                 format!(
                     "{} tokens{}",
@@ -486,6 +499,13 @@ mod tests {
         assert_eq!(decimal("62500.0000000000"), "62500");
         assert_eq!(decimal("12.50"), "12.5");
         assert_eq!(decimal("700"), "700");
+    }
+
+    #[test]
+    fn a_label_too_long_for_its_column_is_kept_apart() {
+        assert_eq!(padded("Plan"), format!("Plan{}", " ".repeat(12)));
+        assert_eq!(padded("seven day fable"), "seven day fable ");
+        assert_eq!(padded("Claude Code (claude)"), "Claude Code (claude) ");
     }
 
     #[test]

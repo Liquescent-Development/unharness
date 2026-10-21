@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{
     App, CodeRows, KeptBlock, LABEL_WIDTH, Live, LiveRow, Scrollbar, StatusReport, Tone,
-    TranscriptView,
+    TranscriptView, padded,
 };
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
@@ -2600,7 +2600,7 @@ fn render_status(
                 let label = if j == 0 { row.label.as_str() } else { "" };
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("  {label:<LABEL_WIDTH$}"),
+                        format!("  {}", padded(label)),
                         Style::default().fg(Color::Gray),
                     ),
                     Span::styled(part, style),
