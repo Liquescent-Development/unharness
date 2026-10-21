@@ -462,7 +462,10 @@ fn status_shows_the_account_of_the_active_harness() {
         status_section(&app, "Account"),
         "Plan: prolite\nSigned in with: chatgpt\nCredits: 62500"
     );
-    app.handle_slash_command("/switch claude");
+    // Switched to directly: `/switch` refuses a harness not installed,
+    // and CI has none.
+    app.switch_harness(HarnessId::CLAUDE);
+    assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert!(!status_section(&app, "Account").contains("prolite"));
 }
 
