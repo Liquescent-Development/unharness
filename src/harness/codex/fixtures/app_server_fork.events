@@ -4,5 +4,5 @@ TextDelta "alpha"
 Usage in=7344 out=5 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=12394 out=15 cache_read=40320 cache_write=0 cost=- cumulative=true
 Context used=19509 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 TurnCompleted Done

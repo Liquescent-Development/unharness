@@ -7,7 +7,7 @@ ToolCallResult id=exec-5bf5a82b-0aa3-4a3f-bad4-6bdbaa65fd97 error=false "{\"_met
 Usage in=2223 out=90 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2223 out=90 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14473 window=258400
-RateLimit status=- 7d=9%@1791589030
+RateLimit status=- limit=codex 7d=9%@1791589030
 TextDelta "z"
 TextDelta "anzibar"
 TextDelta " arg"
@@ -15,5 +15,5 @@ TextDelta "A"
 Usage in=292 out=8 cache_read=14208 cache_write=0 cost=- cumulative=false
 Usage in=2515 out=98 cache_read=26368 cache_write=0 cost=- cumulative=true
 Context used=14508 window=258400
-RateLimit status=- 7d=9%@1791589030
+RateLimit status=- limit=codex 7d=9%@1791589030
 TurnCompleted Done

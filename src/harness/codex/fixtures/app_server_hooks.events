@@ -17,7 +17,7 @@ ToolCallResult id=exec-430d94f3-d6fd-4f82-8add-bfe903e8ae3f error=false "---\\nn
 Usage in=4170 out=152 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4170 out=152 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16482 window=258400
-RateLimit status=- 7d=11%@1791589030
+RateLimit status=- limit=codex 7d=11%@1791589030
 HookStarted id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse
 HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse ok ""
 ToolCallStarted id=exec-6f355fb6-3912-4ef7-9657-1e89f0329745 name=shell input={"command":"/usr/bin/zsh -lc 'echo hello'","cwd":"/WORKSP...
@@ -29,7 +29,7 @@ HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-1affd254-9086-40f6
 Usage in=6185 out=49 cache_read=16128 cache_write=0 cost=- cumulative=false
 Usage in=10355 out=201 cache_read=28288 cache_write=0 cost=- cumulative=true
 Context used=22362 window=258400
-RateLimit status=- 7d=11%@1791589030
+RateLimit status=- limit=codex 7d=11%@1791589030
 TextDelta "`"
 TextDelta "echo"
 TextDelta " hello"
@@ -52,7 +52,7 @@ TextDelta "`."
 Usage in=303 out=23 cache_read=22144 cache_write=0 cost=- cumulative=false
 Usage in=10658 out=224 cache_read=50432 cache_write=0 cost=- cumulative=true
 Context used=22470 window=258400
-RateLimit status=- 7d=11%@1791589030
+RateLimit status=- limit=codex 7d=11%@1791589030
 HookStarted id=stop:2:/<session-flags>/config.toml stop
 HookEnded id=stop:2:/<session-flags>/config.toml stop failed "hook returned invalid stop hook JSON output"
 TurnCompleted Done

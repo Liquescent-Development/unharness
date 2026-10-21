@@ -427,7 +427,11 @@ impl CodexAppServerParser {
                         .chain(self.rate_secondary.iter())
                         .cloned()
                         .collect(),
-                    ..Default::default()
+                    limit: limits
+                        .get("limitId")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    overage: None,
                 }));
             }
             "turn/completed" => {

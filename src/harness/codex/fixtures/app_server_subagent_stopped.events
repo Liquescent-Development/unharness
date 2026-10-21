@@ -25,13 +25,13 @@ ToolCallResult id=call_gTXGDDbgDZvzj2bm9WZZPcQQ error=false ""
 Usage in=2233 out=64 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2233 out=64 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14457 window=258400
-RateLimit status=- 7d=2%@1791589030
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 SubagentEnded id=call_gTXGDDbgDZvzj2bm9WZZPcQQ stopped -
 Usage in=2319 out=21 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4552 out=85 cache_read=24320 cache_write=0 cost=- cumulative=true
 Context used=14500 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 TextDelta "Started"
 TextDelta " one"
 TextDelta " sub"
@@ -65,7 +65,7 @@ TextDelta "."
 Usage in=311 out=34 cache_read=14208 cache_write=0 cost=- cumulative=false
 Usage in=4863 out=119 cache_read=38528 cache_write=0 cost=- cumulative=true
 Context used=14553 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 TurnCompleted Done
 TurnStarted
 TextDelta "I"
@@ -92,12 +92,12 @@ ToolCallResult id=call_PUmXsjCbgjbrydpgCgSsvKBj error=false ""
 Usage in=2770 out=86 cache_read=14336 cache_write=0 cost=- cumulative=false
 Usage in=7633 out=205 cache_read=52864 cache_write=0 cost=- cumulative=true
 Context used=17192 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 ToolCallStarted id=call_5yi4kaWzQMMM5UOq3mdL9ZJA name=agent:wait input=null
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj ToolCallStarted id=exec-6f345307-9b4f-4cbb-9c8c-f03b7bcbcaf1 name=shell input={"command":"/usr/bin/zsh -lc 'cat /nonexistent/file'","cw...
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj PermissionRequest id=0 ToolUse shell [shell "cat /nonexistent/file"]
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj ToolCallResult id=exec-6f345307-9b4f-4cbb-9c8c-f03b7bcbcaf1 error=true "\u{1b}[31m[bat error]\u{1b}[0m: '/nonexistent/file': No such file o..."
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta "Failed"
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta " with"
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta " exit"
@@ -138,13 +138,13 @@ Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta " without"
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta " retry"
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta "ing"
 Sub parent=call_PUmXsjCbgjbrydpgCgSsvKBj TextDelta "."
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 SubagentEnded id=call_PUmXsjCbgjbrydpgCgSsvKBj completed "Failed with exit code 1. Output:\\n\\n```text\\n[bat error]:..."
 ToolCallResult id=call_5yi4kaWzQMMM5UOq3mdL9ZJA error=false ""
 Usage in=319 out=21 cache_read=16896 cache_write=0 cost=- cumulative=false
 Usage in=7952 out=226 cache_read=69760 cache_write=0 cost=- cumulative=true
 Context used=17236 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 TextDelta "The"
 TextDelta " sub"
 TextDelta "-agent"
@@ -194,5 +194,5 @@ TextDelta "."
 Usage in=315 out=50 cache_read=17024 cache_write=0 cost=- cumulative=false
 Usage in=8267 out=276 cache_read=86784 cache_write=0 cost=- cumulative=true
 Context used=17389 window=258400
-RateLimit status=- 7d=2%@1791589030
+RateLimit status=- limit=codex 7d=2%@1791589030
 TurnCompleted Done
