@@ -1,3 +1,4 @@
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 SessionStarted id=01a1054f-4e96-70e1-b3d0-22740a4f4841 model=gpt-6-astra
 TurnStarted
 ToolCallStarted id=call_qFBeGLkELSBZvSTlVk57QQnt name=agent input={"path":"/root/read_word"}
@@ -7,6 +8,7 @@ Usage in=4033 out=75 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4033 out=75 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16268 window=258400
 RateLimit status=- limit=codex 7d=2%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 TextDelta "Spawn"
 TextDelta "ed"
 TextDelta " the"

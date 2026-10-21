@@ -1,5 +1,6 @@
 SessionStarted id=01a10547-a4f5-7fb2-bcfa-f7f7db6aec6b model=gpt-6-astra
 TurnStarted
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 TextDelta "I"
 TextDelta "’ll"
 TextDelta " start"
@@ -26,6 +27,7 @@ Usage in=2233 out=64 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2233 out=64 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14457 window=258400
 RateLimit status=- limit=codex 7d=2%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 RateLimit status=- limit=codex 7d=2%@1791589030
 SubagentEnded id=call_gTXGDDbgDZvzj2bm9WZZPcQQ stopped -
 Usage in=2319 out=21 cache_read=12160 cache_write=0 cost=- cumulative=false

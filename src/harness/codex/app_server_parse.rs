@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AgentEvent, ContextUsage, HookOutcome, Parser, PermissionKind, PermissionRequest, PlanEntry,
-    PlanStatus, Question, QuestionOption, RateLimitInfo, RateLimitWindow, StopReason,
-    SubagentStatus, ToolAction, Usage, UsageScope,
+    AccountInfo, AgentEvent, ContextUsage, Credits, HookOutcome, Parser, PermissionKind,
+    PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption, RateLimitInfo,
+    RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -26,6 +26,9 @@ pub struct CodexAppServerParser {
     /// Rate-limit updates are sparse; a null window keeps its last value.
     rate_primary: Option<RateLimitWindow>,
     rate_secondary: Option<RateLimitWindow>,
+    /// The plan and credits the last rate-limit update gave, told again
+    /// only when they change.
+    account: AccountInfo,
     /// Sub-agent thread id → the item that spawned it. Sub-agent threads
     /// report on the same stream as the main thread.
     children: HashMap<String, String>,
@@ -433,6 +436,15 @@ impl CodexAppServerParser {
                         .map(str::to_string),
                     overage: None,
                 }));
+                let account = AccountInfo {
+                    plan: text_at(limits, "planType"),
+                    credits: credits(limits.get("credits")),
+                    ..Default::default()
+                };
+                if account != AccountInfo::default() && account != self.account {
+                    self.account = account.clone();
+                    out.push(AgentEvent::Account(account));
+                }
             }
             "turn/completed" => {
                 self.turn_started = false;
@@ -486,7 +498,17 @@ impl CodexAppServerParser {
                     out.push(AgentEvent::Notice(error));
                 }
             }
-            // thread/status/changed, account/updated, remoteControl/*,
+            "account/updated" => {
+                let account = AccountInfo {
+                    plan: text_at(p, "planType"),
+                    auth: text_at(p, "authMode"),
+                    ..Default::default()
+                };
+                if account != AccountInfo::default() {
+                    out.push(AgentEvent::Account(account));
+                }
+            }
+            // thread/status/changed, remoteControl/*,
             // serverRequest/resolved, item/updated…
             _ => {}
         }
@@ -863,6 +885,24 @@ fn wrap_sub(parent: &str, events: Vec<AgentEvent>) -> Vec<AgentEvent> {
             event: Box::new(event),
         })
         .collect()
+}
+
+/// A non-empty string field of `v`.
+fn text_at(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// A rate-limit update's `credits`: `{hasCredits, unlimited, balance}`.
+fn credits(c: Option<&Value>) -> Option<Credits> {
+    let c = c.filter(|c| c.is_object())?;
+    Some(Credits {
+        has_credits: c.get("hasCredits").and_then(Value::as_bool) == Some(true),
+        unlimited: c.get("unlimited").and_then(Value::as_bool) == Some(true),
+        balance: text_at(c, "balance"),
+    })
 }
 
 /// A `primary` / `secondary` rate-limit window, labelled by its length (`5h`, `7d`).

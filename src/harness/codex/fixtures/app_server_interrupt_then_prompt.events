@@ -1,6 +1,7 @@
 Notice "codex: WARNING: proceeding, even though we could not crea..."
 SessionStarted id=01a14203-ddbf-79d1-ab7e-11810aa59f59 model=gpt-6.1-sol
 TurnStarted
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 TextDelta "I"
 TextDelta "’ll"
 TextDelta " run"
@@ -19,6 +20,7 @@ Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=false
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=true
 Context used=14679 window=475000
 RateLimit status=- limit=codex 7d=0%@1792681364
+Account plan=prolite auth=- email=- org=- credits=62500.0000000000
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=false
 Usage in=2334 out=57 cache_read=12288 cache_write=0 cost=- cumulative=true
 Context used=14679 window=475000

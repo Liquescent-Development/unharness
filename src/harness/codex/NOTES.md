@@ -155,3 +155,16 @@ Codex retried an unreachable Ollama without end. Unverified: what a
 resumed thread does with a `modelProvider` other than its own,
 `amazon-bedrock`, `lmstudio`, a provider defined only in a project's
 `.codex/config.toml` (`config/read` is asked without a `cwd`).
+
+## Account and rate limits
+
+App-server 0.157.0 sends `account/updated` (`authMode`: `chatgpt`,
+`planType`: `prolite`) at start, and `account/rateLimits/updated` after
+requests: `limitId` (`codex`), `primary` and `secondary` windows
+(`usedPercent` 0 to 100, `windowDurationMins`, `resetsAt` in Unix
+seconds; a null window keeps its last value), `credits`
+(`hasCredits`, `unlimited`, `balance` as a decimal string, `62500` or
+`62500.0000000000`), `planType` and `rateLimitReachedType`. The first
+is read as `AgentEvent::Account`; the second as `RateLimit`, and as
+`Account` (plan and credits) when those change. `exec` reports none of
+it.

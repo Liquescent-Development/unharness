@@ -1,3 +1,4 @@
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 SessionStarted id=01a11372-6fd8-73d0-a66a-5e0fe1948c29 model=gpt-6-astra
 TurnStarted
 TextDelta "I"
@@ -18,6 +19,7 @@ Usage in=4170 out=152 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4170 out=152 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16482 window=258400
 RateLimit status=- limit=codex 7d=11%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 HookStarted id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse
 HookEnded id=pre-tool-use:1:/<session-flags>/config.toml:exec-6f355fb6-3912-4ef7-9657-1e89f0329745 preToolUse ok ""
 ToolCallStarted id=exec-6f355fb6-3912-4ef7-9657-1e89f0329745 name=shell input={"command":"/usr/bin/zsh -lc 'echo hello'","cwd":"/WORKSP...

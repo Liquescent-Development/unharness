@@ -1,5 +1,6 @@
 SessionStarted id=01a103c7-985c-7940-b261-7ac5c537a6b0 model=gpt-6-astra
 TurnStarted
+Account plan=prolite auth=chatgpt email=- org=- credits=-
 TextDelta "I"
 TextDelta "’ll"
 TextDelta " run"
@@ -14,6 +15,7 @@ Usage in=2296 out=46 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2296 out=46 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14502 window=258400
 RateLimit status=- limit=codex 7d=1%@1791589030
+Account plan=prolite auth=- email=- org=- credits=62500
 TextDelta "done"
 TextDelta " STE"
 TextDelta "ER"
