@@ -142,7 +142,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/provider`, `/model`, `/effort`, `/policy`, `/sandbox` | Open the matching picker |
 | `/resume` | Resume a saved conversation (every harness in it) |
 | `/sessions`, `/conversations` | List saved conversations in this workspace |
-| `/usage` | Billed tokens and cost for the last turn and the session, how full the context is, and the account's rate-limit windows ([Tokens and cost](#tokens-and-cost)) |
+| `/status`, `/usage` | The session, the account it runs on, billed tokens and cost, how full the context is, and the rate limits with their reset times ([Status](#status)) |
 | `/plan` | Show or hide the agent's plan checklist (plan mode is `/policy plan`) |
 | `/subagents` | Open a subagent's own transcript (and stop it from there) |
 | `/attach <path>` | Attach an image, PDF or text file to the next prompt |
@@ -404,14 +404,8 @@ each request reads the cached prompt again, so on a long session most
 of it is cache reads, billed at a fraction of the input rate. The cost
 (`$41.27`) follows it where the harness reports one.
 
-`/usage` breaks the billed tokens down, for the last turn and the
-session, with the cost beside each:
-
-```
-Billed tokens, last turn: 47,271 (uncached input 18, output 249, cache reads 41,805, cache writes 5,199), $0.0158
-Billed tokens, session: 162,261,798 (uncached input 826, output 375,600, cache reads 157,702,965, cache writes 4,182,407), $41.2658
-Context: 47,022 of 200,000 tokens (23%)
-```
+`/status` breaks the billed tokens down, for the last turn and the
+session, with the cost beside each ([Status](#status)).
 
 ## Context and rate limits
 
@@ -422,11 +416,60 @@ model's window (Claude says it only when a turn ends), the window that
 model last reported in any workspace is taken. Each harness's figure is
 kept with the conversation and comes back on a switch to it or a resume,
 as long as its session is the one measured and it runs the same model;
-another model, or a new session, starts the figure again. `/usage` gives
-the tokens behind the percentage, or says that the harness never
-reports them (`Context: not reported by Antigravity (agy)`) or has not
-yet (`Context: not known yet`). It adds the account's rate-limit
-windows, and a notice appears when one passes 80%.
+another model, or a new session, starts the figure again. `/status`
+gives the tokens behind the percentage, or says that the harness never
+reports them or has not yet. A notice appears when one of the account's
+rate-limit windows passes 80%.
+
+## Status
+
+`/status` (or `/usage`) opens an overlay of what unharness knows of the
+active harness's session; nothing of it goes into the transcript. It
+follows the session while it is open (a turn's tokens, a reset
+counting down), scrolls with `↑`/`↓`, `PgUp`/`PgDn` or the wheel, and
+closes with `Esc`, `q` or `Enter`. A permission request or a question
+takes its place rather than wait behind it.
+
+```
+Session
+  Harness         Claude Code 2.1.305 (/home/me/.local/bin/claude)
+  Model           anthropic/claude-opus-4-1
+  Policy          ask
+  Sandbox         workspace-write
+  Session         0b6c2c43-…
+  Turn            idle; the last took 14s
+Account
+  Plan            Claude Max
+  Signed in with  firstParty
+  Email           me@example.com
+Usage
+  Last turn       47,271 (uncached input 18, output 249, cache reads 41,805, cache writes 5,199), $0.0158
+  Session         162,261,798 (uncached input 826, …), $41.2658
+  Codex           1,204,511 tokens
+Context
+  Filled          47,022 of 200,000 tokens (23%)
+Rate limits
+  Status          allowed
+  five hour       ███░░░░░░░  27% used · resets in 2h 13m
+  seven day       ░░░░░░░░░░   4% used · resets in 3d 4h
+  Extra usage     rejected (org level disabled)
+                  as of 40s ago
+```
+
+What each part holds depends on what the harness's CLI tells:
+
+| Harness | Account | Rate limits |
+|---|---|---|
+| Claude Code | plan, sign-in, email, organization (at start) | each window, with its reset and extra usage, after each request |
+| Codex (app-server) | plan, sign-in (at start), credits | the 5-hour and weekly windows, with their reset, after each request |
+| Codex (`exec`), pi, agy, Mistral Vibe | whether the CLI was signed in when unharness started | not reported |
+| claude-agent-acp | (sign-in is checked when its session starts) | as Claude Code's |
+| Other ACP agents | (sign-in is checked when its session starts) | not reported |
+
+Rate limits arrive with a turn: before the first, `/status` says none
+have yet. They are the account's, so they are not saved with the
+conversation, and a switch shows the other harness's own. `Usage` lists
+the other harnesses of the conversation with what they billed.
 
 ## Rendering
 

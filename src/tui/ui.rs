@@ -14,14 +14,17 @@ use std::time::Instant;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, CodeRows, KeptBlock, Live, LiveRow, Scrollbar, TranscriptView};
+use super::app::{
+    App, CodeRows, KeptBlock, LABEL_WIDTH, Live, LiveRow, Scrollbar, StatusReport, Tone,
+    TranscriptView,
+};
 use super::code::{
     clamp_lines, code_lines, diff_lines, faint, looks_like_diff, plain_lines, replacement_lines,
     wrap_words, wrap_words_joined, written_lines,
 };
 use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
-    AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, takes_text,
+    AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, StatusModal, takes_text,
 };
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
@@ -81,10 +84,23 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_suggestions(frame, app, prompt_row);
     }
     let area = frame.area();
+    // Built before the modal is borrowed: it reads the whole app.
+    let status = matches!(app.modal, Some(Modal::Status(_))).then(|| {
+        (
+            app.status_report(std::time::SystemTime::now()),
+            app.display_name(),
+            harness_color(app.controller.active),
+        )
+    });
     match &mut app.modal {
         // Drawing it settles how far its preview can scroll.
         Some(Modal::Question(m)) => render_question(frame, m, area),
         Some(Modal::Plan(m)) => render_plan(frame, m, area),
+        Some(Modal::Status(m)) => {
+            if let Some((report, name, color)) = &status {
+                render_status(frame, m, report, name, *color, area);
+            }
+        }
         Some(_) => render_modal(frame, app, area),
         None => {}
     }
@@ -2274,6 +2290,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
         }
         Modal::Question(_) => return, // `render_question`
         Modal::Plan(_) => return,     // `render_plan`
+        Modal::Status(_) => return,   // `render_status`
         Modal::Confirm(m) => {
             let popup = centered_rect(60, 30, area);
             let width = (popup.width.saturating_sub(6)).max(20) as usize;
@@ -2530,6 +2547,89 @@ fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
     );
     frame.render_widget(Paragraph::new(rows), parts[3]);
     frame.render_widget(Paragraph::new(hint), parts[5]);
+}
+
+/// `/status`: a section per heading, a label and a value per row, the
+/// value wrapped under itself.
+fn render_status(
+    frame: &mut Frame,
+    m: &mut StatusModal,
+    report: &StatusReport,
+    harness: &str,
+    color: Color,
+    area: Rect,
+) {
+    let popup = centered_rect(80, 80, area);
+    let block = modal_block(format!(" Status · {harness} "), color);
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    let width = inner.width as usize;
+    let value_width = width.saturating_sub(2 + LABEL_WIDTH).max(10);
+
+    let mut lines = Vec::new();
+    for (i, section) in report.sections.iter().enumerate() {
+        if i > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(
+            section.title,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+        for row in &section.rows {
+            let style = match row.tone {
+                Tone::Normal => Style::default(),
+                Tone::Dim => Style::default().fg(Color::DarkGray),
+                Tone::Warn => Style::default().fg(Color::Yellow),
+                Tone::Alert => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            };
+            // What a CLI reported (an organization, a session id) is drawn
+            // as other text from it is.
+            let value = sanitize(&row.value).replace('\n', " ");
+            for (j, (part, _)) in wrap_words_joined(&value, value_width)
+                .into_iter()
+                .enumerate()
+            {
+                let label = if j == 0 { row.label.as_str() } else { "" };
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  {label:<LABEL_WIDTH$}"),
+                        Style::default().fg(Color::Gray),
+                    ),
+                    Span::styled(part, style),
+                ]));
+            }
+        }
+    }
+
+    let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    let body = parts[0];
+    let max = lines.len().saturating_sub(body.height as usize) as u16;
+    m.scroll_max = max;
+    m.scroll = m.scroll.min(max);
+    frame.render_widget(Paragraph::new(lines).scroll((m.scroll, 0)), body);
+    let hint = if max > 0 {
+        let more = if m.scroll < max { "↓" } else { "↑" };
+        format!(
+            "{more} {}/{} · ↑/↓ PgUp/PgDn scroll · Esc close",
+            m.scroll + 1,
+            max + 1
+        )
+    } else {
+        "Esc close".to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default().fg(Color::Gray),
+        ))),
+        parts[1],
+    );
 }
 
 /// The keys that work on the current page.
@@ -5244,6 +5344,15 @@ mod tests {
         assert!(shown.contains("Open a subagent") && shown.contains("look around"));
         app.open_model_picker();
         term.draw(|f| render(f, &mut app)).unwrap();
+        app.handle_slash_command("/status");
+        term.draw(|f| render(f, &mut app)).unwrap();
+        let shown = term.backend().to_string();
+        assert!(
+            shown.contains("Status · Claude Code") && shown.contains("Account"),
+            "{shown}"
+        );
+        // Drawing it settles how far it scrolls: 100x30 does not hold it all.
+        assert!(matches!(&app.modal, Some(Modal::Status(m)) if m.scroll_max > 0));
         app.modal = None;
         app.on_event(crate::core::AgentEvent::PermissionRequest(
             crate::core::PermissionRequest {

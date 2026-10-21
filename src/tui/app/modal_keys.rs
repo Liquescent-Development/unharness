@@ -317,6 +317,28 @@ impl App {
                 KeyCode::Esc => Some(Some(ModalChoice::Dismiss)),
                 _ => None,
             },
+            // Only read: it scrolls, and anything that closes a picker
+            // closes it.
+            Modal::Status(m) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    m.scroll_by(-1);
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    m.scroll_by(1);
+                    None
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    m.scroll = 0;
+                    None
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    m.scroll = m.scroll_max;
+                    None
+                }
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => Some(None),
+                _ => None,
+            },
             Modal::Input(m) => match key.code {
                 KeyCode::Enter if !m.multiline || key.modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Some(ModalChoice::Decision(PermissionDecision::Answer(

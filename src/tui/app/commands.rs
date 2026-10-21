@@ -1,9 +1,9 @@
 //! Slash commands: unharness's own and the ones passed to the harness.
 
-use super::{App, rate_limit_summary};
+use super::App;
 use crate::core::rules::Scope;
 use crate::core::sandbox::SandboxLevel;
-use crate::core::{PermissionPolicy, ProviderId, Usage};
+use crate::core::{PermissionPolicy, ProviderId};
 
 pub(super) const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/harness", "Open the harness picker"),
@@ -26,9 +26,10 @@ pub(super) const BASE_COMMANDS: &[(&str, &str)] = &[
         "List saved conversations in this workspace",
     ),
     (
-        "/usage",
-        "Show billed tokens, cost, context fill and rate limits",
+        "/status",
+        "Show the session, account, usage, context and rate limits",
     ),
+    ("/usage", "Alias for /status"),
     ("/plan", "Show or hide the agent's plan"),
     (
         "/subagents",
@@ -87,72 +88,7 @@ fn is_own_command(name: &str) -> bool {
     BASE_COMMANDS.iter().any(|(c, _)| *c == name) || HIDDEN_ALIASES.contains(&name)
 }
 
-/// `n` with its digits in groups of three: `157,702,965`.
-pub(super) fn grouped(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
-
-/// One line of `/usage`: the billed tokens `u` adds up to (what the
-/// status row's `session N` counts for the session), what they are made
-/// of, and their cost.
-fn billed_line(over: &str, u: &Usage) -> String {
-    format!(
-        "Billed tokens, {over}: {} (uncached input {}, output {}, cache reads {}, cache writes {}){}",
-        grouped(u.total_tokens()),
-        grouped(u.input),
-        grouped(u.output),
-        grouped(u.cache_read),
-        grouped(u.cache_write),
-        u.cost_usd.map(|c| format!(", ${c:.4}")).unwrap_or_default(),
-    )
-}
-
 impl App {
-    /// What `/usage` says: the billed tokens of the last turn and of the
-    /// session, broken down, with their cost; how full the context is,
-    /// told apart from a harness that never says (as the status row does);
-    /// and the account's rate limits.
-    pub(super) fn usage_report(&self) -> String {
-        let c = &self.controller.conversation;
-        let mut lines = vec![
-            billed_line("last turn", &c.turn_usage),
-            billed_line("session", &c.session_usage),
-        ];
-        let context = &c.context;
-        match (context.percent(), context.used, context.window) {
-            (Some(pct), Some(used), Some(window)) => lines.push(format!(
-                "Context: {} of {} tokens ({pct}%)",
-                grouped(used),
-                grouped(window)
-            )),
-            _ if !self.caps().context_usage => {
-                lines.push(format!("Context: not reported by {}", self.display_name()))
-            }
-            (_, Some(used), _) => lines.push(format!(
-                "Context: {} tokens, of a window not known yet",
-                grouped(used)
-            )),
-            (_, None, Some(window)) if window > 0 => lines.push(format!(
-                "Context: not known yet, of a {}-token window",
-                grouped(window)
-            )),
-            _ => lines.push("Context: not known yet".into()),
-        }
-        let status = self.controller.account_status(self.controller.active);
-        if let Some(r) = status.and_then(|s| s.rate_limit.as_ref()) {
-            lines.push(format!("Rate limits: {}", rate_limit_summary(r)));
-        }
-        lines.join("\n")
-    }
-
     /// Whether one of unharness's own commands is offered for the active
     /// harness (in the `/` list and `/help`).
     pub(super) fn offers_command(&self, name: &str) -> bool {
@@ -273,10 +209,7 @@ impl App {
                     ));
                 }
             }
-            "/usage" => {
-                let report = self.usage_report();
-                self.controller.conversation.transcript.push_system(report);
-            }
+            "/status" | "/usage" => self.open_status(),
             "/steer" => match rest {
                 "" => self
                     .controller
