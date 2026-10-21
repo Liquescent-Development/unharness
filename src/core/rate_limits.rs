@@ -190,6 +190,54 @@ pub fn clock(at: i64, now: i64) -> String {
     }
 }
 
+/// Unix seconds of an ISO 8601 time with a date, a time and an offset
+/// (`2026-10-21T03:40:00.099609+00:00`, `...Z`); the fraction is dropped.
+pub fn iso8601_to_unix(s: &str) -> Option<i64> {
+    let num = |s: &str| -> Option<i64> {
+        s.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    let (date, rest) = s.split_once('T')?;
+    let mut d = date.splitn(3, '-');
+    let (y, m, day) = (num(d.next()?)?, num(d.next()?)?, num(d.next()?)?);
+    let time_len = rest.find(['Z', '+', '-']).unwrap_or(rest.len());
+    let (time, offset) = rest.split_at(time_len);
+    let time = time.split('.').next()?;
+    let mut t = time.splitn(3, ':');
+    let (hh, mm, ss) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    let offset = match offset {
+        "Z" | "" => 0,
+        o => {
+            let sign = if o.starts_with('-') { -1 } else { 1 };
+            // `+05:30`, `+0530` or `+05`.
+            let o = &o[1..];
+            let (oh, om) = match o.split_once(':') {
+                Some(parts) => parts,
+                None if o.len() == 4 => o.split_at(2),
+                None => (o, "0"),
+            };
+            let (oh, om) = (num(oh)?, num(om)?);
+            if oh > 23 || om > 59 {
+                return None;
+            }
+            sign * (oh * 3600 + om * 60)
+        }
+    };
+    // Days from 1970-01-01 to the date (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - offset)
+}
+
 /// A local time's parts, as `localtime_r` gives them.
 #[derive(Debug, Clone, Copy)]
 struct LocalTime {
@@ -424,6 +472,36 @@ mod tests {
         let mut watch = LimitWatch::default();
         let r = limits("allowed", vec![window("five_hour", 92.0, 500)]);
         assert!(texts(&mut watch, &r).is_empty());
+    }
+
+    #[test]
+    fn iso8601_times_read_as_unix_seconds() {
+        assert_eq!(iso8601_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T03:40:00.099609+00:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T05:40:00+02:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-20T22:40:00-05:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T09:10:00+0530"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T08:40:00+05"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(iso8601_to_unix("2026-10-21T08:40:00+0x"), None);
+        assert_eq!(iso8601_to_unix("2026-10-21T08:40:00+24:00"), None);
+        assert_eq!(iso8601_to_unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+        assert_eq!(iso8601_to_unix("2026-13-01T00:00:00Z"), None);
+        assert_eq!(iso8601_to_unix("yesterday"), None);
     }
 
     #[test]

@@ -316,6 +316,7 @@ impl Harness for AcpHarness {
             context_usage: true,
             rate_limits: false,
             status_query: false,
+            status_probe: false,
             // Not in the spec; an agent known to have one declares it.
             rewind: RewindSupport {
                 conversation: self.profile.hooks.rewind_method().is_some(),

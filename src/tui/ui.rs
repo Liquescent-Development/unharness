@@ -91,7 +91,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             app.status_report(std::time::SystemTime::now()),
             app.display_name(),
             harness_color(app.controller.active),
-            app.caps().status_query,
+            app.caps().status_query || app.caps().status_probe,
         )
     });
     match &mut app.modal {

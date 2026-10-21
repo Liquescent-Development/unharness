@@ -16,8 +16,8 @@ use crate::core::sandbox::{Sandbox, SandboxLevel, SandboxPaths};
 
 pub use crate::core::ModelInfo;
 use crate::core::{
-    Capabilities, HarnessCommand, HarnessId, McpServer, ModelRef, PermissionPolicy, PolicySupport,
-    ProviderId, SessionConfig, SessionHandle,
+    AgentEvent, Capabilities, HarnessCommand, HarnessId, McpServer, ModelRef, PermissionPolicy,
+    PolicySupport, ProviderId, SessionConfig, SessionHandle,
 };
 
 /// Where a harness's provider list comes from.
@@ -169,6 +169,18 @@ pub trait Harness: Send + Sync {
         _sandbox: &Sandbox,
     ) -> Result<Option<Vec<HarnessCommand>>> {
         Ok(None)
+    }
+
+    /// What the CLI says of its account's limits, from a run of it for
+    /// that alone in `cwd` and `sandbox` (`Capabilities::status_probe`):
+    /// the `RateLimit` and `Account` events it gives. Default: none.
+    fn query_status(
+        &self,
+        _binary: &Path,
+        _cwd: &Path,
+        _sandbox: &Sandbox,
+    ) -> Result<Vec<AgentEvent>> {
+        Ok(Vec::new())
     }
 
     /// The provider this harness uses when it is told none, as far as can

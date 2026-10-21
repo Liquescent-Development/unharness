@@ -64,6 +64,8 @@ pub enum ListRequest {
     Models(HarnessId, ProviderId),
     /// Its commands, where no session says before the first prompt.
     Commands(HarnessId),
+    /// Its account's limits, where a run of its CLI apart says them.
+    Status(HarnessId),
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +73,7 @@ pub enum ListResult {
     Providers(Result<Vec<(ProviderId, String)>, String>),
     Models(Result<Vec<ModelInfo>, String>),
     Commands(Result<Option<Vec<HarnessCommand>>, String>),
+    Status(Result<Vec<AgentEvent>, String>),
 }
 
 /// Everything a thread needs to answer a `ListRequest`.
@@ -97,6 +100,13 @@ impl ListJob {
                 h.list_commands(&self.binary, &self.cwd, &self.sandbox)
                     .map_err(|e| format!("{e:#}")),
             ),
+            (ListRequest::Status(_), Some(h)) => ListResult::Status(
+                h.query_status(&self.binary, &self.cwd, &self.sandbox)
+                    .map_err(|e| format!("{e:#}")),
+            ),
+            (ListRequest::Status(_), None) => {
+                ListResult::Status(Err("not a registered harness".into()))
+            }
             (ListRequest::Providers(_), None) => {
                 ListResult::Providers(Err("not a registered harness".into()))
             }
@@ -112,7 +122,10 @@ impl ListJob {
 
     fn harness(&self) -> HarnessId {
         match &self.request {
-            ListRequest::Providers(h) | ListRequest::Models(h, _) | ListRequest::Commands(h) => *h,
+            ListRequest::Providers(h)
+            | ListRequest::Models(h, _)
+            | ListRequest::Commands(h)
+            | ListRequest::Status(h) => *h,
         }
     }
 }

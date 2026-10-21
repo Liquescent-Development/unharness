@@ -414,10 +414,13 @@ fn status_tells_never_reported_from_not_known_yet() {
         status_section(&app, "Context"),
         ": not reported by Antigravity (agy)"
     );
+    // Asked of a run of its CLI apart, on `/status` and `r`.
     assert_eq!(
         status_section(&app, "Rate limits"),
-        ": not reported by Antigravity (agy)"
+        ": none yet: r asks Antigravity (agy)"
     );
+    let app = test_app(HarnessId::PI);
+    assert_eq!(status_section(&app, "Rate limits"), ": not reported by pi");
 
     let mut app = test_app(HarnessId::CLAUDE);
     assert!(app.caps().context_usage);
@@ -467,6 +470,46 @@ fn status_shows_the_account_of_the_active_harness() {
     app.switch_harness(HarnessId::CLAUDE);
     assert_eq!(app.controller.active, HarnessId::CLAUDE);
     assert!(!status_section(&app, "Account").contains("prolite"));
+}
+
+/// agy's limits come from a run of `agy --print=/usage` apart, which
+/// `/status` queues, with or without a session.
+#[test]
+fn status_asks_agy_apart_and_shows_its_answer() {
+    use crate::core::{RateLimitInfo, RateLimitWindow};
+    use crate::tui::app::{ListRequest, ListResult};
+    let mut app = test_app(HarnessId::AGY);
+    // Any binary will do: the job is not run here (CI has no agy).
+    app.controller
+        .config
+        .harnesses
+        .entry("agy".into())
+        .or_default()
+        .binary = Some("/bin/sh".into());
+    app.take_list_jobs();
+    app.handle_slash_command("/status");
+    let jobs = app.take_list_jobs();
+    assert_eq!(
+        jobs.iter().map(|j| j.request.clone()).collect::<Vec<_>>(),
+        [ListRequest::Status(HarnessId::AGY)]
+    );
+    assert!(status_section(&app, "Rate limits").contains("asking"));
+    app.on_list(
+        ListRequest::Status(HarnessId::AGY),
+        ListResult::Status(Ok(vec![AgentEvent::RateLimit(RateLimitInfo {
+            windows: vec![RateLimitWindow {
+                label: "Gemini weekly".into(),
+                used_percent: Some(12.0),
+                resets_at: None,
+            }],
+            ..Default::default()
+        })])),
+    );
+    assert!(
+        status_section(&app, "Rate limits").contains("Gemini weekly: █░░░░░░░░░  12% used"),
+        "{}",
+        status_section(&app, "Rate limits")
+    );
 }
 
 /// Without an account reported, what the CLI said at startup.

@@ -12,7 +12,8 @@ sends and where it is read.
 | Claude Code | `initialize`'s answer, `account`: `subscriptionType`, `apiProvider`, `email`, `organization` | `rate_limit_event`'s `rate_limit_info`: `unifiedWindows` (utilization 0 to 1, `resetsAt` Unix seconds), `status`, `overageStatus`, `overageDisabledReason`, `isUsingOverage` (`overageResetsAt` named in 2.1.305, not recorded) |
 | Codex app-server | `account/updated` (`authMode`, `planType`) at start; `planType` and `credits` of `account/rateLimits/updated` when they change | `account/rateLimits/updated`: `primary`/`secondary` (`usedPercent` 0 to 100, `windowDurationMins`, `resetsAt`), `limitId`, `rateLimitReachedType` |
 | claude-agent-acp | none | `usage_update._meta["_claude/rateLimit"]`, Claude's `rate_limit_info` (read by the same `rate_limit_info`) |
-| Codex `exec`, pi, agy, codex-acp, vibe-acp | none | none |
+| agy | none | asked apart: `agy --print=/usage --output-format stream-json`'s `command_result` (below) |
+| Codex `exec`, pi, codex-acp, vibe-acp | none | none |
 
 Where nothing is reported, the Account section falls back on what the
 harness's probe found when unharness started (`HarnessOption::auth`,
@@ -84,6 +85,14 @@ says `refreshing…` until the answer comes or ten seconds pass.
 |---|---|---|
 | Claude Code (2.1.305) | control request `get_usage`, `skip_behaviors: true` | `rate_limits`' windows, `utilization` 0 to 100, `resets_at` ISO 8601 (`iso8601_to_unix`), `model_scoped` |
 | Codex app-server (0.162.1) | `account/rateLimits/read`, `account/read` (`params: {}`), under the names `rate-limits` and `account` | as the notification; `account`'s `type`, `email`, `planType` |
+| agy (1.3.6) | a run of `agy --print=/usage --output-format stream-json` apart (`Capabilities::status_probe`, `Harness::query_status`), in the session's sandbox, with or without a session: its print-mode reports are refused on stream-json input ("unavailable with --input-format stream-json; run it as its own --print /usage invocation") | `command_result`'s `command.data.groups[].buckets[]`: `remaining_fraction` 0 to 1 (read as used), `reset_time` ISO 8601, `window` (`weekly`); each bucket a window named after its group (`Gemini weekly`, `Claude and GPT weekly`) |
+
+The probe is a list job of the TUI's (`ListRequest::Status`), on a
+thread; `Controller::status_probed` takes its answer for the harness it
+was asked of, also after a switch. A failed one is shown under Rate
+limits ("could not be asked"), and `r` asks again. agy's `/credits`
+answered `no credits info found` on the account checked (an individual
+tier), so nothing of the account is read.
 
 An error answer turns `status_query` off for that session, without an
 error shown. Nothing is asked at session start, only when someone
@@ -95,8 +104,7 @@ its account (`initialize`).
 - Codex's `account/usage/read` (lifetime and daily tokens), Claude's
   `get_status` (marked internal), and `get_usage`'s `extra_usage` and
   `spend`.
-- agy has usage, credit and quota reports in print mode
-  (`--print=/usage`, `/credits`), not wired.
+- agy's `/credits` (not answered on the account checked).
 - pi's `get_session_stats` carries the session's token and cost totals;
   not read, since unharness sums the same per-response usage, and the
   totals would count a fork's parent turns.

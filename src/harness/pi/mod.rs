@@ -135,6 +135,7 @@ impl Harness for PiHarness {
             context_usage: true,
             rate_limits: false,
             status_query: false,
+            status_probe: false,
             rewind: RewindSupport {
                 conversation: true,
                 anchors_survive_fork: true,

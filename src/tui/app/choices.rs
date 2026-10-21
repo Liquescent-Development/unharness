@@ -132,6 +132,7 @@ impl App {
             ListRequest::Providers(_) => "providers".to_string(),
             ListRequest::Models(_, p) => format!("models on {p}"),
             ListRequest::Commands(_) => "commands".to_string(),
+            ListRequest::Status(_) => "usage".to_string(),
         };
         self.lists_failed.remove(&request);
         self.open_when_listed = Some(request.clone());
@@ -145,7 +146,7 @@ impl App {
 
     /// Queue `request` for a thread unless it is already under way.
     /// Returns whether it was queued now.
-    fn request_list(&mut self, request: ListRequest) -> bool {
+    pub(super) fn request_list(&mut self, request: ListRequest) -> bool {
         if self.lists_pending.contains(&request) {
             return false;
         }
@@ -178,6 +179,11 @@ impl App {
     /// A list could not be had: noted, so that completion does not ask
     /// again by itself, and shown if the user is waiting for it.
     fn list_failed(&mut self, request: ListRequest, why: String) {
+        // `/status` shows why, and `r` asks again.
+        if let ListRequest::Status(harness) = request {
+            self.controller.status_probed(harness, Err(why));
+            return;
+        }
         self.lists_failed.insert(request.clone());
         // Asked for by itself, and nothing else would say why the list
         // has none of the harness's commands.
@@ -201,6 +207,7 @@ impl App {
                     ListRequest::Providers(_) => format!("list providers: {why}"),
                     ListRequest::Models(..) => format!("list models: {why}"),
                     ListRequest::Commands(_) => format!("list commands: {why}"),
+                    ListRequest::Status(_) => return,
                 });
         }
     }
@@ -220,6 +227,11 @@ impl App {
             | ListResult::Models(Err(why))
             | ListResult::Commands(Err(why)) => {
                 self.list_failed(request, why);
+            }
+            ListResult::Status(answer) => {
+                if let ListRequest::Status(harness) = request {
+                    self.controller.status_probed(harness, answer);
+                }
             }
             // It cannot be told this way: not asked again.
             ListResult::Commands(Ok(None)) => {
@@ -274,7 +286,7 @@ impl App {
             ListRequest::Models(h, p) => {
                 *h == self.controller.active && self.current_provider() == Some(p)
             }
-            ListRequest::Commands(_) => false,
+            ListRequest::Commands(_) | ListRequest::Status(_) => false,
         };
         if !still_there || self.modal.is_some() {
             return false;
@@ -286,7 +298,7 @@ impl App {
                 .push_notice(match request {
                     ListRequest::Providers(_) => "The providers are here: /provider".to_string(),
                     ListRequest::Models(_, p) => format!("The models on {p} are here: Ctrl+M"),
-                    ListRequest::Commands(_) => return false,
+                    ListRequest::Commands(_) | ListRequest::Status(_) => return false,
                 });
             return false;
         }

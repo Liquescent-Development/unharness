@@ -178,6 +178,10 @@ pub struct Capabilities {
     /// The CLI can be asked for its account's rate limits and plan
     /// (`SessionCommand::QueryStatus`), not only told them with a turn.
     pub status_query: bool,
+    /// Its account's limits can be asked of a CLI run for that alone
+    /// (`Harness::query_status`), with or without a session (agy, whose
+    /// print-mode reports are refused on stream-json input).
+    pub status_probe: bool,
     pub rewind: RewindSupport,
     /// A session can be branched into a new one (`SessionConfig::fork`).
     pub fork: bool,

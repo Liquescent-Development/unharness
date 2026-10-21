@@ -336,6 +336,7 @@ impl Harness for CodexHarness {
             // account/rateLimits/read and account/read (0.162.1,
             // `app_server_account_read.jsonl`).
             status_query: app_server,
+            status_probe: false,
             rewind: RewindSupport {
                 conversation: app_server,
                 anchors_survive_fork: true,

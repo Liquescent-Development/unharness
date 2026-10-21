@@ -16,13 +16,14 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     bare_version, probe_version, resolve_binary,
 };
+use crate::core::Parser;
 use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy,
-    PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle,
-    SubagentSupport,
+    AgentEvent, Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef,
+    PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig,
+    SessionHandle, StopReason, SubagentSupport,
 };
 
 #[derive(Default)]
@@ -147,6 +148,7 @@ impl Harness for AgyHarness {
             context_usage: false,
             rate_limits: false,
             status_query: false,
+            status_probe: true,
             rewind: RewindSupport::default(),
             fork: false,
             // Servers are only read from agy's own config (`agy mcp add`
@@ -217,6 +219,15 @@ impl Harness for AgyHarness {
         sandbox: &Sandbox,
     ) -> Result<Option<Vec<HarnessCommand>>> {
         query_skills(binary, cwd, sandbox)
+    }
+
+    fn query_status(
+        &self,
+        binary: &Path,
+        cwd: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<AgentEvent>> {
+        query_usage(binary, cwd, sandbox)
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
@@ -312,15 +323,17 @@ pub fn query_models(binary: &Path) -> Result<Vec<(String, String)>> {
     }
 }
 
-/// The first agy whose print mode answers `/skills` itself, "without
-/// starting an agent turn, spending quota, or leaving a conversation
-/// behind" (its changelog); before it the prompt went to the model.
-const PRINT_SKILLS_SINCE: [u64; 3] = [1, 1, 11];
+/// The first agy whose print mode answers `/skills` and `/usage` itself,
+/// "without starting an agent turn, spending quota, or leaving a
+/// conversation behind" (its changelog); before it the prompt went to the
+/// model.
+const PRINT_ANSWERS_SINCE: [u64; 3] = [1, 1, 11];
 
-/// Whether `agy --version` (`1.3.2`) names one that answers `/skills` in
-/// print mode. Anything but three numbers is not taken for a version.
-fn answers_skills(version: &str) -> bool {
-    bare_version(version).is_some_and(|v| v >= PRINT_SKILLS_SINCE)
+/// Whether `agy --version` (`1.3.2`) names one that answers `/skills` and
+/// `/usage` in print mode. Anything but three numbers is not taken for a
+/// version.
+fn answers_in_print(version: &str) -> bool {
+    bare_version(version).is_some_and(|v| v >= PRINT_ANSWERS_SINCE)
 }
 
 /// The skills agy offers in `cwd`, which a prompt runs as `/name`:
@@ -334,12 +347,13 @@ pub fn query_skills(
     cwd: &Path,
     sandbox: &Sandbox,
 ) -> Result<Option<Vec<HarnessCommand>>> {
-    if !probe_version(binary).is_some_and(|v| answers_skills(&v)) {
+    if !probe_version(binary).is_some_and(|v| answers_in_print(&v)) {
         return Ok(None);
     }
     let mut cmd = Command::new(binary);
     cmd.arg("--print=/skills").current_dir(cwd);
-    let probe = ProbeProcess::spawn(cmd, sandbox).context("start agy")?;
+    let mut probe = ProbeProcess::spawn(cmd, sandbox).context("start agy")?;
+    probe.close_stdin();
     let deadline = Instant::now() + QUERY_TIMEOUT;
     let mut lines = Vec::new();
     loop {
@@ -355,6 +369,56 @@ pub fn query_skills(
         }
     }
     Ok(Some(parse_skills(&lines)))
+}
+
+/// The account's quotas: `agy --print=/usage --output-format
+/// stream-json` (1.3.6), refused on stream-json input, so a process of its
+/// own, in the session's sandbox (it reads agy's configuration, which a
+/// session can write). It answers itself, without a model call, since
+/// 1.1.11; an older one is not run. A run that reported no quota is an
+/// error (agy signed out says so on stderr, which is not read).
+pub fn query_usage(binary: &Path, cwd: &Path, sandbox: &Sandbox) -> Result<Vec<AgentEvent>> {
+    match probe_version(binary) {
+        Some(v) if answers_in_print(&v) => {}
+        Some(v) => anyhow::bail!(
+            "agy {} sends /usage to the model in print mode; 1.1.11 answers it",
+            v.trim()
+        ),
+        None => anyhow::bail!("agy --version did not name a version"),
+    }
+    let mut cmd = Command::new(binary);
+    cmd.args(["--print=/usage", "--output-format", "stream-json"])
+        .current_dir(cwd);
+    let mut probe = ProbeProcess::spawn(cmd, sandbox).context("start agy")?;
+    probe.close_stdin();
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let mut parser = parse::AgyParser::new(None);
+    let mut events = Vec::new();
+    loop {
+        match probe.next_line(deadline) {
+            Ok(line) => events.extend(parser.feed(&line).into_iter().filter_map(|ev| match ev {
+                AgentEvent::RateLimit(_) | AgentEvent::Account(_) => Some(ev),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(e),
+                } => Some(AgentEvent::Error(e)),
+                _ => None,
+            })),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!(
+                    "agy did not report its usage within {}s",
+                    QUERY_TIMEOUT.as_secs()
+                )
+            }
+        }
+    }
+    if let Some(AgentEvent::Error(e)) = events.iter().find(|e| matches!(e, AgentEvent::Error(_))) {
+        anyhow::bail!("{e}");
+    }
+    if !events.iter().any(|e| matches!(e, AgentEvent::RateLimit(_))) {
+        anyhow::bail!("agy reported no quota (signed out?)");
+    }
+    Ok(events)
 }
 
 fn parse_skills(lines: &[String]) -> Vec<HarnessCommand> {
@@ -409,30 +473,88 @@ mod tests {
     }
 
     #[test]
-    fn only_an_agy_that_answers_skills_itself_is_asked() {
-        assert!(answers_skills("1.3.2\n"));
-        assert!(answers_skills("1.1.11"));
-        assert!(!answers_skills("1.1.10"));
-        assert!(!answers_skills("0.9.99"));
+    fn only_an_agy_that_answers_in_print_itself_is_asked() {
+        assert!(answers_in_print("1.3.2\n"));
+        assert!(answers_in_print("1.1.11"));
+        assert!(!answers_in_print("1.1.10"));
+        assert!(!answers_in_print("0.9.99"));
         // What a stand-in printed is not a version.
-        assert!(!answers_skills("{\"event\":\"init\"}"));
-        assert!(!answers_skills("1.3"));
-        assert!(!answers_skills("1.3.2-beta"));
+        assert!(!answers_in_print("{\"event\":\"init\"}"));
+        assert!(!answers_in_print("1.3"));
+        assert!(!answers_in_print("1.3.2-beta"));
+    }
+
+    /// An executable script at `path`, written by a process of its own:
+    /// one written here would be open for writing in a child another test
+    /// forks meanwhile, and running it would then fail (ETXTBSY).
+    #[cfg(unix)]
+    fn write_stand_in(path: &Path, script: &str) {
+        use std::io::Write;
+        let mut sh = Command::new("/bin/sh")
+            .args(["-c", "cat > \"$0\" && chmod 755 \"$0\""])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(sh.wait().unwrap().success());
+    }
+
+    /// What a run apart says of the quotas, and why it said nothing.
+    #[cfg(unix)]
+    #[test]
+    fn usage_is_asked_for_in_print_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/harness/agy/fixtures/usage.jsonl");
+        let agy = dir.path().join("agy");
+        let stand_in = |version: &str, answer: &str| {
+            write_stand_in(
+                &agy,
+                &format!(
+                    "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo {version}; exit 0; }}\n\
+                     [ \"$1\" = --print=/usage ] && {answer}\n"
+                ),
+            );
+            query_usage(&agy, dir.path(), &Sandbox::off())
+        };
+        let events = stand_in("1.3.6", &format!("grep -v '^#' {}", fixture.display())).unwrap();
+        let [AgentEvent::RateLimit(r)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(r.windows.len(), 2);
+        // Signed out: agy says so on stderr only.
+        let err = stand_in("1.3.6", "echo 'authentication required' >&2; exit 1").unwrap_err();
+        assert!(err.to_string().contains("no quota"), "{err}");
+        let err = stand_in(
+            "1.3.6",
+            r#"echo '{"event":"result","result":{"status":"ERROR","error":"quota service unavailable"}}'"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("quota service unavailable"),
+            "{err}"
+        );
+        // An agy that would send it to the model is not run.
+        let err = stand_in("1.1.10", "touch ran").unwrap_err();
+        assert!(err.to_string().contains("1.1.10"), "{err}");
+        assert!(!dir.path().join("ran").exists());
     }
 
     #[cfg(unix)]
     #[test]
     fn skills_are_asked_for_in_print_mode() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let agy = dir.path().join("agy");
-        std::fs::write(
+        write_stand_in(
             &agy,
             "#!/bin/sh\n[ \"$1\" = --version ] && { echo 1.3.2; exit 0; }\n\
              [ \"$1\" = --print=/skills ] && printf 'one\\tThe first\\ntwo\\tThe second\\n'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let skills = query_skills(&agy, dir.path(), &Sandbox::off())
             .unwrap()
             .unwrap();

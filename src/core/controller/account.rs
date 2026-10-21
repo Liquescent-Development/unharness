@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::{Action, Controller};
 use crate::core::rate_limits::LimitWatch;
-use crate::core::{AccountInfo, HarnessId, RateLimitInfo, SessionCommand};
+use crate::core::{AccountInfo, AgentEvent, HarnessId, RateLimitInfo, SessionCommand};
 
 /// What one harness reported of its account.
 #[derive(Debug, Clone, Default)]
@@ -23,6 +23,8 @@ pub struct AccountStatus {
     awaiting: bool,
     /// What the user was told of its limits.
     watch: LimitWatch,
+    /// Why the CLI run to ask it said nothing, the last time.
+    pub failed: Option<String>,
 }
 
 impl AccountStatus {
@@ -36,8 +38,9 @@ impl AccountStatus {
 /// The least time between two status queries to one harness.
 const QUERY_EVERY: Duration = Duration::from_secs(10);
 
-/// How long an answer to a status query is shown as coming.
-const ANSWER_WAIT: Duration = Duration::from_secs(10);
+/// How long an answer to a status query is shown as coming: longer than
+/// a CLI run apart to ask is given (agy's 15 s).
+const ANSWER_WAIT: Duration = Duration::from_secs(20);
 
 /// Each harness's [`AccountStatus`], for those that reported any.
 pub type Accounts = HashMap<HarnessId, AccountStatus>;
@@ -45,19 +48,53 @@ pub type Accounts = HashMap<HarnessId, AccountStatus>;
 impl Controller {
     /// Ask the active harness's CLI for its account's limits and plan, if
     /// it answers that and was not asked a moment ago: `/status` opened,
-    /// or asked to refresh. Not before its session runs.
-    pub fn query_status(&mut self) {
-        if !self.caps().status_query || !self.session_alive || self.start_held {
-            return;
+    /// or asked to refresh. Its session is asked (`status_query`), not
+    /// before it runs. Returns whether a CLI run for that alone is to be
+    /// asked instead (`status_probe`), which the front end does
+    /// ([`Controller::status_probed`] takes the answer).
+    pub fn query_status(&mut self) -> bool {
+        let caps = self.caps();
+        let session = caps.status_query && self.session_alive && !self.start_held;
+        let probe = !caps.status_query && caps.status_probe;
+        if !session && !probe {
+            return false;
         }
         let status = self.accounts.entry(self.active).or_default();
         if status.asked_at.is_some_and(|t| t.elapsed() < QUERY_EVERY) {
-            return;
+            return false;
         }
         status.asked_at = Some(Instant::now());
         status.awaiting = true;
-        self.actions
-            .push_back(Action::Command(SessionCommand::QueryStatus));
+        if session {
+            self.actions
+                .push_back(Action::Command(SessionCommand::QueryStatus));
+        }
+        probe
+    }
+
+    /// The answer of a CLI run apart to say `harness`'s limits
+    /// ([`Controller::query_status`]): what it said, or why it said
+    /// nothing.
+    pub fn status_probed(&mut self, harness: HarnessId, answer: Result<Vec<AgentEvent>, String>) {
+        let events = match answer {
+            Ok(events) => events,
+            Err(why) => {
+                let status = self.accounts.entry(harness).or_default();
+                status.awaiting = false;
+                status.failed = Some(why);
+                return;
+            }
+        };
+        for ev in events {
+            match ev {
+                AgentEvent::RateLimit(r) => self.rate_limit_reported(harness, r),
+                AgentEvent::Account(a) => self.account_reported(harness, a),
+                _ => {}
+            }
+        }
+        let status = self.accounts.entry(harness).or_default();
+        status.awaiting = false;
+        status.failed = None;
     }
 
     /// What `harness` reported of its account in this run.
@@ -65,14 +102,13 @@ impl Controller {
         self.accounts.get(&harness)
     }
 
-    /// The active harness reported its rate limits, merged into what it
-    /// reported before ([`RateLimitInfo::merge`]): the user is told when
-    /// a window nears its limit or a limit is reached
-    /// ([`LimitWatch`]).
-    pub(super) fn rate_limit_reported(&mut self, r: RateLimitInfo) {
-        let name = self.display_name();
+    /// `harness` reported its rate limits, merged into what it reported
+    /// before ([`RateLimitInfo::merge`]): the user is told when a window
+    /// nears its limit or a limit is reached ([`LimitWatch`]).
+    pub(super) fn rate_limit_reported(&mut self, harness: HarnessId, r: RateLimitInfo) {
+        let name = self.display_name_of(harness);
         let now = SystemTime::now();
-        let status = self.accounts.entry(self.active).or_default();
+        let status = self.accounts.entry(harness).or_default();
         let limit = status.rate_limit.get_or_insert_default();
         limit.merge(r);
         let unix = now
@@ -90,9 +126,9 @@ impl Controller {
         status.awaiting = false;
     }
 
-    /// The active harness said what account it runs on.
-    pub(super) fn account_reported(&mut self, a: AccountInfo) {
-        let status = self.accounts.entry(self.active).or_default();
+    /// `harness` said what account it runs on.
+    pub(super) fn account_reported(&mut self, harness: HarnessId, a: AccountInfo) {
+        let status = self.accounts.entry(harness).or_default();
         status.account.merge(a);
         status.awaiting = false;
     }
