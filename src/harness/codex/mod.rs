@@ -333,6 +333,8 @@ impl Harness for CodexHarness {
             // `exec --json` reports a turn's tokens, not the window.
             context_usage: app_server,
             rate_limits: app_server,
+            // Not asked yet: the answer needs a recording first.
+            status_query: false,
             rewind: RewindSupport {
                 conversation: app_server,
                 anchors_survive_fork: true,

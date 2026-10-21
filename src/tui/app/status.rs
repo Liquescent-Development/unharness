@@ -172,9 +172,11 @@ fn unix(t: SystemTime) -> i64 {
 }
 
 impl App {
-    /// Open `/status`.
+    /// Open `/status`, and ask the CLI for its account's figures where it
+    /// answers that.
     pub(super) fn open_status(&mut self) {
         self.modal = Some(Modal::Status(Default::default()));
+        self.controller.query_status();
     }
 
     /// What `/status` shows at `now`.
@@ -408,7 +410,13 @@ impl App {
 
     fn rate_limit_rows(&self, now: SystemTime) -> Vec<StatusRow> {
         let status = self.controller.account_status(self.controller.active);
+        let asking = status.is_some_and(|s| s.asking());
         let Some((r, at)) = status.and_then(|s| s.rate_limit.as_ref().zip(s.rate_limit_at)) else {
+            if asking {
+                return vec![
+                    StatusRow::new("", format!("asking {}…", self.display_name())).tone(Tone::Dim),
+                ];
+            }
             // What a harness that reports none sends shows all the same.
             let why = if self.caps().rate_limits {
                 format!("none yet: {} reports them with a turn", self.display_name())
@@ -417,7 +425,11 @@ impl App {
             };
             return vec![StatusRow::new("", why).tone(Tone::Dim)];
         };
-        rate_limit_rows(r, at, now)
+        let mut rows = rate_limit_rows(r, at, now);
+        if asking {
+            rows.push(StatusRow::new("", "refreshing…").tone(Tone::Dim));
+        }
+        rows
     }
 }
 

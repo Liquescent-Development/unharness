@@ -377,6 +377,8 @@ pub struct CapsUpdate {
     pub fork: Option<bool>,
     /// Context-window usage may be reported (`Capabilities::context_usage`).
     pub context_usage: Option<bool>,
+    /// The CLI answers a status query (`Capabilities::status_query`).
+    pub status_query: Option<bool>,
     /// The agent takes MCP servers reached over HTTP (`McpSupport::http`).
     pub mcp_http: Option<bool>,
     pub plan_mode: Option<bool>,
@@ -480,6 +482,9 @@ impl CapsUpdate {
         }
         if newer.context_usage.is_some() {
             self.context_usage = newer.context_usage;
+        }
+        if newer.status_query.is_some() {
+            self.status_query = newer.status_query;
         }
         if newer.mcp_http.is_some() {
             self.mcp_http = newer.mcp_http;
@@ -899,6 +904,9 @@ impl AgentEvent {
                 }
                 if let Some(p) = u.plan_mode {
                     parts.push(format!("plan_mode={p}"));
+                }
+                if let Some(q) = u.status_query {
+                    parts.push(format!("status_query={q}"));
                 }
                 if let Some(m) = &u.models {
                     parts.push(format!("models={}", m.len()));

@@ -559,6 +559,8 @@ impl Harness for ClaudeHarness {
             compaction: true,
             context_usage: true,
             rate_limits: true,
+            // Not asked yet: the answer needs a recording first.
+            status_query: false,
             rewind: RewindSupport {
                 conversation: true,
                 anchors_survive_fork: false,

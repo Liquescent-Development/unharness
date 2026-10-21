@@ -4,10 +4,10 @@
 //! the user.
 
 use std::collections::HashMap;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
-use super::Controller;
-use crate::core::{AccountInfo, HarnessId, RateLimitInfo};
+use super::{Action, Controller};
+use crate::core::{AccountInfo, HarnessId, RateLimitInfo, SessionCommand};
 
 /// What one harness reported of its account.
 #[derive(Debug, Clone, Default)]
@@ -16,7 +16,25 @@ pub struct AccountStatus {
     pub rate_limit: Option<RateLimitInfo>,
     /// When `rate_limit` was last reported.
     pub rate_limit_at: Option<SystemTime>,
+    /// When the CLI was last asked (`Controller::query_status`).
+    asked_at: Option<Instant>,
+    /// It was asked, and has not answered yet.
+    awaiting: bool,
 }
+
+impl AccountStatus {
+    /// Whether the CLI was asked and its answer is still to come; one
+    /// that has not come in `ANSWER_WAIT` is not waited for.
+    pub fn asking(&self) -> bool {
+        self.awaiting && self.asked_at.is_some_and(|t| t.elapsed() < ANSWER_WAIT)
+    }
+}
+
+/// The least time between two status queries to one harness.
+const QUERY_EVERY: Duration = Duration::from_secs(10);
+
+/// How long an answer to a status query is shown as coming.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
 
 /// Each harness's [`AccountStatus`], for those that reported any.
 pub type Accounts = HashMap<HarnessId, AccountStatus>;
@@ -47,6 +65,23 @@ pub fn rate_limit_summary(r: &RateLimitInfo) -> String {
 }
 
 impl Controller {
+    /// Ask the active harness's CLI for its account's limits and plan, if
+    /// it answers that and was not asked a moment ago: `/status` opened,
+    /// or asked to refresh. Not before its session runs.
+    pub fn query_status(&mut self) {
+        if !self.caps().status_query || !self.session_alive || self.start_held {
+            return;
+        }
+        let status = self.accounts.entry(self.active).or_default();
+        if status.asked_at.is_some_and(|t| t.elapsed() < QUERY_EVERY) {
+            return;
+        }
+        status.asked_at = Some(Instant::now());
+        status.awaiting = true;
+        self.actions
+            .push_back(Action::Command(SessionCommand::QueryStatus));
+    }
+
     /// What `harness` reported of its account in this run.
     pub fn account_status(&self, harness: HarnessId) -> Option<&AccountStatus> {
         self.accounts.get(&harness)
@@ -66,14 +101,13 @@ impl Controller {
                 .push_notice(format!("rate limit: {}", rate_limit_summary(limit)));
         }
         status.rate_limit_at = Some(SystemTime::now());
+        status.awaiting = false;
     }
 
     /// The active harness said what account it runs on.
     pub(super) fn account_reported(&mut self, a: AccountInfo) {
-        self.accounts
-            .entry(self.active)
-            .or_default()
-            .account
-            .merge(a);
+        let status = self.accounts.entry(self.active).or_default();
+        status.account.merge(a);
+        status.awaiting = false;
     }
 }

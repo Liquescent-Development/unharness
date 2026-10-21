@@ -767,6 +767,8 @@ impl StreamProtocol for Claude {
                 self.remote_requests.insert(id, enabled);
                 Encoded::Write(line)
             }
+            // Not declared yet.
+            SessionCommand::QueryStatus => Encoded::Unsupported,
             // The driver's (`shutdown`).
             SessionCommand::Shutdown => Encoded::Done,
         }

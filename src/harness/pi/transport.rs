@@ -308,6 +308,7 @@ impl StreamProtocol for Pi {
             // remote control.
             SessionCommand::StopSubagent { .. }
             | SessionCommand::RemoteControl { .. }
+            | SessionCommand::QueryStatus
             | SessionCommand::SendNow { .. } => {
                 return Encoded::Unsupported;
             }

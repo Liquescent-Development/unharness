@@ -205,6 +205,10 @@ pub enum SessionCommand {
         enabled: bool,
         name: Option<String>,
     },
+    /// Ask the CLI for the account's rate limits and plan now
+    /// (`Capabilities::status_query`); they come back as `RateLimit` and
+    /// `Account`.
+    QueryStatus,
     Shutdown,
 }
 

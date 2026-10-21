@@ -1337,9 +1337,11 @@ impl StreamProtocol for Driver {
             // Not declared (`AcpHarness::capabilities`), so the loop answers
             // them before they come here: no subagent is stopped from here,
             // and ACP has no remote control, steering, compaction on request,
-            // or rewind but an agent's own (`AgentHooks::rewind_method`).
+            // status query, or rewind but an agent's own
+            // (`AgentHooks::rewind_method`).
             SessionCommand::StopSubagent { .. }
             | SessionCommand::RemoteControl { .. }
+            | SessionCommand::QueryStatus
             | SessionCommand::Steer { .. }
             | SessionCommand::SendNow { .. }
             | SessionCommand::Rewind { .. }

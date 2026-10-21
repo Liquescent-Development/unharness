@@ -753,6 +753,9 @@ fn caps_json(u: &CapsUpdate) -> Value {
     if let Some(p) = u.plan_mode {
         v["plan_mode"] = json!(p);
     }
+    if let Some(q) = u.status_query {
+        v["status_query"] = json!(q);
+    }
     if let Some(s) = u.slash_commands {
         v["slash_commands"] = json!(s);
     }

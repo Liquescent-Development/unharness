@@ -337,6 +337,10 @@ impl App {
                     None
                 }
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => Some(None),
+                KeyCode::Char('r') => {
+                    self.controller.query_status();
+                    None
+                }
                 _ => None,
             },
             Modal::Input(m) => match key.code {

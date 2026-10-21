@@ -90,6 +90,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             app.status_report(std::time::SystemTime::now()),
             app.display_name(),
             harness_color(app.controller.active),
+            app.caps().status_query,
         )
     });
     match &mut app.modal {
@@ -97,8 +98,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Some(Modal::Question(m)) => render_question(frame, m, area),
         Some(Modal::Plan(m)) => render_plan(frame, m, area),
         Some(Modal::Status(m)) => {
-            if let Some((report, name, color)) = &status {
-                render_status(frame, m, report, name, *color, area);
+            if let Some((report, name, color, refresh)) = &status {
+                render_status(frame, m, report, name, *color, *refresh, area);
             }
         }
         Some(_) => render_modal(frame, app, area),
@@ -2557,6 +2558,7 @@ fn render_status(
     report: &StatusReport,
     harness: &str,
     color: Color,
+    refresh: bool,
     area: Rect,
 ) {
     let popup = centered_rect(80, 80, area);
@@ -2613,15 +2615,16 @@ fn render_status(
     m.scroll_max = max;
     m.scroll = m.scroll.min(max);
     frame.render_widget(Paragraph::new(lines).scroll((m.scroll, 0)), body);
+    let refresh = if refresh { "r refresh · " } else { "" };
     let hint = if max > 0 {
         let more = if m.scroll < max { "↓" } else { "↑" };
         format!(
-            "{more} {}/{} · ↑/↓ PgUp/PgDn scroll · Esc close",
+            "{more} {}/{} · ↑/↓ PgUp/PgDn scroll · {refresh}Esc close",
             m.scroll + 1,
             max + 1
         )
     } else {
-        "Esc close".to_string()
+        format!("{refresh}Esc close")
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
