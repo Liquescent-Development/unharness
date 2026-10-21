@@ -448,10 +448,20 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         let Some(path) = canonical(&expand(extra)) else {
             continue;
         };
-        if let Some(hit) = protected.iter().find(|p| p.starts_with(&path)) {
+        // Beneath it too: Landlock cannot take a path back out of one it
+        // grants.
+        if let Some(hit) = protected
+            .iter()
+            .find(|p| p.starts_with(&path) || path.starts_with(p))
+        {
             bail!(
-                "[sandbox].writable path {} contains unharness's own state ({})",
+                "[sandbox].writable path {} {} unharness's own state ({})",
                 path.display(),
+                if path.starts_with(hit) {
+                    "is inside"
+                } else {
+                    "contains"
+                },
                 hit.display()
             );
         }
@@ -995,11 +1005,25 @@ mod tests {
     #[test]
     fn writable_path_over_own_state_is_refused() {
         let w = world();
-        let writable = [w.home.clone()];
-        let mut req = request(&w, None);
-        req.extra_writable = &writable;
-        let err = resolve(&req, &available(), &w.env).unwrap_err();
-        assert!(err.to_string().contains("unharness's own state"), "{err}");
+        std::fs::create_dir_all(w.home.join(".local/state/unharness/conversations")).unwrap();
+        // Around it, and inside it: Landlock cannot take it back out.
+        for (path, says) in [
+            (w.home.clone(), "contains"),
+            (
+                w.home.join(".local/state/unharness/conversations"),
+                "is inside",
+            ),
+        ] {
+            let writable = [path];
+            let mut req = request(&w, None);
+            req.extra_writable = &writable;
+            let err = resolve(&req, &available(), &w.env).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("{says} unharness's own state")),
+                "{err}"
+            );
+        }
     }
 
     #[test]
