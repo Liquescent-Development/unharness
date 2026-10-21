@@ -418,8 +418,17 @@ kept with the conversation and comes back on a switch to it or a resume,
 as long as its session is the one measured and it runs the same model;
 another model, or a new session, starts the figure again. `/status`
 gives the tokens behind the percentage, or says that the harness never
-reports them or has not yet. A notice appears when one of the account's
-rate-limit windows passes 80%.
+reports them or has not yet.
+
+When one of the account's rate-limit windows nears its limit, a notice
+says so once, with the time the window starts over (`Claude Code
+(claude): 82% of the 5-hour limit used; it resets at 15:00`), and again
+at 90% and 95%, or after the window started over; Claude's own warning for a window
+below 80% is said once too. A limit reached is said once, as an error
+unless extra usage covers what follows. Meanwhile the usage line shows
+the window nearest its limit (`5h 82%`), in red once a limit stops use.
+`--print` says the same once on stderr (`text` and `json`), a limit
+that stops use as a warning.
 
 ## Status
 
@@ -452,8 +461,8 @@ Context
   Filled          47,022 of 200,000 tokens (23%)
 Rate limits
   Status          allowed
-  five hour       ███░░░░░░░  27% used · resets in 2h 13m
-  seven day       ░░░░░░░░░░   4% used · resets in 3d 4h
+  5-hour          ███░░░░░░░  27% used · resets in 2h 13m
+  weekly          ░░░░░░░░░░   4% used · resets in 3d 4h
   Extra usage     rejected (org level disabled)
                   as of 40s ago
 ```

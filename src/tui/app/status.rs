@@ -143,11 +143,6 @@ fn resets(resets_at: i64, now: i64) -> String {
     }
 }
 
-/// `five_hour` as `five hour`; Codex's `5h` as it is.
-fn window_label(label: &str) -> String {
-    label.replace('_', " ")
-}
-
 fn window_row(w: &RateLimitWindow, now: i64) -> StatusRow {
     let mut value = String::new();
     let mut tone = Tone::Normal;
@@ -170,7 +165,7 @@ fn window_row(w: &RateLimitWindow, now: i64) -> StatusRow {
         value.push_str(" · ");
         value.push_str(&resets(at, now));
     }
-    StatusRow::new(window_label(&w.label), value).tone(tone)
+    StatusRow::new(w.name(), value).tone(tone)
 }
 
 fn unix(t: SystemTime) -> i64 {
@@ -451,12 +446,22 @@ fn rate_limit_rows(r: &RateLimitInfo, at: SystemTime, now: SystemTime) -> Vec<St
     let now_unix = unix(now);
     let mut rows = Vec::new();
     if let Some(s) = &r.status {
-        let row = StatusRow::new("Status", s.as_str());
-        rows.push(if s == "allowed" {
-            row
+        let about = r
+            .windows
+            .iter()
+            .find(|w| r.window.as_deref() == Some(w.label.as_str()));
+        let value = match about {
+            Some(w) => format!("{s} ({})", w.name()),
+            None => s.clone(),
+        };
+        let tone = if r.reached() {
+            Tone::Alert
+        } else if s == "allowed" {
+            Tone::Normal
         } else {
-            row.tone(Tone::Alert)
-        });
+            Tone::Warn
+        };
+        rows.push(StatusRow::new("Status", value).tone(tone));
     }
     if let Some(limit) = &r.limit {
         rows.push(StatusRow::new("Limit", limit.as_str()));
@@ -523,7 +528,8 @@ mod tests {
         let at = UNIX_EPOCH + Duration::from_secs(1_000_000);
         let now = at + Duration::from_secs(40);
         let r = RateLimitInfo {
-            status: Some("allowed".into()),
+            status: Some("allowed_warning".into()),
+            window: Some("seven_day".into()),
             windows: vec![
                 RateLimitWindow {
                     label: "five_hour".into(),
@@ -552,13 +558,14 @@ mod tests {
         assert_eq!(
             text,
             [
-                "Status: allowed",
-                "five hour: ███░░░░░░░  27% used · resets in 2h 13m",
-                "seven day: █████████░  85% used",
+                "Status: allowed_warning (weekly)",
+                "5-hour: ███░░░░░░░  27% used · resets in 2h 13m",
+                "weekly: █████████░  85% used",
                 "Extra usage: rejected (org level disabled)",
                 ": as of 40s ago",
             ]
         );
+        assert_eq!(rows[0].tone, Tone::Warn);
         assert_eq!(rows[2].tone, Tone::Warn);
     }
 }

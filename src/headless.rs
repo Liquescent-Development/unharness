@@ -21,10 +21,11 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::core::controller::{PolicyState, Tracking, Unasked};
 use crate::core::permissions::{Route, Why};
+use crate::core::rate_limits::LimitWatch;
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
-    PermissionRequest, PolicyResolution, PolicySupport, RemoteControl, Rules, SessionCommand,
-    SessionHandle, StopReason, SubagentSupport, ToolAction, Usage, UsageScope,
+    PermissionRequest, PolicyResolution, PolicySupport, RateLimitInfo, RemoteControl, Rules,
+    SessionCommand, SessionHandle, StopReason, SubagentSupport, ToolAction, Usage, UsageScope,
 };
 use crate::harness::Harness;
 
@@ -143,6 +144,9 @@ pub struct Headless<O: Write, E: Write> {
     /// new one: nothing the new one sends is written, and the result
     /// names no session.
     replaced: bool,
+    /// The harness's rate limits so far, and what was said of them.
+    limits: RateLimitInfo,
+    limit_watch: LimitWatch,
     started: Instant,
 }
 
@@ -180,6 +184,8 @@ impl<O: Write, E: Write> Headless<O, E> {
             planning: false,
             resume: None,
             replaced: false,
+            limits: RateLimitInfo::default(),
+            limit_watch: LimitWatch::default(),
             started: Instant::now(),
         }
     }
@@ -380,6 +386,22 @@ impl<O: Write, E: Write> Headless<O, E> {
             AgentEvent::Notice(n) if self.format != Format::StreamJson => {
                 let line = format!("{}: {n}", self.name);
                 self.note(&line);
+            }
+            // Said once near a limit, as in the TUI, not once per event
+            // (#344); `stream-json` has every `rate_limit` event.
+            AgentEvent::RateLimit(r) if self.format != Format::StreamJson => {
+                self.limits.merge(r.clone());
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                for n in self.limit_watch.observe(&self.limits, now) {
+                    let line = format!("{}: {}", self.name, n.text);
+                    if n.stops {
+                        self.warn(line);
+                    } else {
+                        self.note(&line);
+                    }
+                }
             }
             // The session `--resume` named is gone, and the one the harness
             // started in its place knows nothing of it (pi, an ACP agent):
@@ -939,6 +961,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
         AgentEvent::RateLimit(r) => json!({
             "type": "rate_limit",
             "status": r.status,
+            "window": r.window,
             "windows": r.windows.iter().map(|w| json!({
                 "label": w.label,
                 "used_percent": w.used_percent,
@@ -1788,6 +1811,34 @@ mod tests {
                 "{case} not checked: {checked:?}"
             );
         }
+    }
+
+    /// Claude reports its limits with every API call; near one, a text
+    /// run says so once per step, not once per event (#344).
+    #[test]
+    fn a_limit_near_is_said_once() {
+        use crate::core::{RateLimitInfo, RateLimitWindow};
+        let limit = |pct: f32| {
+            AgentEvent::RateLimit(RateLimitInfo {
+                status: Some("allowed_warning".into()),
+                window: Some("five_hour".into()),
+                windows: vec![RateLimitWindow {
+                    label: "five_hour".into(),
+                    used_percent: Some(pct),
+                    resets_at: None,
+                }],
+                ..Default::default()
+            })
+        };
+        let (_dir, mut run) = headless(Format::Text, false);
+        feed(
+            &mut run,
+            vec![limit(82.0), text("hi"), limit(82.0), limit(83.0), done()],
+        );
+        assert_eq!(run.finish(), 0);
+        let err = String::from_utf8_lossy(&run.err);
+        assert_eq!(err.matches("of the 5-hour limit used").count(), 1, "{err}");
+        assert!(err.contains("82% of the 5-hour limit used"), "{err}");
     }
 
     #[test]

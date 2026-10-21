@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use super::super::{Controller, Front, Launch, Opening, PlanAsk, PolicyAsk};
 use crate::config::Config;
-use crate::core::controller::{Action, rate_limit_summary};
+use crate::core::controller::Action;
 use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;

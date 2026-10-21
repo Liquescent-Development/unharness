@@ -442,11 +442,8 @@ impl ClaudeParser {
                 }
             }
             "rate_limit_event" => {
+                // What to tell the user of it is the controller's (#344).
                 let info = rate_limit_info(val.get("rate_limit_info").unwrap_or(&Value::Null));
-                let status = info.status.as_deref().unwrap_or("allowed");
-                if status != "allowed" {
-                    out.push(AgentEvent::Notice(format!("rate limit: {status}")));
-                }
                 out.push(AgentEvent::RateLimit(info));
             }
             _ => {}
@@ -1545,8 +1542,9 @@ fn initialize_account(account: &Value) -> AccountInfo {
 }
 
 /// A `rate_limit_info` (`rate_limit_event`'s, and claude-agent-acp's
-/// `_claude/rateLimit`): its status (`allowed` when it says none), its
-/// windows and what may be used past them.
+/// `_claude/rateLimit`): its status (`allowed` when it says none) and the
+/// window it is about (`rateLimitType`, which names the window in force
+/// when allowed too), its windows and what may be used past them.
 pub(crate) fn rate_limit_info(info: &Value) -> RateLimitInfo {
     let text = |key: &str| info.get(key).and_then(Value::as_str).map(str::to_string);
     let overage = Overage {
@@ -1555,8 +1553,10 @@ pub(crate) fn rate_limit_info(info: &Value) -> RateLimitInfo {
         disabled_reason: text("overageDisabledReason"),
         resets_at: info.get("overageResetsAt").and_then(Value::as_i64),
     };
+    let status = text("status").unwrap_or_else(|| "allowed".into());
     RateLimitInfo {
-        status: Some(text("status").unwrap_or_else(|| "allowed".into())),
+        window: text("rateLimitType").filter(|_| status != "allowed"),
+        status: Some(status),
         windows: rate_limit_windows(info),
         limit: None,
         overage: (overage != Overage::default()).then_some(overage),
@@ -2613,6 +2613,46 @@ mod tests {
     #[test]
     fn fixture_basic_turn_bash() {
         fixture("basic_turn");
+    }
+
+    /// A `rate_limit_event` past a warning threshold, in the shape 2.1.302
+    /// sent one (#344; no recording has it): only reported, with the window
+    /// it is about, and no notice of its own, which came with every API
+    /// call of a turn.
+    #[test]
+    fn a_rate_limit_warning_is_reported_not_noticed() {
+        let line = serde_json::json!({
+            "type": "rate_limit_event",
+            "rate_limit_info": {
+                "status": "allowed_warning",
+                "resetsAt": 1791004800,
+                "rateLimitType": "seven_day",
+                "utilization": 0.76,
+                "surpassedThreshold": 0.75,
+                "overageStatus": "rejected",
+                "isUsingOverage": false,
+                "unifiedWindows": {
+                    "five_hour": {"utilization": 0.2, "resetsAt": 1791004800},
+                    "seven_day": {"utilization": 0.76, "resetsAt": 1791266400}
+                }
+            },
+            "uuid": "u1",
+            "session_id": "s1"
+        });
+        let events = ClaudeParser::new().feed(&line.to_string());
+        let [AgentEvent::RateLimit(r)] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        assert_eq!(r.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(r.window.as_deref(), Some("seven_day"));
+        assert_eq!(r.windows.len(), 2);
+    }
+
+    /// Past a threshold and then rejected, hand-written in the shape #344
+    /// showed: only `RateLimit` events, each naming its window.
+    #[test]
+    fn fixture_rate_limit_warning() {
+        fixture("rate_limit_warning");
     }
 
     /// `get_usage` before the prompt and after it (2.1.305): its windows,

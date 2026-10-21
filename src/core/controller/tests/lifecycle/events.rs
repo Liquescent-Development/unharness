@@ -79,12 +79,24 @@ fn what_a_session_reports_is_said() {
     assert_eq!(app.controller.effort_label(HarnessId::CLAUDE), None);
 }
 
+/// Claude reports its limits with every API call of a turn; near one,
+/// the user hears of it once per step, by name, not once per event
+/// (#344).
 #[test]
-fn rate_limit_warns_once_when_a_window_runs_high() {
+fn rate_limit_warns_once_per_step_not_per_event() {
     use crate::core::{RateLimitInfo, RateLimitWindow};
     let limit = |pct: f32| {
+        let warning = pct >= 80.0;
         AgentEvent::RateLimit(RateLimitInfo {
-            status: Some("allowed".into()),
+            status: Some(
+                if warning {
+                    "allowed_warning"
+                } else {
+                    "allowed"
+                }
+                .into(),
+            ),
+            window: warning.then(|| "five_hour".into()),
             windows: vec![RateLimitWindow {
                 label: "five_hour".into(),
                 used_percent: Some(pct),
@@ -97,20 +109,82 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
     let base = app.controller.conversation.transcript.blocks.len();
     app.on_event(limit(20.0));
     assert_eq!(app.controller.conversation.transcript.blocks.len(), base);
-    app.on_event(limit(85.0));
-    app.on_event(limit(90.0));
+    for _ in 0..5 {
+        app.on_event(limit(85.0));
+    }
+    app.on_event(limit(86.0));
     assert_eq!(
         app.controller.conversation.transcript.blocks.len(),
         base + 1
     );
     assert_eq!(
-        rate_limit_summary(
-            app.controller
-                .account_status(HarnessId::CLAUDE)
-                .and_then(|s| s.rate_limit.as_ref())
-                .unwrap()
-        ),
-        "five_hour 90% used"
+        notices(&app).last().unwrap(),
+        "Claude Code (claude): 85% of the 5-hour limit used"
+    );
+    app.on_event(limit(90.0));
+    assert_eq!(
+        notices(&app).last().unwrap(),
+        "Claude Code (claude): 90% of the 5-hour limit used"
+    );
+}
+
+/// A limit reached is said as an error, or as a notice where extra usage
+/// covers it; Codex's `null` once it is lifted re-arms it, and the status
+/// line stops showing it.
+#[test]
+fn a_limit_reached_is_said_again_after_it_was_lifted() {
+    use crate::core::rate_limits::marker;
+    use crate::core::transcript::Block;
+    use crate::core::{Overage, RateLimitInfo, RateLimitWindow};
+    let limit = |status: &str, pct: f32| {
+        AgentEvent::RateLimit(RateLimitInfo {
+            status: Some(status.into()),
+            windows: vec![RateLimitWindow {
+                label: "5h".into(),
+                used_percent: Some(pct),
+                resets_at: None,
+            }],
+            ..Default::default()
+        })
+    };
+    let errors = |app: &TestApp| {
+        app.controller
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, Block::Error(_)))
+            .count()
+    };
+    let mut app = test_app(HarnessId::CODEX);
+    app.on_event(limit("rate_limit_reached", 100.0));
+    assert_eq!(errors(&app), 1);
+    // What the parser makes of `"rateLimitReachedType":null`.
+    app.on_event(limit("allowed", 3.0));
+    let r = app.controller.account_status(HarnessId::CODEX).unwrap();
+    assert!(!r.rate_limit.as_ref().unwrap().reached());
+    assert_eq!(marker(r.rate_limit.as_ref().unwrap(), 0), None);
+    app.on_event(limit("rate_limit_reached", 100.0));
+    assert_eq!(errors(&app), 2);
+
+    let mut app = test_app(HarnessId::CLAUDE);
+    let mut covered = RateLimitInfo {
+        status: Some("rejected".into()),
+        overage: Some(Overage {
+            status: Some("allowed".into()),
+            in_use: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    covered.window = Some("five_hour".into());
+    app.on_event(AgentEvent::RateLimit(covered));
+    assert_eq!(errors(&app), 0);
+    assert!(
+        notices(&app)
+            .last()
+            .unwrap()
+            .ends_with("extra usage covers what follows")
     );
 }
 
