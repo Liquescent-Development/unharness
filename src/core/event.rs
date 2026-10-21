@@ -118,6 +118,8 @@ pub enum AgentEvent {
     },
     Context(ContextUsage),
     RateLimit(RateLimitInfo),
+    /// What the harness's CLI said of the account it runs on.
+    Account(AccountInfo),
     /// Vendor id of the user turn the harness just accepted (rewind / fork target).
     TurnAnchor {
         id: String,
@@ -310,6 +312,46 @@ impl RateLimitInfo {
             }
         }
     }
+}
+
+/// The account a harness's CLI runs on, as far as it says. Any field may
+/// be unknown.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AccountInfo {
+    /// The subscription (`Claude Max`, `prolite`).
+    pub plan: Option<String>,
+    /// How the CLI signs in (`firstParty`, `vertex`, `chatgpt`, `apikey`).
+    pub auth: Option<String>,
+    pub email: Option<String>,
+    pub organization: Option<String>,
+    pub credits: Option<Credits>,
+}
+
+impl AccountInfo {
+    /// Keep the known fields of `self`, take the rest from `newer`.
+    pub fn merge(&mut self, newer: AccountInfo) {
+        let AccountInfo {
+            plan,
+            auth,
+            email,
+            organization,
+            credits,
+        } = newer;
+        self.plan = plan.or(self.plan.take());
+        self.auth = auth.or(self.auth.take());
+        self.email = email.or(self.email.take());
+        self.organization = organization.or(self.organization.take());
+        self.credits = credits.or(self.credits.take());
+    }
+}
+
+/// Credits an account can spend past its plan (Codex's).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Credits {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    /// As the vendor gives it (a decimal string, `62500.0000000000`).
+    pub balance: Option<String>,
 }
 
 /// Use past the rate limits, paid apart (Claude's "extra usage").
@@ -815,6 +857,30 @@ impl AgentEvent {
                 }
                 format!("RateLimit {}", parts.join(" "))
             }
+            // Who the account is stays out of fixtures, redacted or not.
+            AgentEvent::Account(a) => {
+                let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+                let set = |v: &Option<String>| if v.is_some() { "set" } else { "-" };
+                format!(
+                    "Account plan={} auth={} email={} org={} credits={}",
+                    or_dash(&a.plan),
+                    or_dash(&a.auth),
+                    set(&a.email),
+                    set(&a.organization),
+                    a.credits
+                        .as_ref()
+                        .map(|c| if c.unlimited {
+                            "unlimited".to_string()
+                        } else {
+                            format!(
+                                "{}{}",
+                                c.balance.as_deref().unwrap_or("?"),
+                                if c.has_credits { "" } else { ",none" }
+                            )
+                        })
+                        .unwrap_or_else(|| "-".into())
+                )
+            }
             AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),
             AgentEvent::RewindFailed { reason } => format!("RewindFailed {:?}", short(reason)),
             AgentEvent::CapabilitiesChanged(u) => {
@@ -947,6 +1013,27 @@ mod tests {
         assert_eq!(r.status.as_deref(), Some("allowed_warning"));
         assert_eq!(r.limit.as_deref(), Some("codex"));
         assert_eq!(r.windows.len(), 3);
+    }
+
+    #[test]
+    fn account_merge_keeps_what_is_known() {
+        let mut a = AccountInfo {
+            plan: Some("Claude Max".into()),
+            email: Some("user@example.com".into()),
+            ..Default::default()
+        };
+        a.merge(AccountInfo {
+            plan: Some("Claude Pro".into()),
+            auth: Some("firstParty".into()),
+            ..Default::default()
+        });
+        assert_eq!(a.plan.as_deref(), Some("Claude Pro"));
+        assert_eq!(a.auth.as_deref(), Some("firstParty"));
+        assert_eq!(a.email.as_deref(), Some("user@example.com"));
+        // Who the account is never reaches a fixture.
+        let summary = AgentEvent::Account(a).summary();
+        assert!(!summary.contains("example.com"), "{summary}");
+        assert!(summary.contains("email=set"), "{summary}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 HookStarted id=0c507f3e-50bf-4345-8233-ee6f90275d89 SessionStart:startup
 HookEnded id=0c507f3e-50bf-4345-8233-ee6f90275d89 SessionStart:startup ok ""
 CapabilitiesChanged models=13 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=025ad7ba-8fd7-4e81-b428-1a883134705b model=claude-haiku-5-5
 RemoteControl State ready
 RemoteControl State connected

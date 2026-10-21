@@ -46,6 +46,9 @@ def redact(line: str, cwd: str) -> str:
         line = line.replace(home, "/HOME")
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
     line = re.sub(r"sk-ant-[A-Za-z0-9_-]+", "sk-ant-REDACTED", line)
+    # The account's organization, named in initialize's answer: a name
+    # that is not an email address would pass the line above.
+    line = re.sub(r'"(organization|orgName)":"(?:[^"\\]|\\.)*"', r'"\1":"Example Org"', line)
     # Remote Control's environment and bridge session ids, also inside URLs.
     line = re.sub(r"\b(env|session|cse)_[A-Za-z0-9]{12,}", r"\1_REDACTED", line)
     return line

@@ -10,9 +10,9 @@ use serde_json::Value;
 use crate::core::text::sanitize;
 use crate::core::transcript::truncate_chars;
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
-    ModelRef, Overage, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
-    PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow,
+    AccountInfo, AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome,
+    ModelInfo, ModelRef, Overage, Parser, PermissionKind, PermissionPolicy, PermissionRequest,
+    PlanEntry, PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow,
     RemoteControl, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
@@ -417,6 +417,10 @@ impl ClaudeParser {
                     };
                     if update != CapsUpdate::default() {
                         out.push(AgentEvent::CapabilitiesChanged(update));
+                    }
+                    let account = initialize_account(answer.get("account").unwrap_or(&Value::Null));
+                    if account != AccountInfo::default() {
+                        out.push(AgentEvent::Account(account));
                     }
                 }
                 if answer
@@ -1421,6 +1425,25 @@ fn todo_write_plan(name: &str, input: &Value) -> Option<AgentEvent> {
         entries,
         explanation: None,
     })
+}
+
+/// `initialize`'s `account`: its plan (`subscriptionType`), how it signs in
+/// (`apiProvider`), its email and organization.
+fn initialize_account(account: &Value) -> AccountInfo {
+    let text = |key: &str| {
+        account
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    AccountInfo {
+        plan: text("subscriptionType"),
+        auth: text("apiProvider"),
+        email: text("email"),
+        organization: text("organization"),
+        credits: None,
+    }
 }
 
 /// A `rate_limit_info` (`rate_limit_event`'s, and claude-agent-acp's

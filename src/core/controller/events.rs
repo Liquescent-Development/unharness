@@ -132,6 +132,7 @@ impl Controller {
                 self.conversation.context.merge(c);
             }
             AgentEvent::RateLimit(r) => self.rate_limit_reported(r),
+            AgentEvent::Account(a) => self.account_reported(a),
             AgentEvent::RewindFailed { reason } => {
                 let name = self.short_name();
                 if self.is_generating {

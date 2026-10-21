@@ -421,3 +421,17 @@ The profile text is unit-tested, and a test in `claude/mod.rs` runs
 macOS job, with plain file writes. Unverified: a confined Claude left
 running past `expiresAt` on a Mac, then a plain `claude` and a new
 session both still signed in.
+
+## Account and rate limits
+
+`initialize`'s answer carries `account`: `email`, `organization`,
+`subscriptionType` (`Claude Max`) and `apiProvider` (`firstParty`;
+`vertex` with only that field, `provider_vertex.jsonl`), read as
+`AgentEvent::Account` for `/status` (2.1.289 to 2.1.302 recordings).
+`record-claude.py` redacts `organization`, which is only redacted by the
+email pattern when it happens to be `<email>'s Organization`.
+
+Each `rate_limit_event`'s `rate_limit_info` has, besides the windows in
+`unifiedWindows` (utilization 0 to 1, `resetsAt` in Unix seconds),
+`overageStatus`, `overageDisabledReason` and `isUsingOverage`; the
+2.1.305 binary also names `overageResetsAt`, not seen in a recording.

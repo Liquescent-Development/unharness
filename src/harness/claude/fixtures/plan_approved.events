@@ -1,6 +1,7 @@
 HookStarted id=7f22de83-2733-4648-b2c9-99238df63f34 SessionStart:startup
 HookEnded id=7f22de83-2733-4648-b2c9-99238df63f34 SessionStart:startup ok ""
 CapabilitiesChanged models=13 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
 SessionStarted id=359bf15b-88b6-4f50-b839-48814c566c72 model=claude-haiku-5-5
 TurnStarted
 Context used=24287 window=-

@@ -949,6 +949,17 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 "resets_at": o.resets_at,
             })),
         }),
+        // Not who the account is: the output may be shared.
+        AgentEvent::Account(a) => json!({
+            "type": "account",
+            "plan": a.plan,
+            "auth": a.auth,
+            "credits": a.credits.as_ref().map(|c| json!({
+                "has_credits": c.has_credits,
+                "unlimited": c.unlimited,
+                "balance": c.balance,
+            })),
+        }),
         AgentEvent::TurnAnchor { id } => json!({"type": "turn_anchor", "id": id}),
         AgentEvent::RewindFailed { reason } => json!({"type": "rewind_failed", "reason": reason}),
         AgentEvent::CapabilitiesChanged(u) => {

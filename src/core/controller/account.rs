@@ -1,16 +1,18 @@
-//! What each harness reported of the account it runs on: its rate limits.
-//! Kept per harness, for this run only: the limits are the account's, not
-//! the conversation's, and soon out of date.
+//! What each harness reported of the account it runs on: who it is, its
+//! plan and its rate limits. Kept per harness, for this run only: it is
+//! the account's, not the conversation's, soon out of date, and names
+//! the user.
 
 use std::collections::HashMap;
 use std::time::SystemTime;
 
 use super::Controller;
-use crate::core::{HarnessId, RateLimitInfo};
+use crate::core::{AccountInfo, HarnessId, RateLimitInfo};
 
 /// What one harness reported of its account.
 #[derive(Debug, Clone, Default)]
 pub struct AccountStatus {
+    pub account: AccountInfo,
     pub rate_limit: Option<RateLimitInfo>,
     /// When `rate_limit` was last reported.
     pub rate_limit_at: Option<SystemTime>,
@@ -64,5 +66,14 @@ impl Controller {
                 .push_notice(format!("rate limit: {}", rate_limit_summary(limit)));
         }
         status.rate_limit_at = Some(SystemTime::now());
+    }
+
+    /// The active harness said what account it runs on.
+    pub(super) fn account_reported(&mut self, a: AccountInfo) {
+        self.accounts
+            .entry(self.active)
+            .or_default()
+            .account
+            .merge(a);
     }
 }
