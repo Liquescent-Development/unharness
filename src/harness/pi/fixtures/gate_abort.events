@@ -10,4 +10,5 @@ Usage in=1131 out=23 cache_read=0 cache_write=0 cost=0.0050 cumulative=false
 Usage in=0 out=0 cache_read=0 cache_write=0 cost=0.0000 cumulative=false
 TurnCompleted Done
 Context used=1159 window=272000
+SessionStats user=1 assistant=2 tools=1 tokens=1154 cost=0.0050
 TurnAnchor id=3ad3a729

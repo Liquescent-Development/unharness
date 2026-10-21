@@ -120,6 +120,8 @@ pub enum AgentEvent {
     RateLimit(RateLimitInfo),
     /// What the harness's CLI said of the account it runs on.
     Account(AccountInfo),
+    /// What the CLI counts of its own session, over all of it.
+    SessionStats(SessionStats),
     /// Vendor id of the user turn the harness just accepted (rewind / fork target).
     TurnAnchor {
         id: String,
@@ -400,6 +402,22 @@ impl AccountInfo {
         self.organization = organization.or(self.organization.take());
         self.credits = credits.or(self.credits.take());
     }
+}
+
+/// A CLI's own count of its session (pi's `get_session_stats`): over all
+/// of the session, so also turns unharness did not see (a session resumed
+/// from elsewhere) and those of the session it was forked from, which
+/// unharness's sum of what each response billed leaves out.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SessionStats {
+    /// The session counted, as the CLI names it.
+    pub session_id: Option<String>,
+    pub user_messages: Option<u64>,
+    pub assistant_messages: Option<u64>,
+    pub tool_calls: Option<u64>,
+    /// Every token, of any kind.
+    pub tokens: Option<u64>,
+    pub cost_usd: Option<f64>,
 }
 
 /// Credits an account can spend past its plan (Codex's).
@@ -948,6 +966,17 @@ impl AgentEvent {
                             )
                         })
                         .unwrap_or_else(|| "-".into())
+                )
+            }
+            AgentEvent::SessionStats(st) => {
+                let n = |v: Option<u64>| v.map_or("-".to_string(), |n| n.to_string());
+                format!(
+                    "SessionStats user={} assistant={} tools={} tokens={} cost={}",
+                    n(st.user_messages),
+                    n(st.assistant_messages),
+                    n(st.tool_calls),
+                    n(st.tokens),
+                    st.cost_usd.map_or("-".to_string(), |c| format!("{c:.4}"))
                 )
             }
             AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),

@@ -8,3 +8,4 @@ TextDelta "pong"
 Usage in=5096 out=22 cache_read=0 cache_write=0 cost=0.0208 cumulative=false
 TurnCompleted Done
 Context used=5118 window=272000
+SessionStats user=1 assistant=1 tools=0 tokens=5118 cost=0.0208

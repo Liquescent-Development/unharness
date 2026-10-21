@@ -512,6 +512,63 @@ fn status_asks_agy_apart_and_shows_its_answer() {
     );
 }
 
+/// pi's own count of its session shows beside unharness's, while that
+/// session is the conversation's.
+#[test]
+fn status_shows_pi_s_own_count_of_its_session() {
+    use crate::core::SessionStats;
+    let mut app = test_app(HarnessId::PI);
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "s1".into(),
+        model: None,
+    });
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s1".into()),
+        user_messages: Some(2),
+        assistant_messages: Some(2),
+        tool_calls: Some(1),
+        tokens: Some(10_236),
+        cost_usd: Some(0.0282),
+    }));
+    let usage = status_section(&app, "Usage");
+    assert!(
+        usage.contains(
+            "pi's count: 10,236 tokens, $0.0282 · 2 prompts, 2 replies, 1 tool call\n: its whole session"
+        ),
+        "{usage}"
+    );
+    // A count of nothing (a turn that failed) is no row.
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        tokens: Some(0),
+        user_messages: Some(0),
+        ..Default::default()
+    }));
+    assert!(!status_section(&app, "Usage").contains("pi's count"));
+    // Another session's count is not this one's, also one that came
+    // after it started.
+    app.on_event(AgentEvent::SessionStarted {
+        session_id: "s2".into(),
+        model: None,
+    });
+    assert!(!status_section(&app, "Usage").contains("pi's count"));
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s1".into()),
+        user_messages: Some(3),
+        tokens: Some(12_000),
+        ..Default::default()
+    }));
+    assert!(!status_section(&app, "Usage").contains("pi's count"));
+    // A cost without its tokens is still said.
+    app.on_event(AgentEvent::SessionStats(SessionStats {
+        session_id: Some("s2".into()),
+        user_messages: Some(1),
+        cost_usd: Some(0.5),
+        ..Default::default()
+    }));
+    let usage = status_section(&app, "Usage");
+    assert!(usage.contains("pi's count: $0.5000 · 1 prompt"), "{usage}");
+}
+
 /// Without an account reported, what the CLI said at startup.
 #[test]
 fn status_falls_back_to_the_sign_in_found_at_startup() {

@@ -26,6 +26,21 @@ replaces windows by label, so a report that names only the window in
 force keeps the others). The 80% notice is given there, once per
 harness each time a window crosses it.
 
+## A CLI's own count
+
+pi answers `get_session_stats` (asked after each turn for its context
+fill) with its count of the session file: `userMessages`,
+`assistantMessages`, `toolCalls`, `tokens.total` and `cost`
+(`AgentEvent::SessionStats`). It is not unharness's sum of what each
+response billed, and is shown beside it under Usage ("pi's count"),
+not in it: a session forked by a rewind holds the turns kept from the
+one it came from, which pi counts again (`fixtures/rewind.jsonl`: after
+the rewind, two prompts and $0.0282, the kept first turn's $0.0205 and
+the new one's), and a session resumed from elsewhere holds turns
+unharness never saw. The controller keeps it with the vendor session
+pi names (`sessionId`), and shows it only while that session is the
+conversation's for pi, also once its CLI is gone; it is not saved.
+
 ## Not saved
 
 The account and its limits are not part of the conversation file: they
@@ -105,6 +120,3 @@ its account (`initialize`).
   `get_status` (marked internal), and `get_usage`'s `extra_usage` and
   `spend`.
 - agy's `/credits` (not answered on the account checked).
-- pi's `get_session_stats` carries the session's token and cost totals;
-  not read, since unharness sums the same per-response usage, and the
-  totals would count a fork's parent turns.

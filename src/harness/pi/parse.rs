@@ -8,7 +8,7 @@ use super::gate;
 
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
-    PermissionRequest, StopReason, Usage, UsageScope,
+    PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
 };
 
 #[derive(Debug, Default)]
@@ -423,6 +423,25 @@ impl PiParser {
                         window: c.get("contextWindow").and_then(Value::as_u64),
                     }));
                 }
+                // Its own count, apart from the per-response usage
+                // unharness sums: it covers the whole session file.
+                if let Some(d) = v
+                    .get("data")
+                    .filter(|d| d.get("tokens").is_some_and(Value::is_object))
+                {
+                    let n = |p: &str| d.pointer(p).and_then(Value::as_u64);
+                    out.push(AgentEvent::SessionStats(SessionStats {
+                        session_id: d
+                            .get("sessionId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        user_messages: n("/userMessages"),
+                        assistant_messages: n("/assistantMessages"),
+                        tool_calls: n("/toolCalls"),
+                        tokens: n("/tokens/total"),
+                        cost_usd: d.get("cost").and_then(Value::as_f64),
+                    }));
+                }
             }
             "get_available_thinking_levels" => {
                 if let Some(levels) = v.pointer("/data/levels").and_then(Value::as_array) {
@@ -498,6 +517,38 @@ fn u(v: &Value, key: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A count without its tokens is no count; one with some fields
+    /// missing keeps the rest, and the session it names.
+    #[test]
+    fn session_stats_take_what_pi_gave() {
+        let stats = |data: &str| {
+            PiParser::new(None)
+                .feed(&format!(
+                    r#"{{"id":"req-4","type":"response","command":"get_session_stats","success":true,"data":{data}}}"#
+                ))
+                .into_iter()
+                .find_map(|e| match e {
+                    AgentEvent::SessionStats(s) => Some(s),
+                    _ => None,
+                })
+        };
+        assert_eq!(stats(r#"{"sessionId":"s1","userMessages":1}"#), None);
+        assert_eq!(stats(r#"{"userMessages":1,"tokens":null}"#), None);
+        let s = stats(r#"{"sessionId":"s1","userMessages":1,"tokens":{"input":5},"cost":0.5}"#)
+            .unwrap();
+        assert_eq!(s.session_id.as_deref(), Some("s1"));
+        assert_eq!(
+            (s.user_messages, s.tokens, s.cost_usd),
+            (Some(1), None, Some(0.5))
+        );
+        assert!(
+            PiParser::new(None)
+                .feed(r#"{"id":"req-4","type":"response","command":"get_session_stats","success":false,"error":"no session"}"#)
+                .iter()
+                .all(|e| !matches!(e, AgentEvent::SessionStats(_)))
+        );
+    }
     use crate::core::testing::{assert_fixture, fixtures_dir, replay};
 
     /// pi reports usage at each `turn_end`, once per model call: a turn

@@ -17,6 +17,7 @@ TextDelta "ED"
 Usage in=224 out=39 cache_read=4992 cache_write=0 cost=0.0037 cumulative=false
 TurnCompleted Done
 Context used=5255 window=272000
+SessionStats user=2 assistant=2 tools=1 tokens=10441 cost=0.0257
 Notice "compacting context…"
 Error "Compaction failed: Nothing to compact (session too small)"
 TurnCompleted Done

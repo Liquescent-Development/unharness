@@ -25,6 +25,19 @@ in the notes that cross harnesses.
   (pi has no MCP client) and [herdr](../../../docs/dev/herdr.md) (pi's herdr
   and A2A extensions).
 
+## The session's own count
+
+`get_session_stats`' other fields (`userMessages`, `assistantMessages`,
+`toolCalls`, `tokens`, `cost`) are read as `AgentEvent::SessionStats`
+and shown under `/status`'s Usage, beside unharness's own sum: they
+count the whole session file, so a session forked by a rewind counts
+the kept turns again (`fixtures/rewind.jsonl`, pi 0.87.1: the
+forked session's first stats are the kept turn's and the new one's).
+Each names its session (`sessionId`, the id `get_state` gave; the forked
+one's after the fork), and is kept with it. `tokens.total` is input,
+output, cache read and cache write; `cost` is in dollars, the sum of its
+responses' `usage.cost.total`. See [status](../../../docs/dev/status.md).
+
 ## Context fill
 
 The window comes with `get_state` at session start; what is used comes

@@ -481,7 +481,10 @@ What each part holds depends on what the harness's CLI tells:
 Elsewhere rate limits arrive with a turn: before the first, `/status`
 says none have yet. They are the account's, so they are not saved with the
 conversation, and a switch shows the other harness's own. `Usage` lists
-the other harnesses of the conversation with what they billed.
+the other harnesses of the conversation with what they billed. For pi it
+also shows pi's own count of its session (`pi's count`: tokens, cost,
+prompts, replies and tool calls), which covers the whole session file,
+so after a rewind it counts again the turns kept from before it.
 
 ## Rendering
 

@@ -6,7 +6,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{App, ListRequest};
-use crate::core::{AccountInfo, HarnessId, RateLimitInfo, RateLimitWindow, Usage};
+use crate::core::{AccountInfo, HarnessId, RateLimitInfo, RateLimitWindow, SessionStats, Usage};
 use crate::tui::modal::Modal;
 
 /// What `/status` shows, section by section.
@@ -374,6 +374,9 @@ impl App {
             StatusRow::new("Last turn", billed(&c.turn_usage)),
             StatusRow::new("Session", billed(&c.session_usage)),
         ];
+        if let Some(st) = self.controller.session_stats(self.controller.active) {
+            rows.extend(session_stats_rows(self.short_name(), st));
+        }
         // The others' in this conversation, as last saved.
         let mut others: Vec<(&HarnessId, &Usage)> = c
             .record
@@ -459,6 +462,52 @@ impl App {
         }
         rows
     }
+}
+
+/// The CLI's own count of its session (pi's): beside unharness's, not in
+/// it, since it covers the turns of the session it was forked from too.
+fn session_stats_rows(name: &str, st: &SessionStats) -> Vec<StatusRow> {
+    // A session that has done nothing yet (a turn that failed) says
+    // nothing worth a row.
+    if [
+        st.user_messages,
+        st.assistant_messages,
+        st.tool_calls,
+        st.tokens,
+    ]
+    .iter()
+    .all(|n| n.unwrap_or(0) == 0)
+    {
+        return Vec::new();
+    }
+    let plural = |n: u64, one: &str, many: &str| {
+        format!("{} {}", grouped(n), if n == 1 { one } else { many })
+    };
+    let mut parts = Vec::new();
+    match (st.tokens, st.cost_usd) {
+        (Some(t), Some(c)) => parts.push(format!("{} tokens, ${c:.4}", grouped(t))),
+        (Some(t), None) => parts.push(format!("{} tokens", grouped(t))),
+        (None, Some(c)) => parts.push(format!("${c:.4}")),
+        (None, None) => {}
+    }
+    let counts: Vec<String> = [
+        st.user_messages.map(|n| plural(n, "prompt", "prompts")),
+        st.assistant_messages.map(|n| plural(n, "reply", "replies")),
+        st.tool_calls.map(|n| plural(n, "tool call", "tool calls")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if !counts.is_empty() {
+        parts.push(counts.join(", "));
+    }
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        StatusRow::new(format!("{name}'s count"), parts.join(" · ")),
+        StatusRow::new("", "its whole session, with any it was forked from").tone(Tone::Dim),
+    ]
 }
 
 /// The rows of a harness's rate limits `r`, reported at `at`.

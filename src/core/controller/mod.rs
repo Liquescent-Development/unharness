@@ -52,7 +52,7 @@ use crate::core::registry::Registry;
 use crate::core::sandbox::{SandboxLevel, SandboxSetup};
 use crate::core::{
     Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef,
-    PermissionPolicy, PolicySupport, ProviderId, Rules, SessionCommand,
+    PermissionPolicy, PolicySupport, ProviderId, Rules, SessionCommand, SessionStats,
 };
 use crate::harness::{Harness, resolve_binary};
 
@@ -323,6 +323,10 @@ pub struct Controller {
     pub(crate) interrupted: Option<(Instant, bool)>,
     /// What each harness reported of its account in this run.
     accounts: Accounts,
+    /// Each harness's own count of its session, with the vendor session it
+    /// is of (`AgentEvent::SessionStats`). Not saved: the CLI says it
+    /// again after the next turn.
+    session_stats: HashMap<HarnessId, (String, SessionStats)>,
     /// What it tracks of the session's events as any front end would. The
     /// TUI drives the subagents at work (`subagent_started`, `_progress`,
     /// `_tool_started`, `_ended`, `clear_subagents`, `awaited`) and its
@@ -449,6 +453,7 @@ impl Controller {
             generation_start: None,
             interrupted: None,
             accounts: Accounts::new(),
+            session_stats: HashMap::new(),
             tracking: Tracking::new(launch.rules),
             queued: VecDeque::new(),
             sending_now: None,
