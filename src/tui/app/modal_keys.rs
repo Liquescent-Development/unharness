@@ -338,7 +338,7 @@ impl App {
                 }
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => Some(None),
                 KeyCode::Char('r') => {
-                    self.controller.query_status();
+                    self.ask_status();
                     None
                 }
                 _ => None,

@@ -34,7 +34,11 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::brain;
-use crate::core::{AgentEvent, Parser, StopReason, SubagentStatus, Usage, UsageScope};
+use crate::core::rate_limits::iso8601_to_unix;
+use crate::core::{
+    AgentEvent, Parser, RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, Usage,
+    UsageScope,
+};
 
 #[derive(Debug, Default)]
 pub struct AgyParser {
@@ -188,6 +192,15 @@ impl AgyParser {
                 self.session(step, &mut out);
                 self.open_turn(&mut out);
                 self.on_step(step, &mut out);
+            }
+            // A print-mode report, which stream-json input refuses:
+            // `--print=/usage`, run apart for `/status` (1.3.6).
+            "command_result" => {
+                if v.pointer("/command/name").and_then(Value::as_str) == Some("usage") {
+                    out.push(AgentEvent::RateLimit(usage_report(
+                        v.pointer("/command/data").unwrap_or(&Value::Null),
+                    )));
+                }
             }
             "result" => {
                 let Some(r) = v.get("result") else {
@@ -377,6 +390,51 @@ fn u(v: &Value, key: &str) -> u64 {
     v.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// `/usage`'s report: models in a group share a quota, one bucket per
+/// window (`weekly`), told as the fraction left and an ISO 8601 reset.
+/// Each bucket is a window, named after its group (`Gemini weekly`).
+fn usage_report(data: &Value) -> RateLimitInfo {
+    let mut windows = Vec::new();
+    for group in data
+        .get("groups")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let name = str_of(group, "name");
+        let name = name
+            .strip_suffix(" Models")
+            .or_else(|| name.strip_suffix(" models"))
+            .unwrap_or(name);
+        for bucket in group
+            .get("buckets")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let window = match str_of(bucket, "window") {
+                "" => str_of(bucket, "name"),
+                w => w,
+            };
+            windows.push(RateLimitWindow {
+                label: format!("{name} {window}").trim().to_string(),
+                used_percent: bucket
+                    .get("remaining_fraction")
+                    .and_then(Value::as_f64)
+                    .map(|left| ((1.0 - left) * 100.0) as f32),
+                resets_at: bucket
+                    .get("reset_time")
+                    .and_then(Value::as_str)
+                    .and_then(iso8601_to_unix),
+            });
+        }
+    }
+    RateLimitInfo {
+        windows,
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,9 +461,39 @@ mod tests {
             "subagent_refused",
             "subagent_wait",
             "subagent_followup",
+            "usage",
         ] {
             assert_fixture(&mut AgyParser::new(None), &fixtures_dir(file!()), case);
         }
+    }
+
+    /// `/usage` tells what is left; a window is read as what is used.
+    #[test]
+    fn usage_reads_each_bucket_as_a_window() {
+        let line = r#"{"event":"command_result","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","window":"weekly","remaining_fraction":0.15,"reset_time":"2026-10-28T04:26:27Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":1}]}]}}}"#;
+        let ev = AgyParser::new(None).feed(line);
+        let [AgentEvent::RateLimit(r)] = ev.as_slice() else {
+            panic!("{ev:?}");
+        };
+        assert_eq!(r.status, None);
+        let w: Vec<(&str, i64, Option<i64>)> = r
+            .windows
+            .iter()
+            .map(|w| {
+                (
+                    w.label.as_str(),
+                    w.used_percent.unwrap().round() as i64,
+                    w.resets_at,
+                )
+            })
+            .collect();
+        assert_eq!(
+            w,
+            [
+                ("Gemini weekly", 85, Some(1_793_161_587)),
+                ("Claude and GPT weekly", 0, None)
+            ]
+        );
     }
 
     #[test]

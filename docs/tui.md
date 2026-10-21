@@ -437,9 +437,9 @@ active harness's session; nothing of it goes into the transcript. It
 follows the session while it is open (a turn's tokens, a reset
 counting down), scrolls with `↑`/`↓`, `PgUp`/`PgDn` or the wheel, and
 closes with `Esc`, `q` or `Enter`. A permission request or a question
-takes its place rather than wait behind it. Claude Code and Codex (on
-app-server) are asked for their limits when it opens, so they show
-before the first turn; `r` asks again.
+takes its place rather than wait behind it. Claude Code, Codex (on
+app-server) and agy are asked for their limits when it opens, so they
+show before the first turn; `r` asks again.
 
 ```
 Session
@@ -473,7 +473,8 @@ What each part holds depends on what the harness's CLI tells:
 |---|---|---|
 | Claude Code | plan, sign-in, email, organization (at start) | each window, with its reset and extra usage, after each request |
 | Codex (app-server) | plan, sign-in (at start), credits | the 5-hour and weekly windows, with their reset, after each request |
-| Codex (`exec`), pi, agy, Mistral Vibe | whether the CLI was signed in when unharness started | not reported |
+| agy | whether the CLI was signed in when unharness started | each model group's weekly quota, with its reset, asked of `agy --print=/usage` when `/status` opens and on `r` |
+| Codex (`exec`), pi, Mistral Vibe | whether the CLI was signed in when unharness started | not reported |
 | claude-agent-acp | (sign-in is checked when its session starts) | as Claude Code's |
 | Other ACP agents | (sign-in is checked when its session starts) | not reported |
 

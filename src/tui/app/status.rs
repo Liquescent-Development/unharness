@@ -5,7 +5,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::App;
+use super::{App, ListRequest};
 use crate::core::{AccountInfo, HarnessId, RateLimitInfo, RateLimitWindow, Usage};
 use crate::tui::modal::Modal;
 
@@ -179,7 +179,15 @@ impl App {
     /// answers that.
     pub(super) fn open_status(&mut self) {
         self.modal = Some(Modal::Status(Default::default()));
-        self.controller.query_status();
+        self.ask_status();
+    }
+
+    /// Ask the active harness's CLI for its account's figures: its session,
+    /// or a run of it for that alone (`Capabilities::status_probe`).
+    pub(super) fn ask_status(&mut self) {
+        if self.controller.query_status() {
+            self.request_list(ListRequest::Status(self.controller.active));
+        }
     }
 
     /// What `/status` shows at `now`.
@@ -425,9 +433,17 @@ impl App {
                     StatusRow::new("", format!("asking {}…", self.display_name())).tone(Tone::Dim),
                 ];
             }
+            // A run of the CLI to ask it said nothing.
+            if let Some(why) = status.and_then(|s| s.failed.as_ref()) {
+                return vec![
+                    StatusRow::new("", format!("could not be asked: {why}")).tone(Tone::Warn),
+                ];
+            }
             // What a harness that reports none sends shows all the same.
             let why = if self.caps().rate_limits {
                 format!("none yet: {} reports them with a turn", self.display_name())
+            } else if self.caps().status_probe {
+                format!("none yet: r asks {}", self.display_name())
             } else {
                 format!("not reported by {}", self.display_name())
             };
@@ -436,6 +452,10 @@ impl App {
         let mut rows = rate_limit_rows(r, at, now);
         if asking {
             rows.push(StatusRow::new("", "refreshing…").tone(Tone::Dim));
+        } else if let Some(why) = status.and_then(|s| s.failed.as_ref()) {
+            rows.push(
+                StatusRow::new("", format!("could not be asked again: {why}")).tone(Tone::Warn),
+            );
         }
         rows
     }

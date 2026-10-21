@@ -123,3 +123,22 @@ recordings: neither `init` nor `result` has one), so with none chosen
 the status line says `google (CLI default)` throughout (#329), and
 `agy --output-format json models` (only `id` and `label`) marks no
 default.
+
+## Usage and quotas
+
+`/status` runs `agy --print=/usage --output-format stream-json` apart
+(`query_usage`), in the session's sandbox: on stream-json input agy
+1.3.6 answers `/usage` with an error result ("is answered by the CLI
+itself and is unavailable with --input-format stream-json; run it as its
+own --print /usage invocation"). The run calls no model and leaves no
+conversation (`conversation_id` empty, `num_turns` 0). Its
+`command_result` lists model groups (`Gemini Models`, `Claude and GPT
+models`), each with buckets of a shared quota (`weekly`,
+`remaining_fraction`, `reset_time` in ISO 8601); recorded with
+`record-agy.py --command /usage` (`fixtures/usage.jsonl`, 1.3.6, an
+unused week: both at 1, the reset a week from the run). Not seen: a
+fraction below 1, a group with more than one bucket. `/credits` answered
+`/credits failed: retrieving credits: no credits info found` on the same
+account, and is not read. Checked live in the TUI on 1.4.3 (agy updated
+itself meanwhile): `/status` before the first prompt showed both weekly
+buckets with their reset, and `r` asked again.

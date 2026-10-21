@@ -7,6 +7,11 @@ prompts. A line on stdin is `{"event":"user","message":{"content":"..."}}`
 (agy 1.2.17 names the missing `event` field when sent anything else).
 
 Usage: scripts/record-agy.py OUT.jsonl [--extra=...] PROMPT [PROMPT...]
+       scripts/record-agy.py OUT.jsonl --command /usage
+
+`--command` records one of print mode's own reports, which agy refuses on
+stream-json input: `agy --print=/usage --output-format stream-json`, as
+unharness's `/status` runs it.
 """
 import argparse
 import json
@@ -34,12 +39,17 @@ def encode(text: str) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("prompts", nargs="+")
+    ap.add_argument("prompts", nargs="*")
     ap.add_argument("--extra", default="")
+    ap.add_argument("--command", help="a print-mode report, e.g. /usage")
     ap.add_argument("--idle-timeout", type=float, default=90.0)
     args = ap.parse_args()
 
     cwd = os.getcwd()
+    if args.command:
+        return record_command(args, cwd)
+    if not args.prompts:
+        ap.error("a prompt is needed without --command")
     # `--print=` (empty value) enables print mode while the prompts arrive on stdin;
     # agy 1.2.x treats `-p --input-format` as a prompt named "--input-format".
     cmd = ["agy", "--print=", "--input-format", "stream-json", "--output-format", "stream-json",
@@ -102,6 +112,22 @@ def main() -> int:
         proc.kill()
     record("# ", f"exit={proc.returncode}")
     out.close()
+    print(f"wrote {args.out} (exit={proc.returncode})")
+    return 0
+
+
+def record_command(args, cwd) -> int:
+    cmd = ["agy", f"--print={args.command}", "--output-format", "stream-json"]
+    cmd += args.extra.split() if args.extra else []
+    proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          timeout=args.idle_timeout)
+    with open(args.out, "w") as out:
+        out.write("# " + " ".join(cmd) + "\n")
+        for line in proc.stdout.splitlines():
+            out.write(redact(line, cwd) + "\n")
+        for line in proc.stderr.splitlines():
+            out.write("!! " + redact(line, cwd) + "\n")
+        out.write(f"# exit={proc.returncode}\n")
     print(f"wrote {args.out} (exit={proc.returncode})")
     return 0
 

@@ -243,6 +243,46 @@ fn status_queries_go_to_a_live_session_and_not_too_often() {
     assert!(!asking(&app));
 }
 
+/// agy's limits are asked of a run of its CLI apart, with no session
+/// and not too often; the answer is its harness's, also after a switch.
+#[test]
+fn a_status_probe_needs_no_session_and_its_answer_stays_with_its_harness() {
+    use crate::core::{RateLimitInfo, RateLimitWindow};
+    let mut app = test_app(HarnessId::AGY);
+    assert!(app.with(|c, _| c.query_status()), "asked with no session");
+    assert!(!app.with(|c, _| c.query_status()), "not again at once");
+    assert!(
+        !app.take_actions()
+            .contains(&Action::Command(crate::core::SessionCommand::QueryStatus))
+    );
+    app.switch_harness(HarnessId::CLAUDE);
+    let limits = RateLimitInfo {
+        windows: vec![RateLimitWindow {
+            label: "Gemini weekly".into(),
+            used_percent: Some(85.0),
+            resets_at: None,
+        }],
+        ..Default::default()
+    };
+    app.with(|c, _| c.status_probed(HarnessId::AGY, Ok(vec![AgentEvent::RateLimit(limits)])));
+    assert!(app.controller.account_status(HarnessId::CLAUDE).is_none());
+    let agy = app.controller.account_status(HarnessId::AGY).unwrap();
+    assert!(!agy.asking());
+    assert_eq!(agy.rate_limit.as_ref().unwrap().windows.len(), 1);
+    assert!(
+        notices(&app)
+            .last()
+            .unwrap()
+            .ends_with("85% of the Gemini weekly limit used"),
+        "{:?}",
+        notices(&app)
+    );
+    app.with(|c, _| c.status_probed(HarnessId::AGY, Err("agy timed out".into())));
+    let agy = app.controller.account_status(HarnessId::AGY).unwrap();
+    assert_eq!(agy.failed.as_deref(), Some("agy timed out"));
+    assert!(agy.rate_limit.is_some(), "what it said before stays");
+}
+
 /// A hook whose end will not come is not left running, nor called failed.
 #[test]
 fn hooks_still_running_end_as_unknown() {

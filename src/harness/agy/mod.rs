@@ -16,13 +16,14 @@ use super::{
     AuthInfo, Harness, HarnessDescriptor, ModelInfo, PrintConfig, Probe, ProviderSource,
     bare_version, probe_version, resolve_binary,
 };
+use crate::core::Parser;
 use crate::core::guard::Guarded;
 use crate::core::process::ProbeProcess;
 use crate::core::sandbox::{Sandbox, SandboxPaths};
 use crate::core::{
-    Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef, PermissionPolicy,
-    PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig, SessionHandle,
-    SubagentSupport,
+    AgentEvent, Capabilities, Choices, HarnessCommand, HarnessId, McpSupport, ModelRef,
+    PermissionPolicy, PolicySupport, ProviderId, RewindSupport, SendNow, SessionConfig,
+    SessionHandle, StopReason, SubagentSupport,
 };
 
 #[derive(Default)]
@@ -147,6 +148,7 @@ impl Harness for AgyHarness {
             context_usage: false,
             rate_limits: false,
             status_query: false,
+            status_probe: true,
             rewind: RewindSupport::default(),
             fork: false,
             // Servers are only read from agy's own config (`agy mcp add`
@@ -217,6 +219,15 @@ impl Harness for AgyHarness {
         sandbox: &Sandbox,
     ) -> Result<Option<Vec<HarnessCommand>>> {
         query_skills(binary, cwd, sandbox)
+    }
+
+    fn query_status(
+        &self,
+        binary: &Path,
+        cwd: &Path,
+        sandbox: &Sandbox,
+    ) -> Result<Vec<AgentEvent>> {
+        query_usage(binary, cwd, sandbox)
     }
 
     fn start_session(&self, cfg: SessionConfig) -> Result<SessionHandle> {
@@ -355,6 +366,42 @@ pub fn query_skills(
         }
     }
     Ok(Some(parse_skills(&lines)))
+}
+
+/// The account's quotas: `agy --print=/usage --output-format
+/// stream-json` (1.3.6), refused on stream-json input, so a process of its
+/// own, in the session's sandbox (it reads agy's configuration, which a
+/// session can write). It answers itself, without a model call.
+pub fn query_usage(binary: &Path, cwd: &Path, sandbox: &Sandbox) -> Result<Vec<AgentEvent>> {
+    let mut cmd = Command::new(binary);
+    cmd.args(["--print=/usage", "--output-format", "stream-json"])
+        .current_dir(cwd);
+    let probe = ProbeProcess::spawn(cmd, sandbox).context("start agy")?;
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    let mut parser = parse::AgyParser::new(None);
+    let mut events = Vec::new();
+    loop {
+        match probe.next_line(deadline) {
+            Ok(line) => events.extend(parser.feed(&line).into_iter().filter_map(|ev| match ev {
+                AgentEvent::RateLimit(_) | AgentEvent::Account(_) => Some(ev),
+                AgentEvent::TurnCompleted {
+                    stop_reason: StopReason::Error(e),
+                } => Some(AgentEvent::Error(e)),
+                _ => None,
+            })),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                anyhow::bail!(
+                    "agy did not report its usage within {}s",
+                    QUERY_TIMEOUT.as_secs()
+                )
+            }
+        }
+    }
+    if let Some(AgentEvent::Error(e)) = events.iter().find(|e| matches!(e, AgentEvent::Error(_))) {
+        anyhow::bail!("{e}");
+    }
+    Ok(events)
 }
 
 fn parse_skills(lines: &[String]) -> Vec<HarnessCommand> {
