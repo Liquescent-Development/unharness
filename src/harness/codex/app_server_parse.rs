@@ -142,6 +142,7 @@ impl CodexAppServerParser {
                 .get("rateLimitReachedType")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            window: None,
             windows: self
                 .rate_primary
                 .iter()

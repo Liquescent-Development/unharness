@@ -79,12 +79,24 @@ fn what_a_session_reports_is_said() {
     assert_eq!(app.controller.effort_label(HarnessId::CLAUDE), None);
 }
 
+/// Claude reports its limits with every API call of a turn; near one,
+/// the user hears of it once per step, by name, not once per event
+/// (#344).
 #[test]
-fn rate_limit_warns_once_when_a_window_runs_high() {
+fn rate_limit_warns_once_per_step_not_per_event() {
     use crate::core::{RateLimitInfo, RateLimitWindow};
     let limit = |pct: f32| {
+        let warning = pct >= 80.0;
         AgentEvent::RateLimit(RateLimitInfo {
-            status: Some("allowed".into()),
+            status: Some(
+                if warning {
+                    "allowed_warning"
+                } else {
+                    "allowed"
+                }
+                .into(),
+            ),
+            window: warning.then(|| "five_hour".into()),
             windows: vec![RateLimitWindow {
                 label: "five_hour".into(),
                 used_percent: Some(pct),
@@ -97,20 +109,22 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
     let base = app.controller.conversation.transcript.blocks.len();
     app.on_event(limit(20.0));
     assert_eq!(app.controller.conversation.transcript.blocks.len(), base);
-    app.on_event(limit(85.0));
-    app.on_event(limit(90.0));
+    for _ in 0..5 {
+        app.on_event(limit(85.0));
+    }
+    app.on_event(limit(86.0));
     assert_eq!(
         app.controller.conversation.transcript.blocks.len(),
         base + 1
     );
     assert_eq!(
-        rate_limit_summary(
-            app.controller
-                .account_status(HarnessId::CLAUDE)
-                .and_then(|s| s.rate_limit.as_ref())
-                .unwrap()
-        ),
-        "five_hour 90% used"
+        notices(&app).last().unwrap(),
+        "Claude Code (claude): 85% of the 5-hour limit used"
+    );
+    app.on_event(limit(90.0));
+    assert_eq!(
+        notices(&app).last().unwrap(),
+        "Claude Code (claude): 90% of the 5-hour limit used"
     );
 }
 

@@ -399,7 +399,7 @@ fn status_breaks_billed_tokens_down() {
     );
     assert_eq!(
         status_section(&app, "Rate limits"),
-        "Status: allowed\nfive hour: █░░░░░░░░░  12% used\n: as of 0s ago"
+        "Status: allowed\n5-hour: █░░░░░░░░░  12% used\n: as of 0s ago"
     );
 }
 

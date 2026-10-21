@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod parser;
 pub mod permissions;
 pub mod process;
+pub mod rate_limits;
 pub mod reaper;
 pub mod registry;
 pub mod rules;

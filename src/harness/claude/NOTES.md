@@ -435,6 +435,12 @@ Each `rate_limit_event`'s `rate_limit_info` has, besides the windows in
 `unifiedWindows` (utilization 0 to 1, `resetsAt` in Unix seconds),
 `overageStatus`, `overageDisabledReason` and `isUsingOverage`; the
 2.1.305 binary also names `overageResetsAt`, not seen in a recording.
+`rateLimitType` names a window always (the one in force when
+`allowed`); it is kept as the window a status other than `allowed` is
+about. Past a warning threshold every event says `allowed_warning`
+(2.1.302, with `utilization` and `surpassedThreshold` beside it, seen
+live in #344, not recorded): the parser adds no notice, the controller
+says it once (`docs/dev/status.md`, Telling the user).
 
 `/status` sends `get_usage` (`{"skip_behaviors": true}`, which spares
 the CLI a scan of a week of transcripts), a control request 2.1.305

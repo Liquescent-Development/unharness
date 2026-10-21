@@ -31,6 +31,7 @@ use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
 use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
+use crate::core::rate_limits;
 use crate::core::rules::Scope;
 use crate::core::text::sanitize;
 use crate::core::transcript::{
@@ -1634,7 +1635,22 @@ fn render_bottom(
         None if !app.caps().context_usage => usage.push_str(" · ctx –"),
         None => {}
     }
-    let left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
+    let mut left2 = Line::from(Span::styled(usage, Style::default().fg(Color::Gray)));
+    // While a window nears its limit or a limit is reached (#344).
+    if let Some((text, stops)) = app
+        .controller
+        .account_status(app.controller.active)
+        .and_then(|s| s.rate_limit.as_ref())
+        .and_then(rate_limits::marker)
+    {
+        left2
+            .spans
+            .push(Span::styled(" · ", Style::default().fg(Color::Gray)));
+        left2.spans.push(Span::styled(
+            text,
+            Style::default().fg(if stops { Color::Red } else { Color::Yellow }),
+        ));
+    }
     let right2 = Line::from(Span::styled(
         app.controller
             .conversation
@@ -5253,6 +5269,41 @@ mod tests {
     }
 
     /// A context figure not known yet is left out of the usage row; one
+    /// A window near its limit shows in the status bar while it is (#344).
+    #[test]
+    fn a_window_near_its_limit_shows_in_the_status_bar() {
+        use crate::core::{AgentEvent, RateLimitInfo, RateLimitWindow};
+        let usage_row = |app: &mut App| {
+            let mut term = Terminal::new(TestBackend::new(120, 30)).unwrap();
+            term.draw(|f| render(f, app)).unwrap();
+            let buf = term.backend().buffer().clone();
+            (0..30)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .find(|row| row.contains("· session "))
+                .expect("a usage row")
+        };
+        let limit = |pct: f32| {
+            AgentEvent::RateLimit(RateLimitInfo {
+                status: Some("allowed".into()),
+                windows: vec![RateLimitWindow {
+                    label: "five_hour".into(),
+                    used_percent: Some(pct),
+                    resets_at: None,
+                }],
+                ..Default::default()
+            })
+        };
+        let mut app = test_app(HarnessId::CLAUDE);
+        app.on_event(limit(40.0));
+        assert!(!usage_row(&mut app).contains("5h"));
+        app.on_event(limit(83.0));
+        assert!(usage_row(&mut app).contains("· 5h 83%"));
+    }
+
     /// the harness never reports is shown missing, as its capabilities
     /// say, also once its session says it lacks them (#313).
     #[test]

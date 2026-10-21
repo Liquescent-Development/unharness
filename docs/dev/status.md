@@ -35,6 +35,31 @@ of `--print`'s `account` event. `record-claude.py` redacts
 `organization`, which the email pattern only caught when it was
 `<email>'s Organization`.
 
+## Telling the user
+
+Parsers only report limits; what the user is told of them is
+`core/rate_limits.rs`'s `LimitWatch`, one per harness in the
+controller's store and one in a `--print` run (#344). Claude sends a
+`rate_limit_event` with every API call of a turn, and from its warning
+threshold on each says `allowed_warning`: a notice per event was a
+flood. `LimitWatch` says a window once at 80%, again at 90% and 95%,
+and after the window started over (its reset moved later by more than
+ten minutes, or its use fell below 80%); Claude's `allowed_warning`
+naming a window below 80% (`rateLimitType`, kept as
+`RateLimitInfo::window` when the status is not `allowed`) is said once.
+A limit reached (`RateLimitInfo::reached`: a status other than
+`allowed` and `allowed_warning`, or a window at 100%) is said once, as
+an error unless extra usage covers it (`overage_covers`: Claude's
+`isUsingOverage` or `overageStatus` `allowed`). Codex's
+`rateLimitReachedType` values (0.162.1's schema: `rate_limit_reached`,
+`workspace_{owner,member}_{credits_depleted,usage_limit_reached}`) name
+no window: the one used most is taken, and the `workspace_` ones are
+said in their words. Reset times are on the local clock
+(`localtime_r`). The usage line shows `marker`, the window nearest its
+limit, while there is one. No recording has `allowed_warning`,
+`rejected` or a reached Codex limit; the shapes are 2.1.302's, seen
+live (#344), and the schema's.
+
 ## Asking
 
 Rate limits otherwise come with a turn. Where a CLI can be asked
@@ -63,5 +88,3 @@ its account (`initialize`).
 - pi's `get_session_stats` carries the session's token and cost totals;
   not read, since unharness sums the same per-response usage, and the
   totals would count a fork's parent turns.
-- #344: Claude's per-event `rate limit: <status>` notice still floods
-  the transcript; the per-harness store is where its warning belongs.

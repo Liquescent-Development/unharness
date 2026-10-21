@@ -278,10 +278,46 @@ pub struct RateLimitWindow {
     pub resets_at: Option<i64>,
 }
 
+impl RateLimitWindow {
+    /// The window in words: `5-hour`, `weekly`, `weekly opus`.
+    pub fn name(&self) -> String {
+        self.named("-hour", "weekly")
+    }
+
+    /// The window in the status line: `5h`, `7d`, `7d opus`.
+    pub fn short_name(&self) -> String {
+        self.named("h", "7d")
+    }
+
+    fn named(&self, hours: &str, week: &str) -> String {
+        let label = self.label.as_str();
+        if label == "five_hour" {
+            return format!("5{hours}");
+        }
+        if let Some(rest) = label.strip_prefix("seven_day") {
+            return format!("{week}{}", rest.replace('_', " "));
+        }
+        // Codex's, from the window's length: `5h`, `7d`, `90m`.
+        let (n, unit) = label.split_at(label.len().saturating_sub(1));
+        match (n.parse::<u32>(), unit) {
+            (Ok(7), "d") => week.to_string(),
+            (Ok(n), "h") => format!("{n}{hours}"),
+            (Ok(n), "d") if hours == "h" => format!("{n}d"),
+            (Ok(n), "d") => format!("{n}-day"),
+            (Ok(n), "m") if hours == "h" => format!("{n}m"),
+            (Ok(n), "m") => format!("{n}-minute"),
+            _ => label.replace('_', " "),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RateLimitInfo {
     /// Vendor status string when one is reported (`allowed`, `rejected`...).
     pub status: Option<String>,
+    /// The window `status` is about, when it is not `allowed` and the
+    /// vendor names one (Claude's `rateLimitType`).
+    pub window: Option<String>,
     pub windows: Vec<RateLimitWindow>,
     /// Which of the account's limits this is, where it has several
     /// (Codex's `limitId`).
@@ -298,6 +334,7 @@ impl RateLimitInfo {
     pub fn merge(&mut self, newer: RateLimitInfo) {
         if newer.status.is_some() {
             self.status = newer.status;
+            self.window = newer.window;
         }
         if newer.limit.is_some() {
             self.limit = newer.limit;
@@ -311,6 +348,26 @@ impl RateLimitInfo {
                 None => self.windows.push(w),
             }
         }
+    }
+
+    /// Whether a limit stops use: a status other than Claude's `allowed`
+    /// and `allowed_warning` (Claude's `rejected`, Codex's
+    /// `rateLimitReachedType`), or a window used up.
+    pub fn reached(&self) -> bool {
+        self.status
+            .as_deref()
+            .is_some_and(|s| s != "allowed" && s != "allowed_warning")
+            || self
+                .windows
+                .iter()
+                .any(|w| w.used_percent.is_some_and(|p| p >= 100.0))
+    }
+
+    /// Whether paid use past the limits goes on where they are reached.
+    pub fn overage_covers(&self) -> bool {
+        self.overage
+            .as_ref()
+            .is_some_and(|o| o.in_use || o.status.as_deref() == Some("allowed"))
     }
 }
 
@@ -833,7 +890,14 @@ impl AgentEvent {
                     .unwrap_or_else(|| "-".into())
             ),
             AgentEvent::RateLimit(r) => {
-                let mut parts = vec![format!("status={}", r.status.as_deref().unwrap_or("-"))];
+                let mut parts = vec![format!(
+                    "status={}{}",
+                    r.status.as_deref().unwrap_or("-"),
+                    r.window
+                        .as_deref()
+                        .map(|w| format!("({w})"))
+                        .unwrap_or_default()
+                )];
                 if let Some(limit) = &r.limit {
                     parts.push(format!("limit={limit}"));
                 }
@@ -1021,6 +1085,28 @@ mod tests {
         assert_eq!(r.status.as_deref(), Some("allowed_warning"));
         assert_eq!(r.limit.as_deref(), Some("codex"));
         assert_eq!(r.windows.len(), 3);
+    }
+
+    #[test]
+    fn rate_limit_windows_are_named_in_words() {
+        let names = |label: &str| {
+            let w = RateLimitWindow {
+                label: label.into(),
+                used_percent: None,
+                resets_at: None,
+            };
+            (w.name(), w.short_name())
+        };
+        assert_eq!(names("five_hour"), ("5-hour".into(), "5h".into()));
+        assert_eq!(names("seven_day"), ("weekly".into(), "7d".into()));
+        assert_eq!(
+            names("seven_day_opus"),
+            ("weekly opus".into(), "7d opus".into())
+        );
+        assert_eq!(names("5h"), ("5-hour".into(), "5h".into()));
+        assert_eq!(names("7d"), ("weekly".into(), "7d".into()));
+        assert_eq!(names("30d"), ("30-day".into(), "30d".into()));
+        assert_eq!(names("limit"), ("limit".into(), "limit".into()));
     }
 
     #[test]

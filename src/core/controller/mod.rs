@@ -75,7 +75,7 @@ mod switch;
 mod tracking;
 mod turn;
 
-pub use account::{AccountStatus, Accounts, rate_limit_summary};
+pub use account::{AccountStatus, Accounts};
 pub use choices::{Choice, ChoiceState, PendingChoice, Route, SessionNow, subagents_refusal};
 pub use conversation::{ConversationState, Keeping};
 pub use front::{Front, PlanAsk, PolicyAsk};
