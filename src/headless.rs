@@ -265,9 +265,25 @@ impl<O: Write, E: Write> Headless<O, E> {
                 Access::Read => ("reading", "readable"),
             };
             let name = self.name.clone();
+            let what = match &b.entry {
+                Some(entry) => format!(
+                    "removing or renaming {}, which changes {}",
+                    entry.display(),
+                    b.path.display()
+                ),
+                None => format!("{doing} {}", b.path.display()),
+            };
+            if !b.grantable {
+                self.warn(format!(
+                    "the sandbox kept {name} from {what}: it cannot be allowed, since {} holds \
+                     unharness's own settings; --sandbox off runs without the sandbox",
+                    b.grant().display()
+                ));
+                continue;
+            }
             self.warn(format!(
-                "the sandbox kept {name} from {doing} {}: to allow it, add it to [sandbox] {key} \
-                 in the config, or grant it with /sandbox allow in the TUI",
+                "the sandbox kept {name} from {what}: to allow it, add {} to [sandbox] {key} in \
+                 the config, or grant it with /sandbox allow in the TUI",
                 b.path.display()
             ));
         }

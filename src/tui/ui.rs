@@ -1305,16 +1305,15 @@ fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
 fn grant_lines(app: &App, d: &GrantDraft, width: usize) -> Vec<Line<'static>> {
     let gray = Style::default().fg(Color::Gray);
     let name = app.short_name();
-    let (verb, doing, outside) = match d.access {
-        Access::Write => ("write", "writing", "which is outside the sandbox"),
-        Access::Read => ("read", "reading", "which the sandbox hides"),
+    let (verb, doing) = match d.access {
+        Access::Write => ("write", "writing"),
+        Access::Read => ("read", "reading"),
     };
     let mut lines = vec![Line::default()];
-    if d.blocked {
-        let asked = d.asked.as_deref().unwrap_or(&d.path);
+    if let Some(b) = &d.blocked {
         lines.extend(wrap_prefixed_text(
             "  ",
-            &format!("{name} tried to {verb} {}, {outside}.", sanitize(asked)),
+            &sanitize(&b.describe(name)),
             width,
             Style::default(),
         ));
@@ -1399,7 +1398,7 @@ fn grant_lines(app: &App, d: &GrantDraft, width: usize) -> Vec<Line<'static>> {
     lines.push(Line::default());
     let keys: &[&str] = if d.editing {
         &["  Type the path · Enter or Esc when done"]
-    } else if d.blocked {
+    } else if d.blocked.is_some() {
         &[
             "  ↑/↓ select · Enter allow and retry · a allow only",
             "  e edit path · Esc don't allow",

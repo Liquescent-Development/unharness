@@ -74,6 +74,13 @@ tested), a user-enabled Claude Code sandbox inside ours, agy's own
   `blocked` keeps one only if all three hold: the profile leaves it
   out, `access(2)` says unharness could reach it, and it is not
   unharness's own.
+- **Removal and rename.** Landlock checks a removal or rename against
+  the parent directory. So when a refused path is writable itself but
+  its parent is not, the parent is what was blocked (`Blocked::entry`).
+  It is only reported, not offered (`Blocked::grantable`), when what
+  would be granted is in or around unharness's own directories, such as
+  the home directory (conversation 161a2ad9: `rmdir ~/testing` after
+  `~/testing` was granted).
 - **Offering.** The controller tells each path once a run, and offers
   it when the turn ends (`Front::offer_grant`). `--print` says it on
   stderr instead.

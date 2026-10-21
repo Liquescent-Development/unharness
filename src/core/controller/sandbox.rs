@@ -346,15 +346,18 @@ impl Controller {
             if !self.sandbox_told.insert(b.clone()) {
                 continue;
             }
-            let verb = match b.access {
-                Access::Write => "write",
-                Access::Read => "read",
-            };
+            if !b.grantable {
+                self.conversation.transcript.push_notice(format!(
+                    "Sandbox: {} It can't be allowed: {} holds unharness's own settings. \
+                     /sandbox off turns the sandbox off.",
+                    b.describe(self.short_name()),
+                    tilde(&b.grant())
+                ));
+                continue;
+            }
             self.conversation.transcript.push_notice(format!(
-                "Sandbox: {} tried to {verb} {}, which is outside the sandbox. You can \
-                 allow it when the turn ends.",
-                self.short_name(),
-                tilde(&b.path)
+                "Sandbox: {} You can allow it when the turn ends.",
+                b.describe(self.short_name())
             ));
             self.sandbox_blocked.push(b);
         }
@@ -407,6 +410,15 @@ impl Controller {
     /// Why granting `path` reaches beyond what the sandbox is for, if it
     /// does (`sandbox::grants::grant_risk`).
     pub fn grant_risk(&self, path: &Path, access: Access) -> Option<String> {
+        let env = sandbox::SandboxEnv::current();
+        if env
+            .protected
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .any(|p| p.starts_with(path) || path.starts_with(&p))
+        {
+            return Some("It holds unharness's own settings, so it can't be allowed.".into());
+        }
         let workspace = self.workspace_root.as_deref().unwrap_or(&self.cwd);
         let guarded: Vec<PathBuf> = self
             .harness()
@@ -417,7 +429,7 @@ impl Controller {
         sandbox::grants::grant_risk(
             path,
             access,
-            &sandbox::SandboxEnv::current(),
+            &env,
             &sandbox::grants::search_path(),
             &guarded,
         )

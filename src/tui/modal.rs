@@ -224,9 +224,9 @@ pub struct GrantDraft {
     pub scopes: ListPicker<GrantScope>,
     /// What was asked for, when `path` is not it.
     pub asked: Option<String>,
-    /// The sandbox kept a call from it: the agent can be asked to try
-    /// again once it is granted.
-    pub blocked: bool,
+    /// What the sandbox kept a call from, when that is why it is offered:
+    /// the agent can be asked to try again once it is granted.
+    pub blocked: Option<Blocked>,
     /// Keys edit the path.
     pub editing: bool,
 }
@@ -244,7 +244,7 @@ impl GrantDraft {
             access,
             scopes: ListPicker::new(GrantScope::all(has_workspace)),
             asked: (!same).then(|| tilde(asked)),
-            blocked: false,
+            blocked: None,
             editing: false,
         }
     }
@@ -257,7 +257,7 @@ impl GrantDraft {
     /// The draft for what the sandbox kept a call from.
     pub fn offered(blocked: &Blocked, has_workspace: bool) -> Self {
         GrantDraft {
-            blocked: true,
+            blocked: Some(blocked.clone()),
             ..Self::new(&blocked.path, blocked.access, has_workspace)
         }
     }

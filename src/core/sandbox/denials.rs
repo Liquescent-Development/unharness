@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use super::grants::{propose, tilde};
 use super::{Access, SandboxProfile, canonical, expand_home};
 
 /// A path the sandbox kept a tool call from.
@@ -20,6 +21,44 @@ pub struct Blocked {
     /// for (a file or directory not made yet).
     pub path: PathBuf,
     pub access: Access,
+    /// The path in `path` the call removed or renamed, when that is what
+    /// the sandbox refused: Landlock checks such a change against the
+    /// directory it is made in, so a granted path cannot be removed
+    /// unless its parent is writable too.
+    pub entry: Option<PathBuf>,
+    /// It can be allowed: what would be granted for it
+    /// (`grants::propose`) is not in or around unharness's own
+    /// directories. Removing a directory made in the home directory, or
+    /// writing a file there, cannot be: the home directory holds them.
+    pub grantable: bool,
+}
+
+impl Blocked {
+    /// What would be granted for it, which unharness's own directories
+    /// are in when it cannot be.
+    pub fn grant(&self) -> PathBuf {
+        propose(&self.path, self.access)
+            .map(|(p, _)| p)
+            .unwrap_or_else(|| self.path.clone())
+    }
+
+    /// What `name` tried, in a sentence for the user.
+    pub fn describe(&self, name: &str) -> String {
+        let path = tilde(&self.path);
+        match (&self.entry, self.access) {
+            (Some(entry), _) => format!(
+                "{name} tried to remove or rename {}. That changes {path}, which is outside \
+                 the sandbox.",
+                tilde(entry)
+            ),
+            (None, Access::Write) => {
+                format!("{name} tried to write {path}, which is outside the sandbox.")
+            }
+            (None, Access::Read) => {
+                format!("{name} tried to read {path}, which the sandbox hides.")
+            }
+        }
+    }
 }
 
 /// How each CLI's tools say a path could not be reached, in lowercase.
@@ -182,15 +221,43 @@ pub fn blocked(
             continue;
         }
         let readable = profile.allow_read.iter().any(|a| path.starts_with(a));
+        let writable = |p: &Path| profile.writable.iter().any(|w| p.starts_with(w));
+        let parent = path.parent().map(Path::to_path_buf);
         let found = if !readable && profile.deny_read.iter().any(|d| path.starts_with(d)) {
-            (existing == path && may(&path, Access::Read)).then_some(Access::Read)
-        } else if !profile.writable.iter().any(|w| path.starts_with(w)) {
-            may(&existing, Access::Write).then_some(Access::Write)
+            (existing == path && may(&path, Access::Read)).then_some(Blocked {
+                path,
+                access: Access::Read,
+                entry: None,
+                grantable: true,
+            })
+        } else if !writable(&path) {
+            may(&existing, Access::Write).then_some(Blocked {
+                path,
+                access: Access::Write,
+                entry: None,
+                grantable: true,
+            })
+        } else if let Some(parent) = parent
+            && existing == path
+            && !writable(&parent)
+        {
+            // Writable itself, and there: what was refused is removing or
+            // renaming it, a change to the directory it is in.
+            may(&parent, Access::Write).then_some(Blocked {
+                path: parent,
+                access: Access::Write,
+                entry: Some(path),
+                grantable: true,
+            })
         } else {
             None
         };
-        if let Some(access) = found {
-            let b = Blocked { path, access };
+        if let Some(mut b) = found {
+            let grant = b.grant();
+            b.grantable = !profile
+                .protected
+                .iter()
+                .any(|p| p.starts_with(&grant) || grant.starts_with(p));
             if !out.contains(&b) {
                 out.push(b);
             }
@@ -338,6 +405,52 @@ mod tests {
         );
     }
 
+    /// `rmdir ~/testing` after `~/testing` was granted: removing it is a
+    /// change to `~`, which the grant does not reach (conversation
+    /// 161a2ad9, Claude Code 2.1.306).
+    #[test]
+    fn removing_a_granted_path_is_blocked_at_its_parent() {
+        let mut w = world();
+        let home = w.root.join("home");
+        w.profile.writable.push(home.join("data"));
+        let input = json!({"command": format!("rmdir {}", home.join("data").display())});
+        let output = format!(
+            "rmdir: failed to remove '{}': Permission denied",
+            home.join("data").display()
+        );
+        let found = blocked(
+            &candidates(&input, &output, false),
+            &w.profile,
+            &w.root.join("ws"),
+            Some(&home),
+            |_: &Path, _| true,
+        );
+        assert_eq!(
+            found,
+            vec![Blocked {
+                path: home.clone(),
+                access: Access::Write,
+                entry: Some(home.join("data")),
+                grantable: true,
+            }]
+        );
+        // Inside it, a refused write is not the sandbox's.
+        let output = format!(
+            "touch: cannot touch '{}': Permission denied",
+            home.join("data/x").display()
+        );
+        assert!(
+            blocked(
+                &candidates(&Value::Null, &output, true),
+                &w.profile,
+                &w.root.join("ws"),
+                Some(&home),
+                |_: &Path, _| true,
+            )
+            .is_empty()
+        );
+    }
+
     struct World {
         _tmp: tempfile::TempDir,
         root: PathBuf,
@@ -389,6 +502,8 @@ mod tests {
             vec![Blocked {
                 path: p,
                 access: Access::Write,
+                entry: None,
+                grantable: true,
             }]
         };
         assert_eq!(
@@ -400,7 +515,20 @@ mod tests {
             check("~/.aws/config"),
             vec![Blocked {
                 path: w.root.join("home/.aws/config"),
-                access: Access::Read
+                access: Access::Read,
+                entry: None,
+                grantable: true,
+            }]
+        );
+        // The workspace cannot be removed either, and the directory it is
+        // in holds unharness's state: it cannot be allowed.
+        assert_eq!(
+            check("../ws"),
+            vec![Blocked {
+                path: w.root.clone(),
+                access: Access::Write,
+                entry: Some(w.root.join("ws")),
+                grantable: false,
             }]
         );
         // Writable already, not the user's to write, unharness's own,

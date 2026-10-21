@@ -86,6 +86,13 @@ doesn't exist yet, the dialog offers that directory and creates it, empty,
 when you allow it. For a new file in a directory that exists, it offers
 the directory.
 
+Removing or renaming a path changes the directory it is in, so allowing
+`~/testing` lets the agent work inside it but not remove `~/testing`
+itself. When that is refused, the offer is for the directory above it.
+Your home directory can never be allowed, because it holds unharness's
+own settings. So removing a folder made directly in it, or writing a
+file there, is only reported, with `/sandbox off` as the way to do it.
+
 The dialog warns, in red, when a grant would let what runs in the sandbox
 act outside it later:
 

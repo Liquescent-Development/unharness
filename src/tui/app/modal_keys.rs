@@ -116,9 +116,9 @@ impl App {
                     self.grant_path(&d.path),
                     d.access,
                     d.scope(),
-                    d.blocked,
+                    d.blocked.is_some(),
                 ))),
-                KeyCode::Char('a') if d.blocked => Some(Some(ModalChoice::Grant(
+                KeyCode::Char('a') if d.blocked.is_some() => Some(Some(ModalChoice::Grant(
                     self.grant_path(&d.path),
                     d.access,
                     d.scope(),

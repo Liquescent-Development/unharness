@@ -233,7 +233,7 @@ fn a_write_the_sandbox_refused_is_offered_when_the_turn_ends() {
     let Some(Modal::SandboxGrant(d)) = &app.modal else {
         panic!("not offered: {:?}", app.modal);
     };
-    assert!(d.blocked);
+    assert!(d.blocked.is_some());
     // A new file in a directory that exists: the directory.
     assert_eq!(d.path, data.display().to_string());
     assert_eq!(d.asked, Some(target.display().to_string()));
@@ -352,4 +352,81 @@ fn a_refused_path_can_be_allowed_without_a_retry() {
     app.handle_modal_key(key(KeyCode::Char('a')));
     assert!(writable(&app).contains(&data));
     assert_eq!(app.take_actions(), [Action::Shutdown]);
+}
+
+/// `rmdir` of a path granted on its own is a change to the directory
+/// it is in: that is offered, named as what it is (conversation
+/// 161a2ad9).
+#[test]
+fn removing_a_granted_path_offers_its_parent() {
+    let (_tmp, mut app, data) = granting_app();
+    let sub = data.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    assert!(app.grant_sandbox(&sub, Access::Write, GrantScope::Run));
+    app.submit_prompt("remove it".into());
+    app.take_actions();
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::ToolCallStarted {
+        id: "rm".into(),
+        name: "Bash".into(),
+        input: serde_json::json!({"command": format!("rmdir {}", sub.display())}),
+    });
+    app.on_event(AgentEvent::ToolCallResult {
+        id: "rm".into(),
+        output: format!(
+            "rmdir: failed to remove '{}': Permission denied",
+            sub.display()
+        ),
+        is_error: false,
+    });
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    let Some(Modal::SandboxGrant(d)) = &app.modal else {
+        panic!("not offered: {:?}", app.modal);
+    };
+    assert_eq!(d.path, data.display().to_string());
+    let said = d.blocked.as_ref().unwrap().describe("Claude");
+    assert!(
+        said.starts_with("Claude tried to remove or rename"),
+        "{said}"
+    );
+    app.handle_modal_key(key(KeyCode::Enter));
+    assert!(writable(&app).contains(&data));
+}
+
+/// Removing a path made in a directory that holds unharness's own state
+/// (the home directory, on the machine) cannot be allowed: it is said,
+/// and nothing is offered.
+#[test]
+fn what_cannot_be_allowed_is_said_and_not_offered() {
+    let (tmp, mut app, data) = granting_app();
+    // unharness's state, as it is there on the machine.
+    std::fs::create_dir(tmp.path().join("state")).unwrap();
+    assert!(app.grant_sandbox(&data, Access::Write, GrantScope::Run));
+    app.submit_prompt("remove it".into());
+    app.take_actions();
+    app.controller.session_alive = true;
+    app.on_event(AgentEvent::ToolCallResult {
+        id: "rm".into(),
+        output: format!(
+            "rmdir: failed to remove '{}': Permission denied",
+            data.display()
+        ),
+        is_error: true,
+    });
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+    assert!(app.modal.is_none(), "{:?}", app.modal);
+    let root = tmp.path().canonicalize().unwrap();
+    let said = format!("{:?}", app.controller.conversation.transcript.blocks);
+    assert!(said.contains("tried to remove or rename"), "{said}");
+    assert!(
+        said.contains(&format!(
+            "{} holds unharness's own settings",
+            root.display()
+        )),
+        "{said}"
+    );
 }
