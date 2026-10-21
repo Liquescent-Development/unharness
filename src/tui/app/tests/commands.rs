@@ -56,6 +56,10 @@ fn app_with_claude_commands() -> TestApp {
             },
             command("model", None),
             command("Deploy", None),
+            HarnessCommand {
+                aliases: vec!["cost".into(), "stats".into()],
+                ..command("usage", None)
+            },
         ]),
         ..Default::default()
     }));
@@ -130,6 +134,16 @@ fn unharness_s_own_command_wins_unless_escaped() {
     assert_eq!(said[2], "/new is Claude's own command: passed on");
     assert!(said[3].starts_with("unharness does not see what Claude's /new changes"));
     assert!(said[3].ends_with("(unharness's /clear starts a new conversation)"));
+    app.on_event(AgentEvent::TurnCompleted {
+        stop_reason: StopReason::Done,
+    });
+
+    // Claude's `/usage` under another name only shows something, as
+    // unharness's does: nothing to warn about.
+    app.handle_slash_command("/cost");
+    assert_eq!(app.take_actions(), vec![Action::turn("/cost")]);
+    let said = notices(&app);
+    assert_eq!(said[4..], ["/cost is Claude's own command: passed on"]);
 }
 
 /// A `/` prompt queued for one harness is not sent to another, where

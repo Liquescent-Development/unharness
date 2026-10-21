@@ -82,6 +82,18 @@ pub(super) const BASE_COMMANDS: &[(&str, &str)] = &[
 /// Names `handle_slash_command` answers to that the list leaves out.
 const HIDDEN_ALIASES: &[&str] = &["/sessions", "/exit", "/rc"];
 
+/// unharness's own commands that only show something: a harness's
+/// command of the same name or alias changes nothing unharness keeps.
+const READ_ONLY: &[&str] = &[
+    "/status",
+    "/usage",
+    "/help",
+    "/conversations",
+    "/sessions",
+    "/skills",
+    "/allow",
+];
+
 /// Whether `/name` is one of unharness's own commands on some harness
 /// (`App::owns_command` says whether on the active one).
 fn is_own_command(name: &str) -> bool {
@@ -379,8 +391,10 @@ impl App {
                 }
             });
         // One that does what one of unharness's does changes the session
-        // behind unharness's back.
-        if self.owns_command(name) || listed.as_deref().is_some_and(|l| self.owns_command(l)) {
+        // behind unharness's back, unless that one only shows something
+        // (Claude's /cost and /stats are its /usage).
+        let changes = |c: &str| self.owns_command(c) && !READ_ONLY.contains(&c);
+        if changes(name) || listed.as_deref().is_some_and(changes) {
             let clears = name == "/clear" || listed.as_deref() == Some("/clear");
             self.controller.conversation.transcript.push_notice(format!(
                 "unharness does not see what {harness}'s {name} changes: the model, \
