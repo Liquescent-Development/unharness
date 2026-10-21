@@ -460,3 +460,13 @@ and `spend`; `subscription_type` is `max` where `initialize` says
 answer under an API key, Bedrock or Vertex, and the branch that answers
 "get_usage is not supported in this context" (an error answer to one of
 ours turns `status_query` off for the session, without an error shown).
+
+Sandbox denials (`fixtures/sandbox_denied.jsonl`, 2.1.306, recorded under a
+Landlock ruleset like unharness's workspace-write). Each result is
+`is_error`:
+- Write: `EACCES: permission denied, mkdir '<dir>'`, the directory it
+  could not make.
+- Bash in zsh, three shapes:
+  - `touch: cannot touch '<p>': Permission denied`;
+  - `mkdir: Permission denied`, with no path;
+  - `(eval):1: permission denied: <p>` for a redirection.

@@ -1555,6 +1555,14 @@ mod tests {
         assert_fixture(&mut ClaudeParser::new(), &fixtures_dir(file!()), case);
     }
 
+    /// Writes the sandbox refused (2.1.306, under a Landlock ruleset like
+    /// unharness's): the Write tool's `EACCES`, and `touch`, `mkdir` and a
+    /// redirection in zsh, each in its own words.
+    #[test]
+    fn fixture_sandbox_denied() {
+        fixture("sandbox_denied");
+    }
+
     #[test]
     fn fixture_write_denied_auto_mode() {
         fixture("write_denied");

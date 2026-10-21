@@ -1098,6 +1098,18 @@ mod tests {
         );
     }
 
+    /// Writes the sandbox refused (0.162.1, under a Landlock ruleset like
+    /// unharness's, Codex's own sandbox off): a failed file change carries
+    /// no words, only its path; commands carry their output.
+    #[test]
+    fn fixture_app_server_sandbox_denied() {
+        assert_fixture(
+            &mut CodexAppServerParser::new(),
+            &fixtures_dir(file!()),
+            "app_server_sandbox_denied",
+        );
+    }
+
     #[test]
     fn fixture_app_server_mcp_server() {
         assert_fixture(
