@@ -92,7 +92,7 @@ change, so ignore what you do not know. Absent values are `null`.
 | `permission_withdrawn` | `id` of a `permission_request` the harness stopped waiting for (its turn was interrupted, or a hook answered it) |
 | `usage` | `input`, `output`, `cache_read`, `cache_write`, `cost_usd`, `cumulative` (whether the numbers are session totals rather than this turn's), `scope`: what the numbers cover, `turn` (the whole turn), `request` (one model request; a turn may report several, each to add) or `session` (when `cumulative`) |
 | `context` | `used`, `window` (tokens) |
-| `rate_limit` | `status`, `windows`: [{`label`, `used_percent`, `resets_at` (Unix seconds)}] |
+| `rate_limit` | `status`, `windows`: [{`label`, `used_percent`, `resets_at` (Unix seconds)}], `limit` (which of the account's limits, or null), `overage`: {`status`, `in_use`, `disabled_reason`, `resets_at`} or null |
 | `plan_updated` | `entries`: [{`text`, `status`: `pending`, `in_progress` or `completed`}], `explanation` |
 | `subagent_started` | `id`, `description`, `kind` |
 | `subagent_progress` | `id`, `activity` |

@@ -17,7 +17,7 @@ ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "\", \"content\": \"h
 ToolCallDelta id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write "\"}"
 ToolCallStarted id=toolu_013a1yYJFYShRFQFVWxvHdKQ name=Write input={"content":"hello","file_path":"/WORKSPACE/spike3.txt"}
 PermissionRequest id=5a656780-8efd-44dc-b6bb-fbbdc3aba39f ToolUse Write [edit /WORKSPACE/spike3.txt]
-RateLimit status=allowed five_hour=29% seven_day=4%
+RateLimit status=allowed five_hour=29%@1791004800 seven_day=4%@1791266400 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_013a1yYJFYShRFQFVWxvHdKQ error=false "File created successfully at: /WORKSPACE/spike3.txt (file..."
 Context used=26217 window=-
 TextDelta "created"

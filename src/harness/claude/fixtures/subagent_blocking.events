@@ -19,11 +19,11 @@ ToolCallDelta id=toolu_015kPfBpiyWzySgur2GqQe3L name=Agent "\", \"run_in_backgro
 ToolCallDelta id=toolu_015kPfBpiyWzySgur2GqQe3L name=Agent "}"
 ToolCallStarted id=toolu_015kPfBpiyWzySgur2GqQe3L name=Agent input={"description":"Read a.txt and report the word","prompt":...
 SubagentStarted id=toolu_015kPfBpiyWzySgur2GqQe3L kind=Explore "Read a.txt and report the word"
-RateLimit status=allowed five_hour=36% seven_day=28%
+RateLimit status=allowed five_hour=36%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 SubagentProgress id=toolu_015kPfBpiyWzySgur2GqQe3L "Reading a.txt"
 Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L ToolCallStarted id=toolu_012WrkCw9UgHdS1ESGW7DcBc name=Read input={"file_path":"/WORKSPACE/a.txt"}
 Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L ToolCallResult id=toolu_012WrkCw9UgHdS1ESGW7DcBc error=false "1\talpha\\n2\t"
-RateLimit status=allowed five_hour=37% seven_day=28%
+RateLimit status=allowed five_hour=37%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Sub parent=toolu_015kPfBpiyWzySgur2GqQe3L TextDelta "alpha"
 SubagentEnded id=toolu_015kPfBpiyWzySgur2GqQe3L completed -
 SubagentEnded id=toolu_015kPfBpiyWzySgur2GqQe3L completed "alpha"

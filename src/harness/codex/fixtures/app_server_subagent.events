@@ -21,23 +21,23 @@ ToolCallResult id=call_URyJHIfE1qLHUv0iwNSS9Xii error=false ""
 Usage in=4007 out=84 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=4007 out=84 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=16251 window=258400
-RateLimit status=- 7d=2%
+RateLimit status=- 7d=2%@1791589030
 ToolCallStarted id=call_TaH7ivh31FQjsjvq5pUXTuzA name=agent:wait input=null
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii ToolCallStarted id=exec-7e9f57ca-924c-47e7-8d4d-5fabcea47ed1 name=shell input={"command":"/usr/bin/zsh -lc 'cat a.txt'","cwd":"/WORKSPA...
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii PermissionRequest id=0 ToolUse shell [shell "cat a.txt"]
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii ToolCallResult id=exec-7e9f57ca-924c-47e7-8d4d-5fabcea47ed1 error=false "alpha\\n"
-RateLimit status=- 7d=2%
+RateLimit status=- 7d=2%@1791589030
 Sub parent=call_URyJHIfE1qLHUv0iwNSS9Xii TextDelta "alpha"
-RateLimit status=- 7d=2%
+RateLimit status=- 7d=2%@1791589030
 SubagentEnded id=call_URyJHIfE1qLHUv0iwNSS9Xii completed "alpha"
 ToolCallResult id=call_TaH7ivh31FQjsjvq5pUXTuzA error=false ""
 Usage in=272 out=21 cache_read=16000 cache_write=0 cost=- cumulative=false
 Usage in=4279 out=105 cache_read=28160 cache_write=0 cost=- cumulative=true
 Context used=16293 window=258400
-RateLimit status=- 7d=2%
+RateLimit status=- 7d=2%@1791589030
 TextDelta "alpha"
 Usage in=225 out=5 cache_read=16128 cache_write=0 cost=- cumulative=false
 Usage in=4504 out=110 cache_read=44288 cache_write=0 cost=- cumulative=true
 Context used=16358 window=258400
-RateLimit status=- 7d=2%
+RateLimit status=- 7d=2%@1791589030
 TurnCompleted Done

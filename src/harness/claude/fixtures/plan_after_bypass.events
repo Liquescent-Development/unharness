@@ -12,7 +12,7 @@ ToolCallDelta id=toolu_016oxXbAQXXCL6YTJmwpbai9 name=Write "\"}"
 ToolCallStarted id=toolu_016oxXbAQXXCL6YTJmwpbai9 name=Write input={"content":"x","file_path":"/WORKSPACE/notes.txt"}
 PermissionRequest id=b776a7e8-7548-4671-9a9b-a8549e94b173 ToolUse Write [edit /WORKSPACE/notes.txt]
 ToolCallResult id=toolu_016oxXbAQXXCL6YTJmwpbai9 error=true "recording: denied by user"
-RateLimit status=allowed five_hour=6% seven_day=29%
+RateLimit status=allowed five_hour=6%@1791601200 seven_day=29%@1791871200 overage=rejected(org_level_disabled)
 Context used=26874 window=-
 TextDelta "The Write call"
 TextDelta " was blocked. The"

@@ -14,7 +14,7 @@ ToolCallStarted id=toolu_01K167S33QkBRizKyd9mdHP5 name=Bash input={"command":"rm
 HookStarted id=992b2a88-6980-4ac0-b13b-e1b3c4259ba9 PreToolUse:Bash
 HookEnded id=992b2a88-6980-4ac0-b13b-e1b3c4259ba9 PreToolUse:Bash blocked "rm is off limits"
 ToolCallResult id=toolu_01K167S33QkBRizKyd9mdHP5 error=true "PreToolUse:Bash hook error: rm is off limits"
-RateLimit status=allowed five_hour=28% seven_day=4%
+RateLimit status=allowed five_hour=28%@1791336600 seven_day=4%@1791871200 overage=rejected(org_level_disabled)
 Context used=26398 window=-
 TextDelta "The"
 TextDelta " `"

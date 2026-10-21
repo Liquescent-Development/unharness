@@ -15,10 +15,10 @@ ToolCallResult id=exec-dfc761bb-847a-4467-8e97-0be730e702a1 error=false " /WORKS
 Usage in=2269 out=157 cache_read=12160 cache_write=0 cost=- cumulative=false
 Usage in=2269 out=157 cache_read=12160 cache_write=0 cost=- cumulative=true
 Context used=14586 window=258400
-RateLimit status=- 7d=10%
+RateLimit status=- 7d=10%@1791589030
 TextDelta "done"
 Usage in=402 out=5 cache_read=14208 cache_write=0 cost=- cumulative=false
 Usage in=2671 out=162 cache_read=26368 cache_write=0 cost=- cumulative=true
 Context used=14615 window=258400
-RateLimit status=- 7d=10%
+RateLimit status=- 7d=10%@1791589030
 TurnCompleted Done

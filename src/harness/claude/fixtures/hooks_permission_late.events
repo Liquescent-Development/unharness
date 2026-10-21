@@ -27,7 +27,7 @@ PermissionRequest id=e332436c-b244-442e-a98e-3bfb65ade317 ToolUse Write [edit /W
 HookStarted id=68c676e7-0dde-4106-80e7-258a0dcb06df PermissionRequest:Write
 HookEnded id=68c676e7-0dde-4106-80e7-258a0dcb06df PermissionRequest:Write ok "said deny after the request was answered: writes are revi..."
 ToolCallResult id=toolu_01JD8LKo3eRdS7AjjWuJkkT4 error=false "File created successfully at: /WORKSPACE/note.txt (file s..."
-RateLimit status=allowed five_hour=42% seven_day=6%
+RateLimit status=allowed five_hour=42%@1791336600 seven_day=6%@1791871200 overage=rejected(org_level_disabled)
 Context used=26517 window=-
 TextDelta "Done"
 TextDelta ":"

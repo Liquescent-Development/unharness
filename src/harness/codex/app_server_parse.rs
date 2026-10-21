@@ -427,6 +427,7 @@ impl CodexAppServerParser {
                         .chain(self.rate_secondary.iter())
                         .cloned()
                         .collect(),
+                    ..Default::default()
                 }));
             }
             "turn/completed" => {

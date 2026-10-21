@@ -116,7 +116,7 @@ ToolCallDelta id=toolu_01EsBP1icbThnCXZrYsiF4GY name=AskUserQuestion "}"
 ToolCallStarted id=toolu_01EsBP1icbThnCXZrYsiF4GY name=AskUserQuestion input={"questions":[{"header":"Greeting","multiSelect":false,"o...
 PermissionRequest id=4cff9388-5ee8-4a99-a76a-c3977ecac093 Question n=3 [Greeting: Friendly+preview|Professional+preview] [Tone: Conversational+preview|Technical] [Sections multi: Installation|API Reference|Examples]
 ToolCallResult id=toolu_01EsBP1icbThnCXZrYsiF4GY error=false "Your questions have been answered: \"Which greeting would ..."
-RateLimit status=allowed five_hour=2% seven_day=0%
+RateLimit status=allowed five_hour=2%@1791317400 seven_day=0%@1791871200 overage=rejected(org_level_disabled)
 Context used=27359 window=-
 TextDelta "done"
 Usage in=18 out=1277 cache_read=37693 cache_write=12533 cost=0.0352 cumulative=false

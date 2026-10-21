@@ -7,7 +7,7 @@ ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "&& echo first-"
 ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "ok"
 ToolCallDelta id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash "\"}"
 ToolCallStarted id=toolu_01DhRpdfjN9hS7rNRNxLtizb name=Bash input={"command":"sleep 4 && echo first-ok"}
-RateLimit status=allowed five_hour=40% seven_day=20%
+RateLimit status=allowed five_hour=40%@1791074400 seven_day=20%@1791266400 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_01DhRpdfjN9hS7rNRNxLtizb error=false "first-ok"
 Context used=22895 window=-
 TextDelta "done"

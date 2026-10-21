@@ -281,6 +281,47 @@ pub struct RateLimitInfo {
     /// Vendor status string when one is reported (`allowed`, `rejected`...).
     pub status: Option<String>,
     pub windows: Vec<RateLimitWindow>,
+    /// Which of the account's limits this is, where it has several
+    /// (Codex's `limitId`).
+    pub limit: Option<String>,
+    /// What may be used past the limits, where the vendor says.
+    pub overage: Option<Overage>,
+}
+
+impl RateLimitInfo {
+    /// Take what `newer` reports: its status, overage and limit when it
+    /// has them, and each of its windows in place of the one of that
+    /// label. A window it does not mention stays (a report that names only
+    /// the window in force).
+    pub fn merge(&mut self, newer: RateLimitInfo) {
+        if newer.status.is_some() {
+            self.status = newer.status;
+        }
+        if newer.limit.is_some() {
+            self.limit = newer.limit;
+        }
+        if newer.overage.is_some() {
+            self.overage = newer.overage;
+        }
+        for w in newer.windows {
+            match self.windows.iter_mut().find(|o| o.label == w.label) {
+                Some(old) => *old = w,
+                None => self.windows.push(w),
+            }
+        }
+    }
+}
+
+/// Use past the rate limits, paid apart (Claude's "extra usage").
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Overage {
+    /// Vendor status string (`allowed`, `rejected`...).
+    pub status: Option<String>,
+    pub in_use: bool,
+    /// Why it cannot be used, when it cannot.
+    pub disabled_reason: Option<String>,
+    /// Unix seconds.
+    pub resets_at: Option<i64>,
 }
 
 /// A partial capability update; `None` leaves the declared value alone.
@@ -744,21 +785,36 @@ impl AgentEvent {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".into())
             ),
-            AgentEvent::RateLimit(r) => format!(
-                "RateLimit status={} {}",
-                r.status.as_deref().unwrap_or("-"),
-                r.windows
-                    .iter()
-                    .map(|w| format!(
-                        "{}={}",
+            AgentEvent::RateLimit(r) => {
+                let mut parts = vec![format!("status={}", r.status.as_deref().unwrap_or("-"))];
+                if let Some(limit) = &r.limit {
+                    parts.push(format!("limit={limit}"));
+                }
+                parts.extend(r.windows.iter().map(|w| {
+                    format!(
+                        "{}={}@{}",
                         w.label,
                         w.used_percent
                             .map(|p| format!("{p:.0}%"))
-                            .unwrap_or_else(|| "?".into())
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ),
+                            .unwrap_or_else(|| "?".into()),
+                        w.resets_at
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "-".into())
+                    )
+                }));
+                if let Some(o) = &r.overage {
+                    parts.push(format!(
+                        "overage={}{}{}",
+                        o.status.as_deref().unwrap_or("-"),
+                        if o.in_use { ",in_use" } else { "" },
+                        o.disabled_reason
+                            .as_deref()
+                            .map(|d| format!("({d})"))
+                            .unwrap_or_default()
+                    ));
+                }
+                format!("RateLimit {}", parts.join(" "))
+            }
             AgentEvent::TurnAnchor { id } => format!("TurnAnchor id={id}"),
             AgentEvent::RewindFailed { reason } => format!("RewindFailed {:?}", short(reason)),
             AgentEvent::CapabilitiesChanged(u) => {
@@ -859,6 +915,38 @@ mod tests {
         assert_eq!(PlanStatus::parse("in_progress"), PlanStatus::InProgress);
         assert_eq!(PlanStatus::parse("completed"), PlanStatus::Completed);
         assert_eq!(PlanStatus::parse("whatever"), PlanStatus::Pending);
+    }
+
+    #[test]
+    fn rate_limit_merge_replaces_windows_by_label() {
+        let window = |label: &str, pct: f32| RateLimitWindow {
+            label: label.into(),
+            used_percent: Some(pct),
+            resets_at: None,
+        };
+        let mut r = RateLimitInfo {
+            status: Some("allowed".into()),
+            windows: vec![window("five_hour", 10.0), window("seven_day", 40.0)],
+            ..Default::default()
+        };
+        r.merge(RateLimitInfo {
+            status: Some("allowed_warning".into()),
+            windows: vec![window("five_hour", 90.0)],
+            ..Default::default()
+        });
+        assert_eq!(r.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(
+            r.windows,
+            [window("five_hour", 90.0), window("seven_day", 40.0)]
+        );
+        r.merge(RateLimitInfo {
+            windows: vec![window("seven_day_opus", 5.0)],
+            limit: Some("codex".into()),
+            ..Default::default()
+        });
+        assert_eq!(r.status.as_deref(), Some("allowed_warning"));
+        assert_eq!(r.limit.as_deref(), Some("codex"));
+        assert_eq!(r.windows.len(), 3);
     }
 
     #[test]

@@ -34,7 +34,7 @@ ToolCallDelta id=toolu_016XXTUH47M2RjLTyAC5Laqq name=Agent "\"}"
 ToolCallStarted id=toolu_016XXTUH47M2RjLTyAC5Laqq name=Agent input={"description":"Outer agent","prompt":"Use the Agent tool...
 SubagentStarted id=toolu_016XXTUH47M2RjLTyAC5Laqq kind=general-purpose "Outer agent"
 ToolCallResult id=toolu_016XXTUH47M2RjLTyAC5Laqq error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=7% seven_day=2%
+RateLimit status=allowed five_hour=7%@1791336600 seven_day=2%@1791871200 overage=rejected(org_level_disabled)
 Context used=27740 window=-
 TextDelta "launched"
 Usage in=18 out=909 cache_read=38018 cache_write=12818 cost=0.0340 cumulative=false

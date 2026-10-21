@@ -340,6 +340,7 @@ fn usage_breaks_billed_tokens_down() {
             used_percent: Some(12.0),
             resets_at: None,
         }],
+        ..Default::default()
     }));
     assert_eq!(
         usage_text(&mut app),

@@ -28,11 +28,11 @@ ToolCallDelta id=toolu_0166sF8rxDHi8Y2LSdkGyyyi name=Agent "\"}"
 ToolCallStarted id=toolu_0166sF8rxDHi8Y2LSdkGyyyi name=Agent input={"description":"Read a.txt twice and report the word","pr...
 SubagentStarted id=toolu_0166sF8rxDHi8Y2LSdkGyyyi kind=flaky "Read a.txt twice and report the word"
 ToolCallResult id=toolu_0166sF8rxDHi8Y2LSdkGyyyi error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=36% seven_day=28%
+RateLimit status=allowed five_hour=36%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Context used=23186 window=-
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallStarted id=toolu_01Wa52PEMF5zN9rjYbBUQyuU name=Read input={"file_path":"/WORKSPACE/a.txt"}
 SubagentProgress id=toolu_0166sF8rxDHi8Y2LSdkGyyyi "Reading a.txt"
-RateLimit status=allowed five_hour=37% seven_day=28%
+RateLimit status=allowed five_hour=37%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Sub parent=toolu_0166sF8rxDHi8Y2LSdkGyyyi ToolCallResult id=toolu_01Wa52PEMF5zN9rjYbBUQyuU error=false "1\talpha\\n2\t"
 SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed -
 SubagentEnded id=toolu_0166sF8rxDHi8Y2LSdkGyyyi completed "NOTE: this agent stopped at its 1-turn limit before finis..."

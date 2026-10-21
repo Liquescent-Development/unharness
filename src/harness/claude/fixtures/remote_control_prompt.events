@@ -7,7 +7,7 @@ RemoteControl State connected
 TurnStarted
 Context used=22674 window=-
 TextDelta "ready"
-RateLimit status=allowed five_hour=5% seven_day=33%
+RateLimit status=allowed five_hour=5%@1791673200 seven_day=33%@1791871200 overage=rejected(org_level_disabled)
 Usage in=2 out=4 cache_read=15261 cache_write=7411 cost=0.0016 cumulative=false
 Context used=- window=1000000
 TurnCompleted Done
@@ -15,7 +15,7 @@ RemotePrompt "Reply with the single word: pong"
 TurnStarted
 Context used=29300 window=-
 TextDelta "pong"
-RateLimit status=allowed five_hour=6% seven_day=33%
+RateLimit status=allowed five_hour=6%@1791673200 seven_day=33%@1791871200 overage=rejected(org_level_disabled)
 Usage in=2 out=69 cache_read=15261 cache_write=14037 cost=0.0030 cumulative=false
 Context used=- window=1000000
 TurnCompleted Done

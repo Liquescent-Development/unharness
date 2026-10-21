@@ -13,7 +13,7 @@ ToolCallDelta id=toolu_01BMct1iGFXvDB3y4jeLCDGq name=Bash "\", \"description\": 
 ToolCallDelta id=toolu_01BMct1iGFXvDB3y4jeLCDGq name=Bash "et.py"
 ToolCallDelta id=toolu_01BMct1iGFXvDB3y4jeLCDGq name=Bash "\"}"
 ToolCallStarted id=toolu_01BMct1iGFXvDB3y4jeLCDGq name=Bash input={"command":"find /WORKSPACE -name greet.py -not -path '*/...
-RateLimit status=allowed five_hour=7% seven_day=30%
+RateLimit status=allowed five_hour=7%@1791601200 seven_day=30%@1791871200 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_01BMct1iGFXvDB3y4jeLCDGq error=false "/WORKSPACE/greet.py"
 Context used=30216 window=-
 ToolCallDelta id=toolu_015Xq8mJ71rBFZ8JBE2uH2Sn name=Read "{\"file_path\": \"/WORKSPACE"

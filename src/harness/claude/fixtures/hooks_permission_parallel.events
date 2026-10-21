@@ -26,7 +26,7 @@ HookStarted id=25d67bec-ec3c-420e-bf08-f1a8a7d30fff PermissionRequest:Write
 HookEnded id=25d67bec-ec3c-420e-bf08-f1a8a7d30fff PermissionRequest:Write blocked "writes are reviewed by hand here"
 PermissionWithdrawn id=7cd7d5f6-69f6-4fda-afed-0e7e88e91457
 ToolCallResult id=toolu_01HjSeynJPm7fiaYRQwrhWW6 error=true "writes are reviewed by hand here"
-RateLimit status=allowed five_hour=54% seven_day=7%
+RateLimit status=allowed five_hour=54%@1791336600 seven_day=7%@1791871200 overage=rejected(org_level_disabled)
 Context used=26495 window=-
 TextDelta "Writes submitted"
 TextDelta " for"

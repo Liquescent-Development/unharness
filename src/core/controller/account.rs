@@ -50,17 +50,19 @@ impl Controller {
         self.accounts.get(&harness)
     }
 
-    /// The active harness reported its rate limits: the user is warned
+    /// The active harness reported its rate limits, merged into what it
+    /// reported before ([`RateLimitInfo::merge`]): the user is warned
     /// once each time one of its windows crosses the threshold.
     pub(super) fn rate_limit_reported(&mut self, r: RateLimitInfo) {
         let status = self.accounts.entry(self.active).or_default();
         let was_high = status.rate_limit.as_ref().is_some_and(rate_limit_high);
-        if !was_high && rate_limit_high(&r) {
+        let limit = status.rate_limit.get_or_insert_default();
+        limit.merge(r);
+        if !was_high && rate_limit_high(limit) {
             self.conversation
                 .transcript
-                .push_notice(format!("rate limit: {}", rate_limit_summary(&r)));
+                .push_notice(format!("rate limit: {}", rate_limit_summary(limit)));
         }
-        status.rate_limit = Some(r);
         status.rate_limit_at = Some(SystemTime::now());
     }
 }

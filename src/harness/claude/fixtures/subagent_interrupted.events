@@ -17,7 +17,7 @@ ToolCallDelta id=toolu_01RKmBXAa5erAtZPgpsevAFF name=Agent "\"}"
 ToolCallStarted id=toolu_01RKmBXAa5erAtZPgpsevAFF name=Agent input={"description":"Sleep 60 seconds then read a.txt","prompt...
 SubagentStarted id=toolu_01RKmBXAa5erAtZPgpsevAFF kind=general-purpose "Sleep 60 seconds then read a.txt"
 ToolCallResult id=toolu_01RKmBXAa5erAtZPgpsevAFF error=false "Async agent launched successfully. (This tool result is i..."
-RateLimit status=allowed five_hour=39% seven_day=28%
+RateLimit status=allowed five_hour=39%@1791094200 seven_day=28%@1791266400 overage=rejected(org_level_disabled)
 Context used=23147 window=-
 TextDelta "Agent"
 TextDelta " launched"

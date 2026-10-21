@@ -30,7 +30,7 @@ pub use caps::{
     PolicySupport, PolicyUnavailable, RewindSupport, SendNow, SubagentSupport, resolve_policy,
 };
 pub use event::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HookOutcome, PermissionDecision,
+    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HookOutcome, Overage, PermissionDecision,
     PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption,
     RateLimitInfo, RateLimitWindow, RemoteControl, StopReason, SubagentStatus, Usage, UsageScope,
 };

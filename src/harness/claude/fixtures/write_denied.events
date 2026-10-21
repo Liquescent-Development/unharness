@@ -17,7 +17,7 @@ ToolCallDelta id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write "\"}"
 ToolCallStarted id=toolu_01NWbUzXmddzNpqwyaHRv714 name=Write input={"content":"hello","file_path":"/WORKSPACE/spike.txt"}
 Notice "Claude denied Write: Claude requested permissions to writ..."
 ToolCallResult id=toolu_01NWbUzXmddzNpqwyaHRv714 error=true "Claude requested permissions to write to /WORKSPACE/spike..."
-RateLimit status=allowed five_hour=28% seven_day=4%
+RateLimit status=allowed five_hour=28%@1791004800 seven_day=4%@1791266400 overage=rejected(org_level_disabled)
 Context used=25484 window=-
 TextDelta "created"
 Usage in=18 out=491 cache_read=39576 cache_write=7661 cost=0.0218 cumulative=false

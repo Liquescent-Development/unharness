@@ -11,9 +11,9 @@ use crate::core::text::sanitize;
 use crate::core::transcript::truncate_chars;
 use crate::core::{
     AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome, ModelInfo,
-    ModelRef, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus,
-    ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow, RemoteControl,
-    StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
+    ModelRef, Overage, Parser, PermissionKind, PermissionPolicy, PermissionRequest, PlanEntry,
+    PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow,
+    RemoteControl, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// The policy of one of Claude's permission modes, as `system` `status`
@@ -434,18 +434,12 @@ impl ClaudeParser {
                 }
             }
             "rate_limit_event" => {
-                let info = val.get("rate_limit_info").unwrap_or(&Value::Null);
-                let status = info
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("allowed");
+                let info = rate_limit_info(val.get("rate_limit_info").unwrap_or(&Value::Null));
+                let status = info.status.as_deref().unwrap_or("allowed");
                 if status != "allowed" {
                     out.push(AgentEvent::Notice(format!("rate limit: {status}")));
                 }
-                out.push(AgentEvent::RateLimit(RateLimitInfo {
-                    status: Some(status.to_string()),
-                    windows: rate_limit_windows(info),
-                }));
+                out.push(AgentEvent::RateLimit(info));
             }
             _ => {}
         }
@@ -1427,6 +1421,25 @@ fn todo_write_plan(name: &str, input: &Value) -> Option<AgentEvent> {
         entries,
         explanation: None,
     })
+}
+
+/// A `rate_limit_info` (`rate_limit_event`'s, and claude-agent-acp's
+/// `_claude/rateLimit`): its status (`allowed` when it says none), its
+/// windows and what may be used past them.
+pub(crate) fn rate_limit_info(info: &Value) -> RateLimitInfo {
+    let text = |key: &str| info.get(key).and_then(Value::as_str).map(str::to_string);
+    let overage = Overage {
+        status: text("overageStatus"),
+        in_use: info.get("isUsingOverage").and_then(Value::as_bool) == Some(true),
+        disabled_reason: text("overageDisabledReason"),
+        resets_at: info.get("overageResetsAt").and_then(Value::as_i64),
+    };
+    RateLimitInfo {
+        status: Some(text("status").unwrap_or_else(|| "allowed".into())),
+        windows: rate_limit_windows(info),
+        limit: None,
+        overage: (overage != Overage::default()).then_some(overage),
+    }
 }
 
 /// `unifiedWindows` lists every window; older builds only report the active one.

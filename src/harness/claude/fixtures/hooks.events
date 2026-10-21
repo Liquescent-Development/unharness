@@ -40,7 +40,7 @@ ToolCallStarted id=toolu_015pAsabN9vnsJatcauhW7nR name=Write input={"content":"h
 PermissionRequest id=ebea8532-416b-45aa-ac61-fbcf826ca9bc ToolUse Write [edit /WORKSPACE/note.txt]
 HookStarted id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write
 HookEnded id=d9e29056-2a78-4d1f-94c6-24e9ffc53f77 PostToolUse:Write failed "post-write-failed"
-RateLimit status=allowed five_hour=28% seven_day=4%
+RateLimit status=allowed five_hour=28%@1791336600 seven_day=4%@1791871200 overage=rejected(org_level_disabled)
 ToolCallResult id=toolu_015pAsabN9vnsJatcauhW7nR error=false "File created successfully at: /WORKSPACE/note.txt (file s..."
 Context used=26760 window=-
 TextDelta "The"

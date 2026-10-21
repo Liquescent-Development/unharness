@@ -941,6 +941,13 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 "used_percent": w.used_percent,
                 "resets_at": w.resets_at,
             })).collect::<Vec<_>>(),
+            "limit": r.limit,
+            "overage": r.overage.as_ref().map(|o| json!({
+                "status": o.status,
+                "in_use": o.in_use,
+                "disabled_reason": o.disabled_reason,
+                "resets_at": o.resets_at,
+            })),
         }),
         AgentEvent::TurnAnchor { id } => json!({"type": "turn_anchor", "id": id}),
         AgentEvent::RewindFailed { reason } => json!({"type": "rewind_failed", "reason": reason}),

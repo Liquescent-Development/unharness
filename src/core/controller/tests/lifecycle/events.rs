@@ -90,6 +90,7 @@ fn rate_limit_warns_once_when_a_window_runs_high() {
                 used_percent: Some(pct),
                 resets_at: None,
             }],
+            ..Default::default()
         })
     };
     let mut app = test_app(HarnessId::CLAUDE);
@@ -126,6 +127,7 @@ fn rate_limits_stay_with_the_harness_that_reported_them() {
                 used_percent: Some(pct),
                 resets_at: None,
             }],
+            ..Default::default()
         })
     };
     let mut app = test_app(HarnessId::CLAUDE);

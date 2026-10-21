@@ -7,7 +7,7 @@ RemoteControl State connected
 TurnStarted
 Context used=22272 window=-
 TextDelta "ready"
-RateLimit status=allowed five_hour=2% seven_day=33%
+RateLimit status=allowed five_hour=2%@1791673200 seven_day=33%@1791871200 overage=rejected(org_level_disabled)
 Usage in=2 out=4 cache_read=12443 cache_write=9827 cost=0.0021 cumulative=false
 Context used=- window=1000000
 TurnCompleted Done
@@ -19,7 +19,7 @@ ToolCallDelta id=toolu_01MzBW5kTiQ6PfrTvePQKJEj name=Write "\", \"content\": \"H
 ToolCallDelta id=toolu_01MzBW5kTiQ6PfrTvePQKJEj name=Write "\"}"
 ToolCallStarted id=toolu_01MzBW5kTiQ6PfrTvePQKJEj name=Write input={"content":"Hello world\n","file_path":"/WORKSPACE/hello....
 PermissionRequest id=9c00fa46-60eb-4cc1-a0eb-5ce8464745db ToolUse Write [edit /WORKSPACE/hello.txt]
-RateLimit status=allowed five_hour=4% seven_day=33%
+RateLimit status=allowed five_hour=4%@1791673200 seven_day=33%@1791871200 overage=rejected(org_level_disabled)
 PermissionWithdrawn id=9c00fa46-60eb-4cc1-a0eb-5ce8464745db
 ToolCallResult id=toolu_01MzBW5kTiQ6PfrTvePQKJEj error=false "File created successfully at: /WORKSPACE/hello.txt (file ..."
 Context used=29148 window=-
