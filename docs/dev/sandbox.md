@@ -40,3 +40,43 @@ which is why those files are watched and not write-protected.
 Unverified: the macOS backend (`seatbelt.rs`; only the profile text is
 tested), a user-enabled Claude Code sandbox inside ours, agy's own
 `--sandbox` flag (off unless given), the ACP presets' state directories, `--no-tui` passthrough under the sandbox.
+
+## Grants from the TUI
+
+`/sandbox allow <path>` and `allow-read <path>` widen the profile.
+- **Where a grant lives.** One for the run is a `Grant` in
+  `SandboxSetup::grants`, read by `runner::session_sandbox` beside
+  `[sandbox].writable` and `readable`. A read grant lifts a `deny_read`
+  entry of the same path, as a workspace's `readable` does.
+- **Saved grants.** One saved is added to the workspace's or the global
+  settings file by `Config::add_sandbox_path` (`toml_edit`, written
+  atomically, a link stays one). It is added only once the global and
+  workspace files, merged as a launch merges them, still make a sandbox,
+  so the next run starts.
+- **Restart.** A grant restarts the session at once, or at the end of the
+  running turn (`Controller::sandbox_restart_due`). Landlock rules are set
+  at `pre_exec` and cannot be widened afterwards.
+- **What the dialog offers.** It offers what exists (`grants::grant_target`).
+  It flags what would act outside the sandbox later (`grants::grant_risk`):
+  shell startup files, `$PATH`, login items, git hooks, the harness's
+  `guarded` files and credentials.
+- **unharness's own directories.** `profile()` refuses a writable path
+  inside unharness's own config or state directory, not only one around
+  it. Before grants it took `[sandbox].writable =
+  ["~/.config/unharness/workspaces"]`.
+- **Noticing a block** (`sandbox::denials`). No CLI says "sandbox":
+  each says "permission denied" in its own words. The shapes are
+  recorded under a Landlock ruleset like unharness's (`setpriv
+  --landlock-*` inside the bwrap recording setup) in each harness's
+  `fixtures/*sandbox_denied.jsonl`. `candidates` reads paths from three
+  places: the error lines (quoted, or absolute words), the input's
+  `*path` keys, and a command's words when the error names none.
+  `blocked` keeps one only if all three hold: the profile leaves it
+  out, `access(2)` says unharness could reach it, and it is not
+  unharness's own.
+- **Offering.** The controller tells each path once a run, and offers
+  it when the turn ends (`Front::offer_grant`). `--print` says it on
+  stderr instead.
+- **What is proposed.** `grants::propose` offers the path, or the first
+  missing directory above it, made when it is granted, or for a new file
+  the existing directory it goes in.

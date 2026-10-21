@@ -2,7 +2,7 @@
 
 use super::App;
 use crate::core::rules::Scope;
-use crate::core::sandbox::SandboxLevel;
+use crate::core::sandbox::{Access, SandboxLevel};
 use crate::core::{PermissionPolicy, ProviderId};
 
 pub(super) const BASE_COMMANDS: &[(&str, &str)] = &[
@@ -16,7 +16,10 @@ pub(super) const BASE_COMMANDS: &[(&str, &str)] = &[
     ("/effort", "Open the reasoning effort picker"),
     ("/think", "Alias for /effort"),
     ("/policy", "Open the permission policy picker"),
-    ("/sandbox", "Open the sandbox level picker"),
+    (
+        "/sandbox",
+        "Sandbox level picker; /sandbox allow <path>, allow-read <path>, paths",
+    ),
     (
         "/resume",
         "Resume a saved conversation (all harnesses in it)",
@@ -167,6 +170,19 @@ impl App {
                 None => self.open_policy_picker(),
             },
             "/sandbox" => match arg {
+                Some(a) if a == "allow" || a == "allow-read" => {
+                    let access = if a == "allow" {
+                        Access::Write
+                    } else {
+                        Access::Read
+                    };
+                    let path = rest.strip_prefix(a.as_str()).unwrap_or("").trim();
+                    self.open_sandbox_grant(path, access);
+                }
+                Some(a) if a == "paths" => {
+                    let report = self.controller.sandbox_report();
+                    self.controller.conversation.transcript.push_system(report);
+                }
                 Some(a) => match SandboxLevel::parse(&a) {
                     Some(l) => {
                         self.set_sandbox(l);

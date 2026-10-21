@@ -16,6 +16,7 @@ use crate::core::controller::Action;
 use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
+use crate::core::sandbox::denials::Blocked;
 use crate::core::transcript::Transcript;
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef, Parser,
@@ -49,6 +50,8 @@ enum Shown {
     Request(String),
     /// The policy picker.
     Policy,
+    /// The offer to grant a path the sandbox kept a call from.
+    Grant(PathBuf),
 }
 
 /// The front end the controller is driven with here: what it was asked
@@ -125,6 +128,10 @@ impl Front for Recording {
 
     fn conversation_installed(&mut self) {
         self.shown = None;
+    }
+
+    fn offer_grant(&mut self, blocked: Blocked, _has_workspace: bool) {
+        self.shown = Some(Shown::Grant(blocked.path));
     }
 }
 

@@ -35,6 +35,7 @@ impl Controller {
             AgentEvent::TextDelta(t) => self.conversation.transcript.append_assistant(&sender, &t),
             AgentEvent::ThinkingDelta(t) => self.conversation.transcript.append_thought(&t),
             AgentEvent::ToolCallStarted { id, name, input } => {
+                self.tool_inputs.insert(id.clone(), input.clone());
                 self.conversation.transcript.tool_started(&id, &name, input)
             }
             // Live output. Streaming args arrive before the block exists and
@@ -46,10 +47,12 @@ impl Controller {
                 id,
                 output,
                 is_error,
-            } => self
-                .conversation
-                .transcript
-                .tool_result(&id, &output, is_error),
+            } => {
+                self.notice_blocked(&id, &output, is_error);
+                self.conversation
+                    .transcript
+                    .tool_result(&id, &output, is_error)
+            }
             AgentEvent::PermissionRequest(req) => self.on_permission_request(req, front),
             AgentEvent::PermissionWithdrawn { id } => self.withdraw_prompt(&id, front),
             AgentEvent::Usage(u) => self.usage_reported(u),
@@ -67,6 +70,7 @@ impl Controller {
                 | AgentEvent::SubagentEnded { .. }) => self.on_event(ev, front),
                 ev => {
                     if let AgentEvent::ToolCallStarted { id, name, input } = &ev {
+                        self.tool_inputs.insert(id.clone(), input.clone());
                         self.tracking
                             .subagent_tool_started(&parent, id, name, input);
                     }
@@ -206,6 +210,9 @@ impl Controller {
                 let held = self.handoff.is_some_and(|h| h.held);
                 self.finish_handoff(done, front);
                 self.persist();
+                self.restart_for_grants(front);
+                self.tool_inputs.clear();
+                self.sandbox_offers.extend(self.sandbox_blocked.drain(..));
                 // A prompt sent at once is the next turn. A clean finish
                 // moves on to the next queued prompt; after an interrupt or
                 // error the user decides (Enter sends it), also when a
@@ -217,6 +224,9 @@ impl Controller {
                 } else {
                     self.say_held();
                 }
+                // What the sandbox kept the turn from, unless the next
+                // turn is already on its way.
+                self.show_next_prompt(front);
             }
             AgentEvent::HookStarted { id, name } => {
                 self.conversation.transcript.hook_started(&id, &name)

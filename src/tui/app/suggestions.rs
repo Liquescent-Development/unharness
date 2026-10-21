@@ -71,6 +71,20 @@ impl App {
                             out.push((format!("/sandbox {l}"), l.description().to_string()));
                         }
                     }
+                    if self.controller.sandbox.backend.is_ok() {
+                        for (sub, what) in [
+                            ("allow ", "Let the agent write a path beyond the sandbox"),
+                            (
+                                "allow-read ",
+                                "Let the agent read a path the sandbox denies",
+                            ),
+                            ("paths", "What the sandbox lets the agent write and read"),
+                        ] {
+                            if sub.starts_with(s) {
+                                out.push((format!("/sandbox {sub}"), what.to_string()));
+                            }
+                        }
+                    }
                 }
                 ("/effort" | "/think", Some(s)) => {
                     for l in self.caps().effort_levels {

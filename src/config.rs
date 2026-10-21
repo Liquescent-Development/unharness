@@ -418,6 +418,57 @@ impl Config {
             .with_context(|| format!("could not write {}", path.display()))
     }
 
+    /// Add `granted` to `[sandbox].writable` or `readable` in the file at
+    /// `path`, leaving the rest of it as it was, comments included. A file
+    /// that is a link stays one; a path already there is not added again.
+    pub fn add_sandbox_path(path: &Path, access: sandbox::Access, granted: &Path) -> Result<()> {
+        if path.is_symlink() && !path.exists() {
+            anyhow::bail!("{} is a link to a file that does not exist", path.display());
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("could not read {}", path.display())),
+        };
+        let mut doc: toml_edit::DocumentMut = content
+            .parse()
+            .with_context(|| format!("{} is not valid TOML", path.display()))?;
+        let key = access.key();
+        let value = granted.to_string_lossy().into_owned();
+        let table = doc
+            .entry("sandbox")
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_like_mut()
+            .with_context(|| format!("sandbox in {} is not a table", path.display()))?;
+        let list = table
+            .entry(key)
+            .or_insert_with(|| toml_edit::value(toml_edit::Array::new()))
+            .as_array_mut()
+            .with_context(|| format!("sandbox.{key} in {} is not a list", path.display()))?;
+        if list.iter().any(|v| v.as_str() == Some(value.as_str())) {
+            return Ok(());
+        }
+        list.push(value.as_str());
+        let content = doc.to_string();
+        // What is written has to read back as a config, with the path.
+        let back: Config = toml::from_str(&content)
+            .with_context(|| format!("{} is not a valid unharness config", path.display()))?;
+        let saved = match access {
+            sandbox::Access::Write => &back.sandbox.writable,
+            sandbox::Access::Read => &back.sandbox.readable,
+        };
+        if !saved.iter().any(|p| p == granted) {
+            anyhow::bail!(
+                "could not add the path to {} as it is laid out; add it to [sandbox] {key} by \
+                 hand",
+                path.display()
+            );
+        }
+        let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        write_atomic(&target, &content)
+            .with_context(|| format!("could not write {}", path.display()))
+    }
+
     /// Settings for one harness, if configured.
     pub fn harness(&self, id: &str) -> Option<&HarnessSettings> {
         self.harnesses.get(id)
@@ -713,6 +764,65 @@ mod tests {
             assert!(
                 Config::set_harness_default_policy(&path, "pi", PermissionPolicy::Ask).is_err()
             );
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        }
+    }
+
+    #[test]
+    fn a_sandbox_path_is_added_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("unharness/workspaces/ws.toml");
+
+        // No file (nor directory) yet: one with just the path.
+        Config::add_sandbox_path(&path, sandbox::Access::Write, Path::new("/data/a")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[sandbox]\nwritable = [\"/data/a\"]\n"
+        );
+
+        // An existing list grows; comments and the rest stay; a path
+        // already there is not added twice.
+        std::fs::write(
+            &path,
+            "# mine\n[sandbox]\nlevel = \"workspace-write\" # here\n\
+             writable = [\"~/x\"] # by hand\n\n[harnesses.pi]\nbinary = \"/opt/pi\"\n",
+        )
+        .unwrap();
+        Config::add_sandbox_path(&path, sandbox::Access::Write, Path::new("/data/a")).unwrap();
+        Config::add_sandbox_path(&path, sandbox::Access::Write, Path::new("/data/a")).unwrap();
+        Config::add_sandbox_path(&path, sandbox::Access::Read, Path::new("/data/b")).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with("# mine\n[sandbox]\nlevel = \"workspace-write\" # here\n"));
+        assert!(after.contains("# by hand"), "{after}");
+        let cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(
+            cfg.sandbox.writable,
+            [PathBuf::from("~/x"), PathBuf::from("/data/a")]
+        );
+        assert_eq!(cfg.sandbox.readable, [PathBuf::from("/data/b")]);
+        assert_eq!(
+            cfg.harnesses["pi"].binary.as_deref(),
+            Some(Path::new("/opt/pi"))
+        );
+
+        // Inline, it stays inline.
+        std::fs::write(&path, "sandbox = { level = \"read-only\" }\n").unwrap();
+        Config::add_sandbox_path(&path, sandbox::Access::Write, Path::new("/data/a")).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&after).unwrap();
+        assert_eq!(cfg.sandbox.level.as_deref(), Some("read-only"));
+        assert_eq!(cfg.sandbox.writable, [PathBuf::from("/data/a")]);
+        assert!(after.starts_with("sandbox = {"), "{after}");
+
+        // What cannot take it is left alone.
+        for content in [
+            "sandbox = 3\n",
+            "[sandbox]\nwritable = \"x\"\n",
+            "not toml [",
+        ] {
+            std::fs::write(&path, content).unwrap();
+            let granted = Path::new("/data/a");
+            assert!(Config::add_sandbox_path(&path, sandbox::Access::Write, granted).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
         }
     }

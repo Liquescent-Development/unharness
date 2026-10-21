@@ -140,6 +140,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 |---|---|
 | `/harness`, `/switch` | Switch harness ([Switching harnesses](usage.md#switching-harnesses)) |
 | `/provider`, `/model`, `/effort`, `/policy`, `/sandbox` | Open the matching picker |
+| `/sandbox allow <path>`, `/sandbox allow-read <path>`, `/sandbox paths` | Grant a path beyond the sandbox, for the run or saved; list what it allows ([Granting a path](sandbox.md#granting-a-path-from-the-tui)) |
 | `/resume` | Resume a saved conversation (every harness in it) |
 | `/sessions`, `/conversations` | List saved conversations in this workspace |
 | `/status`, `/usage` | The session, the account it runs on, billed tokens and cost, how full the context is, and the rate limits with their reset times ([Status](#status)) |

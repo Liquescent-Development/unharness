@@ -24,7 +24,8 @@ use super::code::{
 };
 use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
-    AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, StatusModal, takes_text,
+    AlwaysDraft, GrantDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal,
+    StatusModal, takes_text,
 };
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
@@ -33,6 +34,8 @@ use crate::core::SandboxLevel;
 use crate::core::conversations::ShellStatus;
 use crate::core::rate_limits;
 use crate::core::rules::Scope;
+use crate::core::sandbox::Access;
+use crate::core::sandbox::grants::grant_target;
 use crate::core::text::sanitize;
 use crate::core::transcript::{
     Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
@@ -1297,6 +1300,119 @@ fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// What the sandbox kept the agent from, the question of allowing it,
+/// and how long an answer lasts, as a list like the other pickers'.
+fn grant_lines(app: &App, d: &GrantDraft, width: usize) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::Gray);
+    let name = app.short_name();
+    let (verb, doing, outside) = match d.access {
+        Access::Write => ("write", "writing", "which is outside the sandbox"),
+        Access::Read => ("read", "reading", "which the sandbox hides"),
+    };
+    let mut lines = vec![Line::default()];
+    if d.blocked {
+        let asked = d.asked.as_deref().unwrap_or(&d.path);
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            &format!("{name} tried to {verb} {}, {outside}.", sanitize(asked)),
+            width,
+            Style::default(),
+        ));
+        lines.push(Line::default());
+    }
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    if d.editing {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  Allow {doing} in: "), bold),
+            Span::raw(sanitize(&d.path)),
+            Span::styled("▏", Style::default().fg(Color::Magenta)),
+        ]));
+    } else {
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            &format!("Allow {doing} in {}?", sanitize(&d.path)),
+            width,
+            bold,
+        ));
+    }
+
+    // What is worth knowing before answering.
+    let path = app.grant_path(&d.path);
+    let reach = grant_target(&path);
+    let note = match path.canonicalize() {
+        Err(_) if d.access == Access::Read || reach.is_none() => Some((
+            "That path doesn't exist.".to_string(),
+            Style::default().fg(Color::Yellow),
+        )),
+        Err(_) => Some((
+            "This folder doesn't exist yet. Allowing creates it.".to_string(),
+            gray,
+        )),
+        Ok(p) if app.controller.sandbox_allows(&p, d.access) => {
+            Some((format!("{name} can already {verb} there."), gray))
+        }
+        Ok(_) => None,
+    };
+    if let Some((note, style)) = note {
+        lines.extend(wrap_prefixed_text("  ", &note, width, style));
+    }
+    let checked = path.canonicalize().ok().or(reach.map(|r| {
+        let base = path.ancestors().find(|a| a.exists()).unwrap_or(&path);
+        r.join(path.strip_prefix(base).unwrap_or(&path))
+    }));
+    if let Some(risk) = checked.and_then(|p| app.controller.grant_risk(&p, d.access)) {
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            &format!("⚠ {risk}"),
+            width,
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // How long, as the pickers draw a list.
+    lines.push(Line::default());
+    let pad = d
+        .scopes
+        .items
+        .iter()
+        .map(|s| s.title().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    for (i, scope) in d.scopes.items.iter().enumerate() {
+        let style = if i == d.scopes.selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if i == d.scopes.selected { "❯ " } else { "  " }, style),
+            Span::styled(format!("{:<pad$}", scope.title()), style),
+            Span::styled(format!(" ─ {}", scope.detail()), gray),
+        ]));
+    }
+
+    lines.push(Line::default());
+    let keys: &[&str] = if d.editing {
+        &["  Type the path · Enter or Esc when done"]
+    } else if d.blocked {
+        &[
+            "  ↑/↓ select · Enter allow and retry · a allow only",
+            "  e edit path · Esc don't allow",
+        ]
+    } else {
+        &["  ↑/↓ select · Enter allow · e edit path · Esc cancel"]
+    };
+    for k in keys {
+        lines.push(Line::from(Span::styled(k.to_string(), gray)));
+    }
+    lines
+}
+
 /// Under the policy list: how to save the selected policy as the
 /// harness's default, or where it is about to be saved.
 fn policy_save_lines(p: &PolicyPicker, harness: &str, width: usize) -> Vec<Line<'static>> {
@@ -2204,6 +2320,24 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             (
                 popup,
                 modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
+                lines,
+            )
+        }
+        // As tall as what it says, no more.
+        Modal::SandboxGrant(d) => {
+            let wide = centered_rect(80, 100, area);
+            let width = (wide.width.saturating_sub(6)).max(20) as usize;
+            let mut lines = grant_lines(app, d, width);
+            lines.push(Line::default());
+            let height = (lines.len() as u16 + 2).min(area.height);
+            let popup = Rect {
+                y: area.y + (area.height - height) / 2,
+                height,
+                ..wide
+            };
+            (
+                popup,
+                modal_block(" Sandbox ".into(), Color::Magenta),
                 lines,
             )
         }

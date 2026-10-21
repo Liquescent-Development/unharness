@@ -1,10 +1,15 @@
 //! Modal state: list pickers and the permission/question/dialog prompts.
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
+use crate::core::controller::GrantScope;
 use crate::core::conversations::ConversationSummary;
 use crate::core::rules::{Rule, Scope};
-use crate::core::sandbox::SandboxLevel;
+use crate::core::sandbox::denials::Blocked;
+use crate::core::sandbox::grants::{propose, tilde};
+use crate::core::sandbox::{Access, SandboxLevel};
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
@@ -203,6 +208,57 @@ impl AlwaysDraft {
         match self.scope {
             Scope::Workspace => Scope::Global,
             Scope::Global => Scope::Workspace,
+        }
+    }
+}
+
+/// A path about to be granted beyond the sandbox: one the sandbox kept a
+/// call from, or `/sandbox allow`'s.
+#[derive(Debug, Clone)]
+pub struct GrantDraft {
+    /// The path to grant (`grants::propose`), which `e` opens for editing.
+    pub path: String,
+    pub access: Access,
+    /// How long it lasts: for the run, or saved (for the workspace when
+    /// there is one, or everywhere).
+    pub scopes: ListPicker<GrantScope>,
+    /// What was asked for, when `path` is not it.
+    pub asked: Option<String>,
+    /// The sandbox kept a call from it: the agent can be asked to try
+    /// again once it is granted.
+    pub blocked: bool,
+    /// Keys edit the path.
+    pub editing: bool,
+}
+
+impl GrantDraft {
+    /// The draft for `asked`, as written: what `grants::propose` would
+    /// grant for it.
+    pub fn new(asked: &Path, access: Access, has_workspace: bool) -> Self {
+        let path = propose(asked, access)
+            .map(|(p, _)| p)
+            .unwrap_or_else(|| asked.to_path_buf());
+        let same = asked.canonicalize().ok().as_ref() == Some(&path) || asked == path;
+        GrantDraft {
+            path: tilde(&path),
+            access,
+            scopes: ListPicker::new(GrantScope::all(has_workspace)),
+            asked: (!same).then(|| tilde(asked)),
+            blocked: false,
+            editing: false,
+        }
+    }
+
+    /// How long the grant lasts, as chosen.
+    pub fn scope(&self) -> GrantScope {
+        self.scopes.current().copied().unwrap_or(GrantScope::Run)
+    }
+
+    /// The draft for what the sandbox kept a call from.
+    pub fn offered(blocked: &Blocked, has_workspace: bool) -> Self {
+        GrantDraft {
+            blocked: true,
+            ..Self::new(&blocked.path, blocked.access, has_workspace)
         }
     }
 }
@@ -597,6 +653,8 @@ pub enum Modal {
     Effort(ListPicker<String>),
     Policy(PolicyPicker),
     Sandbox(ListPicker<SandboxLevel>),
+    /// `/sandbox allow`: a path to grant.
+    SandboxGrant(GrantDraft),
     /// The conversation's subagents; the chosen one's transcript is opened.
     Subagents(ListPicker<super::app::SubagentOption>),
     Resume(ListPicker<ConversationSummary>),

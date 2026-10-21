@@ -470,3 +470,6 @@ Landlock ruleset like unharness's workspace-write). Each result is
   - `touch: cannot touch '<p>': Permission denied`;
   - `mkdir: Permission denied`, with no path;
   - `(eval):1: permission denied: <p>` for a redirection.
+
+Checked live in the TUI: the block was offered when the turn ended,
+Enter allowed it, and the resumed session's retry wrote the file.

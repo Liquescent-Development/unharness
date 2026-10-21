@@ -82,6 +82,7 @@ impl Controller {
         {
             self.on_permission_request(req, front);
         }
+        self.offer_grants(front);
     }
 
     /// The harness stopped waiting for request `id`: close it unanswered.

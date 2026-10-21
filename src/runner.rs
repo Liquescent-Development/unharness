@@ -1,7 +1,7 @@
 //! Resolves harness/policy/model and dispatches to print, passthrough, or TUI.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -16,7 +16,9 @@ use crate::core::conversations::ConversationStore;
 use crate::core::guard::{self, Watch};
 use crate::core::mcp;
 use crate::core::registry::Registry;
-use crate::core::sandbox::{self, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup};
+use crate::core::sandbox::{
+    self, Access, Sandbox, SandboxEnv, SandboxLevel, SandboxRequest, SandboxSetup,
+};
 use crate::core::{HarnessId, McpServer, ModelRef, PermissionPolicy, ProviderId, SessionConfig};
 use crate::harness::{Harness, PrintConfig};
 use crate::headless::{self, Headless, RunInfo};
@@ -73,6 +75,30 @@ pub fn session_sandbox(
     if let Some(settings) = config.harness(harness.descriptor().id.as_str()) {
         extra_writable.extend(settings.sandbox_writable.iter().cloned());
     }
+    let mut extra_readable = config.sandbox.readable.clone();
+    for grant in &setup.grants {
+        match grant.access {
+            Access::Write => extra_writable.push(grant.path.clone()),
+            Access::Read => extra_readable.push(grant.path.clone()),
+        }
+    }
+    // A path granted for reading is no longer denied, as a workspace's
+    // `readable` lifts a global `deny_read` of the same path.
+    let home = dirs::home_dir();
+    let extra_deny_read: Vec<PathBuf> = config
+        .sandbox
+        .deny_read
+        .iter()
+        .filter(|d| {
+            let denied = workspace.join(sandbox::expand_home(d, home.as_deref()));
+            let denied = denied.canonicalize().unwrap_or(denied);
+            !setup
+                .grants
+                .iter()
+                .any(|g| g.access == Access::Read && g.path == denied)
+        })
+        .cloned()
+        .collect();
     sandbox::resolve(
         &SandboxRequest {
             explicit: setup.explicit,
@@ -80,8 +106,8 @@ pub fn session_sandbox(
             workspace,
             harness: &harness.sandbox_paths(),
             extra_writable: &extra_writable,
-            extra_readable: &config.sandbox.readable,
-            extra_deny_read: &config.sandbox.deny_read,
+            extra_readable: &extra_readable,
+            extra_deny_read: &extra_deny_read,
         },
         &setup.backend,
         &SandboxEnv::current(),
@@ -210,6 +236,9 @@ pub async fn run(args: CommonRunArgs, config: &Config, cwd: &Path) -> Result<Exi
         }
         for w in res.warning.into_iter().chain(setup.warnings) {
             run.warn(w);
+        }
+        if let Sandbox::Active { profile, .. } = &setup.sandbox {
+            run.watch_sandbox(profile.clone());
         }
         if let Some(note) = harness.prepare()? {
             run.warn(note);

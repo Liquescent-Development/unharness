@@ -15,9 +15,13 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub mod denials;
+pub mod grants;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod seatbelt;
+
+pub use grants::{Access, Grant};
 
 /// How far a harness process is confined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -190,8 +194,20 @@ pub struct SandboxEnv {
     pub protected: Vec<PathBuf>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What `SandboxEnv::current` gives on this thread instead: a test's
+    /// machine, whose temp directory is not scratch.
+    pub(crate) static TEST_ENV: std::cell::RefCell<Option<SandboxEnv>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl SandboxEnv {
     pub fn current() -> Self {
+        #[cfg(test)]
+        if let Some(env) = TEST_ENV.with(|e| e.borrow().clone()) {
+            return env;
+        }
         let mut scratch = vec![
             PathBuf::from("/tmp"),
             PathBuf::from("/var/tmp"),
@@ -348,6 +364,8 @@ pub struct SandboxSetup {
     /// The level from the flag or the config, if any.
     pub explicit: Option<SandboxLevel>,
     pub backend: std::result::Result<Arc<dyn SandboxBackend>, String>,
+    /// Paths granted for the run from the TUI (`/sandbox allow`).
+    pub grants: Vec<Grant>,
 }
 
 impl SandboxSetup {
@@ -355,6 +373,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit,
             backend: detect(),
+            grants: Vec::new(),
         }
     }
 
@@ -363,6 +382,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit: Some(SandboxLevel::Off),
             backend: Err("off".to_string()),
+            grants: Vec::new(),
         }
     }
 
@@ -373,6 +393,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit,
             backend: Ok(Arc::new(NullBackend)),
+            grants: Vec::new(),
         }
     }
 
