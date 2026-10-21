@@ -201,6 +201,8 @@ session nothing has been sent to yet is not saved, nor its id. Resume
 restores all of it; vendor sessions themselves live with the vendor. A
 block of a kind this version does not know is skipped when read; not
 handled: an older unharness that rewrites such a conversation drops it.
+The account a harness reported and its rate limits are not saved
+(`core/controller/account.rs`).
 
 ## Testing conventions
 
@@ -289,6 +291,8 @@ Across harnesses:
 - [`unharness update`](docs/dev/update.md).
 - [Harness versions](docs/dev/versions.md): `min_version` and `doctor`.
 - [Cost](docs/dev/cost.md): running totals reported per turn.
+- [Account and rate-limit status](docs/dev/status.md): what each CLI
+  says of its account and limits, and `/status`.
 
 ## Commit style
 
