@@ -1210,6 +1210,64 @@ async fn codex_app_server_lists_skills_and_runs_one_from_a_slash() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// `/status` asks app-server for the account's limits and plan
+/// (`account/rateLimits/read`, `account/read`), under the names whose
+/// answers the parser reads, before a turn and after it.
+#[tokio::test]
+async fn codex_app_server_reads_rate_limits_and_account_on_request() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/codex/fixtures/app_server_account_read.jsonl");
+    let mut handle = codex_app_server()
+        .start_session(fake.config(&fixture, PermissionPolicy::Bypass, true))
+        .unwrap();
+    handle.send(SessionCommand::QueryStatus).await.unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let signed_in = |events: &[AgentEvent]| {
+        events.iter().any(|e| {
+            matches!(e, AgentEvent::Account(a)
+                if a.auth.as_deref() == Some("chatgpt") && a.email.is_some())
+        })
+    };
+    let limited = |events: &[AgentEvent]| {
+        events.iter().any(|e| {
+            matches!(e, AgentEvent::RateLimit(r)
+                if r.limit.as_deref() == Some("codex") && !r.windows.is_empty())
+        })
+    };
+    assert!(signed_in(&events) && limited(&events), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error(_))));
+
+    handle.send(SessionCommand::QueryStatus).await.unwrap();
+    let mut after = Vec::new();
+    while !(signed_in(&after) && limited(&after)) {
+        after.push(next_event(&mut handle).await);
+    }
+    let sent = fake.sent_lines();
+    let reads: Vec<(&str, &str)> = sent
+        .iter()
+        .filter(|v| {
+            v["method"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("account/"))
+        })
+        .map(|v| (v["id"].as_str().unwrap(), v["method"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        reads,
+        [
+            ("rate-limits", "account/rateLimits/read"),
+            ("account", "account/read"),
+            ("rate-limits", "account/rateLimits/read"),
+            ("account", "account/read"),
+        ]
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// A thread says which provider it runs on; a chosen one goes on the
 /// command line, and a thread on another says so.
 #[tokio::test]

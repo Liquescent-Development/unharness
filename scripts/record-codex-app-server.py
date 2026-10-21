@@ -29,6 +29,9 @@ def redact(line: str, cwd: str) -> str:
     line = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "user@example.com", line)
     line = re.sub(r'"serverName":"[^"]*"', '"serverName":"user"', line)
     line = re.sub(r'"installationId":"[^"]*"', '"installationId":"REDACTED"', line)
+    # account/rateLimits/read and account/read name the account.
+    line = re.sub(r'"(accountId|chatgptAccountId)":\s*"[^"]*"', r'"\1":"REDACTED"', line)
+    line = re.sub(r"RateLimitResetCredit_[0-9a-f]+", "RateLimitResetCredit_REDACTED", line)
     return line
 
 
@@ -53,6 +56,9 @@ def main() -> int:
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
     ap.add_argument("--interrupt-children", action="store_true",
                     help="when the last turn ends with sub-agents still running, interrupt them")
+    ap.add_argument("--read-account", action="store_true",
+                    help="ask for the rate limits and the account (as /status does) before the "
+                         "first turn and after the last")
     ap.add_argument("--linger", type=float, default=6.0,
                     help="seconds of silence to wait for after the last sub-agent ends")
     args = ap.parse_args()
@@ -85,6 +91,14 @@ def main() -> int:
         if params is not None:
             msg["params"] = params
         send(msg)
+
+    reads = set()
+
+    def read_account():
+        # As unharness asks, under the names it uses.
+        reads.update(["rate-limits", "account"])
+        send({"jsonrpc": "2.0", "id": "rate-limits", "method": "account/rateLimits/read"})
+        send({"jsonrpc": "2.0", "id": "account", "method": "account/read", "params": {}})
 
     def respond(rid, result):
         send({"jsonrpc": "2.0", "id": rid, "result": result})
@@ -154,7 +168,7 @@ def main() -> int:
         except queue.Empty:
             quiet = time.time() - last
             if (finishing and models_id is None and not children and not main_active
-                    and quiet >= (args.linger if saw_children else 0)):
+                    and not reads and quiet >= (args.linger if saw_children else 0)):
                 models_id = request("model/list", {})
             elif quiet > args.idle_timeout:
                 sys.stderr.write("idle timeout\n")
@@ -215,11 +229,15 @@ def main() -> int:
                     for skill in entry.get("skills", []):
                         if skill.get("enabled", True):
                             skills.setdefault(skill["name"], skill["path"])
+                if args.read_account:
+                    read_account()
                 items = turn_items(prompts.pop(0))
                 if args.image:
                     items.append({"type": "localImage", "path": os.path.abspath(args.image)})
                 request("turn/start", {"threadId": thread_id, "input": items})
                 phase = "turn"
+            elif rid in reads:
+                reads.discard(rid)
             elif rid == models_id:
                 proc.stdin.close()
                 break
@@ -268,6 +286,8 @@ def main() -> int:
                 compact_id = request("thread/compact/start", {"threadId": thread_id})
             else:
                 finishing = True
+                if args.read_account:
+                    read_account()
                 if args.interrupt_children:
                     for child, child_turn in children.items():
                         request("turn/interrupt", {"threadId": child, "turnId": child_turn})

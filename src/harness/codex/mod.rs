@@ -333,8 +333,9 @@ impl Harness for CodexHarness {
             // `exec --json` reports a turn's tokens, not the window.
             context_usage: app_server,
             rate_limits: app_server,
-            // Not asked yet: the answer needs a recording first.
-            status_query: false,
+            // account/rateLimits/read and account/read (0.162.1,
+            // `app_server_account_read.jsonl`).
+            status_query: app_server,
             rewind: RewindSupport {
                 conversation: app_server,
                 anchors_survive_fork: true,
@@ -1024,6 +1025,7 @@ region = "us-east-1"
                 lacks: Some(Ability::ALL.to_vec()),
                 fork: Some(false),
                 context_usage: Some(false),
+                status_query: Some(false),
                 plan_mode: Some(false),
                 ask_user_question: Some(false),
                 lacks_policies: Some(vec![PermissionPolicy::Ask]),

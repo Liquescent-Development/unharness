@@ -8,7 +8,7 @@ use tokio::process::Command;
 
 use super::OwnSandbox;
 use super::app_server_parse::CodexAppServerParser;
-use super::app_server_parse::ELICITATION_PREFIX;
+use super::app_server_parse::{ACCOUNT_ID, ELICITATION_PREFIX, RATE_LIMITS_ID};
 use crate::core::driver::{self, Answer, Encoded, Gone, Io, Shutdown, StreamProtocol};
 use crate::core::jsonrpc::{self, RequestId, RpcMessage};
 use crate::core::sandbox::SandboxLevel;
@@ -517,9 +517,15 @@ impl AppServer {
                 Ok(())
             }
             // Not sent here: `encode`'s and the driver's (`shutdown`).
+            // Answered by name: the parser reads them, `on_answer` an error.
+            SessionCommand::QueryStatus => {
+                io.request_named(RATE_LIMITS_ID, "account/rateLimits/read", Value::Null)
+                    .await?;
+                io.request_named(ACCOUNT_ID, "account/read", json!({}))
+                    .await
+            }
             SessionCommand::RemoteControl { .. }
             | SessionCommand::SendNow { .. }
-            | SessionCommand::QueryStatus
             | SessionCommand::SetProvider(_)
             | SessionCommand::Shutdown => Ok(()),
         }
@@ -708,9 +714,9 @@ impl StreamProtocol for AppServer {
     async fn encode(&mut self, cmd: SessionCommand, io: &mut Io<'_>) -> Encoded {
         match cmd {
             // Codex has none, and does not declare them.
-            SessionCommand::RemoteControl { .. }
-            | SessionCommand::SendNow { .. }
-            | SessionCommand::QueryStatus => Encoded::Unsupported,
+            SessionCommand::RemoteControl { .. } | SessionCommand::SendNow { .. } => {
+                Encoded::Unsupported
+            }
             SessionCommand::SetProvider(p) => Encoded::Restart {
                 command: Box::new(self.restart_on(p)),
                 then: None,
@@ -736,6 +742,20 @@ impl StreamProtocol for AppServer {
             RequestId::Name(name) if name == SKILLS_ID => {
                 self.skills_listed(answer.result.as_ref(), io).await;
                 return Ok(());
+            }
+            // A server that cannot say (signed in with an API key, or one
+            // older than these requests) is not asked again, and nothing
+            // is shown for it: `/status` keeps what came with the turns.
+            RequestId::Name(name) if name == RATE_LIMITS_ID || name == ACCOUNT_ID => {
+                if answer.error.is_some() {
+                    io.emit(AgentEvent::CapabilitiesChanged(CapsUpdate {
+                        status_query: Some(false),
+                        ..Default::default()
+                    }))
+                    .await;
+                    return Ok(());
+                }
+                return self.feed(answer.line, io).await;
             }
             RequestId::Number(id) => self.outstanding.remove(id),
             RequestId::Name(_) => None,

@@ -168,3 +168,16 @@ seconds; a null window keeps its last value), `credits`
 is read as `AgentEvent::Account`; the second as `RateLimit`, and as
 `Account` (plan and credits) when those change. `exec` reports none of
 it.
+
+Asked on `/status` (0.162.1, `app_server_account_read.jsonl`, recorded
+with `record-codex-app-server.py --read-account`):
+`account/rateLimits/read` (no params) answers `rateLimits` in the
+shape of the notification, plus `rateLimitsByLimitId`,
+`rateLimitResetCredits` and `accountId` (redacted by the recorder);
+`account/read` refuses a missing `params` (`-32600`) and with `{}`
+answers `account` (`type`: `chatgpt`, `email`, `planType`) and
+`workspaceRouting` (its `chatgptAccountId` redacted). They go under the
+names `rate-limits` and `account`, which the parser reads; an error to
+either turns `status_query` off for the session, quietly. Unverified: the
+answers under an API key, and `account/usage/read` (lifetime and daily
+token counts), not asked.
