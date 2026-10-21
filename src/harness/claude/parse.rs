@@ -418,6 +418,10 @@ impl ClaudeParser {
                     if update != CapsUpdate::default() {
                         out.push(AgentEvent::CapabilitiesChanged(update));
                     }
+                    // The answer to `get_usage` (`/status`).
+                    if answer.get("rate_limits_available").is_some() {
+                        out.extend(usage_answer(answer));
+                    }
                     let account = initialize_account(answer.get("account").unwrap_or(&Value::Null));
                     if account != AccountInfo::default() {
                         out.push(AgentEvent::Account(account));
@@ -1425,6 +1429,100 @@ fn todo_write_plan(name: &str, input: &Value) -> Option<AgentEvent> {
         entries,
         explanation: None,
     })
+}
+
+/// The windows `get_usage` names that are the account's whole (the
+/// others it lists, under code names, are null on the plans recorded).
+const USAGE_WINDOWS: &[&str] = &[
+    "five_hour",
+    "seven_day",
+    "seven_day_opus",
+    "seven_day_sonnet",
+    "seven_day_oauth_apps",
+];
+
+/// `get_usage`'s answer (2.1.305): each window in `rate_limits`, with
+/// `utilization` from 0 to 100 (not 0 to 1, as in `rate_limit_event`) and
+/// `resets_at` in ISO 8601, and the weekly limit of each model in
+/// `model_scoped`. Its `extra_usage` is left to `rate_limit_event`'s
+/// overage, which says it differently, and `subscription_type` (`max`) to
+/// `initialize`'s `Claude Max`. Nothing when the plan has no limits
+/// (`rate_limits_available` false: an API key, Bedrock, Vertex).
+fn usage_answer(answer: &Value) -> Vec<AgentEvent> {
+    if answer.get("rate_limits_available").and_then(Value::as_bool) != Some(true) {
+        return Vec::new();
+    }
+    let limits = answer.get("rate_limits").unwrap_or(&Value::Null);
+    let window = |label: String, w: &Value| {
+        Some(RateLimitWindow {
+            label,
+            used_percent: Some(w.get("utilization")?.as_f64()? as f32),
+            resets_at: w
+                .get("resets_at")
+                .and_then(Value::as_str)
+                .and_then(iso8601_to_unix),
+        })
+    };
+    let mut windows: Vec<RateLimitWindow> = USAGE_WINDOWS
+        .iter()
+        .filter_map(|k| window(k.to_string(), limits.get(*k)?))
+        .collect();
+    for m in limits
+        .get("model_scoped")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(name) = m.get("display_name").and_then(Value::as_str) {
+            let label = format!("seven_day_{}", name.to_lowercase().replace(' ', "_"));
+            windows.extend(window(label, m));
+        }
+    }
+    if windows.is_empty() {
+        return Vec::new();
+    }
+    vec![AgentEvent::RateLimit(RateLimitInfo {
+        windows,
+        ..Default::default()
+    })]
+}
+
+/// Unix seconds of an ISO 8601 time with a date, a time and an offset
+/// (`2026-10-21T03:40:00.099609+00:00`, `...Z`); the fraction is dropped.
+pub(crate) fn iso8601_to_unix(s: &str) -> Option<i64> {
+    let num = |s: &str| -> Option<i64> {
+        s.bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| s.parse().ok())
+            .flatten()
+    };
+    let (date, rest) = s.split_once('T')?;
+    let mut d = date.splitn(3, '-');
+    let (y, m, day) = (num(d.next()?)?, num(d.next()?)?, num(d.next()?)?);
+    let time_len = rest.find(['Z', '+', '-']).unwrap_or(rest.len());
+    let (time, offset) = rest.split_at(time_len);
+    let time = time.split('.').next()?;
+    let mut t = time.splitn(3, ':');
+    let (hh, mm, ss) = (num(t.next()?)?, num(t.next()?)?, num(t.next()?)?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || hh > 23 || mm > 59 || ss > 60 {
+        return None;
+    }
+    let offset = match offset {
+        "Z" | "" => 0,
+        o => {
+            let sign = if o.starts_with('-') { -1 } else { 1 };
+            let (oh, om) = o[1..].split_once(':').unwrap_or((&o[1..], "0"));
+            sign * (num(oh)? * 3600 + num(om)? * 60)
+        }
+    };
+    // Days from 1970-01-01 to the date (Howard Hinnant's days_from_civil).
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(days * 86_400 + hh * 3600 + mm * 60 + ss - offset)
 }
 
 /// `initialize`'s `account`: its plan (`subscriptionType`), how it signs in
@@ -2515,6 +2613,39 @@ mod tests {
     #[test]
     fn fixture_basic_turn_bash() {
         fixture("basic_turn");
+    }
+
+    /// `get_usage` before the prompt and after it (2.1.305): its windows,
+    /// on the scale `rate_limit_event`'s are on.
+    #[test]
+    fn fixture_get_usage() {
+        fixture("get_usage");
+    }
+
+    #[test]
+    fn iso8601_times_read_as_unix_seconds() {
+        assert_eq!(iso8601_to_unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T03:40:00.099609+00:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-21T05:40:00+02:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(
+            iso8601_to_unix("2026-10-20T22:40:00-05:00"),
+            Some(1_792_554_000)
+        );
+        assert_eq!(iso8601_to_unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+        assert_eq!(iso8601_to_unix("2026-13-01T00:00:00Z"), None);
+        assert_eq!(iso8601_to_unix("yesterday"), None);
+    }
+
+    #[test]
+    fn get_usage_without_plan_limits_says_nothing() {
+        let line = r#"{"type":"control_response","response":{"subtype":"success","request_id":"u","response":{"session":{},"subscription_type":null,"rate_limits_available":false,"rate_limits":null}}}"#;
+        assert_eq!(ClaudeParser::new().feed(line), Vec::new());
     }
 
     #[test]

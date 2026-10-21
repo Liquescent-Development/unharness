@@ -428,7 +428,9 @@ active harness's session; nothing of it goes into the transcript. It
 follows the session while it is open (a turn's tokens, a reset
 counting down), scrolls with `↑`/`↓`, `PgUp`/`PgDn` or the wheel, and
 closes with `Esc`, `q` or `Enter`. A permission request or a question
-takes its place rather than wait behind it.
+takes its place rather than wait behind it. Claude Code and Codex (on
+app-server) are asked for their limits when it opens, so they show
+before the first turn; `r` asks again.
 
 ```
 Session
@@ -466,8 +468,8 @@ What each part holds depends on what the harness's CLI tells:
 | claude-agent-acp | (sign-in is checked when its session starts) | as Claude Code's |
 | Other ACP agents | (sign-in is checked when its session starts) | not reported |
 
-Rate limits arrive with a turn: before the first, `/status` says none
-have yet. They are the account's, so they are not saved with the
+Elsewhere rate limits arrive with a turn: before the first, `/status`
+says none have yet. They are the account's, so they are not saved with the
 conversation, and a switch shows the other harness's own. `Usage` lists
 the other harnesses of the conversation with what they billed.
 

@@ -559,7 +559,8 @@ impl Harness for ClaudeHarness {
             compaction: true,
             context_usage: true,
             rate_limits: true,
-            status_query: false,
+            // `get_usage` (2.1.305, marked experimental; `get_usage.jsonl`).
+            status_query: true,
             rewind: RewindSupport {
                 conversation: true,
                 anchors_survive_fork: false,

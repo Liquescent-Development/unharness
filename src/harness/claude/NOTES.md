@@ -435,3 +435,21 @@ Each `rate_limit_event`'s `rate_limit_info` has, besides the windows in
 `unifiedWindows` (utilization 0 to 1, `resetsAt` in Unix seconds),
 `overageStatus`, `overageDisabledReason` and `isUsingOverage`; the
 2.1.305 binary also names `overageResetsAt`, not seen in a recording.
+
+`/status` sends `get_usage` (`{"skip_behaviors": true}`, which spares
+the CLI a scan of a week of transcripts), a control request 2.1.305
+marks experimental. Checked live on 2.1.305 in `-p` stream-json before
+anything else was sent: it answered (`get_usage.jsonl`, recorded with
+`record-claude.py --get-usage`, before the prompt and after it).
+Its `rate_limits` has `five_hour` and `seven_day` with `utilization`
+from 0 to 100 (not 0 to 1, as `rate_limit_event`'s) and `resets_at` in
+ISO 8601, a score of code-named windows that were null, `model_scoped`
+(the weekly limit of a model, `Fable`, read as `seven_day_fable`),
+`limits` (the same windows again), `extra_usage` (`user_disabled`
+while `rate_limit_event` said `org_level_disabled`: left to the latter)
+and `spend`; `subscription_type` is `max` where `initialize` says
+`Claude Max`, so the plan is taken from `initialize`. With
+`rate_limits_available` false nothing is read. Unverified: the
+answer under an API key, Bedrock or Vertex, and the branch that answers
+"get_usage is not supported in this context" (an error answer to one of
+ours turns `status_query` off for the session, without an error shown).

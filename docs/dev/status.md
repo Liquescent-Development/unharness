@@ -35,15 +35,29 @@ of `--print`'s `account` event. `record-claude.py` redacts
 `organization`, which the email pattern only caught when it was
 `<email>'s Organization`.
 
+## Asking
+
+Rate limits otherwise come with a turn. Where a CLI can be asked
+(`Capabilities::status_query`), `/status` asks when it opens and on
+`r` (`SessionCommand::QueryStatus`, `Controller::query_status`): at
+most once in ten seconds per harness, only while its session runs, and
+says `refreshing…` until the answer comes or ten seconds pass.
+
+| Harness | Request | Answer read |
+|---|---|---|
+| Claude Code (2.1.305) | control request `get_usage`, `skip_behaviors: true` | `rate_limits`' windows, `utilization` 0 to 100, `resets_at` ISO 8601 (`iso8601_to_unix`), `model_scoped` |
+| Codex app-server (0.162.1) | `account/rateLimits/read`, `account/read` (`params: {}`), under the names `rate-limits` and `account` | as the notification; `account`'s `type`, `email`, `planType` |
+
+An error answer turns `status_query` off for that session, without an
+error shown. Nothing is asked at session start, only when someone
+looks: Codex sends its account and limits by itself then, and Claude
+its account (`initialize`).
+
 ## Not done
 
-- Asking for the figures: they arrive with a turn, so before the first
-  one `/status` says none have yet. Codex app-server answers
-  `account/rateLimits/read`, `account/read` and `account/usage/read`
-  (named in 0.162.1), and Claude 2.1.305 a `get_usage` control request
-  (marked experimental, with `utilization` 0 to 100 and an ISO-8601
-  `resets_at`; another branch answers "not supported in this context").
-  Each needs a recording before unharness sends it.
+- Codex's `account/usage/read` (lifetime and daily tokens), Claude's
+  `get_status` (marked internal), and `get_usage`'s `extra_usage` and
+  `spend`.
 - agy has usage, credit and quota reports in print mode
   (`--print=/usage`, `/credits`), not wired.
 - pi's `get_session_stats` carries the session's token and cost totals;

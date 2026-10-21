@@ -1210,6 +1210,45 @@ async fn codex_app_server_lists_skills_and_runs_one_from_a_slash() {
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
+/// `/status` asks Claude for its account's windows (`get_usage`), before
+/// a turn and after it; the answers are read as rate limits.
+#[tokio::test]
+async fn claude_get_usage_on_request() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/claude/fixtures/get_usage.jsonl");
+    let mut handle = unharness::harness::claude::ClaudeHarness::default()
+        .start_session(fake.config(&fixture, PermissionPolicy::Ask, true))
+        .unwrap();
+    handle.send(SessionCommand::QueryStatus).await.unwrap();
+    handle.send(SessionCommand::turn("hi")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let windows = |events: &[AgentEvent]| {
+        events.iter().any(|e| {
+            matches!(e, AgentEvent::RateLimit(r)
+                if r.status.is_none() && r.windows.iter().any(|w| w.label == "five_hour"
+                    && w.resets_at.is_some() && w.used_percent.is_some_and(|p| p > 1.0)))
+        })
+    };
+    assert!(windows(&events), "{events:?}");
+    assert!(!events.iter().any(|e| matches!(e, AgentEvent::Error(_))));
+    handle.send(SessionCommand::QueryStatus).await.unwrap();
+    let mut after = Vec::new();
+    while !windows(&after) {
+        after.push(next_event(&mut handle).await);
+    }
+    let sent = fake.sent_lines();
+    let asked: Vec<&serde_json::Value> = sent
+        .iter()
+        .filter(|v| v["request"]["subtype"] == "get_usage")
+        .collect();
+    assert_eq!(asked.len(), 2);
+    assert_eq!(asked[0]["request"]["skip_behaviors"], true);
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+}
+
 /// `/status` asks app-server for the account's limits and plan
 /// (`account/rateLimits/read`, `account/read`), under the names whose
 /// answers the parser reads, before a turn and after it.
