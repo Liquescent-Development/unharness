@@ -188,6 +188,7 @@ pub async fn run_actions(
                         c.session_alive = true;
                         c.session_sandbox_level = Some(c.sandbox_level().0);
                         c.sandbox_restart_due = false;
+                        c.sandbox_started();
                         let policy = c.effective_policy(c.active);
                         c.policy.started_under(policy);
                         // Remote Control the user had on, on the process before.

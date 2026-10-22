@@ -154,7 +154,7 @@ pub struct Headless<O: Write, E: Write> {
     /// What confines the harness, to tell what it kept a call from.
     sandbox: Option<SandboxProfile>,
     /// The input of each tool call not yet answered.
-    tool_inputs: HashMap<String, Value>,
+    tool_inputs: HashMap<String, (String, Value)>,
     /// The paths said to be blocked: each once.
     blocked: HashSet<Blocked>,
 }
@@ -240,7 +240,10 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// What the sandbox kept tool call `id` from: said once a path, with
     /// how to allow it, since nobody can be asked here.
     fn notice_blocked(&mut self, id: &str, output: &str, is_error: bool) {
-        let input = self.tool_inputs.remove(id).unwrap_or(Value::Null);
+        let (name, input) = self
+            .tool_inputs
+            .remove(id)
+            .unwrap_or_else(|| (String::new(), Value::Null));
         let Some(profile) = &self.sandbox else {
             return;
         };
@@ -249,13 +252,14 @@ impl<O: Write, E: Write> Headless<O, E> {
             return;
         }
         let home = dirs::home_dir();
-        let found = denials::blocked(
+        let found = denials::deepest(denials::blocked(
             &candidates,
             profile,
             &self.cwd,
             home.as_deref(),
+            denials::writes(&name),
             denials::may_access,
-        );
+        ));
         for b in found {
             if !self.blocked.insert(b.clone()) {
                 continue;
@@ -264,7 +268,7 @@ impl<O: Write, E: Write> Headless<O, E> {
                 Access::Write => ("writing", "writable"),
                 Access::Read => ("reading", "readable"),
             };
-            let name = self.name.clone();
+            let harness = self.name.clone();
             let what = match &b.entry {
                 Some(entry) => format!(
                     "removing or renaming {}, which changes {}",
@@ -273,18 +277,26 @@ impl<O: Write, E: Write> Headless<O, E> {
                 ),
                 None => format!("{doing} {}", b.path.display()),
             };
+            // What would be granted: the sandbox skips a path that does
+            // not exist, so a folder to make is made first.
+            let (grant, make) = b.grant();
             if !b.grantable {
                 self.warn(format!(
-                    "the sandbox kept {name} from {what}: it cannot be allowed, since {} holds \
+                    "the sandbox kept {harness} from {what}: it cannot be allowed, since {} holds \
                      unharness's own settings; --sandbox off runs without the sandbox",
-                    b.grant().display()
+                    grant.display()
                 ));
                 continue;
             }
+            let make = if make {
+                format!("create {} and ", grant.display())
+            } else {
+                String::new()
+            };
             self.warn(format!(
-                "the sandbox kept {name} from {what}: to allow it, add {} to [sandbox] {key} in \
-                 the config, or grant it with /sandbox allow in the TUI",
-                b.path.display()
+                "the sandbox kept {harness} from {what}: to allow it, {make}add {} to [sandbox] \
+                 {key} in the config, or grant it with /sandbox allow in the TUI",
+                grant.display()
             ));
         }
     }
@@ -373,10 +385,11 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// agent. What any front end tracks of it goes to `tracking`.
     fn take(&mut self, ev: &AgentEvent, parent: Option<&str>, commands: &mut Vec<SessionCommand>) {
         let main = parent.is_none();
-        if let AgentEvent::ToolCallStarted { id, input, .. } = ev
+        if let AgentEvent::ToolCallStarted { id, name, input } = ev
             && self.sandbox.is_some()
         {
-            self.tool_inputs.insert(id.clone(), input.clone());
+            self.tool_inputs
+                .insert(id.clone(), (name.clone(), input.clone()));
         }
         match ev {
             AgentEvent::Sub { parent, event } => self.take(event, Some(parent), commands),
@@ -1210,7 +1223,37 @@ mod tests {
         feed(&mut run, refused("3", &ws.join("x")));
         assert_eq!(run.warnings.len(), 1, "{:?}", run.warnings);
         assert!(run.warnings[0].contains("[sandbox] writable"));
-        assert!(run.warnings[0].contains("outside/x"));
+        assert!(run.warnings[0].contains("outside"));
+
+        // A file in a folder not there yet: one line, naming the folder to
+        // make and add, not the file (the sandbox skips what does not
+        // exist).
+        let new = root.join("outside/new");
+        feed(
+            &mut run,
+            vec![
+                AgentEvent::ToolCallStarted {
+                    id: "w".into(),
+                    name: "Write".into(),
+                    input: json!({"file_path": new.join("out.txt")}),
+                },
+                AgentEvent::ToolCallResult {
+                    id: "w".into(),
+                    output: format!("EACCES: permission denied, mkdir '{}'", new.display()),
+                    is_error: true,
+                },
+            ],
+        );
+        assert_eq!(run.warnings.len(), 2, "{:?}", run.warnings);
+        let said = &run.warnings[1];
+        assert!(
+            said.contains(&format!(
+                "create {} and add {} to",
+                new.display(),
+                new.display()
+            )),
+            "{said}"
+        );
     }
 
     fn headless(format: Format, report_turn: bool) -> (tempfile::TempDir, Run) {

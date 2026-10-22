@@ -34,12 +34,11 @@ pub struct Blocked {
 }
 
 impl Blocked {
-    /// What would be granted for it, which unharness's own directories
-    /// are in when it cannot be.
-    pub fn grant(&self) -> PathBuf {
-        propose(&self.path, self.access)
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| self.path.clone())
+    /// What would be granted for it (`grants::propose`), which
+    /// unharness's own directories are in when it cannot be, and whether
+    /// it is a directory to be made first.
+    pub fn grant(&self) -> (PathBuf, bool) {
+        propose(&self.path, self.access).unwrap_or_else(|| (self.path.clone(), false))
     }
 
     /// What `name` tried, in a sentence for the user.
@@ -86,10 +85,12 @@ fn is_command_key(key: &str) -> bool {
 }
 
 /// The paths a tool call's result suggests it could not reach, as
-/// written: those its error lines name, and with an error, the paths in
-/// its input. A command whose error names none (zsh's `mkdir: Permission
-/// denied`) suggests the paths in its command line. Nothing is checked
-/// here.
+/// written: those its denial lines name, and the paths in its input. A
+/// command whose denial names none (zsh's `mkdir: Permission denied`)
+/// suggests the paths in its command line. A result with no denial line
+/// suggests nothing, unless it failed with no words at all, only paths
+/// (Codex's failed `apply_patch`): a call that failed for another reason
+/// (a file not found) is not the sandbox's. Nothing is checked here.
 pub fn candidates(input: &Value, output: &str, is_error: bool) -> Vec<PathBuf> {
     let lines: Vec<&str> = output
         .lines()
@@ -98,7 +99,12 @@ pub fn candidates(input: &Value, output: &str, is_error: bool) -> Vec<PathBuf> {
             DENIED.iter().any(|d| l.contains(d))
         })
         .collect();
-    if lines.is_empty() && !is_error {
+    let wordless = is_error
+        && !output.trim().is_empty()
+        && output
+            .split_whitespace()
+            .all(|w| w.starts_with('/') || w.starts_with("~/"));
+    if lines.is_empty() && !wordless {
         return Vec::new();
     }
     let mut out: Vec<PathBuf> = Vec::new();
@@ -203,12 +209,16 @@ fn shell_paths(command: &str) -> Vec<&str> {
 /// does not let it write (or one it does not let it read) which
 /// unharness, outside the sandbox, could (`may`, the `access(2)` check
 /// in production). A path in or around one of `protected` is never one.
-/// Relative paths are under `cwd`, `~` is `home`.
+/// Relative paths are under `cwd`, `~` is `home`. In a path hidden from
+/// reading, a call that `writes` (a file tool's write or edit) or one
+/// that made something not there before was refused writing, any other
+/// reading.
 pub fn blocked(
     candidates: &[PathBuf],
     profile: &SandboxProfile,
     cwd: &Path,
     home: Option<&Path>,
+    writes: bool,
     may: impl Fn(&Path, Access) -> bool,
 ) -> Vec<Blocked> {
     let mut out: Vec<Blocked> = Vec::new();
@@ -223,14 +233,15 @@ pub fn blocked(
         let readable = profile.allow_read.iter().any(|a| path.starts_with(a));
         let writable = |p: &Path| profile.writable.iter().any(|w| p.starts_with(w));
         let parent = path.parent().map(Path::to_path_buf);
-        let found = if !readable && profile.deny_read.iter().any(|d| path.starts_with(d)) {
-            (existing == path && may(&path, Access::Read)).then_some(Blocked {
+        let hidden = !readable && profile.deny_read.iter().any(|d| path.starts_with(d));
+        let found = if hidden && existing == path && !writes {
+            may(&path, Access::Read).then_some(Blocked {
                 path,
                 access: Access::Read,
                 entry: None,
                 grantable: true,
             })
-        } else if !writable(&path) {
+        } else if hidden || !writable(&path) {
             may(&existing, Access::Write).then_some(Blocked {
                 path,
                 access: Access::Write,
@@ -253,7 +264,7 @@ pub fn blocked(
             None
         };
         if let Some(mut b) = found {
-            let grant = b.grant();
+            let (grant, _) = b.grant();
             b.grantable = !profile
                 .protected
                 .iter()
@@ -264,6 +275,30 @@ pub fn blocked(
         }
     }
     out
+}
+
+/// What one call was kept from, less what a deeper path of it lies
+/// beneath: that says less (Claude's Write reports the directory it could
+/// not make, beside the file it was for).
+pub fn deepest(blocked: Vec<Blocked>) -> Vec<Blocked> {
+    blocked
+        .iter()
+        .filter(|b| {
+            !blocked
+                .iter()
+                .any(|o| o.path != b.path && o.path.starts_with(&b.path))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether the tool `name` writes the paths its input names (a file
+/// tool's write or edit), as against reading them.
+pub fn writes(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["write", "edit", "patch", "notebook", "create"]
+        .iter()
+        .any(|w| name.contains(w))
 }
 
 /// `path` with its existing part canonical, and that part: `None` when
@@ -381,9 +416,41 @@ mod tests {
     fn what_is_not_a_denial_suggests_nothing() {
         let input = json!({"command": "ls /etc"});
         assert!(candidates(&input, "a\nb\n", false).is_empty());
-        // A failed call names what it was for, though.
+        // A call that failed for another reason is not the sandbox's:
+        // Claude's Read of a file not there.
         let input = json!({"file_path": "/x/y"});
-        assert_eq!(candidates(&input, "", true), [PathBuf::from("/x/y")]);
+        assert!(candidates(&input, "File does not exist.", true).is_empty());
+        assert!(candidates(&input, "", true).is_empty());
+        // One that failed with nothing but its paths (Codex's
+        // apply_patch) names what it was for.
+        let input = json!({"changes": [{"path": "/x/y"}]});
+        assert_eq!(candidates(&input, " /x/y", true), [PathBuf::from("/x/y")]);
+    }
+
+    /// In a path hidden from reading, a call that writes, or one that made
+    /// something new, was refused writing: a read grant would not let it.
+    #[test]
+    fn a_write_into_a_hidden_path_is_a_write() {
+        let w = world();
+        let home = w.root.join("home");
+        let check = |p: &str, writes: bool| {
+            blocked(
+                &[home.join(p)],
+                &w.profile,
+                &w.root.join("ws"),
+                Some(&home),
+                writes,
+                |_: &Path, _| true,
+            )
+            .into_iter()
+            .map(|b| b.access)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(check(".aws/new.txt", false), [Access::Write]);
+        assert_eq!(check(".aws/config", true), [Access::Write]);
+        assert_eq!(check(".aws/config", false), [Access::Read]);
+        assert!(writes("Write") && writes("apply_patch") && writes("edit"));
+        assert!(!writes("Read") && !writes("Bash"));
     }
 
     #[test]
@@ -423,6 +490,7 @@ mod tests {
             &w.profile,
             &w.root.join("ws"),
             Some(&home),
+            false,
             |_: &Path, _| true,
         );
         assert_eq!(
@@ -445,6 +513,7 @@ mod tests {
                 &w.profile,
                 &w.root.join("ws"),
                 Some(&home),
+                false,
                 |_: &Path, _| true,
             )
             .is_empty()
@@ -495,6 +564,7 @@ mod tests {
                 &w.profile,
                 &w.root.join("ws"),
                 Some(&w.root.join("home")),
+                false,
                 may,
             )
         };

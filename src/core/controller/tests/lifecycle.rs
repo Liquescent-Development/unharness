@@ -10,13 +10,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::super::{Controller, Front, Launch, Opening, PlanAsk, PolicyAsk};
+use super::super::{Controller, Front, GrantOffer, Launch, Opening, PlanAsk, PolicyAsk};
 use crate::config::Config;
 use crate::core::controller::Action;
 use crate::core::conversations::{Conversation, ConversationStore};
 use crate::core::registry::Registry;
 use crate::core::sandbox::SandboxSetup;
-use crate::core::sandbox::denials::Blocked;
 use crate::core::transcript::Transcript;
 use crate::core::{
     AgentEvent, Attachment, Capabilities, CapsUpdate, ContextUsage, HarnessId, ModelRef, Parser,
@@ -130,8 +129,8 @@ impl Front for Recording {
         self.shown = None;
     }
 
-    fn offer_grant(&mut self, blocked: Blocked, _has_workspace: bool) {
-        self.shown = Some(Shown::Grant(blocked.path));
+    fn offer_grant(&mut self, offer: GrantOffer) {
+        self.shown = Some(Shown::Grant(offer.blocked.path));
     }
 }
 

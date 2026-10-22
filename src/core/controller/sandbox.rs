@@ -20,6 +20,61 @@ pub enum GrantScope {
     Saved(Scope),
 }
 
+/// A line the grant dialog shows beside the path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantNote {
+    pub text: String,
+    pub kind: NoteKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteKind {
+    Info,
+    /// The grant will not go as it stands.
+    Caution,
+    /// It would let what runs in the sandbox act outside it.
+    Danger,
+}
+
+impl GrantNote {
+    fn info(text: impl Into<String>) -> Self {
+        GrantNote {
+            text: text.into(),
+            kind: NoteKind::Info,
+        }
+    }
+
+    fn caution(text: impl Into<String>) -> Self {
+        GrantNote {
+            text: text.into(),
+            kind: NoteKind::Caution,
+        }
+    }
+
+    fn danger(text: impl Into<String>) -> Self {
+        GrantNote {
+            text: text.into(),
+            kind: NoteKind::Danger,
+        }
+    }
+}
+
+/// The offer to grant what the sandbox kept a call from (`Front::
+/// offer_grant`).
+#[derive(Debug, Clone)]
+pub struct GrantOffer {
+    pub blocked: denials::Blocked,
+    /// What the agent tried, in a sentence.
+    pub said: String,
+    /// What would be granted (`grants::propose`), and whether it is a
+    /// folder to be made.
+    pub path: PathBuf,
+    pub make: bool,
+    pub notes: Vec<GrantNote>,
+    /// There is a workspace, so it can be kept for it.
+    pub has_workspace: bool,
+}
+
 impl GrantScope {
     /// Its row in the dialog.
     pub fn title(self) -> &'static str {
@@ -133,6 +188,7 @@ impl Controller {
         path: &Path,
         access: Access,
         scope: GrantScope,
+        make: bool,
         front: &mut dyn Front,
     ) -> bool {
         if let Err(why) = &self.sandbox.backend {
@@ -152,7 +208,7 @@ impl Controller {
             ));
             return true;
         }
-        let made = match make_granted(path, access) {
+        let made = match make_granted(path, access, make) {
             Ok(made) => made,
             Err(e) => {
                 self.conversation
@@ -312,52 +368,46 @@ impl Controller {
     }
 
     /// What the sandbox kept tool call `id` from, as its result tells
-    /// (`sandbox::denials`): each path is told once in the run, and
-    /// offered to the user once the turn has ended.
+    /// (`sandbox::denials`), judged against what confines the process that
+    /// ran it: each path is told once a run for each harness, and offered
+    /// to the user once the turn has ended; one that cannot be allowed is
+    /// only told.
     pub(super) fn notice_blocked(&mut self, id: &str, output: &str, is_error: bool) {
-        let input = self.tool_inputs.remove(id).unwrap_or(Value::Null);
+        let (name, input) = self
+            .tool_inputs
+            .remove(id)
+            .unwrap_or_else(|| (String::new(), Value::Null));
         let candidates = denials::candidates(&input, output, is_error);
         if candidates.is_empty() {
             return;
         }
-        let Ok(Sandbox::Active { profile, .. }) = self.session_sandbox() else {
+        let Some(profile) = &self.session_profile else {
             return;
         };
         let home = dirs::home_dir();
-        let blocked = denials::blocked(
+        let blocked = denials::deepest(denials::blocked(
             &candidates,
-            &profile,
+            profile,
             &self.cwd,
             home.as_deref(),
+            denials::writes(&name),
             denials::may_access,
-        );
-        // One a deeper path of the same call lies beneath says less
-        // (Claude's Write reports the directory it could not make).
-        let deepest: Vec<denials::Blocked> = blocked
-            .iter()
-            .filter(|b| {
-                !blocked
-                    .iter()
-                    .any(|o| o.path != b.path && o.path.starts_with(&b.path))
-            })
-            .cloned()
-            .collect();
-        for b in deepest {
-            if !self.sandbox_told.insert(b.clone()) {
+        ));
+        for b in blocked {
+            if !self.sandbox_told.insert((self.active, b.clone())) {
                 continue;
             }
+            let said = b.describe(self.short_name());
             if !b.grantable {
                 self.conversation.transcript.push_notice(format!(
-                    "Sandbox: {} It can't be allowed: {} holds unharness's own settings. \
+                    "Sandbox: {said} It can't be allowed: {} holds unharness's own settings. \
                      /sandbox off turns the sandbox off.",
-                    b.describe(self.short_name()),
-                    tilde(&b.grant())
+                    tilde(&b.grant().0)
                 ));
                 continue;
             }
             self.conversation.transcript.push_notice(format!(
-                "Sandbox: {} You can allow it when the turn ends.",
-                b.describe(self.short_name())
+                "Sandbox: {said} You can allow it when the turn ends."
             ));
             self.sandbox_blocked.push(b);
         }
@@ -372,11 +422,82 @@ impl Controller {
         }
         while let Some(b) = self.sandbox_offers.pop_front() {
             let reach = grant_target(&b.path).unwrap_or_else(|| b.path.clone());
-            if !self.sandbox_allows(&reach, b.access) {
-                front.offer_grant(b, self.workspace_root.is_some());
-                return;
+            if self.sandbox_allows(&reach, b.access) {
+                continue;
             }
+            let (path, make) = b.grant();
+            front.offer_grant(GrantOffer {
+                said: b.describe(self.short_name()),
+                notes: self.grant_notes(&path, b.access, make),
+                path,
+                make,
+                has_workspace: self.workspace_root.is_some(),
+                blocked: b,
+            });
+            return;
         }
+    }
+
+    /// The live session's process started: what confines it is what its
+    /// refusals are told against.
+    pub(crate) fn sandbox_started(&mut self) {
+        self.session_profile = match self.session_sandbox() {
+            Ok(Sandbox::Active { profile, .. }) => Some(profile),
+            _ => None,
+        };
+    }
+
+    /// The turn ended, also when its process was ended for it: what the
+    /// sandbox kept it from is offered.
+    pub(super) fn blocks_turn_ended(&mut self) {
+        self.tool_inputs.clear();
+        self.sandbox_offers.extend(self.sandbox_blocked.drain(..));
+    }
+
+    /// Another harness or conversation takes over: what the sandbox kept
+    /// the one before from is not offered to it.
+    pub(super) fn forget_blocks(&mut self) {
+        self.tool_inputs.clear();
+        self.sandbox_blocked.clear();
+        self.sandbox_offers.clear();
+    }
+
+    /// What the dialog says beside `path` before it is granted for
+    /// `access`: whether it exists (or is made, `make`), whether the
+    /// sandbox reaches it already, and what granting it would open
+    /// (`grant_risk`). Worked out once for a path, not each time the
+    /// dialog is drawn.
+    pub fn grant_notes(&self, path: &Path, access: Access, make: bool) -> Vec<GrantNote> {
+        let name = self.short_name();
+        let verb = match access {
+            Access::Write => "write",
+            Access::Read => "read",
+        };
+        let reach = grant_target(path);
+        let mut notes = Vec::new();
+        match path.canonicalize() {
+            Err(_) if access == Access::Read || reach.is_none() => {
+                notes.push(GrantNote::caution("That path doesn't exist."))
+            }
+            Err(_) if make => notes.push(GrantNote::info(
+                "This folder doesn't exist yet. Allowing creates it.",
+            )),
+            Err(_) => notes.push(GrantNote::caution(
+                "That path doesn't exist. End it with / to create it as a folder.",
+            )),
+            Ok(p) if self.sandbox_allows(&p, access) => {
+                notes.push(GrantNote::info(format!("{name} can already {verb} there.")))
+            }
+            Ok(_) => {}
+        }
+        let checked = path.canonicalize().ok().or_else(|| {
+            let base = path.ancestors().find(|a| a.exists())?;
+            Some(reach?.join(path.strip_prefix(base).ok()?))
+        });
+        if let Some(risk) = checked.and_then(|p| self.grant_risk(&p, access)) {
+            notes.push(GrantNote::danger(format!("⚠ {risk}")));
+        }
+        notes
     }
 
     /// The session restarts under paths granted during the turn that ended.
@@ -511,10 +632,11 @@ fn add_path(config: &mut Config, path: &Path, access: Access, lift: bool) {
 }
 
 /// Make the directories `path` names that do not exist yet, to be
-/// granted to write, and return them innermost first. Never in or around
+/// granted to write, when the user chose to (`make`: the folder offered,
+/// or a path ending in `/`), and return them innermost first. Never in or around
 /// unharness's own directories.
-fn make_granted(path: &Path, access: Access) -> anyhow::Result<Vec<PathBuf>> {
-    if access == Access::Read || !path.is_absolute() || path.exists() {
+fn make_granted(path: &Path, access: Access, make: bool) -> anyhow::Result<Vec<PathBuf>> {
+    if !make || access == Access::Read || !path.is_absolute() || path.exists() {
         return Ok(Vec::new());
     }
     let missing: Vec<&Path> = path.ancestors().take_while(|a| !a.exists()).collect();

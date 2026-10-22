@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::App;
 use crate::core::controller::GrantScope;
-use crate::core::sandbox::grants::grant_target;
+use crate::core::sandbox::grants::{grant_target, propose};
 use crate::core::sandbox::{Access, Sandbox, SandboxLevel, expand_home};
 use crate::tui::modal::{GrantDraft, ListPicker, Modal};
 
@@ -42,8 +42,8 @@ impl App {
     }
 
     /// Open the dialog that grants the path `text` names beyond the
-    /// sandbox; one that does not exist is offered by the nearest
-    /// directory above it that does.
+    /// sandbox: what `grants::propose` would grant for it, or a folder to
+    /// make when it ends in `/`.
     pub fn open_sandbox_grant(&mut self, text: &str, access: Access) {
         if text.trim().is_empty() {
             let cmd = match access {
@@ -64,11 +64,21 @@ impl App {
                 .push_error(format!("nothing of {} exists", asked.display()));
             return;
         }
+        // A folder typed with a `/` at its end is made; otherwise what
+        // would be granted for the path (`grants::propose`).
+        let (path, make) = if text.trim().ends_with('/') {
+            (asked, true)
+        } else {
+            propose(&asked, access).unwrap_or((asked, false))
+        };
+        let notes = self.controller.grant_notes(&path, access, make);
         let has_workspace = self.controller.workspace_root.is_some();
         self.modal = Some(Modal::SandboxGrant(GrantDraft::new(
-            &asked,
+            &path,
+            make,
             access,
             has_workspace,
+            notes,
         )));
     }
 
@@ -85,20 +95,29 @@ impl App {
             return path;
         };
         match (base.canonicalize(), path.strip_prefix(base)) {
+            // Joining nothing would add a `/`.
+            (Ok(existing), Ok(rest)) if rest.as_os_str().is_empty() => existing,
             (Ok(existing), Ok(rest)) => existing.join(rest),
             _ => path,
         }
     }
 
-    /// Grant `path` beyond the sandbox (`Controller::grant_sandbox`).
-    pub fn grant_sandbox(&mut self, path: &Path, access: Access, scope: GrantScope) -> bool {
-        self.with(|c, screen| c.grant_sandbox(path, access, scope, screen))
+    /// Grant `path` beyond the sandbox, made first as a folder with
+    /// `make` (`Controller::grant_sandbox`).
+    pub fn grant_sandbox(
+        &mut self,
+        path: &Path,
+        access: Access,
+        scope: GrantScope,
+        make: bool,
+    ) -> bool {
+        self.with(|c, screen| c.grant_sandbox(path, access, scope, make, screen))
     }
 
     /// Grant `path`, and ask the agent to try again what the sandbox kept
     /// it from: the prompt goes to the session that restarts under it.
-    pub fn grant_and_retry(&mut self, path: &Path, access: Access, scope: GrantScope) {
-        if !self.grant_sandbox(path, access, scope) {
+    pub fn grant_and_retry(&mut self, path: &Path, access: Access, scope: GrantScope, make: bool) {
+        if !self.grant_sandbox(path, access, scope, make) {
             return;
         }
         let verb = match access {

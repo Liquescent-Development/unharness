@@ -35,7 +35,8 @@ impl Controller {
             AgentEvent::TextDelta(t) => self.conversation.transcript.append_assistant(&sender, &t),
             AgentEvent::ThinkingDelta(t) => self.conversation.transcript.append_thought(&t),
             AgentEvent::ToolCallStarted { id, name, input } => {
-                self.tool_inputs.insert(id.clone(), input.clone());
+                self.tool_inputs
+                    .insert(id.clone(), (name.clone(), input.clone()));
                 self.conversation.transcript.tool_started(&id, &name, input)
             }
             // Live output. Streaming args arrive before the block exists and
@@ -70,7 +71,8 @@ impl Controller {
                 | AgentEvent::SubagentEnded { .. }) => self.on_event(ev, front),
                 ev => {
                     if let AgentEvent::ToolCallStarted { id, name, input } = &ev {
-                        self.tool_inputs.insert(id.clone(), input.clone());
+                        self.tool_inputs
+                            .insert(id.clone(), (name.clone(), input.clone()));
                         self.tracking
                             .subagent_tool_started(&parent, id, name, input);
                     }
@@ -211,8 +213,7 @@ impl Controller {
                 self.finish_handoff(done, front);
                 self.persist();
                 self.restart_for_grants(front);
-                self.tool_inputs.clear();
-                self.sandbox_offers.extend(self.sandbox_blocked.drain(..));
+                self.blocks_turn_ended();
                 // A prompt sent at once is the next turn. A clean finish
                 // moves on to the next queued prompt; after an interrupt or
                 // error the user decides (Enter sends it), also when a

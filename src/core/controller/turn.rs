@@ -609,6 +609,7 @@ impl Controller {
         self.process_gone(front);
         self.conversation.transcript.end_running_tools();
         self.finish_generation();
+        self.blocks_turn_ended();
         self.conversation
             .transcript
             .push_system("Turn interrupted.");

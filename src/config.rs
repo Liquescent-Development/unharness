@@ -534,14 +534,18 @@ impl Config {
 
     /// The lists are joined, except that a global `deny_read` path the
     /// workspace names in `readable` is lifted for that workspace. Only
-    /// that way round, and only for the same path as written (`~`
-    /// expanded): any other overlap is refused when the sandbox is set up.
+    /// that way round, and only for the same path (`~` expanded, links
+    /// followed where it exists, as the sandbox resolves it): any other
+    /// overlap is refused when the sandbox is set up.
     fn merge_sandbox(
         global: SandboxSettings,
         local: SandboxSettings,
         home: Option<&Path>,
     ) -> SandboxSettings {
-        let expand = |p: &PathBuf| sandbox::expand_home(p, home);
+        let expand = |p: &PathBuf| {
+            let path = sandbox::expand_home(p, home);
+            path.canonicalize().unwrap_or(path)
+        };
         let lifted: Vec<PathBuf> = local.readable.iter().map(expand).collect();
         let global_deny = global
             .deny_read
@@ -993,6 +997,29 @@ url = "https://example.com/mcp"
                 denied
             );
         }
+    }
+
+    /// Where the home directory is a link (Silverblue's /home ->
+    /// /var/home), a readable path written through the link lifts a deny
+    /// written as `~`: they are one path, as the sandbox resolves them.
+    #[cfg(unix)]
+    #[test]
+    fn a_lift_follows_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().canonicalize().unwrap().join("var/home/u");
+        std::fs::create_dir_all(real.join("secrets")).unwrap();
+        let home = tmp.path().join("home-u");
+        std::os::unix::fs::symlink(&real, &home).unwrap();
+        let global = SandboxSettings {
+            deny_read: vec![PathBuf::from("~/secrets")],
+            ..Default::default()
+        };
+        let local = SandboxSettings {
+            readable: vec![real.join("secrets")],
+            ..Default::default()
+        };
+        let merged = Config::merge_sandbox(global, local, Some(&home));
+        assert!(merged.deny_read.is_empty(), "{:?}", merged.deny_read);
     }
 
     /// `modes` is a table of policy → agent mode, and a workspace's

@@ -4,7 +4,7 @@
 //! prompt box, the status rule. The TUI's `App` is the front end with a
 //! screen (`tui::app::Screen`); nothing here builds or draws a dialog.
 
-use crate::core::sandbox::denials::Blocked;
+use super::GrantOffer;
 use crate::core::{Attachment, PermissionPolicy, PermissionRequest};
 
 /// The view a controller works on. Called at the exact points where the
@@ -49,9 +49,8 @@ pub trait Front {
     /// before (a subagent's transcript, a selection, a request's dialog).
     fn conversation_installed(&mut self);
     /// Offer the user to grant what the sandbox kept a call from
-    /// (`Controller::grant_sandbox`), when no other dialog is open; with a
-    /// workspace, it can be kept for it.
-    fn offer_grant(&mut self, blocked: Blocked, has_workspace: bool);
+    /// (`Controller::grant_sandbox`), when no other dialog is open.
+    fn offer_grant(&mut self, offer: GrantOffer);
 }
 
 /// The policy picker as the controller asks for it.

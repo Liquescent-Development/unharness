@@ -83,9 +83,18 @@ impl App {
                 .map(|c| c.and_then(|_| p.current().map(|l| ModalChoice::Sandbox(*l)))),
             // `e` opens the path for editing, which Enter or Esc closes;
             // Tab goes round where the grant is kept.
+            // What is said of the path is worked out again once it is
+            // edited, not as it is typed.
             Modal::SandboxGrant(d) if d.editing => {
                 match key.code {
-                    KeyCode::Enter | KeyCode::Esc => d.editing = false,
+                    KeyCode::Enter | KeyCode::Esc => {
+                        d.editing = false;
+                        d.notes = self.controller.grant_notes(
+                            &self.grant_path(&d.path),
+                            d.access,
+                            d.make(),
+                        );
+                    }
                     KeyCode::Backspace => {
                         d.path.pop();
                     }
@@ -112,18 +121,22 @@ impl App {
                     d.scopes.down();
                     None
                 }
-                KeyCode::Enter => Some(Some(ModalChoice::Grant(
-                    self.grant_path(&d.path),
-                    d.access,
-                    d.scope(),
-                    d.blocked.is_some(),
-                ))),
-                KeyCode::Char('a') if d.blocked.is_some() => Some(Some(ModalChoice::Grant(
-                    self.grant_path(&d.path),
-                    d.access,
-                    d.scope(),
-                    false,
-                ))),
+                KeyCode::Enter => Some(Some(ModalChoice::Grant(Grant {
+                    path: self.grant_path(&d.path),
+                    access: d.access,
+                    scope: d.scope(),
+                    make: d.make(),
+                    retry: d.blocked.is_some(),
+                }))),
+                KeyCode::Char('a') if d.blocked.is_some() => {
+                    Some(Some(ModalChoice::Grant(Grant {
+                        path: self.grant_path(&d.path),
+                        access: d.access,
+                        scope: d.scope(),
+                        make: d.make(),
+                        retry: false,
+                    })))
+                }
                 KeyCode::Char('e') => {
                     d.editing = true;
                     None
@@ -462,12 +475,12 @@ impl App {
                     }
                     // Whether or not it was granted: what went wrong is
                     // in the transcript.
-                    ModalChoice::Grant(path, access, scope, retry) => {
+                    ModalChoice::Grant(g) => {
                         self.modal = None;
-                        if retry {
-                            self.grant_and_retry(&path, access, scope);
+                        if g.retry {
+                            self.grant_and_retry(&g.path, g.access, g.scope, g.make);
                         } else {
-                            self.grant_sandbox(&path, access, scope);
+                            self.grant_sandbox(&g.path, g.access, g.scope, g.make);
                         }
                     }
                     ModalChoice::Subagent(id) => {
@@ -512,9 +525,7 @@ enum ModalChoice {
     /// Choose the policy and save it as the harness's default.
     SavePolicy(PermissionPolicy, Scope),
     Sandbox(SandboxLevel),
-    /// Grant this path beyond the sandbox, kept where the scope says;
-    /// and ask the agent to try again.
-    Grant(PathBuf, Access, GrantScope, bool),
+    Grant(Grant),
     Subagent(String),
     Resume(String),
     /// (user block, also restore files)
@@ -525,6 +536,17 @@ enum ModalChoice {
     /// Allow the request and keep these rules for the next ones like it.
     Always(Scope, Vec<Rule>),
     Dismiss,
+}
+
+/// A path to grant beyond the sandbox, kept where `scope` says, made
+/// first as a folder with `make`; and with `retry`, the agent asked to
+/// try again.
+struct Grant {
+    path: PathBuf,
+    access: Access,
+    scope: GrantScope,
+    make: bool,
+    retry: bool,
 }
 
 /// Shared navigation for local list pickers.

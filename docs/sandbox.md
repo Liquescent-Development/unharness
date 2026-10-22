@@ -84,7 +84,8 @@ the file left as it was.
 The sandbox can only grant what exists. So for a file in a directory that
 doesn't exist yet, the dialog offers that directory and creates it, empty,
 when you allow it. For a new file in a directory that exists, it offers
-the directory.
+the directory. A path you type or edit is created as a folder only when
+it ends with `/`, so a file name is never turned into a folder.
 
 Removing or renaming a path changes the directory it is in, so allowing
 `~/testing` lets the agent work inside it but not remove `~/testing`
