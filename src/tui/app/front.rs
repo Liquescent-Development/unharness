@@ -5,9 +5,9 @@
 use std::time::Instant;
 
 use super::{App, ListRequest, TranscriptView};
-use crate::core::controller::{Controller, Front, PlanAsk, PolicyAsk};
+use crate::core::controller::{Controller, Front, GrantOffer, PlanAsk, PolicyAsk};
 use crate::core::{Attachment, PermissionPolicy, PermissionRequest};
-use crate::tui::modal::{ListPicker, Modal, PolicyPicker};
+use crate::tui::modal::{GrantDraft, ListPicker, Modal, PolicyPicker};
 use crate::tui::selection::{Point, Selection};
 
 /// The App's view, borrowed beside its controller.
@@ -130,6 +130,10 @@ pub(super) fn policy_picker(ask: PolicyAsk) -> Modal {
 }
 
 impl Front for Screen<'_> {
+    fn offer_grant(&mut self, offer: GrantOffer) {
+        *self.modal = Some(Modal::SandboxGrant(GrantDraft::offered(offer)));
+    }
+
     fn dialog_open(&self) -> bool {
         self.modal.as_ref().is_some_and(|m| !m.yields())
     }

@@ -118,6 +118,7 @@ fn completion_asks_for_a_list_once() {
     app.controller.sandbox = SandboxSetup {
         explicit: Some(SandboxLevel::ReadOnly),
         backend: Err("no kernel".into()),
+        grants: Vec::new(),
     };
     assert!(app.session_sandbox().is_err());
     app.input = "/model x".into();

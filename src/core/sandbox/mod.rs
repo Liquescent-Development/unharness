@@ -15,9 +15,13 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub mod denials;
+pub mod grants;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod seatbelt;
+
+pub use grants::{Access, Grant};
 
 /// How far a harness process is confined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -190,8 +194,20 @@ pub struct SandboxEnv {
     pub protected: Vec<PathBuf>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// What `SandboxEnv::current` gives on this thread instead: a test's
+    /// machine, whose temp directory is not scratch.
+    pub(crate) static TEST_ENV: std::cell::RefCell<Option<SandboxEnv>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl SandboxEnv {
     pub fn current() -> Self {
+        #[cfg(test)]
+        if let Some(env) = TEST_ENV.with(|e| e.borrow().clone()) {
+            return env;
+        }
         let mut scratch = vec![
             PathBuf::from("/tmp"),
             PathBuf::from("/var/tmp"),
@@ -348,6 +364,8 @@ pub struct SandboxSetup {
     /// The level from the flag or the config, if any.
     pub explicit: Option<SandboxLevel>,
     pub backend: std::result::Result<Arc<dyn SandboxBackend>, String>,
+    /// Paths granted for the run from the TUI (`/sandbox allow`).
+    pub grants: Vec<Grant>,
 }
 
 impl SandboxSetup {
@@ -355,6 +373,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit,
             backend: detect(),
+            grants: Vec::new(),
         }
     }
 
@@ -363,6 +382,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit: Some(SandboxLevel::Off),
             backend: Err("off".to_string()),
+            grants: Vec::new(),
         }
     }
 
@@ -373,6 +393,7 @@ impl SandboxSetup {
         SandboxSetup {
             explicit,
             backend: Ok(Arc::new(NullBackend)),
+            grants: Vec::new(),
         }
     }
 
@@ -448,10 +469,20 @@ fn profile(level: SandboxLevel, req: &SandboxRequest, env: &SandboxEnv) -> Resul
         let Some(path) = canonical(&expand(extra)) else {
             continue;
         };
-        if let Some(hit) = protected.iter().find(|p| p.starts_with(&path)) {
+        // Beneath it too: Landlock cannot take a path back out of one it
+        // grants.
+        if let Some(hit) = protected
+            .iter()
+            .find(|p| p.starts_with(&path) || path.starts_with(p))
+        {
             bail!(
-                "[sandbox].writable path {} contains unharness's own state ({})",
+                "[sandbox].writable path {} {} unharness's own state ({})",
                 path.display(),
+                if path.starts_with(hit) {
+                    "is inside"
+                } else {
+                    "contains"
+                },
                 hit.display()
             );
         }
@@ -995,11 +1026,25 @@ mod tests {
     #[test]
     fn writable_path_over_own_state_is_refused() {
         let w = world();
-        let writable = [w.home.clone()];
-        let mut req = request(&w, None);
-        req.extra_writable = &writable;
-        let err = resolve(&req, &available(), &w.env).unwrap_err();
-        assert!(err.to_string().contains("unharness's own state"), "{err}");
+        std::fs::create_dir_all(w.home.join(".local/state/unharness/conversations")).unwrap();
+        // Around it, and inside it: Landlock cannot take it back out.
+        for (path, says) in [
+            (w.home.clone(), "contains"),
+            (
+                w.home.join(".local/state/unharness/conversations"),
+                "is inside",
+            ),
+        ] {
+            let writable = [path];
+            let mut req = request(&w, None);
+            req.extra_writable = &writable;
+            let err = resolve(&req, &available(), &w.env).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("{says} unharness's own state")),
+                "{err}"
+            );
+        }
     }
 
     #[test]

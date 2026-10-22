@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::super::{Controller, Front, Launch, Opening, PlanAsk, PolicyAsk};
+use super::super::{Controller, Front, GrantOffer, Launch, Opening, PlanAsk, PolicyAsk};
 use crate::config::Config;
 use crate::core::controller::Action;
 use crate::core::conversations::{Conversation, ConversationStore};
@@ -49,6 +49,8 @@ enum Shown {
     Request(String),
     /// The policy picker.
     Policy,
+    /// The offer to grant a path the sandbox kept a call from.
+    Grant(PathBuf),
 }
 
 /// The front end the controller is driven with here: what it was asked
@@ -125,6 +127,10 @@ impl Front for Recording {
 
     fn conversation_installed(&mut self) {
         self.shown = None;
+    }
+
+    fn offer_grant(&mut self, offer: GrantOffer) {
+        self.shown = Some(Shown::Grant(offer.blocked.path));
     }
 }
 

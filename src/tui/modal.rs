@@ -1,10 +1,16 @@
 //! Modal state: list pickers and the permission/question/dialog prompts.
 
+use std::path::Path;
+
 use serde_json::{Value, json};
 
+use crate::core::controller::GrantScope;
+use crate::core::controller::{GrantNote, GrantOffer};
 use crate::core::conversations::ConversationSummary;
 use crate::core::rules::{Rule, Scope};
-use crate::core::sandbox::SandboxLevel;
+use crate::core::sandbox::denials::Blocked;
+use crate::core::sandbox::grants::tilde;
+use crate::core::sandbox::{Access, SandboxLevel};
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, PermissionRequest, Question,
 };
@@ -204,6 +210,83 @@ impl AlwaysDraft {
             Scope::Workspace => Scope::Global,
             Scope::Global => Scope::Workspace,
         }
+    }
+}
+
+/// A path about to be granted beyond the sandbox: one the sandbox kept a
+/// call from, or `/sandbox allow`'s.
+#[derive(Debug, Clone)]
+pub struct GrantDraft {
+    /// The path to grant, which `e` opens for editing.
+    pub path: String,
+    /// The path as offered, and whether it is a folder to be made
+    /// (`grants::propose`).
+    offered: String,
+    offered_make: bool,
+    pub access: Access,
+    /// How long it lasts: for the run, or saved (for the workspace when
+    /// there is one, or everywhere).
+    pub scopes: ListPicker<GrantScope>,
+    /// What the sandbox kept a call from, when that is why it is offered,
+    /// and what the agent tried, in a sentence: the agent can be asked to
+    /// try again once it is granted.
+    pub blocked: Option<Blocked>,
+    pub said: Option<String>,
+    /// What is worth knowing before granting it, worked out for the path
+    /// as it stands (`Controller::grant_notes`).
+    pub notes: Vec<GrantNote>,
+    /// Keys edit the path.
+    pub editing: bool,
+}
+
+impl GrantDraft {
+    /// The draft for granting `path` for `access`, `make` if it is a
+    /// folder to be made.
+    pub fn new(
+        path: &Path,
+        make: bool,
+        access: Access,
+        has_workspace: bool,
+        notes: Vec<GrantNote>,
+    ) -> Self {
+        GrantDraft {
+            path: tilde(path),
+            offered: tilde(path),
+            offered_make: make,
+            access,
+            scopes: ListPicker::new(GrantScope::all(has_workspace)),
+            blocked: None,
+            said: None,
+            notes,
+            editing: false,
+        }
+    }
+
+    /// The draft for what the sandbox kept a call from.
+    pub fn offered(offer: GrantOffer) -> Self {
+        GrantDraft {
+            blocked: Some(offer.blocked.clone()),
+            said: Some(offer.said),
+            ..Self::new(
+                &offer.path,
+                offer.make,
+                offer.blocked.access,
+                offer.has_workspace,
+                offer.notes,
+            )
+        }
+    }
+
+    /// How long the grant lasts, as chosen.
+    pub fn scope(&self) -> GrantScope {
+        self.scopes.current().copied().unwrap_or(GrantScope::Run)
+    }
+
+    /// Whether a path not there yet is made, as a folder: the folder
+    /// offered, or a path typed with a `/` at its end. A file name typed
+    /// is never made into a folder.
+    pub fn make(&self) -> bool {
+        (self.offered_make && self.path == self.offered) || self.path.ends_with('/')
     }
 }
 
@@ -597,6 +680,8 @@ pub enum Modal {
     Effort(ListPicker<String>),
     Policy(PolicyPicker),
     Sandbox(ListPicker<SandboxLevel>),
+    /// `/sandbox allow`: a path to grant.
+    SandboxGrant(GrantDraft),
     /// The conversation's subagents; the chosen one's transcript is opened.
     Subagents(ListPicker<super::app::SubagentOption>),
     Resume(ListPicker<ConversationSummary>),

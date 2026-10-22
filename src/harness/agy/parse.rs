@@ -322,7 +322,21 @@ impl AgyParser {
                         input,
                     });
                 }
-                if str_of(step, "state") == "DONE" {
+                // 1.4.3 ends a call that failed as `ERROR`, with agy's
+                // message: a write the sandbox refused, `fixtures/
+                // sandbox_denied.jsonl`.
+                if str_of(step, "state") == "ERROR" {
+                    self.open_tools.retain(|i| *i != index);
+                    let message = info
+                        .and_then(|i| i.pointer("/error/message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("failed");
+                    out.push(AgentEvent::ToolCallResult {
+                        id,
+                        output: message.to_string(),
+                        is_error: true,
+                    });
+                } else if str_of(step, "state") == "DONE" {
                     self.open_tools.retain(|i| *i != index);
                     let output = if step_type == "subagent" {
                         subagents
@@ -337,7 +351,8 @@ impl AgyParser {
                         info.map(|i| str_of(i, "output")).unwrap_or("").to_string()
                     };
                     // A command that failed and a call agy refused look the
-                    // same here: no status, at most an output.
+                    // same here: no status, at most an output (a command's
+                    // exit code is in it).
                     out.push(AgentEvent::ToolCallResult {
                         id,
                         output,
@@ -463,6 +478,7 @@ mod tests {
             "subagent_wait",
             "subagent_followup",
             "usage",
+            "sandbox_denied",
         ] {
             assert_fixture(&mut AgyParser::new(None), &fixtures_dir(file!()), case);
         }

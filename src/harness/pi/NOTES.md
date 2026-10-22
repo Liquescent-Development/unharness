@@ -86,3 +86,11 @@ notice, and holds nothing after it (e2e
 `pi_sends_a_prompt_held_for_an_abort_pi_never_answers`); an
 `agent_start` of pi's own also ends the wait. Not checked live: a `prompt` sent before
 the answer (whether pi refuses it or queues it).
+
+Sandbox denials (`fixtures/sandbox_denied.jsonl`, 1.1.0, under a Landlock
+ruleset like unharness's), each `isError`:
+- write: `EACCES: permission denied, mkdir '<dir>'`.
+- bash, run with `/bin/bash`:
+  - `touch: cannot touch '<p>': Permission denied`;
+  - `mkdir: Permission denied`;
+  - `/bin/bash: line 2: <p>: Permission denied`.

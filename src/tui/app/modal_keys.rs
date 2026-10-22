@@ -1,11 +1,14 @@
 //! Keys while a dialog or picker is open.
 
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
 use super::App;
+use crate::core::controller::GrantScope;
 use crate::core::rules::Scope;
-use crate::core::sandbox::SandboxLevel;
+use crate::core::sandbox::{Access, SandboxLevel};
 use crate::core::{
     HarnessId, PermissionDecision, PermissionKind, PermissionPolicy, ProviderId, Rule,
 };
@@ -78,6 +81,69 @@ impl App {
             },
             Modal::Sandbox(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|l| ModalChoice::Sandbox(*l)))),
+            // `e` opens the path for editing, which Enter or Esc closes;
+            // Tab goes round where the grant is kept.
+            // What is said of the path is worked out again once it is
+            // edited, not as it is typed.
+            Modal::SandboxGrant(d) if d.editing => {
+                match key.code {
+                    KeyCode::Enter | KeyCode::Esc => {
+                        d.editing = false;
+                        d.notes = self.controller.grant_notes(
+                            &self.grant_path(&d.path),
+                            d.access,
+                            d.make(),
+                        );
+                    }
+                    KeyCode::Backspace => {
+                        d.path.pop();
+                    }
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        d.path.push(c)
+                    }
+                    _ => {}
+                }
+                None
+            }
+            // ↑/↓ choose how long it lasts. After a block Enter also asks
+            // the agent to try again, and `a` only allows; `/sandbox
+            // allow`'s Enter allows.
+            Modal::SandboxGrant(d) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    d.scopes.up();
+                    None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    d.scopes.down();
+                    None
+                }
+                KeyCode::Enter => Some(Some(ModalChoice::Grant(Grant {
+                    path: self.grant_path(&d.path),
+                    access: d.access,
+                    scope: d.scope(),
+                    make: d.make(),
+                    retry: d.blocked.is_some(),
+                }))),
+                KeyCode::Char('a') if d.blocked.is_some() => {
+                    Some(Some(ModalChoice::Grant(Grant {
+                        path: self.grant_path(&d.path),
+                        access: d.access,
+                        scope: d.scope(),
+                        make: d.make(),
+                        retry: false,
+                    })))
+                }
+                KeyCode::Char('e') => {
+                    d.editing = true;
+                    None
+                }
+                KeyCode::Esc => Some(None),
+                _ => None,
+            },
             Modal::Subagents(p) => picker_nav(p, key.code)
                 .map(|c| c.and_then(|_| p.current().map(|a| ModalChoice::Subagent(a.id.clone())))),
             Modal::Resume(p) => picker_nav(p, key.code)
@@ -407,6 +473,16 @@ impl App {
                             self.modal = None;
                         }
                     }
+                    // Whether or not it was granted: what went wrong is
+                    // in the transcript.
+                    ModalChoice::Grant(g) => {
+                        self.modal = None;
+                        if g.retry {
+                            self.grant_and_retry(&g.path, g.access, g.scope, g.make);
+                        } else {
+                            self.grant_sandbox(&g.path, g.access, g.scope, g.make);
+                        }
+                    }
                     ModalChoice::Subagent(id) => {
                         self.modal = None;
                         self.open_subagent(&id);
@@ -449,6 +525,7 @@ enum ModalChoice {
     /// Choose the policy and save it as the harness's default.
     SavePolicy(PermissionPolicy, Scope),
     Sandbox(SandboxLevel),
+    Grant(Grant),
     Subagent(String),
     Resume(String),
     /// (user block, also restore files)
@@ -459,6 +536,17 @@ enum ModalChoice {
     /// Allow the request and keep these rules for the next ones like it.
     Always(Scope, Vec<Rule>),
     Dismiss,
+}
+
+/// A path to grant beyond the sandbox, kept where `scope` says, made
+/// first as a folder with `make`; and with `retry`, the agent asked to
+/// try again.
+struct Grant {
+    path: PathBuf,
+    access: Access,
+    scope: GrantScope,
+    make: bool,
+    retry: bool,
 }
 
 /// Shared navigation for local list pickers.

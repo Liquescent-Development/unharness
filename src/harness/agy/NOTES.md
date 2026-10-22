@@ -148,3 +148,11 @@ A run with no bucket in its answer is a failure ("reported no quota"):
 agy signed out says so on stderr, which a probe does not read. stdin is
 closed. Not checked: the run beside a session of agy in the same
 workspace, or during its turn.
+
+Sandbox denials (`fixtures/sandbox_denied.jsonl`, 1.4.3, under a Landlock
+ruleset like unharness's, `--dangerously-skip-permissions`):
+- **write_file:** 1.4.3 ends a failed call with a step in state `ERROR`
+  and `tool_info.error.message` (`mkdir <dir>: permission denied`). The
+  parser takes it as a failed result; before that the call was left open.
+- **Commands:** a command that failed is still `DONE`, its exit code and
+  output in `tool_info.output` (`bash: line 1: <p>: Permission denied`).

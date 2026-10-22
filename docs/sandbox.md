@@ -43,6 +43,78 @@ holds for the run on every harness. A change in the TUI applies to the
 next harness process, so the session restarts under it (resumed where
 the harness can; nothing changes during a turn).
 
+## Granting a path from the TUI
+
+When the sandbox refuses an agent's tool call, the TUI notices. It says so
+in the transcript, and when the turn ends it offers to allow the path:
+
+- **↑/↓** choose how long the grant lasts.
+- **Enter** allows it and asks the agent to try again.
+- **a** only allows it.
+- **e** edits the path.
+- **Esc** leaves it; it is not offered again until you quit.
+
+Each path is offered once a run. A path is offered only when the sandbox
+is what kept the agent from it: the sandbox does not allow it, and your
+own user could write (or read) it. So an ordinary permission error, or a
+message an agent made up, offers nothing. With `--print`, the same check
+names the path and the setting to add on stderr.
+
+You can also grant a path yourself:
+
+- `/sandbox allow <path>` lets the agent write (and read) the path and
+  everything beneath it.
+- `/sandbox allow-read <path>` lets it read a path the sandbox denies,
+  such as a credential directory.
+- `/sandbox paths` lists what the next process may write and may not
+  read, what was granted for the run, and the files saved grants are
+  kept in.
+
+The dialog shows the path, which you can edit (`e`), and lists how long
+the grant lasts:
+
+- **Until I quit** (the default), on every harness;
+- **In this project**, saved under `[sandbox]` in the workspace's
+  settings file;
+- **Everywhere**, saved under `[sandbox]` in the global config.
+
+Saved grants go in as `writable` or `readable` entries, with the rest of
+the file left as it was.
+
+The sandbox can only grant what exists. So for a file in a directory that
+doesn't exist yet, the dialog offers that directory and creates it, empty,
+when you allow it. For a new file in a directory that exists, it offers
+the directory. A path you type or edit is created as a folder only when
+it ends with `/`, so a file name is never turned into a folder.
+
+Removing or renaming a path changes the directory it is in, so allowing
+`~/testing` lets the agent work inside it but not remove `~/testing`
+itself. When that is refused, the offer is for the directory above it.
+Your home directory can never be allowed, because it holds unharness's
+own settings. So removing a folder made directly in it, or writing a
+file there, is only reported, with `/sandbox off` as the way to do it.
+
+The dialog warns, in red, when a grant would let what runs in the sandbox
+act outside it later:
+
+- your home directory or `/`;
+- a shell's startup files;
+- a directory on `$PATH`;
+- what is started at login (`~/.config/systemd`, `~/.config/autostart`,
+  `~/Library/LaunchAgents`);
+- a git repository, whose hooks git runs unconfined;
+- the harness's own configuration;
+- for reading, a credential location.
+
+The warning doesn't stop you: the grant is still yours to make. unharness's
+own config and state directories are never granted, neither around them
+nor inside them.
+
+The sandbox is set when a process starts and cannot be widened while it
+runs. So the agent restarts under the grant and continues where it left
+off (where the harness can resume): at once when no turn is running,
+otherwise when the turn ends.
+
 ## Hiding more
 
 Everything else your user can read, the agent can read too, other

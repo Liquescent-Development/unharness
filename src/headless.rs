@@ -10,6 +10,7 @@
 //! request, is the controller's [`Tracking`], as in the TUI; what it
 //! writes of them is its own.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,6 +23,8 @@ use crate::config::Config;
 use crate::core::controller::{PolicyState, Tracking, Unasked};
 use crate::core::permissions::{Route, Why};
 use crate::core::rate_limits::LimitWatch;
+use crate::core::sandbox::denials::{self, Blocked};
+use crate::core::sandbox::{Access, SandboxProfile};
 use crate::core::{
     AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
     PermissionRequest, PolicyResolution, PolicySupport, RateLimitInfo, RemoteControl, Rules,
@@ -148,6 +151,12 @@ pub struct Headless<O: Write, E: Write> {
     limits: RateLimitInfo,
     limit_watch: LimitWatch,
     started: Instant,
+    /// What confines the harness, to tell what it kept a call from.
+    sandbox: Option<SandboxProfile>,
+    /// The input of each tool call not yet answered.
+    tool_inputs: HashMap<String, (String, Value)>,
+    /// The paths said to be blocked: each once.
+    blocked: HashSet<Blocked>,
 }
 
 impl<O: Write, E: Write> Headless<O, E> {
@@ -187,6 +196,9 @@ impl<O: Write, E: Write> Headless<O, E> {
             limits: RateLimitInfo::default(),
             limit_watch: LimitWatch::default(),
             started: Instant::now(),
+            sandbox: None,
+            tool_inputs: HashMap::new(),
+            blocked: HashSet::new(),
         }
     }
 
@@ -216,6 +228,76 @@ impl<O: Write, E: Write> Headless<O, E> {
             None => false,
             Some(StopReason::Done) => self.tracking.owed == 0 && self.tracking.awaited() == 0,
             Some(_) => true,
+        }
+    }
+
+    /// Tell what `profile` keeps the harness's tool calls from, as it
+    /// does (`sandbox::denials`).
+    pub fn watch_sandbox(&mut self, profile: SandboxProfile) {
+        self.sandbox = Some(profile);
+    }
+
+    /// What the sandbox kept tool call `id` from: said once a path, with
+    /// how to allow it, since nobody can be asked here.
+    fn notice_blocked(&mut self, id: &str, output: &str, is_error: bool) {
+        let (name, input) = self
+            .tool_inputs
+            .remove(id)
+            .unwrap_or_else(|| (String::new(), Value::Null));
+        let Some(profile) = &self.sandbox else {
+            return;
+        };
+        let candidates = denials::candidates(&input, output, is_error);
+        if candidates.is_empty() {
+            return;
+        }
+        let home = dirs::home_dir();
+        let found = denials::deepest(denials::blocked(
+            &candidates,
+            profile,
+            &self.cwd,
+            home.as_deref(),
+            denials::writes(&name),
+            denials::may_access,
+        ));
+        for b in found {
+            if !self.blocked.insert(b.clone()) {
+                continue;
+            }
+            let (doing, key) = match b.access {
+                Access::Write => ("writing", "writable"),
+                Access::Read => ("reading", "readable"),
+            };
+            let harness = self.name.clone();
+            let what = match &b.entry {
+                Some(entry) => format!(
+                    "removing or renaming {}, which changes {}",
+                    entry.display(),
+                    b.path.display()
+                ),
+                None => format!("{doing} {}", b.path.display()),
+            };
+            // What would be granted: the sandbox skips a path that does
+            // not exist, so a folder to make is made first.
+            let (grant, make) = b.grant();
+            if !b.grantable {
+                self.warn(format!(
+                    "the sandbox kept {harness} from {what}: it cannot be allowed, since {} holds \
+                     unharness's own settings; --sandbox off runs without the sandbox",
+                    grant.display()
+                ));
+                continue;
+            }
+            let make = if make {
+                format!("create {} and ", grant.display())
+            } else {
+                String::new()
+            };
+            self.warn(format!(
+                "the sandbox kept {harness} from {what}: to allow it, {make}add {} to [sandbox] \
+                 {key} in the config, or grant it with /sandbox allow in the TUI",
+                grant.display()
+            ));
         }
     }
 
@@ -303,6 +385,12 @@ impl<O: Write, E: Write> Headless<O, E> {
     /// agent. What any front end tracks of it goes to `tracking`.
     fn take(&mut self, ev: &AgentEvent, parent: Option<&str>, commands: &mut Vec<SessionCommand>) {
         let main = parent.is_none();
+        if let AgentEvent::ToolCallStarted { id, name, input } = ev
+            && self.sandbox.is_some()
+        {
+            self.tool_inputs
+                .insert(id.clone(), (name.clone(), input.clone()));
+        }
         match ev {
             AgentEvent::Sub { parent, event } => self.take(event, Some(parent), commands),
             AgentEvent::PermissionRequest(req) => commands.push(self.respond(req)),
@@ -328,7 +416,14 @@ impl<O: Write, E: Write> Headless<O, E> {
                     self.tracking.subagent_tool_started(p, id, name, input);
                 }
             }
-            AgentEvent::ToolCallResult { id, .. } => self.tracking.tool_result(id),
+            AgentEvent::ToolCallResult {
+                id,
+                output,
+                is_error,
+            } => {
+                self.notice_blocked(id, output, *is_error);
+                self.tracking.tool_result(id)
+            }
             // A hook that did its job quietly is not worth a line.
             AgentEvent::HookEnded {
                 name,
@@ -1085,6 +1180,79 @@ mod tests {
         assert!(
             e.to_string()
                 .starts_with("policy 'plan' is not available for Claude")
+        );
+    }
+
+    /// A call the sandbox refused is said on stderr once, with how to
+    /// allow it; one it did not refuse is not.
+    #[test]
+    fn a_path_the_sandbox_refused_is_said() {
+        let (dir, mut run) = headless(Format::Text, false);
+        let root = dir.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        std::fs::create_dir_all(&ws).unwrap();
+        run.watch_sandbox(SandboxProfile {
+            level: crate::core::SandboxLevel::WorkspaceWrite,
+            workspace: ws.clone(),
+            writable: vec![ws.clone()],
+            writable_files: Vec::new(),
+            deny_read: Vec::new(),
+            allow_read: vec![ws.clone()],
+            protected: Vec::new(),
+        });
+        let refused = |id: &str, path: &std::path::Path| {
+            vec![
+                AgentEvent::ToolCallStarted {
+                    id: id.into(),
+                    name: "Bash".into(),
+                    input: json!({"command": format!("touch {}", path.display())}),
+                },
+                AgentEvent::ToolCallResult {
+                    id: id.into(),
+                    output: format!(
+                        "touch: cannot touch '{}': Permission denied",
+                        path.display()
+                    ),
+                    is_error: true,
+                },
+            ]
+        };
+        feed(&mut run, refused("1", &root.join("outside/x")));
+        feed(&mut run, refused("2", &root.join("outside/x")));
+        feed(&mut run, refused("3", &ws.join("x")));
+        assert_eq!(run.warnings.len(), 1, "{:?}", run.warnings);
+        assert!(run.warnings[0].contains("[sandbox] writable"));
+        assert!(run.warnings[0].contains("outside"));
+
+        // A file in a folder not there yet: one line, naming the folder to
+        // make and add, not the file (the sandbox skips what does not
+        // exist).
+        let new = root.join("outside/new");
+        feed(
+            &mut run,
+            vec![
+                AgentEvent::ToolCallStarted {
+                    id: "w".into(),
+                    name: "Write".into(),
+                    input: json!({"file_path": new.join("out.txt")}),
+                },
+                AgentEvent::ToolCallResult {
+                    id: "w".into(),
+                    output: format!("EACCES: permission denied, mkdir '{}'", new.display()),
+                    is_error: true,
+                },
+            ],
+        );
+        assert_eq!(run.warnings.len(), 2, "{:?}", run.warnings);
+        let said = &run.warnings[1];
+        assert!(
+            said.contains(&format!(
+                "create {} and add {} to",
+                new.display(),
+                new.display()
+            )),
+            "{said}"
         );
     }
 

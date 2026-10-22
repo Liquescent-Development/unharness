@@ -65,7 +65,7 @@ impl Guarded {
         }
     }
 
-    fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         match self {
             Guarded::File(p)
             | Guarded::Secret(p)

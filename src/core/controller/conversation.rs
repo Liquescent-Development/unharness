@@ -119,6 +119,7 @@ impl Controller {
         self.policy.forget_plans();
         self.active = active;
         self.tracking.drop_waiting();
+        self.forget_blocks();
         self.restore_context();
     }
 

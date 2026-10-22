@@ -567,6 +567,17 @@ mod tests {
         assert_eq!(scopes, [UsageScope::Request; 3]);
     }
 
+    /// Writes the sandbox refused (1.1.0, under a Landlock ruleset like
+    /// unharness's).
+    #[test]
+    fn fixture_sandbox_denied() {
+        assert_fixture(
+            &mut PiParser::new(None),
+            &fixtures_dir(file!()),
+            "sandbox_denied",
+        );
+    }
+
     #[test]
     fn fixture_gate() {
         assert_fixture(

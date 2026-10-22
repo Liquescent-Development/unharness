@@ -49,7 +49,7 @@ use crate::core::conversations::{
 };
 use crate::core::guard::Watch;
 use crate::core::registry::Registry;
-use crate::core::sandbox::{SandboxLevel, SandboxSetup};
+use crate::core::sandbox::{SandboxLevel, SandboxProfile, SandboxSetup, denials::Blocked};
 use crate::core::{
     Attachment, Capabilities, CapsUpdate, HarnessCommand, HarnessId, ModelInfo, ModelRef,
     PermissionPolicy, PolicySupport, ProviderId, Rules, SessionCommand, SessionStats,
@@ -82,6 +82,7 @@ pub use front::{Front, PlanAsk, PolicyAsk};
 pub use open::{Greeting, Opening};
 pub use policy::{PolicySet, PolicySource, PolicyState, Refused, configured_policy};
 pub use run::{Ending, run_actions};
+pub use sandbox::{GrantNote, GrantOffer, GrantScope, NoteKind};
 pub use switch::handoff_prompt;
 pub use tracking::{RunningSubagent, Tracking, Unasked};
 pub use turn::STOP_GRACE;
@@ -285,6 +286,23 @@ pub struct Controller {
     pub sandbox: SandboxSetup,
     /// The level the live session's process was started under.
     pub session_sandbox_level: Option<SandboxLevel>,
+    /// A path was granted during a turn: the session restarts under it
+    /// when the turn ends.
+    pub(crate) sandbox_restart_due: bool,
+    /// The name and input of each tool call not yet answered, to read what
+    /// a result the sandbox refused was for.
+    tool_inputs: HashMap<String, (String, serde_json::Value)>,
+    /// What confines the live session's process, as it was started: what
+    /// a refusal is told against (a grant made since reaches only the
+    /// next process).
+    session_profile: Option<SandboxProfile>,
+    /// What the sandbox kept this turn's calls from, offered to the user
+    /// once the turn has ended (`sandbox_offers`).
+    sandbox_blocked: Vec<Blocked>,
+    /// Offered, one dialog at a time, while no turn runs.
+    pub(crate) sandbox_offers: VecDeque<Blocked>,
+    /// Told of in this run, by harness: a path is offered once.
+    sandbox_told: HashSet<(HarnessId, Blocked)>,
     /// The active harness's own configuration files as they were when its
     /// session started, to notice a change (`core::guard`).
     pub guard: Option<Watch>,
@@ -437,6 +455,12 @@ impl Controller {
             workspace_root: launch.workspace_root,
             sandbox: launch.sandbox,
             session_sandbox_level: None,
+            sandbox_restart_due: false,
+            tool_inputs: HashMap::new(),
+            session_profile: None,
+            sandbox_blocked: Vec::new(),
+            sandbox_offers: VecDeque::new(),
+            sandbox_told: HashSet::new(),
             guard: None,
             bridge_max_chars,
             bridge_summary,

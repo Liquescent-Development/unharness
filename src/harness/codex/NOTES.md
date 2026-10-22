@@ -181,3 +181,15 @@ names `rate-limits` and `account`, which the parser reads; an error to
 either turns `status_query` off for the session, quietly. Unverified: the
 answers under an API key, and `account/usage/read` (lifetime and daily
 token counts), not asked.
+
+Sandbox denials on app-server (`fixtures/app_server_sandbox_denied.jsonl`,
+0.162.1, under a Landlock ruleset like unharness's, the thread's sandbox
+`danger-full-access`):
+- **apply_patch:** it ends `failed` with no words, only its path in
+  `changes[].path`. "Failed to create parent directories" goes to stderr
+  only.
+- **Commands:** `/usr/bin/zsh -lc '…'` carries zsh's output in
+  `aggregatedOutput` (`zsh:1: permission denied: <p>`, `mkdir:
+  Permission denied`).
+
+Not recorded: `exec`.

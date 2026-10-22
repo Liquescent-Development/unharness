@@ -1,0 +1,97 @@
+HookStarted id=51ac65f0-4ad8-4641-a2e5-ace6e0ecf060 SessionStart:startup
+HookEnded id=51ac65f0-4ad8-4641-a2e5-ace6e0ecf060 SessionStart:startup ok ""
+CapabilitiesChanged models=13 provider=anthropic commands=71
+Account plan=Claude Max auth=firstParty email=set org=set credits=-
+SessionStarted id=3fc0a1b8-3055-4a1e-916f-dee8a9c09ac2 model=claude-haiku-5-5
+Notice "MCP server 'plugin:cq:cq' failed to start"
+TurnStarted
+Context used=22827 window=-
+ToolCallDelta id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write "{\"file_path\": \"/HOME"
+ToolCallDelta id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write "/unharness-denied/"
+ToolCallDelta id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write "out.txt"
+ToolCallDelta id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write "\", \"content\": \"hi"
+ToolCallDelta id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write "\"}"
+ToolCallStarted id=toolu_01346t4Ybz5NDbKmE76iX4Sc name=Write input={"content":"hi","file_path":"/HOME/unharness-denied/out.t...
+PermissionRequest id=f76edd3e-90c6-4a5a-a350-fc4ddc2ff28c ToolUse Write [edit /HOME/unharness-denied/out.txt]
+RateLimit status=allowed five_hour=4%@1792627800 seven_day=4%@1793080800 overage=rejected(org_level_disabled)
+ToolCallResult id=toolu_01346t4Ybz5NDbKmE76iX4Sc error=true "EACCES: permission denied, mkdir '/HOME/unharness-denied'"
+Context used=25700 window=-
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "{\"command\": \"tou"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "ch /HOME/"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "unharness-denied.tx"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "t"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "\", \"description\": \"Create"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash " emp"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "ty file at /srv/h"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "h/unharness-denied"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash ".txt"
+ToolCallDelta id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash "\"}"
+ToolCallStarted id=toolu_01RtYnPT5jaxoyUEPoYosrW2 name=Bash input={"command":"touch /HOME/unharness-denied.txt","descriptio...
+PermissionRequest id=1cf3eed4-d67b-4f14-aebf-0ccd200cdf2a ToolUse Bash [shell "touch /HOME/unharness-denied.txt"]
+ToolCallResult id=toolu_01RtYnPT5jaxoyUEPoYosrW2 error=true "Exit code 1\\ntouch: cannot touch '/HOME/unharness-denied...."
+Context used=29933 window=-
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "{\"command\": \"mkdir /"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "srv/hh/unhar"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "ness-denied-dir"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "\", \"description\": \"Create direct"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "ory /HOME/"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "unharness-denied-d"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "ir"
+ToolCallDelta id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash "\"}"
+ToolCallStarted id=toolu_01DMPePVpog6mYEsAczQbRSD name=Bash input={"command":"mkdir /HOME/unharness-denied-dir","descriptio...
+PermissionRequest id=66fd0557-6c20-4dec-99fe-94d6353daf3d ToolUse Bash [shell "mkdir /HOME/unharness-denied-dir"]
+ToolCallResult id=toolu_01DMPePVpog6mYEsAczQbRSD error=true "Exit code 1\\nmkdir: Permission denied"
+Context used=30091 window=-
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "{\"command\": \"echo h"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "i > /HOME"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "/unharness-denied-"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "redirect.txt"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "\", \"description\": \"Write"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash " hi into"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash " /HOME/un"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "harness-denied-redir"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "ect.txt"
+ToolCallDelta id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash "\"}"
+ToolCallStarted id=toolu_01SFF4h6tsPpHH1886WwRBTc name=Bash input={"command":"echo hi > /HOME/unharness-denied-redirect.txt...
+PermissionRequest id=a7fa8299-3bb8-4a6b-b5e5-30a1a0cd8fee ToolUse Bash [shell "echo hi > /HOME/unharness-denied-redirect.txt"]
+ToolCallResult id=toolu_01SFF4h6tsPpHH1886WwRBTc error=true "Exit code 1\\n(eval):1: permission denied: /HOME/unharness..."
+Context used=30280 window=-
+TextDelta "None"
+TextDelta " of the four steps wor"
+TextDelta "ked. Each was denied by"
+TextDelta " permiss"
+TextDelta "ions on `/srv/h"
+TextDelta "h/"
+TextDelta "`, and I did"
+TextDelta "n't try any"
+TextDelta " work"
+TextDelta "ar"
+TextDelta "ounds.\\n\\n1"
+TextDelta "."
+TextDelta " Write `"
+TextDelta "/HOME/un"
+TextDelta "harness-denied/out."
+TextDelta "txt`: failed,"
+TextDelta " `EACCES`"
+TextDelta " on cre"
+TextDelta "ating the directory `"
+TextDelta "/HOME/un"
+TextDelta "harness-denied`."
+TextDelta "\\n2. `"
+TextDelta "touch /HOME"
+TextDelta "/unharness-denied."
+TextDelta "txt`: failed, \""
+TextDelta "Permission denied\"."
+TextDelta "\\n3. `mkdir"
+TextDelta " /HOME/un"
+TextDelta "harness-denied-dir"
+TextDelta "`: failed, \""
+TextDelta "Permission denied\".\\n4."
+TextDelta " `echo hi > /sr"
+TextDelta "v/hh/unharness"
+TextDelta "-denied-redirect."
+TextDelta "txt`: failed, \""
+TextDelta "permission denied\"."
+Usage in=10 out=786 cache_read=121236 cache_write=17585 cost=0.0051 cumulative=false
+Context used=- window=1000000
+TurnCompleted Done

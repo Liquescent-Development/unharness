@@ -24,15 +24,18 @@ use super::code::{
 };
 use super::markdown::{render_markdown_rows, render_markdown_to_lines};
 use super::modal::{
-    AlwaysDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal, StatusModal, takes_text,
+    AlwaysDraft, GrantDraft, ListPicker, Modal, PlanModal, PolicyPicker, QuestionModal,
+    StatusModal, takes_text,
 };
 use super::prompt;
 use super::rows::{Part, Rows, clamp_row};
 use super::selection::{self, Join, RowCopy};
 use crate::core::SandboxLevel;
+use crate::core::controller::NoteKind;
 use crate::core::conversations::ShellStatus;
 use crate::core::rate_limits;
 use crate::core::rules::Scope;
+use crate::core::sandbox::Access;
 use crate::core::text::sanitize;
 use crate::core::transcript::{
     Block as TBlock, HookState, ToolBody, command_beyond_summary, input_beyond_summary, tool_body,
@@ -1297,6 +1300,99 @@ fn always_lines(draft: &AlwaysDraft, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// What the sandbox kept the agent from, the question of allowing it,
+/// and how long an answer lasts, as a list like the other pickers'.
+fn grant_lines(d: &GrantDraft, width: usize) -> Vec<Line<'static>> {
+    let gray = Style::default().fg(Color::Gray);
+    let doing = match d.access {
+        Access::Write => "writing",
+        Access::Read => "reading",
+    };
+    let mut lines = vec![Line::default()];
+    if let Some(said) = &d.said {
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            &sanitize(said),
+            width,
+            Style::default(),
+        ));
+        lines.push(Line::default());
+    }
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    if d.editing {
+        lines.push(Line::from(vec![
+            Span::styled(format!("  Allow {doing} in: "), bold),
+            Span::raw(sanitize(&d.path)),
+            Span::styled("▏", Style::default().fg(Color::Magenta)),
+        ]));
+    } else {
+        lines.extend(wrap_prefixed_text(
+            "  ",
+            &format!("Allow {doing} in {}?", sanitize(&d.path)),
+            width,
+            bold,
+        ));
+        // What is worth knowing before answering, for the path as it
+        // stands (worked out when it was offered or edited).
+        for note in &d.notes {
+            let style = match note.kind {
+                NoteKind::Info => gray,
+                NoteKind::Caution => Style::default().fg(Color::Yellow),
+                NoteKind::Danger => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            };
+            lines.extend(wrap_prefixed_text(
+                "  ",
+                &sanitize(&note.text),
+                width,
+                style,
+            ));
+        }
+    }
+
+    // How long, as the pickers draw a list.
+    lines.push(Line::default());
+    let pad = d
+        .scopes
+        .items
+        .iter()
+        .map(|s| s.title().chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    for (i, scope) in d.scopes.items.iter().enumerate() {
+        let style = if i == d.scopes.selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Magenta)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(if i == d.scopes.selected { "❯ " } else { "  " }, style),
+            Span::styled(format!("{:<pad$}", scope.title()), style),
+            Span::styled(format!(" ─ {}", scope.detail()), gray),
+        ]));
+    }
+
+    lines.push(Line::default());
+    let keys: &[&str] = if d.editing {
+        &["  Type the path · Enter or Esc when done"]
+    } else if d.blocked.is_some() {
+        &[
+            "  ↑/↓ select · Enter allow and retry · a allow only",
+            "  e edit path · Esc don't allow",
+        ]
+    } else {
+        &["  ↑/↓ select · Enter allow · e edit path · Esc cancel"]
+    };
+    for k in keys {
+        lines.push(Line::from(Span::styled(k.to_string(), gray)));
+    }
+    lines
+}
+
 /// Under the policy list: how to save the selected policy as the
 /// harness's default, or where it is about to be saved.
 fn policy_save_lines(p: &PolicyPicker, harness: &str, width: usize) -> Vec<Line<'static>> {
@@ -2204,6 +2300,24 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             (
                 popup,
                 modal_block(format!(" Sandbox ({NAV}) "), Color::Magenta),
+                lines,
+            )
+        }
+        // As tall as what it says, no more.
+        Modal::SandboxGrant(d) => {
+            let wide = centered_rect(80, 100, area);
+            let width = (wide.width.saturating_sub(6)).max(20) as usize;
+            let mut lines = grant_lines(d, width);
+            lines.push(Line::default());
+            let height = (lines.len() as u16 + 2).min(area.height);
+            let popup = Rect {
+                y: area.y + (area.height - height) / 2,
+                height,
+                ..wide
+            };
+            (
+                popup,
+                modal_block(" Sandbox ".into(), Color::Magenta),
                 lines,
             )
         }

@@ -223,6 +223,8 @@ impl Controller {
         if self.session_alive {
             self.shutdown_session(front);
         }
+        // What this harness was kept from is not the next one's to answer.
+        self.forget_blocks();
         self.idle_start_paused = false;
         // What this harness saw: everything but the `!` commands run since
         // its last prompt, which it is told about when it comes back.
