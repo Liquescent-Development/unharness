@@ -22,7 +22,7 @@ impl App {
             .iter()
             .enumerate()
             .filter_map(|(block, b)| match b {
-                super::transcript::Block::User { text } => Some(RewindOption {
+                super::transcript::Block::User { text, .. } => Some(RewindOption {
                     block,
                     text: text.clone(),
                     native: self

@@ -17,8 +17,8 @@ use crate::core::conversations::{
     CheckpointRecord, ContextRecord, Conversation, ConversationStore, TurnAnchorRecord,
     now_rfc3339, truncate_title,
 };
-use crate::core::transcript::Transcript;
-use crate::core::{ContextUsage, HarnessId, PlanEntry, Usage};
+use crate::core::transcript::{Block, KeptAt, Transcript};
+use crate::core::{Compaction, ContextUsage, HarnessId, Kept, PlanEntry, Usage};
 
 /// Where a run keeps its conversations, checkpoints the workspace's
 /// files, and keeps the context windows harnesses reported.
@@ -49,10 +49,12 @@ pub struct ConversationState {
     pub plan: Vec<PlanEntry>,
     /// Where each harness can rewind its session to (see `TurnAnchor`).
     pub anchors: Vec<TurnAnchorRecord>,
-    /// User blocks whose anchor has not arrived yet, oldest first. A harness
-    /// that can rewind reports one anchor per turn, in order, but not
-    /// always before the next turn starts (pi lists it after the turn).
-    pub anchor_pending: VecDeque<usize>,
+    /// User blocks whose anchor has not arrived yet, oldest first, each
+    /// with the oldest block its message told of (`TurnAnchorRecord::
+    /// told_from`). A harness that can rewind reports one anchor per turn,
+    /// in order, but not always before the next turn starts (pi lists it
+    /// after the turn).
+    pub anchor_pending: VecDeque<(usize, usize)>,
     /// The working tree as it was before each prompt.
     pub file_checkpoints: Vec<CheckpointRecord>,
     /// The tree as it was before the last file restore, for `/undo-restore`.
@@ -300,6 +302,8 @@ impl Controller {
         c.last_active_index.remove(&harness);
         c.fork_pending.remove(&harness);
         c.anchors.retain(|a| a.harness != harness);
+        // What its session compacted, it no longer holds.
+        c.transcript.retire_compactions(harness);
         if harness == active {
             c.context.used = None;
         }
@@ -315,15 +319,75 @@ impl Controller {
     }
 
     /// The turn `harness`'s oldest prompt still owed one was is `id` to it;
-    /// an empty id means the turn never reached the harness.
+    /// an empty id means the turn never reached the harness. A compaction
+    /// that kept the messages from that turn on, told before it, folds
+    /// what came before what the turn's message told of.
     pub fn turn_anchor(&mut self, harness: HarnessId, id: String) {
         let c = &mut self.conversation;
-        if let Some(block) = c.anchor_pending.pop_front()
+        if let Some((block, told_from)) = c.anchor_pending.pop_front()
             && !id.is_empty()
         {
+            c.transcript.kept_named(&id, told_from);
             c.anchors
                 .retain(|a| !(a.block == block && a.harness == harness));
-            c.anchors.push(TurnAnchorRecord { block, harness, id });
+            c.anchors.push(TurnAnchorRecord {
+                block,
+                harness,
+                id,
+                told_from: Some(told_from),
+            });
+        }
+    }
+
+    /// The active harness compacted its context: a block for it, which
+    /// folds the blocks before what it kept as it was, where that can be
+    /// told for certain ([`Self::kept_at`]).
+    pub fn compacted(&mut self, c: Compaction) {
+        let kept = self.kept_at(&c.kept);
+        let active = self.active;
+        self.conversation
+            .transcript
+            .push_compaction(active, c, kept);
+    }
+
+    /// Where in the transcript what a compaction of the active harness's
+    /// `kept` starts. Certain only where the harness names a user turn by
+    /// the id its anchor gave (`TurnAnchorRecord`), or keeps nothing: from
+    /// that turn on, or from the oldest block its message told of besides
+    /// it (what the harness had not seen, `!` commands), which the model
+    /// has in that message. A turn whose anchor is still owed is waited
+    /// for (pi lists it after the turn). Anything else (a message inside a
+    /// turn, a turn of a session unharness did not see, an anchor saved
+    /// before #359 that did not say what its message told) is not known.
+    /// Nothing kept is all before it, but for what was sent into the turn
+    /// running, which the harness may not have taken yet.
+    pub fn kept_at(&self, kept: &Kept) -> KeptAt {
+        let c = &self.conversation;
+        let blocks = &c.transcript.blocks;
+        match kept {
+            Kept::Unknown => KeptAt::Unknown,
+            Kept::Nothing if self.is_generating => {
+                let prompt = blocks
+                    .iter()
+                    .rposition(|b| matches!(b, Block::User { steer: false, .. }))
+                    .map_or(0, |p| p + 1);
+                KeptAt::Block(
+                    blocks[prompt..]
+                        .iter()
+                        .position(|b| matches!(b, Block::User { steer: true, .. }))
+                        .map_or(blocks.len(), |s| prompt + s),
+                )
+            }
+            Kept::Nothing => KeptAt::Block(blocks.len()),
+            Kept::From(id) => match c
+                .anchors
+                .iter()
+                .find(|a| a.harness == self.active && a.id == *id)
+            {
+                Some(a) => a.told_from.map_or(KeptAt::Unknown, KeptAt::Block),
+                None if !c.anchor_pending.is_empty() => KeptAt::Pending(id.clone()),
+                None => KeptAt::Unknown,
+            },
         }
     }
 
@@ -490,6 +554,7 @@ impl Controller {
                     c.session_ids.remove(&h);
                     c.last_active_index.remove(&h);
                     c.anchors.retain(|a| a.harness != h);
+                    c.transcript.retire_compactions(h);
                     fresh.push(h.as_str());
                 }
             }

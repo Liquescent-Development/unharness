@@ -34,7 +34,10 @@ fn a_saved_policy_the_harness_lacks_is_never_loosened() {
     let store = ConversationStore::open(Some(tmp.path()), tmp.path());
     let mut conv = Conversation::new(HarnessId::AGY);
     conv.blocks
-        .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        .push(crate::core::conversations::BlockRecord::User {
+            text: "hi".into(),
+            steer: false,
+        });
     conv.sessions.insert(HarnessId::AGY, "agy-1".into());
     conv.policy = Some(PermissionPolicy::Ask);
     store.save(&conv).unwrap();
@@ -50,7 +53,10 @@ fn a_policy_named_on_resume_holds_over_every_choice_even_the_same() {
     let store = ConversationStore::open(Some(tmp.path()), tmp.path());
     let mut conv = Conversation::new(HarnessId::AGY);
     conv.blocks
-        .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        .push(crate::core::conversations::BlockRecord::User {
+            text: "hi".into(),
+            steer: false,
+        });
     conv.policy = Some(PermissionPolicy::Ask);
     conv.policy_choices
         .insert(HarnessId::AGY, PermissionPolicy::AcceptEdits);

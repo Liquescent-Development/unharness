@@ -6,8 +6,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::text::{sanitize, strip_controls};
-use crate::core::conversations::{AgentRecord, BlockRecord, ShellStatus};
-use crate::core::{HookOutcome, SubagentStatus};
+use crate::core::conversations::{AgentRecord, BlockRecord, CompactionRecord, ShellStatus};
+use crate::core::{CompactTrigger, Compaction, HarnessId, HookOutcome, SubagentStatus};
 
 /// A subagent's work, kept on the tool call that spawned it. The call
 /// itself may be long done (a background launch returns at once). What the
@@ -75,6 +75,8 @@ impl AgentRun {
 pub enum Block {
     User {
         text: String,
+        /// Sent into a running turn (a steer), not a turn of its own.
+        steer: bool,
     },
     Assistant {
         text: String,
@@ -130,6 +132,141 @@ pub enum Block {
         started: Instant,
         duration: Option<Duration>,
     },
+    /// The harness compacted its context (`AgentEvent::Compacted`).
+    Compaction {
+        /// The harness that compacted.
+        harness: HarnessId,
+        trigger: Option<CompactTrigger>,
+        tokens_before: Option<u64>,
+        tokens_after: Option<u64>,
+        /// The text the model has now in place of what was compacted.
+        summary: Option<String>,
+        /// Where what the model kept as it was starts.
+        kept: KeptAt,
+        /// The session that compacted was left (forgotten, replaced, a
+        /// fork started afresh): it folds nothing, and what it held is
+        /// what it knew then ([`Transcript::retire_compactions`]).
+        retired: bool,
+        /// The summary is collapsed.
+        collapsed: bool,
+        /// The blocks before `kept` are folded ([`folds`]).
+        folded: bool,
+    },
+}
+
+/// Where the messages a compaction kept as they were start, in the
+/// transcript.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeptAt {
+    /// At this block: the ones before it are what the model no longer has.
+    Block(usize),
+    /// At the turn the harness names by this id, whose anchor has not
+    /// come yet (pi lists a turn's after the turn): nothing is folded
+    /// until it does ([`Transcript::kept_named`]).
+    Pending(String),
+    /// Not known for certain: nothing is folded.
+    Unknown,
+}
+
+/// The blocks a compaction folds: from the first up to where what the
+/// model kept starts, when they hold a turn. A later fold holds the
+/// earlier ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    /// The compaction's block.
+    pub compaction: usize,
+    /// One past the last block folded.
+    pub end: usize,
+    /// The user turns among them (not the steers).
+    pub turns: usize,
+    pub folded: bool,
+}
+
+/// What the compactions of `active`'s session fold, in their order: the
+/// model of the harness in use no longer has those turns. Another
+/// harness was told them (the bridge), and a session left holds nothing.
+pub fn folds(blocks: &[Block], active: HarnessId) -> Vec<Fold> {
+    let mut found: Vec<Fold> = blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(at, b)| match b {
+            Block::Compaction {
+                harness,
+                kept: KeptAt::Block(end),
+                retired: false,
+                folded,
+                ..
+            } if *harness == active && *end <= at => Some(Fold {
+                compaction: at,
+                end: *end,
+                turns: 0,
+                folded: *folded,
+            }),
+            _ => None,
+        })
+        .collect();
+    if found.is_empty() {
+        return found;
+    }
+    let mut by_end: Vec<usize> = (0..found.len()).collect();
+    by_end.sort_by_key(|&i| found[i].end);
+    let (mut turns, mut at) = (0, 0);
+    for i in by_end {
+        let end = found[i].end;
+        turns += blocks[at..end]
+            .iter()
+            .filter(|b| matches!(b, Block::User { steer: false, .. }))
+            .count();
+        at = end;
+        found[i].turns = turns;
+    }
+    found.retain(|f| f.turns > 0);
+    found
+}
+
+/// The compaction whose summary is what `active`'s session holds now:
+/// its latest, unless that session was left.
+pub fn current_compaction(blocks: &[Block], active: HarnessId) -> Option<usize> {
+    blocks.iter().rposition(
+        |b| matches!(b, Block::Compaction { harness, retired: false, .. } if *harness == active),
+    )
+}
+
+/// The folds as they are drawn: the first block draws the rows of the
+/// outermost fold and, while each is open, of the one inside it, down to
+/// the first one folded, and the blocks that one holds are not drawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folding {
+    /// Outermost first, one per end: the latest compaction's of those
+    /// that fold the same blocks.
+    pub rows: Vec<Fold>,
+    /// Blocks before this one are hidden; 0 when all are open.
+    pub hidden: usize,
+}
+
+impl Folding {
+    pub fn of(blocks: &[Block], active: HarnessId) -> Self {
+        let mut all = folds(blocks, active);
+        all.sort_by(|a, b| b.end.cmp(&a.end).then(b.compaction.cmp(&a.compaction)));
+        all.dedup_by_key(|f| f.end);
+        let mut rows = Vec::new();
+        for f in all {
+            rows.push(f);
+            if f.folded {
+                return Folding {
+                    rows,
+                    hidden: f.end,
+                };
+            }
+        }
+        Folding { rows, hidden: 0 }
+    }
+
+    /// Whether block `i` is hidden by a fold (the first block's rows
+    /// aside).
+    pub fn hides(&self, i: usize) -> bool {
+        i < self.hidden
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -178,7 +315,10 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
     blocks
         .iter()
         .map(|b| match b {
-            Block::User { text } => BlockRecord::User { text: text.clone() },
+            Block::User { text, steer } => BlockRecord::User {
+                text: text.clone(),
+                steer: *steer,
+            },
             Block::Assistant {
                 text,
                 sender,
@@ -222,7 +362,10 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
                 }),
             },
             Block::System(t) => BlockRecord::System { text: t.clone() },
-            Block::Notice(t) => BlockRecord::Notice { text: t.clone() },
+            Block::Notice(t) => BlockRecord::Notice {
+                text: t.clone(),
+                compaction: None,
+            },
             Block::Error(t) => BlockRecord::Error { text: t.clone() },
             Block::Hook {
                 name,
@@ -253,6 +396,43 @@ fn records_of(blocks: &[Block]) -> Vec<BlockRecord> {
                 sent: *sent,
                 secs: duration.map(|d| d.as_secs_f32()),
             },
+            Block::Compaction {
+                harness,
+                trigger,
+                tokens_before,
+                tokens_after,
+                summary,
+                kept,
+                retired,
+                ..
+            } => {
+                let figures = Compaction {
+                    trigger: *trigger,
+                    tokens_before: *tokens_before,
+                    tokens_after: *tokens_after,
+                    ..Default::default()
+                }
+                .figures();
+                BlockRecord::Notice {
+                    // What an unharness before #359 shows of it.
+                    text: std::iter::once("context compacted".to_string())
+                        .chain(figures)
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    compaction: Some(CompactionRecord {
+                        harness: *harness,
+                        trigger: *trigger,
+                        tokens_before: *tokens_before,
+                        tokens_after: *tokens_after,
+                        summary: summary.clone(),
+                        kept: match kept {
+                            KeptAt::Block(at) => Some(*at),
+                            KeptAt::Pending(_) | KeptAt::Unknown => None,
+                        },
+                        retired: *retired,
+                    }),
+                }
+            }
         })
         .collect()
 }
@@ -261,6 +441,15 @@ impl Transcript {
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::User {
             text: sanitize(&text.into()),
+            steer: false,
+        });
+    }
+
+    /// A message the user sent into the running turn.
+    pub fn push_steer(&mut self, text: impl Into<String>) {
+        self.blocks.push(Block::User {
+            text: sanitize(&text.into()),
+            steer: true,
         });
     }
 
@@ -420,15 +609,39 @@ impl Transcript {
         records_of(&self.blocks)
     }
 
-    /// Rebuild from persisted records; everything comes back finished and
-    /// collapsed.
+    /// Rebuild from persisted records; everything comes back finished,
+    /// collapsed and folded.
     pub fn from_records(records: &[BlockRecord]) -> Self {
         let mut t = Transcript::default();
+        // Each record's block, or the next one where it has none here (a
+        // kind skipped, a call moved into its subagent's transcript).
+        let mut at = Vec::with_capacity(records.len());
         for r in records {
+            at.push(t.blocks.len());
             let mut parent = None;
             let block = match r {
                 BlockRecord::Unknown => continue,
-                BlockRecord::User { text } => Block::User { text: text.clone() },
+                BlockRecord::Notice {
+                    compaction: Some(c),
+                    ..
+                } => Block::Compaction {
+                    harness: c.harness,
+                    trigger: c.trigger,
+                    tokens_before: c.tokens_before,
+                    tokens_after: c.tokens_after,
+                    summary: c.summary.clone(),
+                    kept: c
+                        .kept
+                        .and_then(|k| at.get(k).copied())
+                        .map_or(KeptAt::Unknown, KeptAt::Block),
+                    retired: c.retired,
+                    collapsed: true,
+                    folded: true,
+                },
+                BlockRecord::User { text, steer } => Block::User {
+                    text: text.clone(),
+                    steer: *steer,
+                },
                 BlockRecord::Assistant { text, sender, secs } => Block::Assistant {
                     text: text.clone(),
                     sender: sender.clone(),
@@ -479,7 +692,7 @@ impl Transcript {
                     }
                 }
                 BlockRecord::System { text } => Block::System(text.clone()),
-                BlockRecord::Notice { text } => Block::Notice(text.clone()),
+                BlockRecord::Notice { text, .. } => Block::Notice(text.clone()),
                 BlockRecord::Error { text } => Block::Error(text.clone()),
                 BlockRecord::Hook {
                     name,
@@ -523,6 +736,50 @@ impl Transcript {
         }
         t.end_running_agents();
         t
+    }
+
+    /// `harness` compacted its context, keeping what is `kept`.
+    pub fn push_compaction(&mut self, harness: HarnessId, c: Compaction, kept: KeptAt) {
+        self.close_thought();
+        self.blocks.push(Block::Compaction {
+            harness,
+            trigger: c.trigger,
+            tokens_before: c.tokens_before,
+            tokens_after: c.tokens_after,
+            summary: c.summary.map(|s| sanitize(&s)),
+            kept,
+            retired: false,
+            collapsed: true,
+            folded: true,
+        });
+    }
+
+    /// `harness`'s session was left: its compactions fold nothing, and
+    /// what they summarised is what it knew then.
+    pub fn retire_compactions(&mut self, harness: HarnessId) {
+        for b in &mut self.blocks {
+            if let Block::Compaction {
+                harness: h,
+                retired,
+                ..
+            } = b
+                && *h == harness
+            {
+                *retired = true;
+            }
+        }
+    }
+
+    /// The turn the harness names `id` has come to be known: what a
+    /// compaction kept from it on starts at block `at`.
+    pub fn kept_named(&mut self, id: &str, at: usize) {
+        for b in &mut self.blocks {
+            if let Block::Compaction { kept, .. } = b
+                && *kept == KeptAt::Pending(id.to_string())
+            {
+                *kept = KeptAt::Block(at);
+            }
+        }
     }
 
     pub fn append_assistant(&mut self, sender: &str, delta: &str) {
@@ -1015,12 +1272,13 @@ pub fn block_text(b: &Block) -> Option<String> {
             .join("\n")
     };
     let text = match b {
-        Block::User { text }
+        Block::User { text, .. }
         | Block::Assistant { text, .. }
         | Block::Thought { text, .. }
         | Block::Handoff { text, .. } => text.clone(),
         Block::System(t) | Block::Notice(t) | Block::Error(t) => t.clone(),
         Block::Hook { output, .. } => output.clone(),
+        Block::Compaction { summary, .. } => summary.clone().unwrap_or_default(),
         Block::Shell {
             command, output, ..
         } => lines(&[command, output]),
@@ -1456,6 +1714,148 @@ mod tests {
         );
         assert_eq!(back.to_records(), records);
         assert!(!back.is_thinking());
+    }
+
+    /// A compaction comes back from disk folded and collapsed, folding
+    /// from the same block, also where a block before it was of a kind
+    /// this unharness skips. It is saved on a notice.
+    #[test]
+    fn a_compaction_comes_back_from_disk_folding_the_same_blocks() {
+        let pi = HarnessId::PI;
+        let mut t = Transcript::default();
+        t.push_user("one");
+        t.append_assistant("pi", "a");
+        t.finish_turn(Duration::ZERO);
+        t.push_user("two");
+        let c = Compaction {
+            trigger: Some(CompactTrigger::Auto),
+            tokens_before: Some(9),
+            summary: Some("\x1b[1msaid\x1b[0m".into()),
+            ..Default::default()
+        };
+        t.push_compaction(pi, c.clone(), KeptAt::Block(2));
+        t.push_compaction(pi, c.clone(), KeptAt::Pending("e9".into()));
+        t.push_compaction(HarnessId::CODEX, c, KeptAt::Unknown);
+        let Block::Compaction {
+            summary, folded, ..
+        } = &t.blocks[3]
+        else {
+            panic!("{:?}", t.blocks[3]);
+        };
+        assert_eq!(summary.as_deref(), Some("said"));
+        assert!(*folded);
+        assert_eq!(folds(&t.blocks, pi).len(), 1);
+
+        let records = t.to_records();
+        let kept = |r: &BlockRecord| match r {
+            BlockRecord::Notice {
+                text,
+                compaction: Some(c),
+            } => (text.clone(), c.kept),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            kept(&records[3]),
+            ("context compacted · 9 tokens before · auto".into(), Some(2))
+        );
+        assert_eq!(kept(&records[4]).1, None);
+        let back = Transcript::from_records(&records);
+        assert_eq!(back.to_records(), records);
+        assert_eq!(folds(&back.blocks, pi), folds(&t.blocks, pi));
+
+        // A later unharness wrote a block of a kind this one skips before
+        // it, and counted it: the fold still starts at the same block.
+        let mut shifted = vec![BlockRecord::Unknown];
+        shifted.extend(records.into_iter().map(|r| match r {
+            BlockRecord::Notice {
+                text,
+                compaction: Some(mut c),
+            } => {
+                c.kept = c.kept.map(|k| k + 1);
+                BlockRecord::Notice {
+                    text,
+                    compaction: Some(c),
+                }
+            }
+            r => r,
+        }));
+        let back = Transcript::from_records(&shifted);
+        assert!(matches!(
+            &back.blocks[3],
+            Block::Compaction {
+                kept: KeptAt::Block(2),
+                ..
+            }
+        ));
+        // The turn a pending one waited for is named.
+        let mut t = back;
+        t.push_compaction(pi, Compaction::default(), KeptAt::Pending("e9".into()));
+        t.kept_named("e9", 2);
+        assert!(matches!(
+            t.blocks.last(),
+            Some(Block::Compaction {
+                kept: KeptAt::Block(2),
+                ..
+            })
+        ));
+        // Retired, it folds nothing, and comes back so.
+        t.retire_compactions(pi);
+        assert!(folds(&t.blocks, pi).is_empty());
+        let back = Transcript::from_records(&t.to_records());
+        assert!(folds(&back.blocks, pi).is_empty());
+        assert_eq!(current_compaction(&back.blocks, pi), None);
+        assert_eq!(current_compaction(&back.blocks, HarnessId::CODEX), Some(5));
+    }
+
+    /// The first block draws the rows of the folds, outermost first,
+    /// down to the first one folded; the blocks it holds are hidden. Only
+    /// the harness in use's fold, and the turns it counts are not steers.
+    #[test]
+    fn folding_shows_the_rows_down_to_the_first_one_folded() {
+        let pi = HarnessId::PI;
+        let mut t = Transcript::default();
+        t.push_user("one");
+        // Kept from the first turn: nothing to fold.
+        t.push_compaction(pi, Compaction::default(), KeptAt::Block(0));
+        t.push_user("two");
+        t.push_compaction(pi, Compaction::default(), KeptAt::Block(2));
+        let all = folds(&t.blocks, pi);
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].compaction, all[0].end, all[0].turns), (3, 2, 1));
+        assert_eq!(Folding::of(&t.blocks, pi).hidden, 2);
+        assert_eq!(
+            Folding::of(&t.blocks, HarnessId::CLAUDE),
+            Folding::default()
+        );
+        let unfold = |t: &mut Transcript, at: usize| {
+            if let Block::Compaction { folded, .. } = &mut t.blocks[at] {
+                *folded = false;
+            }
+        };
+
+        // A later fold holds the earlier one; a steer is no turn.
+        t.push_user("three");
+        t.push_steer("and this");
+        t.push_user("four");
+        t.push_compaction(pi, Compaction::default(), KeptAt::Block(6));
+        let f = Folding::of(&t.blocks, pi);
+        let ends = |f: &Folding| f.rows.iter().map(|r| r.end).collect::<Vec<_>>();
+        assert_eq!((ends(&f), f.hidden), (vec![6], 6));
+        assert_eq!(f.rows[0].turns, 3);
+        unfold(&mut t, 7);
+        let f = Folding::of(&t.blocks, pi);
+        assert_eq!((ends(&f), f.hidden), (vec![6, 2], 2));
+        assert!(f.hides(1) && !f.hides(2));
+        unfold(&mut t, 3);
+        let f = Folding::of(&t.blocks, pi);
+        assert_eq!((ends(&f), f.hidden), (vec![6, 2], 0));
+
+        // Two that fold the same blocks are one row, the later's.
+        t.push_compaction(pi, Compaction::default(), KeptAt::Block(6));
+        let f = Folding::of(&t.blocks, pi);
+        assert_eq!(ends(&f), [6]);
+        assert_eq!(f.rows[0].compaction, 8);
+        assert_eq!((f.hidden, current_compaction(&t.blocks, pi)), (6, Some(8)));
     }
 
     #[test]

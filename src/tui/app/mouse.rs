@@ -232,18 +232,29 @@ impl App {
         }
     }
 
-    /// Expand or collapse the tool call whose first row is rendered line
-    /// `line` (a click on it).
+    /// Expand or collapse what a click on rendered line `line` is on: a
+    /// tool call's first row, a compaction's divider or the row of its
+    /// summary under it.
     fn toggle_tool_at(&mut self, line: usize) -> bool {
         let Some(i) = self
             .transcript_view
             .blocks
             .iter()
-            .position(|b| b.top == line && b.top < b.end)
+            .position(|b| b.top <= line && line < b.end)
         else {
             return false;
         };
+        let row = line - self.transcript_view.blocks[i].top;
         match self.shown_transcript_mut().blocks.get_mut(i) {
+            Some(super::transcript::Block::Compaction {
+                summary: Some(_),
+                collapsed,
+                ..
+            }) if row <= 1 => {
+                *collapsed = !*collapsed;
+                true
+            }
+            _ if row > 0 => false,
             // A call that spawned a subagent opens that subagent's transcript.
             Some(super::transcript::Block::Tool {
                 id, agent: Some(_), ..

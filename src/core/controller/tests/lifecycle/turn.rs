@@ -225,7 +225,9 @@ async fn a_compaction_or_rewind_the_driver_refuses_ends_the_wait() {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, crate::core::transcript::Block::User { text } if text == "two"))
+        .position(
+            |b| matches!(b, crate::core::transcript::Block::User { text, .. } if text == "two"),
+        )
         .unwrap();
     app.rewind_to(two, false);
     answered(&mut app, &mut session).await;

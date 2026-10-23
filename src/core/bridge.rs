@@ -97,7 +97,7 @@ fn last_handoff(blocks: &[Block]) -> Option<usize> {
 fn handoff_head(blocks: &[Block], at: usize, max_chars: usize) -> String {
     let mut head = String::new();
     if let Some(prompt) = blocks[..at].iter().find_map(|b| match b {
-        Block::User { text } => Some(text),
+        Block::User { text, .. } => Some(text),
         _ => None,
     }) {
         let prompt = truncate_chars(prompt, max_chars / HANDOFF_PROMPT_SHARE);
@@ -303,7 +303,7 @@ fn split(blocks: &[Block]) -> Vec<Turn<'_>> {
 impl<'a> Turn<'a> {
     fn of(blocks: &'a [Block]) -> Self {
         match blocks.first() {
-            Some(Block::User { text }) => Turn {
+            Some(Block::User { text, .. }) => Turn {
                 prompt: Some(text),
                 blocks: &blocks[1..],
             },

@@ -184,12 +184,14 @@ impl Controller {
     /// for a harness switched to: the next prompt tells it the
     /// conversation so far (within the bridge's budget), and the
     /// conversation keeps its id once a prompt has gone to it. What
-    /// pointed into the old session (rewind anchors, a pending fork) goes.
+    /// pointed into the old session (rewind anchors, a pending fork) goes,
+    /// and what it compacted is no longer what it holds.
     pub(super) fn session_replaced(&mut self, reason: &str) {
         let harness = self.active;
         let name = self.short_name().to_string();
         self.conversation.fork_pending.remove(&harness);
         self.conversation.anchors.retain(|a| a.harness != harness);
+        self.conversation.transcript.retire_compactions(harness);
         self.conversation.context.used = None;
         if self.session_blank {
             // The new session's id waits in `blank_session` for the first

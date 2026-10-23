@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::caps::PermissionPolicy;
-use super::event::{HookOutcome, PlanEntry, SubagentStatus, Usage};
+use super::event::{CompactTrigger, HookOutcome, PlanEntry, SubagentStatus, Usage};
 use super::ids::{HarnessId, ModelRef};
 
 /// Conversations kept in the index; older ones are deleted on save.
@@ -24,6 +24,9 @@ pub const MAX_CONVERSATIONS: usize = 50;
 pub enum BlockRecord {
     User {
         text: String,
+        /// Sent into a running turn (a steer), not a turn of its own.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        steer: bool,
     },
     Assistant {
         text: String,
@@ -62,6 +65,11 @@ pub enum BlockRecord {
     },
     Notice {
         text: String,
+        /// What a compaction the notice tells of was (#359). An unharness
+        /// before it reads the notice alone, so that the blocks after it
+        /// keep their places (and the anchors and checkpoints on them).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<CompactionRecord>,
     },
     Error {
         text: String,
@@ -92,6 +100,29 @@ pub enum BlockRecord {
     /// the rest of the conversation still opens; never written.
     #[serde(other)]
     Unknown,
+}
+
+/// A compaction, saved on the notice that tells of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactionRecord {
+    /// The harness that compacted.
+    pub harness: HarnessId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<CompactTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_after: Option<u64>,
+    /// The text the model had in place of what was compacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    /// The block where what the model kept as it was starts (this list's
+    /// index); `None` when it was not known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<usize>,
+    /// The session that compacted was left: what it held is no one's now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
 }
 
 fn is_zero(n: &usize) -> bool {
@@ -250,6 +281,12 @@ pub struct TurnAnchorRecord {
     pub harness: HarnessId,
     /// The harness's id for that turn (`AgentEvent::TurnAnchor`).
     pub id: String,
+    /// The oldest block the turn's message told the harness of: what it
+    /// had not seen of the conversation, `!` commands, else `block`
+    /// itself. A compaction that keeps the turn keeps those too. `None`
+    /// in a file of an unharness before #359, which did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told_from: Option<usize>,
 }
 
 impl Conversation {
@@ -584,7 +621,10 @@ mod tests {
             ModelRef::new(HarnessId::CODEX, "openai", "gpt-x"),
         );
         c.efforts.insert(HarnessId::CODEX, "high".into());
-        c.blocks.push(BlockRecord::User { text: "hi".into() });
+        c.blocks.push(BlockRecord::User {
+            text: "hi".into(),
+            steer: false,
+        });
         c.blocks.push(BlockRecord::Assistant {
             text: "hello".into(),
             sender: "Claude".into(),
@@ -727,7 +767,10 @@ mod tests {
         assert_eq!(
             blocks,
             [
-                BlockRecord::User { text: "hi".into() },
+                BlockRecord::User {
+                    text: "hi".into(),
+                    steer: false
+                },
                 BlockRecord::Unknown,
                 BlockRecord::Hook {
                     name: "Stop".into(),
@@ -738,6 +781,83 @@ mod tests {
         );
         let back = crate::core::transcript::Transcript::from_records(&blocks);
         assert_eq!(back.blocks.len(), 2);
+    }
+
+    /// A compaction is saved on the notice that tells of it, which an
+    /// unharness before #359 reads as a notice: every block keeps its
+    /// place, and the anchors and checkpoints on the blocks after it
+    /// still point at them.
+    #[test]
+    fn a_compaction_is_a_notice_an_older_unharness_reads_in_its_place() {
+        let r = BlockRecord::Notice {
+            text: "context compacted · 9 tokens before · overflow".into(),
+            compaction: Some(CompactionRecord {
+                harness: HarnessId::PI,
+                trigger: Some(CompactTrigger::Overflow),
+                tokens_before: Some(9),
+                tokens_after: None,
+                summary: Some("s".into()),
+                kept: Some(0),
+                retired: false,
+            }),
+        };
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"kind": "notice", "text": "context compacted · 9 tokens before · overflow",
+                "compaction": {"harness": "pi", "trigger": "overflow", "tokens_before": 9,
+                               "summary": "s", "kept": 0}})
+        );
+        assert_eq!(
+            serde_json::from_value::<BlockRecord>(json.clone()).unwrap(),
+            r
+        );
+        // A plain notice is saved as before.
+        let plain = BlockRecord::Notice {
+            text: "n".into(),
+            compaction: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({"kind": "notice", "text": "n"})
+        );
+
+        // The records as an unharness before #359 had them, with or
+        // without `serde(other)`: the compaction is a notice, in its place.
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Older {
+            User { text: String },
+            Notice { text: String },
+        }
+        let user = serde_json::json!({"kind": "user", "text": "after"});
+        let read: Vec<Older> = serde_json::from_value(serde_json::json!([
+            {"kind": "user", "text": "hi"},
+            json,
+            user
+        ]))
+        .unwrap();
+        assert_eq!(
+            read,
+            [
+                Older::User { text: "hi".into() },
+                Older::Notice {
+                    text: "context compacted · 9 tokens before · overflow".into()
+                },
+                Older::User {
+                    text: "after".into()
+                },
+            ]
+        );
+        let back = crate::core::transcript::Transcript::from_records(
+            &serde_json::from_value::<Vec<BlockRecord>>(serde_json::json!([
+                {"kind": "notice", "text": "context compacted"}
+            ]))
+            .unwrap(),
+        );
+        assert!(
+            matches!(&back.blocks[0], crate::core::transcript::Block::Notice(t) if t == "context compacted")
+        );
     }
 
     #[test]

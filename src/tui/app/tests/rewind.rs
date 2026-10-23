@@ -25,7 +25,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
             .transcript
             .blocks
             .iter()
-            .position(|b| matches!(b, Block::User { text } if text == want))
+            .position(|b| matches!(b, Block::User { text, .. } if text == want))
             .unwrap()
     };
 
@@ -51,7 +51,7 @@ fn rewind_uses_the_harness_anchor_or_starts_a_fresh_session() {
             .transcript
             .blocks
             .iter()
-            .any(|b| matches!(b, Block::User { text } if text == "three"))
+            .any(|b| matches!(b, Block::User { text, .. } if text == "three"))
     );
     assert_eq!(app.controller.conversation.anchors.len(), 2);
     app.take_input();

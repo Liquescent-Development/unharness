@@ -1552,7 +1552,7 @@ mod tests {
         );
         // The transcript shows the prompt as typed.
         assert!(app.controller.conversation.transcript.blocks.iter().any(
-            |b| matches!(b, transcript::Block::User { text } if text == "what did it print?")
+            |b| matches!(b, transcript::Block::User { text, .. } if text == "what did it print?")
         ));
 
         // Once: the next prompt goes alone.
