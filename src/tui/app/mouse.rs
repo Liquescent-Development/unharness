@@ -38,8 +38,8 @@ impl App {
             return;
         }
         match ev.kind {
-            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES),
-            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES),
+            MouseEventKind::ScrollUp => self.scroll_up(WHEEL_LINES.into()),
+            MouseEventKind::ScrollDown => self.scroll_down(WHEEL_LINES.into()),
             MouseEventKind::Down(MouseButton::Left) => self.mouse_press(ev.column, ev.row),
             MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(ev.column, ev.row),
             MouseEventKind::Up(MouseButton::Left) => self.mouse_release(),
@@ -332,12 +332,12 @@ impl App {
         changed
     }
 
-    pub fn scroll_up(&mut self, n: u16) {
+    pub fn scroll_up(&mut self, n: usize) {
         self.auto_scroll = false;
         self.scroll = self.scroll.saturating_sub(n);
     }
 
-    pub fn scroll_down(&mut self, n: u16) {
+    pub fn scroll_down(&mut self, n: usize) {
         self.scroll = self.scroll.saturating_add(n);
     }
 

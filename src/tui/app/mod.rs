@@ -210,7 +210,9 @@ pub struct App {
     /// The user asked for the clipboard's image; reading it runs tools, so
     /// the event loop does it.
     clipboard_requested: bool,
-    pub scroll: u16,
+    /// Index of the transcript line on the first row; a transcript can be
+    /// longer than a `u16` counts.
+    pub scroll: usize,
     pub auto_scroll: bool,
 
     pub spinner_frame: usize,
@@ -221,7 +223,7 @@ pub struct App {
     /// The subagent whose transcript is shown in place of the main one.
     pub viewing: Option<String>,
     /// Where the main transcript was scrolled to when a subagent's was opened.
-    main_scroll: (u16, bool),
+    main_scroll: (usize, bool),
     /// Images that go out with the next prompt.
     pub attachments: Vec<Attachment>,
 
@@ -365,27 +367,29 @@ pub struct Scrollbar {
     /// Rows from the top of the bar to the top of the thumb.
     pub thumb_top: u16,
     pub thumb_len: u16,
-    pub max_scroll: u16,
+    pub max_scroll: usize,
 }
 
 impl Scrollbar {
     /// The bar for `total` lines seen through `height` rows from line
     /// `scroll`; `None` when everything fits.
-    pub fn new(x: u16, y: u16, height: u16, total: u16, scroll: u16) -> Option<Self> {
-        if height == 0 || total <= height {
+    pub fn new(x: u16, y: u16, height: u16, total: usize, scroll: usize) -> Option<Self> {
+        if height == 0 || total <= height as usize {
             return None;
         }
-        let max_scroll = total - height;
-        let thumb_len = ((height as u32 * height as u32) / total as u32).max(1) as u16;
-        let travel = (height - thumb_len) as u32;
-        let scroll = scroll.min(max_scroll) as u32;
+        let max_scroll = total - height as usize;
+        // At most `height`, since `total` is more.
+        let thumb_len = ((height as u128 * height as u128) / total as u128).max(1) as u16;
+        let travel = (height - thumb_len) as u128;
+        let scroll = scroll.min(max_scroll) as u128;
+        let max = max_scroll as u128;
         // Rounded, but only at the very ends when the view is at the ends.
-        let mut thumb_top = ((scroll * travel + max_scroll as u32 / 2) / max_scroll as u32) as u16;
+        let mut thumb_top = ((scroll * travel + max / 2) / max) as u16;
         if travel > 1 {
             if scroll > 0 {
                 thumb_top = thumb_top.max(1);
             }
-            if scroll < max_scroll as u32 {
+            if scroll < max {
                 thumb_top = thumb_top.min(travel as u16 - 1);
             }
         }
@@ -400,13 +404,13 @@ impl Scrollbar {
     }
 
     /// The scroll offset that puts the thumb's top `top` rows down the bar.
-    pub fn scroll_for(&self, top: i32) -> u16 {
+    pub fn scroll_for(&self, top: i32) -> usize {
         let travel = (self.height - self.thumb_len) as i32;
         if travel == 0 {
             return 0;
         }
-        let top = top.clamp(0, travel);
-        ((top * self.max_scroll as i32 + travel / 2) / travel) as u16
+        let (top, travel) = (top.clamp(0, travel) as u128, travel as u128);
+        ((top * self.max_scroll as u128 + travel / 2) / travel) as usize
     }
 
     fn contains(&self, column: u16, row: u16) -> bool {

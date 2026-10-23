@@ -1100,14 +1100,14 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     patch_running(&mut view, app.spinner(), inner.width as usize);
     view.took = started.elapsed();
 
-    let total = view.rendered.len().min(u16::MAX as usize) as u16;
-    let max_scroll = total.saturating_sub(inner.height);
+    let total = view.rendered.len();
+    let max_scroll = total.saturating_sub(inner.height as usize);
     if app.auto_scroll || app.scroll >= max_scroll {
         app.scroll = max_scroll;
         app.auto_scroll = true;
     }
     view.area = inner;
-    view.scroll = app.scroll as usize;
+    view.scroll = app.scroll;
     // On the right border, beside the rows of text.
     view.scrollbar = Scrollbar::new(
         area.x + area.width.saturating_sub(1),
@@ -1129,7 +1129,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let visible: Vec<Line<'static>> = view
         .rendered
         .iter()
-        .skip(app.scroll as usize)
+        .skip(app.scroll)
         .take(inner.height as usize)
         .cloned()
         .collect();
@@ -1143,7 +1143,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
         let drawn = selection::copies_drawing(&view.lines, &view.copy, start, end);
         let buf = frame.buffer_mut();
         for row in 0..inner.height {
-            let line = app.scroll as usize + row as usize;
+            let line = app.scroll + row as usize;
             if line < start.line || line > end.line {
                 continue;
             }
@@ -4186,7 +4186,7 @@ mod tests {
         // A click on the blank line above a call does nothing; one on its
         // head expands it.
         let top = app.transcript_view.area.y as usize;
-        let scroll = app.scroll as usize;
+        let scroll = app.scroll;
         let row = |line: usize| (top + line - scroll) as u16;
         let click = |app: &mut App, row: u16| {
             app.last_click_forget();
@@ -4554,6 +4554,153 @@ mod tests {
         assert_eq!(bar.scroll_for(-3), 0);
         assert_eq!(bar.scroll_for(4), 15);
         assert_eq!(bar.scroll_for(99), 30);
+        // Also further than a `u16` counts, or an `i32` multiplies.
+        let bar = Scrollbar::new(9, 1, 50, 100_000_000, usize::MAX).unwrap();
+        assert_eq!((bar.thumb_top, bar.thumb_len), (49, 1));
+        assert_eq!(bar.scroll_for(49), 99_999_950);
+        assert_eq!(bar.scroll_for(48), 97_959_135);
+    }
+
+    /// Two prompts of 40,000 lines each, more rows between them than a
+    /// `u16` counts, then what `more` adds.
+    fn longer_than_a_u16(more: impl FnOnce(&mut App)) -> TestApp {
+        let mut app = test_app(HarnessId::CLAUDE);
+        for part in ["first", "second"] {
+            let text: Vec<String> = (0..40_000).map(|i| format!("{part} {i}")).collect();
+            app.controller
+                .conversation
+                .transcript
+                .push_user(text.join("\n"));
+        }
+        more(&mut app);
+        screen(&mut app, 80, 30);
+        assert!(app.transcript_view.lines.len() > 80_000);
+        app
+    }
+
+    #[test]
+    fn a_transcript_longer_than_a_u16_counts_shows_its_end_and_scrolls_back_to_it() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEventKind};
+        let left = MouseButton::Left;
+        let key = |app: &mut App, code| crate::tui::handle_key(app, KeyModifiers::NONE, code);
+        let mut app = longer_than_a_u16(|app| {
+            app.controller
+                .conversation
+                .transcript
+                .push_system("the end");
+        });
+        let at_end = |app: &mut App| {
+            let (rows, _) = screen(app, 80, 30);
+            let view = &app.transcript_view;
+            let bottom = view.lines.len() - view.area.height as usize;
+            assert_eq!((app.scroll, app.auto_scroll), (bottom, true));
+            assert!(rows.join("\n").contains("the end"), "{rows:?}");
+            rows
+        };
+
+        // Followed: the last block is shown and the thumb is at the foot.
+        let rows = at_end(&mut app);
+        let bar = app.transcript_view.scrollbar.unwrap();
+        let foot = bar.y + bar.height - 1;
+        assert_eq!(bar.thumb_top + bar.thumb_len, bar.height);
+        assert!(rows[foot as usize].ends_with('█'));
+        let bottom = app.scroll;
+
+        // Scrolled up a little, still past row 65,535: those rows are shown.
+        key(&mut app, KeyCode::PageUp);
+        let (rows, _) = screen(&mut app, 80, 30);
+        assert_eq!((app.scroll, app.auto_scroll), (bottom - 10, false));
+        let first = &app.transcript_view.lines[app.scroll];
+        assert!(first.contains("second 399"), "{first}");
+        assert!(rows[app.transcript_view.area.y as usize].contains(first.trim()));
+        assert!(app.transcript_view.jump.is_some());
+        key(&mut app, KeyCode::End);
+        at_end(&mut app);
+
+        // To the top with the thumb, then PageDown back past the old cap.
+        app.handle_mouse(mouse(MouseEventKind::Down(left), bar.x, bar.y));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), bar.x, bar.y));
+        screen(&mut app, 80, 30);
+        assert_eq!((app.scroll, app.auto_scroll), (0, false));
+        for _ in 0..bottom / 10 {
+            key(&mut app, KeyCode::PageDown);
+        }
+        assert!(!app.auto_scroll && app.scroll > u16::MAX as usize);
+        key(&mut app, KeyCode::PageDown);
+        at_end(&mut app);
+
+        // The thumb dragged from the top to the foot follows the end again.
+        app.handle_mouse(mouse(MouseEventKind::Down(left), bar.x, bar.y));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), bar.x, bar.y));
+        screen(&mut app, 80, 30);
+        app.handle_mouse(mouse(MouseEventKind::Down(left), bar.x, bar.y));
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), bar.x, foot));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), bar.x, foot));
+        at_end(&mut app);
+    }
+
+    #[test]
+    fn a_transcript_longer_than_a_u16_counts_copies_and_expands_past_it() {
+        use crate::tui::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let left = MouseButton::Left;
+        let mut app = longer_than_a_u16(|app| {
+            app.submit_prompt("go".into());
+            app.take_actions();
+            app.on_event(crate::core::AgentEvent::ToolCallStarted {
+                id: "t1".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({ "command": "run t1" }),
+            });
+            app.on_event(crate::core::AgentEvent::ToolCallResult {
+                id: "t1".into(),
+                output: "t1-1\nt1-2\nt1-3\nt1-4\nt1-5\nt1-6".into(),
+                is_error: false,
+            });
+            app.on_event(crate::core::AgentEvent::TextDelta(
+                "Run this:\n\n```sh\nmake test\n```".into(),
+            ));
+            app.on_event(crate::core::AgentEvent::TurnCompleted {
+                stop_reason: crate::core::StopReason::Done,
+            });
+        });
+        let (rows, _) = screen(&mut app, 80, 30);
+        let row = |rows: &[String], s: &str| rows.iter().position(|r| r.contains(s)).unwrap();
+        let line = |app: &App, row: usize| {
+            let view = &app.transcript_view;
+            view.scroll + row - view.area.y as usize
+        };
+
+        // A selection on a row past 65,535 copies that row.
+        let prompt = row(&rows, "second 39999");
+        assert!(line(&app, prompt) > u16::MAX as usize);
+        app.last_click_forget();
+        app.handle_mouse(mouse(MouseEventKind::Down(left), 1, prompt as u16));
+        app.handle_mouse(mouse(MouseEventKind::Drag(left), 78, prompt as u16));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), 78, prompt as u16));
+        assert_eq!(app.take_copy_request().as_deref(), Some("second 39999"));
+
+        // A right click copies the code block it is on, or all of the prompt.
+        let right = |app: &mut App, row: usize| {
+            let at = mouse(MouseEventKind::Down(MouseButton::Right), 10, row as u16);
+            app.handle_mouse(at);
+            app.take_copy_request()
+        };
+        let code = row(&rows, "make test");
+        assert!(line(&app, code) > u16::MAX as usize);
+        assert_eq!(right(&mut app, code).as_deref(), Some("make test"));
+        let all = right(&mut app, prompt).unwrap();
+        assert!(all.starts_with("second 0\n") && all.ends_with("\nsecond 39999"));
+
+        // A click on the call's head expands it.
+        assert!(!rows.join("\n").contains("t1-6"));
+        let head = row(&rows, "run t1");
+        app.last_click_forget();
+        app.handle_mouse(mouse(MouseEventKind::Down(left), 10, head as u16));
+        app.handle_mouse(mouse(MouseEventKind::Up(left), 10, head as u16));
+        let (rows, _) = screen(&mut app, 80, 30);
+        assert!(rows.join("\n").contains("t1-6"), "{rows:?}");
     }
 
     #[test]
