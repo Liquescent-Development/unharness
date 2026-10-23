@@ -53,7 +53,7 @@ what was kept. The parser tells its completion as a compaction with none
 of those (`AgentEvent::Compacted`, #359), and `thread/compacted`, the
 other notification app-server has for it (in the 0.162.1 binary, not
 recorded), as the same, once per turn: the one it names, or else its
-thread's turn in progress.
+thread's turn in progress. The TUI shows a divider and folds nothing.
 
 ## Token usage
 

@@ -71,9 +71,11 @@ harness does not have, a sandbox level with no sandbox to enforce it.
 | `↓ Jump to bottom` | Shown while scrolled up. Click it to follow new output again |
 | Drag, double click, triple click | Select text, a word (paths stay whole) or a line, copied on release without the drawing around it |
 | Right click on a block | Copy all of it, also what is not shown: a call's command and whole output, a file it wrote, a response's markdown. On a code block in a response, that code alone |
-| `Ctrl+O` | Expand or collapse the last tool call's output |
+| `Ctrl+O` | Expand or collapse the last tool call's output, or the summary of a compaction that came after it |
 | `Ctrl+T` | Expand or collapse every tool call |
+| `Ctrl+F`, `/fold` | Show or fold again the turns the last compaction folded. VS Code's terminal keeps `Ctrl+F` for its Find: use `/fold` there |
 | Click on a tool call | Expand or collapse it. On a call that spawned a subagent, open the subagent's transcript |
+| Click on a compaction | On its `▸ … earlier turns` row, show or fold the turns. On its divider or `What … now knows` row, expand or collapse the summary |
 
 ### Subagents
 
@@ -151,6 +153,7 @@ Type `/` to open autocomplete; `Enter` on a partial command completes it.
 | `/steer <text>` | Send a message into the running turn |
 | `/now [text]` | Interrupt the running turn and send this as the next one; with no text, the oldest queued prompt ([below](#sending-a-prompt-now)) |
 | `/compact [instructions]` | Summarise the context now |
+| `/fold` | Show or fold again the turns the last compaction folded (`Ctrl+F`) |
 | `/rewind` | Go back to before an earlier prompt and edit it ([below](#rewind-and-checkpoints)) |
 | `/undo-restore` | Reverse the last file restore made by `/rewind` |
 | `/fork` | Continue in a copy of the conversation |
@@ -431,6 +434,45 @@ unless extra usage covers what follows. Meanwhile the usage line shows
 the window nearest its limit (`5h 82%`), in red once a limit stops use.
 `--print` says the same once on stderr (`text` and `json`), a limit
 that stops use as a warning.
+
+## Compaction
+
+When the agent compacts its context (`/compact`, or by itself near its
+limit), the transcript shows a divider with what the harness reported,
+and below it the summary the model now has in place of the turns before:
+
+```
+▸ 214 earlier turns · not in pi's context (click)
+
+── Compacted · 252k → 52k tokens · manual ──────────────
+▸ What pi now knows (summary, 38 lines)
+```
+
+- The turns the model no longer has fold into one row at the top. Click
+  it, press `Ctrl+F` or type `/fold` to show them. Nothing is removed:
+  they stay in the saved conversation, `/rewind` and `/fork`.
+- The fold is that of the harness in use. A harness you switch to is
+  told the folded turns, so they show unfolded, and the summary is what
+  the one that compacted knew then; switch back and its fold is there
+  again. When its session is left (a session it could not resume, a
+  rewind or a fork it starts afresh, a model it can only take in a new
+  session), the new one is told every turn and nothing is folded.
+- What the harness kept as it was stays unfolded. Where that cannot be
+  matched to the transcript's turns for certain, nothing is folded; the
+  divider and the summary are still shown.
+- The summary is collapsed. Click it, or press `Ctrl+O`.
+- Each compaction folds everything before what it kept, so a later fold
+  holds an earlier one, which is a row of its own once the later one is
+  open. The summary of an earlier one says what the model knew then.
+- Rewinding to a folded turn works as to any other: the compaction after
+  it goes with the turns dropped. A resumed conversation comes back
+  folded.
+
+| Harness | Shown |
+|---|---|
+| Claude Code, pi | divider, summary, and the fold where the turns kept start at a prompt you sent, or nothing was kept |
+| Codex (`app-server`) | the divider: it reports no summary, tokens or what it kept |
+| others | nothing: they report no compaction |
 
 ## Status
 

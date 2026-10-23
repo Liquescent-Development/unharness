@@ -1109,17 +1109,43 @@ impl Transcript {
         }
     }
 
-    pub fn toggle_last_tool(&mut self) -> bool {
-        if let Some(Block::Tool { collapsed, .. }) = self
-            .blocks
-            .iter_mut()
-            .rev()
-            .find(|b| matches!(b, Block::Tool { .. }))
-        {
+    /// Expand or collapse the last tool call, or a compaction's summary
+    /// that came after it.
+    pub fn toggle_last(&mut self) -> bool {
+        if let Some(
+            Block::Tool { collapsed, .. }
+            | Block::Compaction {
+                collapsed,
+                summary: Some(_),
+                ..
+            },
+        ) = self.blocks.iter_mut().rev().find(|b| {
+            matches!(
+                b,
+                Block::Tool { .. }
+                    | Block::Compaction {
+                        summary: Some(_),
+                        ..
+                    }
+            )
+        }) {
             *collapsed = !*collapsed;
             return true;
         }
         false
+    }
+
+    /// Fold or unfold what the outermost fold of `active`'s holds (the
+    /// turns before its latest compaction that folds any). Returns whether
+    /// there is one.
+    pub fn toggle_fold(&mut self, active: HarnessId) -> bool {
+        let Some(f) = Folding::of(&self.blocks, active).rows.first().copied() else {
+            return false;
+        };
+        if let Some(Block::Compaction { folded, .. }) = self.blocks.get_mut(f.compaction) {
+            *folded = !*folded;
+        }
+        true
     }
 
     pub fn toggle_all_tools(&mut self) {
@@ -1660,7 +1686,7 @@ mod tests {
         // Unknown result creates a block.
         t.tool_result("zz", "out", true);
         assert_eq!(t.blocks.len(), 2);
-        assert!(t.toggle_last_tool());
+        assert!(t.toggle_last());
         assert!(matches!(
             &t.blocks[1],
             Block::Tool {

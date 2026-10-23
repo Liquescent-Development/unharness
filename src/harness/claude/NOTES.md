@@ -318,7 +318,19 @@ neither uuid appears anywhere else in it (not as an `assistant` or
 `user` line's `uuid`): what they are, the recording does not show. Its
 prompts carry no uuid of unharness's either (2.1.288, before the
 transport sent one per turn), so whether a kept prompt keeps the uuid
-unharness gave it is not recorded. Recorded for `/compact` only (2.1.288,
+unharness gave it is not recorded.
+
+The TUI folds the turns before what was kept only where `head_uuid` is
+the uuid unharness put on a prompt (its `TurnAnchor`), or where nothing
+was kept (`Controller::kept_at`, [rewind and fork](../../../docs/dev/rewind-and-fork.md#a-compactions-fold)).
+A head that is an answer, a tool result or a message unharness did not
+send folds nothing; in the recording it is none of unharness's, so it
+shows the divider and the summary only. Unverified live: a compaction
+whose kept messages start at a prompt unharness sent (an auto-compaction
+in a long session), and so the fold on Claude. A head inside a turn
+(an answer or a tool result of a turn unharness sent) could be put on
+that turn from the uuids of the stream's lines, as pi's is from its
+entries: #360, which needs a recording of such a compaction. Recorded for `/compact` only (2.1.288,
 `fixtures/steer_and_compact.jsonl`: `pre_tokens` 22975, `post_tokens`
 1988; the next turn was not recorded). Read in the 2.1.300 binary: the
 SDK schema declares `post_tokens` optional (`pre_tokens` is not); one

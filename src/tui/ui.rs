@@ -38,7 +38,7 @@ use crate::core::rules::Scope;
 use crate::core::sandbox::Access;
 use crate::core::text::sanitize;
 use crate::core::transcript::{
-    Block as TBlock, HookState, ToolBody, command_beyond_summary, current_compaction,
+    Block as TBlock, Folding, HookState, ToolBody, command_beyond_summary, current_compaction,
     input_beyond_summary, tool_body, tool_summary, tool_summary_full, truncate_chars,
     waits_on_user,
 };
@@ -1051,6 +1051,40 @@ struct CompactionView {
     now: bool,
 }
 
+/// The key of a block a fold hides, which has no lines.
+const HIDDEN: u64 = 0x4f4c_4445_4421;
+
+/// The key of the first block with the folds' rows drawn above it: its
+/// own `key` (or [`HIDDEN`]) and what the rows show.
+fn fold_key(key: u64, folding: &Folding, name: &str, click: bool) -> u64 {
+    let mut h = DefaultHasher::new();
+    (key, name, click).hash(&mut h);
+    for f in &folding.rows {
+        (f.turns, f.folded).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// The folds' rows, outermost first: how many turns each holds, that the
+/// model of `name`, the harness in use, no longer has them, and, while
+/// folded, that a click opens it.
+fn fold_rows(folding: &Folding, name: &str, click: bool) -> Rows {
+    let mut rows = Rows::new();
+    for f in &folding.rows {
+        rows.drawing(vec![Part::Draw(Span::styled(
+            format!(
+                "{} {} earlier turn{} · not in {name}'s context{}",
+                if f.folded { '▸' } else { '▾' },
+                f.turns,
+                if f.turns == 1 { "" } else { "s" },
+                if f.folded && click { " (click)" } else { "" }
+            ),
+            faint(),
+        ))]);
+    }
+    rows
+}
+
 fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1097,10 +1131,20 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
     let shown = app.shown_blocks();
     let active = app.controller.active;
     let current = current_compaction(shown, active);
+    // What compactions fold is not laid out: a block it hides has no
+    // lines, and the first block draws the folds' rows.
+    let folding = Folding::of(shown, active);
+    let name = app.controller.name_of(active);
+    let click = app.controller.config.mouse.unwrap_or(true);
     for (i, b) in shown.iter().enumerate() {
         // The space above a block is laid out with it: it depends on the
         // block before, and a change there lays out this one again anyway.
-        let gap = i.checked_sub(1).map_or(0, |p| block_gap(&shown[p], b));
+        // After a fold, that is the fold's rows.
+        let gap = match i.checked_sub(1) {
+            None => 0,
+            Some(p) if folding.hides(p) => 1,
+            Some(p) => block_gap(&shown[p], b),
+        };
         let followed = i + 1 < shown.len();
         let compaction = match b {
             TBlock::Compaction { harness, .. } => Some(CompactionView {
@@ -1109,7 +1153,15 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             }),
             _ => None,
         };
-        let key = block_key(b, gap, followed, compaction, thinking_live, elapsed);
+        let hidden = folding.hides(i);
+        let head = i == 0 && !folding.rows.is_empty();
+        let mut key = match hidden {
+            true => HIDDEN,
+            false => block_key(b, gap, followed, compaction, thinking_live, elapsed),
+        };
+        if head {
+            key = fold_key(key, &folding, name, click);
+        }
         if i == fresh && view.blocks.get(i).is_some_and(|k| k.key == key) {
             // Its start is read again, not kept: the key leaves it out.
             if let Some(row) = view.live.iter_mut().find(|r| r.block == i)
@@ -1130,8 +1182,19 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect) {
             view.lines.truncate(keep);
             view.copy.truncate(keep);
         }
-        let (mut lines, status_span) =
-            block_layout(b, width, followed, compaction, thinking_live, elapsed);
+        let (mut lines, mut status_span) = match hidden {
+            true => (Rows::new(), None),
+            false => block_layout(b, width, followed, compaction, thinking_live, elapsed),
+        };
+        if head {
+            let mut rows = fold_rows(&folding, name, click);
+            if !lines.is_empty() {
+                rows.blank();
+                rows.append(lines);
+            }
+            lines = rows;
+            status_span = None;
+        }
         // The gap is the only space between blocks.
         while lines.lines().last().is_some_and(is_blank) {
             lines.truncate(lines.len() - 1);
@@ -4717,6 +4780,252 @@ mod tests {
                 .starts_with("── Compacted ──")),
             "{text}"
         );
+    }
+
+    /// pi's turns with a long call each, and a compaction that kept the
+    /// last turn: the ones before it fold.
+    fn compacted_app() -> TestApp {
+        use crate::core::{AgentEvent, CompactTrigger, Compaction, Kept, StopReason};
+        let mut app = test_app(HarnessId::PI);
+        for (n, prompt) in ["one", "two", "three"].iter().enumerate() {
+            app.submit_prompt(prompt.to_string());
+            app.take_actions();
+            if n == 0 {
+                app.on_event(AgentEvent::SessionStarted {
+                    session_id: "pi-1".into(),
+                    model: None,
+                });
+            }
+            let id = format!("t{n}");
+            app.on_event(AgentEvent::ToolCallStarted {
+                id: id.clone(),
+                name: "bash".into(),
+                input: serde_json::json!({"command": format!("ls {prompt}")}),
+            });
+            app.on_event(AgentEvent::ToolCallResult {
+                id,
+                output: (1..=8).map(|l| format!("{prompt}-{l}\n")).collect(),
+                is_error: false,
+            });
+            app.on_event(AgentEvent::TextDelta(format!("answer {prompt}")));
+            app.on_event(AgentEvent::TurnCompleted {
+                stop_reason: StopReason::Done,
+            });
+            app.on_event(AgentEvent::TurnAnchor {
+                id: format!("e{n}"),
+            });
+        }
+        app.on_event(AgentEvent::Compacted(Compaction {
+            trigger: Some(CompactTrigger::Manual),
+            tokens_before: Some(1_655),
+            tokens_after: Some(1_671),
+            summary: Some("## Goal\nfold".into()),
+            kept: Kept::From("e2".into()),
+        }));
+        app
+    }
+
+    /// The turns a compaction folded are one row, and are not laid out
+    /// while folded; a click on the row shows them, and the lines kept
+    /// between frames stay those a fresh render draws.
+    #[test]
+    fn a_compaction_folds_the_turns_the_model_no_longer_has() {
+        use super::super::app::tests::mouse;
+        use crossterm::event::{MouseButton, MouseEventKind};
+        fn fresh(app: &mut App, what: &str) -> Vec<String> {
+            let (kept, _) = screen(app, 70, 60);
+            let kept_copy = app.transcript_view.copy.clone();
+            app.transcript_view = Default::default();
+            let (again, _) = screen(app, 70, 60);
+            assert_eq!(kept, again, "{what}");
+            assert_eq!(kept_copy, app.transcript_view.copy, "{what}");
+            kept
+        }
+        let mut app = compacted_app();
+        let rows = fresh(&mut app, "folded");
+        let text = rows.join("\n");
+        assert!(
+            rows[1].contains("│▸ 2 earlier turns · not in pi's context (click)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("ls one") && !text.contains("answer two"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ls three") && text.contains("answer three"),
+            "{text}"
+        );
+        let divider = rows
+            .iter()
+            .position(|r| r.contains("── Compacted · 1.7k → 1.7k tokens · manual"))
+            .unwrap();
+        // The fold, a blank row, the turn kept, then the divider.
+        assert!(rows[2].trim_matches('│').trim().is_empty(), "{text}");
+        assert!(rows[3].contains("❯ You"), "{text}");
+        assert!(rows[divider + 1].contains("▸ What pi now knows (summary, 2 lines)"));
+        // The blocks it holds have no lines.
+        let folded_lines = app.transcript_view.lines.len();
+        let three = app
+            .controller
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .position(|b| matches!(b, TBlock::User { text, .. } if text == "three"))
+            .unwrap();
+        assert!(
+            app.transcript_view.blocks[1..three]
+                .iter()
+                .all(|k| k.top == k.end)
+        );
+        // Nothing changed: every block is reused as it is.
+        let kept = app.transcript_view.blocks.clone();
+        screen(&mut app, 70, 60);
+        assert_eq!(app.transcript_view.blocks, kept);
+
+        // A right click on the row copies the turns it holds.
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right), 10, 1));
+        let copied = app.take_copy_request().unwrap();
+        assert!(
+            copied.contains("one") && copied.contains("ls two\ntwo-1"),
+            "{copied}"
+        );
+        assert!(!copied.contains("three"), "{copied}");
+
+        // A click shows them.
+        let click = |app: &mut App, row: u16| {
+            app.last_click_forget();
+            app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), 10, row));
+            app.handle_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 10, row));
+        };
+        click(&mut app, 1);
+        let rows = fresh(&mut app, "unfolded");
+        let text = rows.join("\n");
+        assert!(
+            rows[1].contains("│▾ 2 earlier turns · not in pi's context")
+                && !rows[1].contains("click"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ls one") && text.contains("answer two"),
+            "{text}"
+        );
+        assert!(app.transcript_view.lines.len() > folded_lines);
+        // The first block's own rows, below the fold's and a blank one.
+        assert!(rows[3].contains("Welcome to unharness"), "{text}");
+
+        // A click on the call in the first turn still expands it.
+        let call = rows.iter().position(|r| r.contains("ls one")).unwrap() as u16;
+        click(&mut app, call);
+        let text = fresh(&mut app, "call expanded").join("\n");
+        assert!(text.contains("one-8"), "{text}");
+
+        // And folded again.
+        click(&mut app, 1);
+        fresh(&mut app, "folded again");
+        assert_eq!(app.transcript_view.lines.len(), folded_lines);
+    }
+
+    /// A later compaction's fold holds the earlier one, which is a row of
+    /// its own once the later one is open.
+    #[test]
+    fn an_earlier_fold_sits_inside_a_later_one() {
+        use crate::core::{AgentEvent, Compaction, Kept, StopReason};
+        let mut app = compacted_app();
+        app.submit_prompt("four".into());
+        app.take_actions();
+        app.on_event(AgentEvent::TurnCompleted {
+            stop_reason: StopReason::Done,
+        });
+        app.on_event(AgentEvent::TurnAnchor { id: "e3".into() });
+        app.on_event(AgentEvent::Compacted(Compaction {
+            summary: Some("later".into()),
+            kept: Kept::From("e3".into()),
+            ..Default::default()
+        }));
+        let (rows, _) = screen(&mut app, 70, 60);
+        let text = rows.join("\n");
+        assert!(
+            rows[1].contains("▸ 3 earlier turns · not in pi's context (click)"),
+            "{text}"
+        );
+        assert!(!rows[2].contains("earlier turns"), "{text}");
+        assert_eq!(text.matches("── Compacted").count(), 1, "{text}");
+        app.toggle_fold();
+        let (rows, _) = screen(&mut app, 70, 60);
+        let text = rows.join("\n");
+        assert!(rows[1].contains("▾ 3 earlier turns"), "{text}");
+        assert!(
+            rows[2].contains("▸ 2 earlier turns · not in pi's context (click)"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("ls one") && text.contains("ls three"),
+            "{text}"
+        );
+        assert_eq!(text.matches("── Compacted").count(), 2, "{text}");
+        assert!(
+            text.contains("What pi knew then (summary, 2 lines)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("What pi now knows (summary, 1 line)"),
+            "{text}"
+        );
+    }
+
+    /// Another harness in use was told the folded turns: they show, and
+    /// the summary is what pi knew then. Back on pi, folded again.
+    #[test]
+    fn a_fold_shows_only_while_its_harness_is_in_use() {
+        let mut app = compacted_app();
+        app.switch_harness(HarnessId::CLAUDE);
+        app.take_actions();
+        let (rows, _) = screen(&mut app, 70, 80);
+        let text = rows.join("\n");
+        assert!(
+            !text.contains("earlier turn") && text.contains("ls one"),
+            "{text}"
+        );
+        assert!(
+            text.contains("▸ What pi knew then (summary, 2 lines)"),
+            "{text}"
+        );
+        app.switch_harness(HarnessId::PI);
+        let (rows, _) = screen(&mut app, 70, 80);
+        let text = rows.join("\n");
+        assert!(
+            rows[1].contains("▸ 2 earlier turns · not in pi's context"),
+            "{text}"
+        );
+        assert!(text.contains("▸ What pi now knows"), "{text}");
+    }
+
+    /// `/fold` and `Ctrl+F` fold again without following the end when the
+    /// view did not: it goes to the fold's row.
+    #[test]
+    fn folding_again_does_not_follow_the_end_unless_the_view_did() {
+        let mut app = compacted_app();
+        app.handle_slash_command("/fold");
+        screen(&mut app, 70, 12);
+        assert!(app.auto_scroll);
+        // Scrolled up a little from the end, and folded again.
+        app.scroll_up(3);
+        screen(&mut app, 70, 12);
+        assert!(!app.auto_scroll);
+        app.handle_slash_command("/fold");
+        let (rows, _) = screen(&mut app, 70, 12);
+        assert!(!app.auto_scroll && app.scroll == 0);
+        assert!(rows[1].contains("▸ 2 earlier turns"), "{}", rows.join("\n"));
+        // Following the end, it still does.
+        app.scroll_to_bottom();
+        app.handle_slash_command("/fold");
+        screen(&mut app, 70, 12);
+        assert!(app.auto_scroll);
+        app.handle_slash_command("/fold");
+        screen(&mut app, 70, 12);
+        assert!(app.auto_scroll);
     }
 
     #[test]

@@ -17,6 +17,16 @@ between 8,000 and 2,000,000 tokens. Unverified: a
 summary turn on pi, agy or an ACP agent, and one in which the agent
 asks for a tool anyway.
 
+## Compactions
+
+A compaction block (#359) is not bridged: the turns a compaction folded
+are bridged as any others, and a harness switched to is told them in
+full where they fit (`folded_turns_are_bridged_and_forked_as_any_others`).
+The reverse holds for what a fold may hide: blocks told to a harness in
+the message of a turn its compaction kept (the bridge, `!` commands) are
+in its context in that message, and are not folded
+(`a_kept_turn_keeps_what_its_message_told`).
+
 ## A new session for a choice
 
 A model, effort or provider the session cannot take (Mistral Vibe pins

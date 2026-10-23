@@ -642,7 +642,7 @@ fn handle_view_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (_, KeyCode::Tab) => app.view_next_subagent(false),
         (_, KeyCode::BackTab) => app.view_next_subagent(true),
         (true, KeyCode::Char('o')) => {
-            app.shown_transcript_mut().toggle_last_tool();
+            app.shown_transcript_mut().toggle_last();
         }
         (true, KeyCode::Char('t')) => app.shown_transcript_mut().toggle_all_tools(),
         (_, KeyCode::Up) => app.scroll_up(2),
@@ -706,9 +706,10 @@ fn handle_key(app: &mut App, modifiers: KeyModifiers, code: KeyCode) {
         (true, KeyCode::Char('p')) => app.open_policy_picker(),
         (true, KeyCode::Char('r')) => app.open_resume_picker(),
         (true, KeyCode::Char('o')) => {
-            app.controller.conversation.transcript.toggle_last_tool();
+            app.controller.conversation.transcript.toggle_last();
         }
         (true, KeyCode::Char('t')) => app.controller.conversation.transcript.toggle_all_tools(),
+        (true, KeyCode::Char('f')) => app.toggle_fold(),
         (true, KeyCode::Char('s')) => app.open_subagent_picker(),
         (true, KeyCode::Char('a')) => app.move_cursor_home(),
         (true, KeyCode::Char('u')) => {
@@ -854,6 +855,38 @@ mod tests {
             a,
             Action::SendTurn { text, .. } if text == "one\ntwo\nthree"
         )));
+    }
+
+    /// `Ctrl+F` shows the turns the last compaction folded, and folds them
+    /// again; `Ctrl+O` expands its summary, the last thing to expand.
+    #[test]
+    fn ctrl_f_shows_folded_turns_and_ctrl_o_a_compactions_summary() {
+        let mut app = test_app(HarnessId::PI);
+        let t = &mut app.controller.conversation.transcript;
+        t.push_user("one");
+        let two = t.blocks.len();
+        t.push_user("two");
+        t.push_compaction(
+            HarnessId::PI,
+            crate::core::Compaction {
+                summary: Some("s".into()),
+                ..Default::default()
+            },
+            transcript::KeptAt::Block(two),
+        );
+        let state = |app: &App| match app.controller.conversation.transcript.blocks.last() {
+            Some(transcript::Block::Compaction {
+                folded, collapsed, ..
+            }) => (*folded, *collapsed),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(state(&app), (true, true));
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('f'));
+        assert_eq!(state(&app), (false, true));
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('o'));
+        assert_eq!(state(&app), (false, false));
+        handle_key(&mut app, KeyModifiers::CONTROL, KeyCode::Char('f'));
+        assert_eq!(state(&app), (true, false));
     }
 
     #[test]

@@ -146,6 +146,19 @@ say which. In the recording it is neither of the two prompts' entries
 (`get_fork_messages`): with `keepRecentTokens` 1, pi cut inside the
 second turn or kept nothing, which the recording does not show.
 
+The TUI folds the turns before what pi kept only where `firstKeptEntryId`
+is a prompt's entry id that `get_fork_messages` gave as its anchor
+(`Controller::kept_at`, [rewind and fork](../../../docs/dev/rewind-and-fork.md#a-compactions-fold)).
+pi lists a turn's entry after the turn, so a compaction during a turn
+that keeps that turn (a threshold one after a tool call) is folded once
+the listing names it. An entry inside a turn, or pi's own (kept
+nothing), is no prompt's: which turn holds it cannot be told from what
+pi says, and nothing is folded; the recording is that case, so it shows
+the divider and the summary only. `get_entries` (1.1.0's RPC) lists
+every entry with its parent and would tell which turn holds one;
+unharness does not ask it, and using it needs a recording of a
+compaction that cuts inside a turn.
+
 ## The default model
 
 With no model chosen (#329), `get_state` at session start, before the
