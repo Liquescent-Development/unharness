@@ -316,9 +316,9 @@ pub struct QuestionModal {
     /// The free text as it was when typing started, for Esc.
     other_before: String,
     /// Lines the preview pane is scrolled down.
-    pub preview_scroll: u16,
+    pub preview_scroll: usize,
     /// The furthest the preview can scroll, as last drawn.
-    pub preview_max: u16,
+    pub preview_max: usize,
 }
 
 /// The agent's plan, to carry out under a policy or to keep working on.
@@ -335,9 +335,9 @@ pub struct PlanModal {
     pub feedback: String,
     pub editing: bool,
     /// Lines the plan is scrolled down.
-    pub scroll: u16,
+    pub scroll: usize,
     /// The furthest the plan can scroll, as last drawn.
-    pub scroll_max: u16,
+    pub scroll_max: usize,
 }
 
 impl PlanModal {
@@ -376,8 +376,7 @@ impl PlanModal {
     }
 
     pub fn scroll_by(&mut self, lines: i32) {
-        let max = i32::from(self.scroll_max);
-        self.scroll = (i32::from(self.scroll) + lines).clamp(0, max) as u16;
+        self.scroll = scrolled(self.scroll, lines, self.scroll_max);
     }
 
     /// The answer that keeps the agent planning, with what the user typed.
@@ -386,6 +385,11 @@ impl PlanModal {
             reason: self.feedback.trim().to_string(),
         }
     }
+}
+
+/// `scroll` moved by `lines`, kept within `0..=max`.
+fn scrolled(scroll: usize, lines: i32, max: usize) -> usize {
+    scroll.saturating_add_signed(lines as isize).min(max)
 }
 
 /// The question has a row for a typed answer: it allows one, or it has
@@ -485,8 +489,7 @@ impl QuestionModal {
     }
 
     pub fn scroll_preview(&mut self, lines: i32) {
-        let max = i32::from(self.preview_max);
-        self.preview_scroll = (i32::from(self.preview_scroll) + lines).clamp(0, max) as u16;
+        self.preview_scroll = scrolled(self.preview_scroll, lines, self.preview_max);
     }
 
     /// Space: pick a single-select option, toggle a multi-select one, or
@@ -701,15 +704,14 @@ pub enum Modal {
 #[derive(Debug, Clone, Default)]
 pub struct StatusModal {
     /// Lines it is scrolled down.
-    pub scroll: u16,
+    pub scroll: usize,
     /// The furthest it can scroll, as last drawn.
-    pub scroll_max: u16,
+    pub scroll_max: usize,
 }
 
 impl StatusModal {
     pub fn scroll_by(&mut self, lines: i32) {
-        let max = i32::from(self.scroll_max);
-        self.scroll = (i32::from(self.scroll) + lines).clamp(0, max) as u16;
+        self.scroll = scrolled(self.scroll, lines, self.scroll_max);
     }
 }
 
