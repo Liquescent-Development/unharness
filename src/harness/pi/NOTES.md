@@ -50,7 +50,12 @@ told from three places (#355):
   or failed and one that counted nothing, and so does the parser. This
   moves the figure during a turn, once per model call, before the tools
   it asked for run (`fixtures/compaction.jsonl`: 1613 after the tool
-  call's response, 1633 after the answer).
+  call's response, 1633 after the answer). Only where the provider
+  reports usage: one that streams none (a model with pi's
+  `compat.supportsUsageInStreaming: false`, or an endpoint that sends
+  none) gives responses that count 0, and then the figure moves only
+  when a turn ends, with `get_session_stats`, which pi then estimates
+  from the messages' text.
 - `get_session_stats` (`data.contextUsage.tokens`), which the transport
   asks for once a turn has ended (`TurnCompleted`). pi counts the last
   response's usage plus an estimate of what came after it, so this
@@ -67,7 +72,11 @@ told from three places (#355):
   than before: the summary is longer than the one short turn it
   replaced), then 1862 after the next response. Threshold and overflow
   compactions are read from the same event and were not recorded; their
-  `result` is built by the same code in 1.1.0's source.
+  `result` is built by the same code in 1.1.0's source. pi added
+  `estimatedTokensAfter` in 0.79.8 (its CHANGELOG): from 0.78.1
+  (`MIN_VERSION`) to 0.79.7 a compaction that succeeds has none, and
+  the figure is dropped then (below) until a response counts it. An
+  estimate of 0 is taken as none, as Claude's `post_tokens` is.
 
 After a compaction pi answers `get_session_stats` with
 `contextUsage.tokens: null` until a response follows (recorded: the
@@ -81,7 +90,11 @@ the parser makes of it depends on what was told before (#319):
   compaction unharness saw end, which is the one in the recording.
 - Nothing was told of what pi holds now: a session resumed after a
   compaction an earlier run (or pi itself) made, a fork, a
-  `compaction_end` without `estimatedTokensAfter` (said at once, there).
+  `compaction_end` without `estimatedTokensAfter` (said at once, there),
+  or the estimate and then a response (not aborted, not failed) that
+  reported no usage. That last one is a provider that streams none: pi
+  can count no response after the compaction and answers `null` for the
+  rest of the session, while the context grows past the estimate.
   Then the figure is of the context as it was before, and is dropped
   (`AgentEvent::ContextUnknown`): `ctx` leaves the usage line and
   `/status` says it is not known yet, until the next response. A resumed

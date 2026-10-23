@@ -26,14 +26,27 @@ pub struct PiParser {
     fork_messages_seen: Option<usize>,
     /// The session was to be resumed, and has not been listed yet.
     resumed_unlisted: bool,
-    /// A context fill was told here that is of what pi holds now: one
-    /// since the session started in this process (a resume's figure is
-    /// the controller's, saved by an earlier run) and since the last
-    /// compaction, or that compaction's estimate. pi answers
-    /// `get_session_stats` with `tokens: null` after a compaction until
-    /// a response follows; then the figure told stands only if this is
-    /// set (#355).
-    fill_current: bool,
+    /// What the context fill told here is of. pi answers
+    /// `get_session_stats` with `tokens: null` after a compaction until a
+    /// response it can count follows; then the figure told stands only
+    /// if it is of what pi holds now (#355).
+    fill: Fill,
+}
+
+/// What the context fill a [`PiParser`] told is of (#319, #355).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// Nothing told in this process is of what pi holds now: nothing was
+    /// told yet (a resume's figure is the controller's, saved by an
+    /// earlier run), or the context changed under it (a fork, a
+    /// compaction without an estimate, a response after the estimate
+    /// that pi could not count).
+    #[default]
+    Stale,
+    /// A compaction's estimate, and no response since.
+    Estimate,
+    /// A response's figure, or pi's own.
+    Counted,
 }
 
 impl PiParser {
@@ -116,12 +129,23 @@ impl PiParser {
             // `get_session_stats` after the turn adds what came after the
             // last response (#355).
             "message_end" => {
-                if let Some(used) = v.get("message").and_then(context_tokens) {
-                    self.fill_current = true;
-                    out.push(AgentEvent::Context(ContextUsage {
-                        used: Some(used),
-                        window: None,
-                    }));
+                let Some(message) = v.get("message").filter(|m| is_response(m)) else {
+                    return out;
+                };
+                match context_tokens(message) {
+                    Some(used) => {
+                        self.fill = Fill::Counted;
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: Some(used),
+                            window: None,
+                        }));
+                    }
+                    // A response that reported no usage (a provider that
+                    // streams none): the context grew past the estimate,
+                    // and pi, which cannot count it either, answers `null`
+                    // from here on.
+                    None if self.fill == Fill::Estimate => self.fill = Fill::Stale,
+                    None => {}
                 }
             }
             "tool_execution_start" => {
@@ -197,8 +221,12 @@ impl PiParser {
                     // as it was.
                     let after = v
                         .pointer("/result/estimatedTokensAfter")
-                        .and_then(Value::as_u64);
-                    self.fill_current = after.is_some();
+                        .and_then(Value::as_u64)
+                        .filter(|&n| n > 0);
+                    self.fill = match after {
+                        Some(_) => Fill::Estimate,
+                        None => Fill::Stale,
+                    };
                     out.push(match after {
                         Some(after) => AgentEvent::Context(ContextUsage {
                             used: Some(after),
@@ -457,7 +485,7 @@ impl PiParser {
                 } else {
                     self.fork_messages_seen = None;
                     // The fork holds less than the session it left.
-                    self.fill_current = false;
+                    self.fill = Fill::Stale;
                 }
             }
             "get_session_stats" => {
@@ -467,14 +495,17 @@ impl PiParser {
                         used,
                         window: c.get("contextWindow").and_then(Value::as_u64),
                     }));
-                    // `null`: no response since the last compaction, so
-                    // pi does not know. A fill told since then (the
-                    // compaction's estimate) stands; one from before it
-                    // (a session resumed after a compaction) is no
-                    // longer of what pi holds, and is not kept (#319).
+                    // `null`: no response pi could count since the last
+                    // compaction, so pi does not know. A fill told since
+                    // then (the compaction's estimate) stands; one from
+                    // before it (a session resumed after a compaction) or
+                    // one the context has grown past is no longer of what
+                    // pi holds, and is not kept (#319).
                     if used.is_some() {
-                        self.fill_current = true;
-                    } else if c.get("tokens").is_some_and(Value::is_null) && !self.fill_current {
+                        self.fill = Fill::Counted;
+                    } else if c.get("tokens").is_some_and(Value::is_null)
+                        && self.fill == Fill::Stale
+                    {
                         out.push(AgentEvent::ContextUnknown);
                     }
                 }
@@ -559,16 +590,18 @@ pub fn flatten_result(result: Option<&Value>) -> String {
     }
 }
 
-/// The tokens an assistant `message` says the context holds, as pi 1.1.0
-/// reckons them (`calculateContextTokens`): `totalTokens`, or the sum of
-/// the four counts where that is missing or zero. pi leaves out a
-/// response that was aborted or failed and one that counted nothing, and
-/// so does this; other messages carry no usage.
+/// An assistant `message` that pi counts the context by: not one that
+/// was aborted or failed (1.1.0's `getContextUsage`). Other messages
+/// carry no usage.
+fn is_response(message: &Value) -> bool {
+    s(message, "role") == "assistant" && !matches!(s(message, "stopReason"), "aborted" | "error")
+}
+
+/// The tokens a response says the context holds, as pi 1.1.0 reckons
+/// them (`calculateContextTokens`): `totalTokens`, or the sum of the four
+/// counts where that is missing or zero. One that counted nothing (its
+/// provider reported no usage) says nothing, as in pi.
 fn context_tokens(message: &Value) -> Option<u64> {
-    if s(message, "role") != "assistant" || matches!(s(message, "stopReason"), "aborted" | "error")
-    {
-        return None;
-    }
     let usage = message.get("usage")?;
     let tokens = match u(usage, "totalTokens") {
         0 => ["input", "output", "cacheRead", "cacheWrite"]
@@ -704,6 +737,12 @@ mod tests {
             r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"errorMessage":"Auto-compaction failed: boom"}"#,
         );
         assert!(told_fill(&failed).is_empty());
+        // An estimate of 0 is none (as Claude's `post_tokens`).
+        let zero = end(
+            r#"{"type":"compaction_end","reason":"manual","result":{"summary":"s","tokensBefore":9000,"estimatedTokensAfter":0},"aborted":false,"willRetry":false}"#,
+        );
+        assert!(told_fill(&zero).is_empty());
+        assert!(zero.contains(&AgentEvent::ContextUnknown));
         let cancelled =
             end(r#"{"type":"compaction_end","reason":"manual","aborted":true,"willRetry":false}"#);
         assert!(told_fill(&cancelled).is_empty());
@@ -766,6 +805,31 @@ mod tests {
         // pi's own figure is of what it holds.
         p.feed(&stats(r#""tokens":1500,"#));
         assert!(!unknown(p.feed(&null)));
+
+        // A provider that reports no usage: pi counts no response after
+        // the compaction, and answers `null` from then on. The estimate
+        // stands until a response grows the context past it; an aborted
+        // or failed one is not counted by pi either way.
+        let estimate = r#"{"type":"compaction_end","reason":"threshold","result":{"summary":"s","tokensBefore":9000,"estimatedTokensAfter":3000},"aborted":false,"willRetry":false}"#;
+        let uncounted = |stop: &str| {
+            format!(
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[],"usage":{{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0}},"stopReason":"{stop}"}}}}"#
+            )
+        };
+        let mut p = PiParser::new(None);
+        p.feed(estimate);
+        assert!(!unknown(p.feed(&null)));
+        for stop in ["aborted", "error"] {
+            assert!(told_fill(&p.feed(&uncounted(stop))).is_empty());
+            assert!(!unknown(p.feed(&null)), "{stop}");
+        }
+        assert!(told_fill(&p.feed(&uncounted("stop"))).is_empty());
+        assert!(unknown(p.feed(&null)));
+        assert!(unknown(p.feed(&null)));
+        // Without a compaction pi estimates the fill itself.
+        let mut p = PiParser::new(None);
+        p.feed(&uncounted("stop"));
+        assert!(!unknown(p.feed(&stats(r#""tokens":2500,"#))));
     }
 
     /// pi reports usage at each `turn_end`, once per model call: a turn

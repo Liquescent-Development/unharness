@@ -412,7 +412,8 @@ session, with the cost beside each ([Status](#status)).
 
 The usage line shows how full the model's context is (`ctx 34%`), once
 the harness has said. A harness that never says (agy, Codex on `exec`)
-shows `ctx –`; pi says after each model call. Until a session reports its
+shows `ctx –`; pi says after each model call where its provider reports
+usage, and otherwise when a turn ends. Until a session reports its
 model's window (Claude says it only when a turn ends), the window that
 model last reported in any workspace is taken. Each harness's figure is
 kept with the conversation and comes back on a switch to it or a resume,
