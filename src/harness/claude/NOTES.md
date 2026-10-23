@@ -290,10 +290,35 @@ nobody sent, and after which it sends the next queued prompt.
 
 A compaction ends with a `system` `compact_boundary` whose
 `compact_metadata` has `trigger` (`manual` or `auto`), `pre_tokens` and
-`post_tokens`; the parser makes it the "context compacted" notice and,
-from `post_tokens`, the context's new size (#310), which otherwise kept
-the size from before the compaction until the next request's
-`message_start`. Recorded for `/compact` only (2.1.288,
+`post_tokens`; the parser tells from `post_tokens` the context's new
+size at once (#310), which otherwise kept the size from before the
+compaction until the next request's `message_start`. The compaction
+itself (`AgentEvent::Compacted`, #359) is told once the summary has
+come: the synthetic user message right after the boundary
+(`isSynthetic: true`, no `isReplay`, text only: one carrying a tool
+result is read as one), whose uuid is the boundary's
+`preserved_segment.anchor_uuid` where it names one. Its content is the
+summary the model has now ("This session is being continued from a
+previous conversation…"). Before #359 the parser dropped that message
+(a `user` line with text content and no tool result); it never showed
+as a prompt. The main agent's `system` lines in between keep the
+compaction waiting; anything else, or the CLI's exit (`flush`), tells it
+without a summary. The `<local-command-stdout>` replay after it stays
+ignored.
+
+What was kept as it was is named by `preserved_segment` (`head_uuid`
+to `tail_uuid`, read in the 2.1.306 binary as a chain of messages walked
+from the tail back to the head by `parentUuid`) or by
+`preserved_messages.uuids`, in order; the parser takes `head_uuid` (or
+the first of `uuids`) as where the kept messages start. A boundary with
+neither kept nothing: Claude Code writes them only when it kept
+messages, and when it loads a session drops everything before a
+boundary without them. In the recording both name two messages, and
+neither uuid appears anywhere else in it (not as an `assistant` or
+`user` line's `uuid`): what they are, the recording does not show. Its
+prompts carry no uuid of unharness's either (2.1.288, before the
+transport sent one per turn), so whether a kept prompt keeps the uuid
+unharness gave it is not recorded. Recorded for `/compact` only (2.1.288,
 `fixtures/steer_and_compact.jsonl`: `pre_tokens` 22975, `post_tokens`
 1988; the next turn was not recorded). Read in the 2.1.300 binary: the
 SDK schema declares `post_tokens` optional (`pre_tokens` is not); one
