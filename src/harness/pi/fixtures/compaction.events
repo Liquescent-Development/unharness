@@ -1,0 +1,39 @@
+SessionStarted id=01a1663d-82cf-7490-92b6-c14df9b39abf model=qwen3.8-q8kxl
+Context used=- window=262144
+CapabilitiesChanged image_input=false
+CapabilitiesChanged commands=0
+TurnStarted
+ToolCallStarted id=vuTswU4eYEC6NGIXSuPzjdNCK8dscYFV name=bash input={"command":"echo alpha"}
+Context used=1613 window=-
+ToolCallDelta id=vuTswU4eYEC6NGIXSuPzjdNCK8dscYFV name=bash "alpha\\n"
+ToolCallResult id=vuTswU4eYEC6NGIXSuPzjdNCK8dscYFV error=false "alpha\\n"
+Usage in=1586 out=27 cache_read=0 cache_write=0 cost=0.0000 cumulative=false
+TextDelta "one"
+Context used=1633 window=-
+Usage in=17 out=2 cache_read=1614 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1633 window=262144
+SessionStats user=1 assistant=2 tools=1 tokens=3246 cost=0.0000
+TurnAnchor id=962494df
+TurnStarted
+TextDelta "two"
+Context used=1655 window=-
+Usage in=26 out=2 cache_read=1627 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1655 window=262144
+SessionStats user=2 assistant=3 tools=1 tokens=4901 cost=0.0000
+TurnAnchor id=76254f20
+Notice "compacting context…"
+Notice "context compacted"
+Context used=1671 window=-
+TurnCompleted Done
+Context used=- window=262144
+SessionStats user=2 assistant=3 tools=1 tokens=5682 cost=0.0000
+TurnStarted
+TextDelta "three"
+Context used=1862 window=-
+Usage in=790 out=2 cache_read=1070 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1862 window=262144
+SessionStats user=3 assistant=4 tools=1 tokens=7544 cost=0.0000
+TurnAnchor id=775a3745

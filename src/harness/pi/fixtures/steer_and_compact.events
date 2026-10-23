@@ -7,6 +7,7 @@ TurnStarted
 ThinkingDelta "**Clarifying execution protocol**"
 ThinkingDelta "\\n\\n"
 ToolCallStarted id=call_qWNwhgAB6vTidzgkuqldA7HD|fc_03723ae0960ab6e1016ac17a99c8fc87d0b5723104c89ca592 name=bash input={"command":"sleep 4 && echo first-ok","timeout":10}
+Context used=5186 window=-
 ToolCallDelta id=call_qWNwhgAB6vTidzgkuqldA7HD|fc_03723ae0960ab6e1016ac17a99c8fc87d0b5723104c89ca592 name=bash "first-ok\\n"
 ToolCallResult id=call_qWNwhgAB6vTidzgkuqldA7HD|fc_03723ae0960ab6e1016ac17a99c8fc87d0b5723104c89ca592 error=false "first-ok\\n"
 Usage in=5107 out=79 cache_read=0 cache_write=0 cost=0.0220 cumulative=false
@@ -14,6 +15,7 @@ TextDelta "done"
 TextDelta " STE"
 TextDelta "ER"
 TextDelta "ED"
+Context used=5255 window=-
 Usage in=224 out=39 cache_read=4992 cache_write=0 cost=0.0037 cumulative=false
 TurnCompleted Done
 Context used=5255 window=272000

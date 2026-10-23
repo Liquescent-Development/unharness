@@ -770,6 +770,50 @@ fn pi_harness(fake: &Fake) -> unharness::harness::pi::PiHarness {
     }
 }
 
+/// A resumed pi is asked how full its context is before any turn ends
+/// (#355): a session whose last turn was a compaction answers `null`
+/// (`fixtures/resume_compacted.jsonl`, pi 1.1.0), so the figure saved
+/// from before it is dropped, until the next response tells one.
+#[tokio::test]
+async fn pi_asks_a_resumed_session_how_full_its_context_is() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/resume_compacted.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    cfg.resume = Some("401bf0eb-8893-4cae-89d6-77f7c3f2efef".into());
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
+    handle.send(SessionCommand::turn("three")).await.unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    let unknown = events
+        .iter()
+        .position(|e| *e == AgentEvent::ContextUnknown)
+        .expect("the fill from before the compaction is dropped");
+    let told = events
+        .iter()
+        .position(|e| matches!(e, AgentEvent::Context(c) if c.used == Some(1881)))
+        .expect("the response tells the fill");
+    assert!(unknown < told, "{events:?}");
+    handle.send(SessionCommand::Shutdown).await.unwrap();
+    until_exited(&mut handle).await;
+    assert_eq!(
+        fake.sent_lines()
+            .iter()
+            .filter_map(|v| v["type"].as_str())
+            .take(5)
+            .collect::<Vec<_>>(),
+        [
+            "get_state",
+            "get_commands",
+            "get_fork_messages",
+            "get_session_stats",
+            "prompt"
+        ],
+    );
+}
+
 /// A turn sent to a resumed pi waits for the first `get_fork_messages`
 /// answer (#214): pi saves a prompt under the id it was given, so one sent
 /// to the empty session pi made for a missing id
@@ -821,6 +865,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
             ">> {\"type\": \"get_state\"}\n",
             ">> {\"type\": \"get_commands\"}\n",
             ">> {\"type\": \"get_fork_messages\"}\n",
+            ">> {\"type\": \"get_session_stats\"}\n",
             "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
             "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
             ">> {\"type\": \"prompt\"}\n",
@@ -832,14 +877,20 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
     cfg.resume = Some("s1".into());
     let handle = pi_harness(&fake).start_session(cfg).unwrap();
     handle.send(SessionCommand::turn("hi")).await.unwrap();
-    let sent = fake.sent_lines_eventually(4).await;
+    let sent = fake.sent_lines_eventually(5).await;
     assert_eq!(
         sent.iter()
             .filter_map(|v| v["type"].as_str())
             .collect::<Vec<_>>(),
-        ["get_state", "get_commands", "get_fork_messages", "prompt"],
+        [
+            "get_state",
+            "get_commands",
+            "get_fork_messages",
+            "get_session_stats",
+            "prompt"
+        ],
     );
-    assert_eq!(sent[3]["message"], "hi");
+    assert_eq!(sent[4]["message"], "hi");
     handle.send(SessionCommand::Shutdown).await.unwrap();
 
     // Before the listing answers the turn is still held: an interrupt
@@ -854,6 +905,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
             ">> {\"type\": \"get_state\"}\n",
             ">> {\"type\": \"get_commands\"}\n",
             ">> {\"type\": \"get_fork_messages\"}\n",
+            ">> {\"type\": \"get_session_stats\"}\n",
             "# gate\n",
             "{\"id\":\"u3\",\"type\":\"response\",\"command\":\"get_fork_messages\",\"success\":true,",
             "\"data\":{\"messages\":[{\"entryId\":\"e1\",\"text\":\"earlier\"}]}}\n",
@@ -868,7 +920,7 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
         gate.to_string_lossy().into_owned(),
     ));
     let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
-    fake.sent_lines_eventually(3).await;
+    fake.sent_lines_eventually(4).await;
     handle.send(SessionCommand::turn("hi")).await.unwrap();
     handle.send(SessionCommand::Interrupt).await.unwrap();
     let events = run_turn(&mut handle, |_| None).await;
@@ -889,7 +941,12 @@ async fn pi_holds_a_resumed_turn_until_its_listing_answers() {
             .iter()
             .filter_map(|v| v["type"].as_str())
             .collect::<Vec<_>>(),
-        ["get_state", "get_commands", "get_fork_messages"],
+        [
+            "get_state",
+            "get_commands",
+            "get_fork_messages",
+            "get_session_stats"
+        ],
     );
     handle.send(SessionCommand::Shutdown).await.unwrap();
 }
@@ -4878,7 +4935,12 @@ async fn headless_fails_a_resume_the_agent_replaced_with_a_new_session() {
         sent.iter()
             .filter_map(|v| v["type"].as_str())
             .collect::<Vec<_>>(),
-        ["get_state", "get_commands", "get_fork_messages"],
+        [
+            "get_state",
+            "get_commands",
+            "get_fork_messages",
+            "get_session_stats"
+        ],
         "{sent:?}"
     );
 

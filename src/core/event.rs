@@ -117,6 +117,11 @@ pub enum AgentEvent {
         output: String,
     },
     Context(ContextUsage),
+    /// How full the context is is no longer known: the fill told before
+    /// is not to stand, as `ContextUsage::merge` would keep it (pi asked
+    /// after a compaction it told no estimate for, #319). The window
+    /// stands.
+    ContextUnknown,
     RateLimit(RateLimitInfo),
     /// What the harness's CLI said of the account it runs on.
     Account(AccountInfo),
@@ -907,6 +912,7 @@ impl AgentEvent {
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".into())
             ),
+            AgentEvent::ContextUnknown => "ContextUnknown".into(),
             AgentEvent::RateLimit(r) => {
                 let mut parts = vec![format!(
                     "status={}{}",

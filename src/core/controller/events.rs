@@ -137,6 +137,7 @@ impl Controller {
                 }
                 self.conversation.context.merge(c);
             }
+            AgentEvent::ContextUnknown => self.conversation.context.used = None,
             AgentEvent::RateLimit(r) => self.rate_limit_reported(self.active, r),
             AgentEvent::Account(a) => self.account_reported(self.active, a),
             AgentEvent::SessionStats(s) => self.session_stats_reported(s),

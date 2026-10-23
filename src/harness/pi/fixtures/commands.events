@@ -6,6 +6,7 @@ TurnStarted
 TextDelta "HEL"
 TextDelta "LO"
 TextDelta " world"
+Context used=1333 window=-
 Usage in=1326 out=7 cache_read=0 cache_write=0 cost=0.0054 cumulative=false
 TurnCompleted Done
 Context used=1333 window=272000
@@ -19,6 +20,7 @@ TextDelta "J"
 TextDelta "OUR"
 TextDelta " AM"
 TextDelta "I"
+Context used=1496 window=-
 Usage in=79 out=9 cache_read=1408 cache_write=0 cost=0.0011 cumulative=false
 TurnCompleted Done
 Context used=1496 window=272000
