@@ -2682,7 +2682,7 @@ fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
         .title(title);
     let plan = pane.inner(parts[1]);
     let lines = render_markdown_to_lines(&m.plan, plan.width as usize, true);
-    let max = lines.len().saturating_sub(plan.height as usize) as u16;
+    let max = lines.len().saturating_sub(plan.height as usize);
     m.scroll_max = max;
     m.scroll = m.scroll.min(max);
     let pane = if max > 0 {
@@ -2695,7 +2695,7 @@ fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
         pane
     };
     frame.render_widget(
-        Paragraph::new(lines).scroll((m.scroll, 0)).block(pane),
+        Paragraph::new(scrolled_lines(lines, m.scroll)).block(pane),
         parts[1],
     );
     frame.render_widget(Paragraph::new(rows), parts[3]);
@@ -3000,7 +3000,7 @@ fn render_question_options(frame: &mut Frame, m: &QuestionModal, area: Rect) {
     let offset = ranges
         .get(m.cursor)
         .map_or(0, |&(start, end)| end.saturating_sub(height).min(start));
-    frame.render_widget(Paragraph::new(lines).scroll((offset as u16, 0)), area);
+    frame.render_widget(Paragraph::new(scrolled_lines(lines, offset)), area);
 }
 
 /// The highlighted option's preview, as markdown, in a pane of its own.
@@ -3019,7 +3019,7 @@ fn render_question_preview(frame: &mut Frame, m: &mut QuestionModal, area: Rect)
                 .add_modifier(Modifier::ITALIC),
         ))],
     };
-    let max = lines.len().saturating_sub(inner.height as usize) as u16;
+    let max = lines.len().saturating_sub(inner.height as usize);
     m.preview_max = max;
     m.preview_scroll = m.preview_scroll.min(max);
     let scroll = m.preview_scroll;
@@ -3031,7 +3031,16 @@ fn render_question_preview(frame: &mut Frame, m: &mut QuestionModal, area: Rect)
     } else {
         pane
     };
-    frame.render_widget(Paragraph::new(lines).scroll((scroll, 0)).block(pane), area);
+    frame.render_widget(
+        Paragraph::new(scrolled_lines(lines, scroll)).block(pane),
+        area,
+    );
+}
+
+/// `lines` from line `scroll` on. `Paragraph::scroll` counts in `u16`,
+/// which what an agent wrote can be longer than.
+fn scrolled_lines(lines: Vec<Line<'static>>, scroll: usize) -> Vec<Line<'static>> {
+    lines.into_iter().skip(scroll).collect()
 }
 
 /// What is still unanswered (first, so a long list cannot hide it), then
@@ -3619,6 +3628,36 @@ mod tests {
             unreachable!()
         };
         assert!(m.editing && m.scroll > 0);
+    }
+
+    #[test]
+    fn a_plan_or_preview_longer_than_a_u16_counts_scrolls_to_its_end() {
+        let long: Vec<String> = (1..=35_000).map(|i| format!("line {i}")).collect();
+        let long = long.join("\n\n");
+        let mut app = test_app(HarnessId::CLAUDE);
+        let mut plan = PlanModal::new("plan".into(), long.clone(), None);
+        plan.scroll = usize::MAX;
+        app.modal = Some(Modal::Plan(plan));
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 35000");
+        let Some(Modal::Plan(m)) = &app.modal else {
+            unreachable!()
+        };
+        assert!(m.scroll == m.scroll_max && m.scroll > u16::MAX as usize);
+
+        let mut questions = greeting_and_tone();
+        questions[0].options[0].preview = Some(long);
+        let mut app = question_app(questions);
+        let Some(Modal::Question(m)) = &mut app.modal else {
+            unreachable!()
+        };
+        m.preview_scroll = usize::MAX;
+        let (rows, _) = screen(&mut app, 140, 40);
+        find(&rows, "line 35000");
+        let Some(Modal::Question(m)) = &app.modal else {
+            unreachable!()
+        };
+        assert!(m.preview_scroll == m.preview_max && m.preview_max > u16::MAX as usize);
     }
 
     #[test]
