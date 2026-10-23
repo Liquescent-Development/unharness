@@ -704,15 +704,14 @@ pub enum Modal {
 #[derive(Debug, Clone, Default)]
 pub struct StatusModal {
     /// Lines it is scrolled down.
-    pub scroll: u16,
+    pub scroll: usize,
     /// The furthest it can scroll, as last drawn.
-    pub scroll_max: u16,
+    pub scroll_max: usize,
 }
 
 impl StatusModal {
     pub fn scroll_by(&mut self, lines: i32) {
-        let max = i32::from(self.scroll_max);
-        self.scroll = (i32::from(self.scroll) + lines).clamp(0, max) as u16;
+        self.scroll = scrolled(self.scroll, lines, self.scroll_max);
     }
 }
 

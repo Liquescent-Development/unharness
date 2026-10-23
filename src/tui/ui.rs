@@ -2309,7 +2309,7 @@ fn render_modal(frame: &mut Frame, app: &App, area: Rect) {
             let width = (wide.width.saturating_sub(6)).max(20) as usize;
             let mut lines = grant_lines(d, width);
             lines.push(Line::default());
-            let height = (lines.len() as u16 + 2).min(area.height);
+            let height = (lines.len() + 2).min(area.height as usize) as u16;
             let popup = Rect {
                 y: area.y + (area.height - height) / 2,
                 height,
@@ -2545,9 +2545,11 @@ fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
         width,
         Style::default().fg(Color::Gray),
     );
-    let hint_rows = (hint.len() as u16).min(2);
+    let hint_rows = hint.len().min(2) as u16;
     // Leave the options at least a few rows on a short terminal.
-    let head_rows = (head.len() as u16).min(inner.height.saturating_sub(6).max(1));
+    let head_rows = head
+        .len()
+        .min(inner.height.saturating_sub(6).max(1) as usize) as u16;
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(head_rows),
@@ -2575,7 +2577,7 @@ fn render_question(frame: &mut Frame, m: &mut QuestionModal, area: Rect) {
                 (cols[0], cols[2])
             } else {
                 let (lines, _) = question_option_lines(m, body.width as usize);
-                let top = (lines.len() as u16).min(body.height / 2).max(3);
+                let top = (lines.len().min((body.height / 2) as usize) as u16).max(3);
                 let parts =
                     Layout::vertical([Constraint::Length(top), Constraint::Min(3)]).split(body);
                 (parts[0], parts[1])
@@ -2659,8 +2661,10 @@ fn render_plan(frame: &mut Frame, m: &mut PlanModal, area: Rect) {
     };
     let hint = wrap_prefixed_text("", hint, width, Style::default().fg(Color::Gray));
 
-    let row_count = (rows.len() as u16).min(inner.height.saturating_sub(5).max(1));
-    let hint_rows = (hint.len() as u16).min(2);
+    let row_count = rows
+        .len()
+        .min(inner.height.saturating_sub(5).max(1) as usize) as u16;
+    let hint_rows = hint.len().min(2) as u16;
     let parts = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
@@ -2763,10 +2767,10 @@ fn render_status(
 
     let parts = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
     let body = parts[0];
-    let max = lines.len().saturating_sub(body.height as usize) as u16;
+    let max = lines.len().saturating_sub(body.height as usize);
     m.scroll_max = max;
     m.scroll = m.scroll.min(max);
-    frame.render_widget(Paragraph::new(lines).scroll((m.scroll, 0)), body);
+    frame.render_widget(Paragraph::new(scrolled_lines(lines, m.scroll)), body);
     let refresh = if refresh { "r refresh · " } else { "" };
     let hint = if max > 0 {
         let more = if m.scroll < max { "↓" } else { "↑" };
@@ -3658,6 +3662,43 @@ mod tests {
             unreachable!()
         };
         assert!(m.preview_scroll == m.preview_max && m.preview_max > u16::MAX as usize);
+    }
+
+    #[test]
+    fn status_longer_than_a_u16_counts_scrolls_to_its_end() {
+        let app = test_app(HarnessId::CLAUDE);
+        let mut report = app.status_report(std::time::SystemTime::now());
+        let rows = &mut report.sections.last_mut().unwrap().rows;
+        let row = rows[0].clone();
+        rows.extend((0..70_000).map(|i| {
+            let mut row = row.clone();
+            row.value = format!("row {i}");
+            row
+        }));
+        let mut m = StatusModal {
+            scroll: usize::MAX,
+            scroll_max: 0,
+        };
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| {
+            render_status(
+                f,
+                &mut m,
+                &report,
+                "Claude Code",
+                Color::Cyan,
+                false,
+                f.area(),
+            )
+        })
+        .unwrap();
+        let shown = term.backend().to_string();
+        assert!(m.scroll == m.scroll_max && m.scroll > u16::MAX as usize);
+        assert!(shown.contains("row 69999"), "{shown}");
+        assert!(
+            shown.contains(&format!("{0}/{0}", m.scroll_max + 1)),
+            "{shown}"
+        );
     }
 
     #[test]
