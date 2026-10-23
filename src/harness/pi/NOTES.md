@@ -59,7 +59,20 @@ told from three places (#355):
 - `get_session_stats` (`data.contextUsage.tokens`), which the transport
   asks for once a turn has ended (`TurnCompleted`). pi counts the last
   response's usage plus an estimate of what came after it, so this
-  refines the figure the last response gave.
+  refines the figure the last response gave. A resumed session (also one
+  forked at start) is asked as well as it starts, after its listing:
+  the figure the conversation saved may be from before a compaction
+  made since (by an earlier run, or by pi itself), and asked only once
+  a turn ends it would be told only after the turn's first response had
+  replaced it anyway (`fixtures/resume_compacted.jsonl`, pi 1.1.0: a
+  session saved right after a `/compact`, resumed, answers `null`). A
+  conversation resumed with a run that names another model than it ran
+  gets back the fill counted on the model before: the controller drops
+  the saved fill then (`restore_context`), but pi's answer is of the
+  session, counted from its last response. Accepted: pi's own footer
+  shows the same figure, it holds until the first response on the new
+  model, and before this the same figure came at the end of the first
+  turn anyway.
 - A compaction that succeeds (`compaction_end` with `result`, whether
   `manual`, `threshold` or `overflow`): `result.estimatedTokensAfter`,
   pi's estimate of the context it rebuilt, told until a response gives
@@ -100,8 +113,10 @@ the parser makes of it depends on what was told before (#319):
   `/status` says it is not known yet, until the next response. A resumed
   conversation whose saved figure was that compaction's estimate loses
   it too, since the parser of a new process cannot tell it from a stale
-  one; it comes back with the next response. Taken from 1.1.0's source
-  and the recording; the resumed and fork cases were not run live.
+  one; it comes back with the next response. The resumed case is
+  recorded (`fixtures/resume_compacted.jsonl`, and an e2e test drives
+  it); the fork, no-estimate and no-usage cases are read from 1.1.0's
+  source and pinned by parser tests, not run live.
 
 Asking for `get_session_stats` after every `turn_end` as well was the
 other way to move the figure mid-turn. Not done: it changes what

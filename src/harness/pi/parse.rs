@@ -1070,6 +1070,17 @@ mod tests {
         assert!(!replaced(&rewound.feed(&listing(0))));
     }
 
+    /// A session saved after a `/compact`, resumed (pi 1.1.0): asked at
+    /// once, pi answers `null`, and what was saved before is dropped
+    /// until the response (#355).
+    #[test]
+    fn fixture_resume_compacted() {
+        let dir = fixtures_dir(file!());
+        let mut p = PiParser::new(Some("401bf0eb-8893-4cae-89d6-77f7c3f2efef".into()));
+        p.expect_fork_baseline();
+        assert_fixture(&mut p, &dir, "resume_compacted");
+    }
+
     #[test]
     fn fixture_too_old() {
         // pi 0.73.1 refusing `--session-id`.

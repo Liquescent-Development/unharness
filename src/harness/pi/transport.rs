@@ -247,6 +247,11 @@ impl StreamProtocol for Pi {
             // can tell which one is new.
             self.parser.expect_fork_baseline();
             let _ = io.write(&self.request("get_fork_messages")).await;
+            // How full its context is now: the figure the conversation
+            // saved may be from before a compaction made since, which
+            // pi answers with `null` (#355). Otherwise it is first asked
+            // once a turn ends, after a response has told it anyway.
+            let _ = io.write(&self.request("get_session_stats")).await;
         }
     }
 

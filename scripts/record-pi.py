@@ -7,8 +7,8 @@ Usage: scripts/record-pi.py OUT.jsonl [--provider P --model M] [--no-models] PRO
 
 With `--resume ID` pi is started on that stored session as unharness
 resumes one (`--session-id`, the session saved), and the session's user
-messages are listed (`get_fork_messages`) before the first prompt, as the
-driver does; the prompts may then be left out.
+messages are listed (`get_fork_messages`) and its stats asked for before
+the first prompt, as the driver does; the prompts may then be left out.
 
 With `--extension src/harness/pi/gate.ts --select Allow --select Deny` the
 gate's dialogs are answered in that order (the last answer repeats);
@@ -76,6 +76,9 @@ def main() -> int:
                     help="pass --session-id as unharness does (a pi before 0.76.0 refuses it)")
     ap.add_argument("--resume", metavar="ID",
                     help="resume this stored session as the driver does (see above)")
+    ap.add_argument("--keep-session", action="store_true",
+                    help="save the session (to resume it later; a sessionDir in the workspace's "
+                         ".pi/settings.json keeps it there)")
     args = ap.parse_args()
     if not args.prompts and not args.resume:
         ap.error("a PROMPT is needed (only --resume runs without one)")
@@ -86,7 +89,7 @@ def main() -> int:
     if args.resume:
         cmd = ["pi", "--mode", "rpc", "--session-id", args.resume]
     else:
-        cmd = ["pi", "--mode", "rpc", "--no-session"]
+        cmd = ["pi", "--mode", "rpc"] + ([] if args.keep_session else ["--no-session"])
     if args.session_id:
         cmd += ["--session-id", args.session_id]
     if args.provider:
@@ -152,8 +155,10 @@ def main() -> int:
     prompts = list(args.prompts)
     after_compact = list(args.after_compact)
     if args.resume:
-        # The prompts follow the listing (below).
+        # The prompts follow the listing (below). How full the context is
+        # comes after it, as the driver asks.
         send({"id": next_id(), "type": "get_fork_messages"})
+        send({"id": next_id(), "type": "get_session_stats"})
         first = None
     else:
         first = {"id": next_id(), "type": "prompt", "message": prompts.pop(0)}

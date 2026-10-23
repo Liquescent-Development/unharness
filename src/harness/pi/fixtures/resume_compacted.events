@@ -1,0 +1,15 @@
+SessionStarted id=401bf0eb-8893-4cae-89d6-77f7c3f2efef model=qwen3.8-q8kxl
+Context used=- window=262144
+CapabilitiesChanged image_input=false
+CapabilitiesChanged commands=0
+Context used=- window=262144
+ContextUnknown
+SessionStats user=2 assistant=3 tools=1 tokens=5701 cost=0.0000
+TurnStarted
+TextDelta "three"
+Context used=1881 window=-
+Usage in=809 out=2 cache_read=1070 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1881 window=262144
+SessionStats user=3 assistant=4 tools=1 tokens=7582 cost=0.0000
+TurnAnchor id=0ffdb50f
