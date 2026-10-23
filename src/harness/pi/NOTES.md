@@ -125,6 +125,27 @@ walks the session's entries to answer each; the responses' own usage
 gives the same figure without either. Read in 1.1.0's source (#313):
 the RPC loop answers `get_session_stats` mid-run, so it would work.
 
+## Compaction
+
+A `compaction_end` that succeeded is `AgentEvent::Compacted` (#359):
+`result.summary` (the text pi rebuilt the context from),
+`result.firstKeptEntryId` (where the messages it kept as they were
+start), `result.tokensBefore` and `result.estimatedTokensAfter`, and
+`reason` (`manual`; `threshold` is told as `auto`, `overflow` as
+itself). Recorded for a manual `/compact` on pi 1.1.0
+(`fixtures/compaction.jsonl`); threshold and overflow are read from the
+same event, built by the same code in 1.1.0's source. One that failed
+(`errorMessage`) or was cancelled (`aborted`) stays an error or a
+notice.
+
+`firstKeptEntryId` is a user message's entry where pi cut between turns,
+the entry of a message inside a turn where that turn alone was over
+`keepRecentTokens` (pi's "split user-message span", `docs/compaction.md`),
+and the compaction's own entry where it kept nothing; the event does not
+say which. In the recording it is neither of the two prompts' entries
+(`get_fork_messages`): with `keepRecentTokens` 1, pi cut inside the
+second turn or kept nothing, which the recording does not show.
+
 ## The default model
 
 With no model chosen (#329), `get_state` at session start, before the

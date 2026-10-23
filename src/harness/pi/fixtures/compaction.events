@@ -24,7 +24,7 @@ Context used=1655 window=262144
 SessionStats user=2 assistant=3 tools=1 tokens=4901 cost=0.0000
 TurnAnchor id=76254f20
 Notice "compacting context…"
-Notice "context compacted"
+Compacted trigger=manual tokens=1655->1671 kept=from:6938e548 summary="## Goal\\n- Execute a specific shell command (`echo alpha`..."
 Context used=1671 window=-
 TurnCompleted Done
 Context used=- window=262144

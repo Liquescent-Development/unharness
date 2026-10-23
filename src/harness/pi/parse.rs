@@ -7,8 +7,8 @@ use serde_json::Value;
 use super::gate;
 
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
-    PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
+    AgentEvent, CapsUpdate, CompactTrigger, Compaction, ContextUsage, HarnessCommand, Kept, Parser,
+    PermissionKind, PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
 };
 
 #[derive(Debug, Default)]
@@ -212,7 +212,7 @@ impl PiParser {
                     // Cancelled: no `result`, and no message to say why.
                     out.push(AgentEvent::Notice("compaction cancelled".into()));
                 } else {
-                    out.push(AgentEvent::Notice("context compacted".into()));
+                    out.push(AgentEvent::Compacted(compaction(v)));
                     // pi's estimate of the context it rebuilt (1.1.0),
                     // told until a response gives the real figure, as
                     // Claude's `post_tokens` is (#310); `get_session_stats`
@@ -613,6 +613,36 @@ fn context_tokens(message: &Value) -> Option<u64> {
     (tokens > 0).then_some(tokens)
 }
 
+/// A `compaction_end` that succeeded, as pi tells it (1.1.0): the summary
+/// pi rebuilt the context from, and the entry the messages it kept start
+/// at (`firstKeptEntryId`: a user message, or a message inside a turn when
+/// one turn was over pi's budget; a compaction that kept nothing names
+/// its own entry).
+fn compaction(v: &Value) -> Compaction {
+    let count = |key: &str| {
+        v.pointer(&format!("/result/{key}"))
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
+    };
+    let text = |key: &str| {
+        v.pointer(&format!("/result/{key}"))
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_string)
+    };
+    Compaction {
+        trigger: match s(v, "reason") {
+            "manual" => Some(CompactTrigger::Manual),
+            "threshold" => Some(CompactTrigger::Auto),
+            "overflow" => Some(CompactTrigger::Overflow),
+            _ => None,
+        },
+        tokens_before: count("tokensBefore"),
+        tokens_after: count("estimatedTokensAfter"),
+        summary: text("summary"),
+        kept: text("firstKeptEntryId").map_or(Kept::Unknown, Kept::From),
+    }
+}
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -752,6 +782,54 @@ mod tests {
         );
     }
 
+    /// A compaction that succeeds is told with pi's summary, the entry
+    /// its kept messages start at, its token counts and its reason.
+    #[test]
+    fn a_compaction_tells_what_pi_reported() {
+        let end = |line: &str| PiParser::new(None).feed(line);
+        for (reason, trigger) in [
+            ("manual", CompactTrigger::Manual),
+            ("threshold", CompactTrigger::Auto),
+            ("overflow", CompactTrigger::Overflow),
+        ] {
+            let ev = end(&format!(
+                r#"{{"type":"compaction_end","reason":"{reason}","result":{{"summary":"s","firstKeptEntryId":"e1","tokensBefore":252199,"estimatedTokensAfter":32000}},"aborted":false,"willRetry":false}}"#
+            ));
+            assert_eq!(
+                ev[0],
+                AgentEvent::Compacted(Compaction {
+                    trigger: Some(trigger),
+                    tokens_before: Some(252199),
+                    tokens_after: Some(32000),
+                    summary: Some("s".into()),
+                    kept: Kept::From("e1".into()),
+                })
+            );
+        }
+        // What is missing (a pi before 0.79.8 gives no estimate) is not told.
+        let bare = end(
+            r#"{"type":"compaction_end","reason":"manual","result":{"summary":"","tokensBefore":0},"aborted":false,"willRetry":false}"#,
+        );
+        assert_eq!(
+            bare[0],
+            AgentEvent::Compacted(Compaction {
+                trigger: Some(CompactTrigger::Manual),
+                ..Default::default()
+            })
+        );
+        // One that failed or was cancelled is no compaction.
+        for line in [
+            r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"errorMessage":"boom"}"#,
+            r#"{"type":"compaction_end","reason":"manual","aborted":true,"willRetry":false}"#,
+        ] {
+            assert!(
+                !end(line)
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Compacted(_)))
+            );
+        }
+    }
+
     /// pi answers `tokens: null` after a compaction until a response
     /// follows. The compaction's estimate, told since, stands; a figure
     /// from before it is dropped (#319): a session resumed after a
@@ -774,7 +852,7 @@ mod tests {
         assert!(!events.contains(&AgentEvent::ContextUnknown));
         let compacted = events
             .iter()
-            .position(|e| *e == AgentEvent::Notice("context compacted".into()))
+            .position(|e| matches!(e, AgentEvent::Compacted(_)))
             .unwrap();
         assert_eq!(
             told_fill(&events[compacted..]),
