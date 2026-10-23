@@ -4,6 +4,7 @@ CapabilitiesChanged image_input=true
 CapabilitiesChanged commands=0
 TurnStarted
 ToolCallStarted id=call_HLT9ORCg8h9otMvROXzDagsg|fc_0ddb29669d9834f4016ac69d9dd4c087d090ebd8cb6db165d9 name=bash input={"command":"echo hi","timeout":null}
+Context used=1154 window=-
 PermissionRequest id=460c5e4d-51a6-4dfb-99da-d0271406e385 ToolUse bash [shell "echo hi"]
 ToolCallResult id=call_HLT9ORCg8h9otMvROXzDagsg|fc_0ddb29669d9834f4016ac69d9dd4c087d090ebd8cb6db165d9 error=true "Operation aborted"
 Usage in=1131 out=23 cache_read=0 cache_write=0 cost=0.0050 cumulative=false

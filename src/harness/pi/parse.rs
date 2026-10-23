@@ -102,6 +102,19 @@ impl PiParser {
                     }));
                 }
             }
+            // What the context holds once a response is in, the way pi
+            // counts it (`calculateContextTokens` in 1.1.0's `getContextUsage`),
+            // so that the figure moves during a turn; the
+            // `get_session_stats` after the turn adds what came after the
+            // last response (#355).
+            "message_end" => {
+                if let Some(used) = v.get("message").and_then(context_tokens) {
+                    out.push(AgentEvent::Context(ContextUsage {
+                        used: Some(used),
+                        window: None,
+                    }));
+                }
+            }
             "tool_execution_start" => {
                 let id = s(v, "toolCallId").to_string();
                 if self.announced_tools.insert(id.clone()) {
@@ -162,8 +175,24 @@ impl PiParser {
             "compaction_end" => {
                 if let Some(msg) = v.get("errorMessage").and_then(Value::as_str) {
                     out.push(AgentEvent::Error(msg.to_string()));
+                } else if v.get("aborted").and_then(Value::as_bool) == Some(true) {
+                    // Cancelled: no `result`, and no message to say why.
+                    out.push(AgentEvent::Notice("compaction cancelled".into()));
                 } else {
                     out.push(AgentEvent::Notice("context compacted".into()));
+                    // pi's estimate of the context it rebuilt (1.1.0),
+                    // told until a response gives the real figure, as
+                    // Claude's `post_tokens` is (#310); `get_session_stats`
+                    // has none meanwhile (#355).
+                    if let Some(after) = v
+                        .pointer("/result/estimatedTokensAfter")
+                        .and_then(Value::as_u64)
+                    {
+                        out.push(AgentEvent::Context(ContextUsage {
+                            used: Some(after),
+                            window: None,
+                        }));
+                    }
                 }
                 // A requested compaction is its own unit of work; automatic
                 // ones happen inside a turn that ends by itself.
@@ -182,7 +211,7 @@ impl PiParser {
                 s(v, "extensionPath"),
                 s(v, "error")
             ))),
-            // message_start/end, agent_end, queue_update, session_info_changed, bash_execution_update…
+            // message_start, agent_end, queue_update, session_info_changed, bash_execution_update…
             _ => {}
         }
         out
@@ -504,6 +533,27 @@ pub fn flatten_result(result: Option<&Value>) -> String {
     }
 }
 
+/// The tokens an assistant `message` says the context holds, as pi 1.1.0
+/// reckons them (`calculateContextTokens`): `totalTokens`, or the sum of
+/// the four counts where that is missing or zero. pi leaves out a
+/// response that was aborted or failed and one that counted nothing, and
+/// so does this; other messages carry no usage.
+fn context_tokens(message: &Value) -> Option<u64> {
+    if s(message, "role") != "assistant" || matches!(s(message, "stopReason"), "aborted" | "error")
+    {
+        return None;
+    }
+    let usage = message.get("usage")?;
+    let tokens = match u(usage, "totalTokens") {
+        0 => ["input", "output", "cacheRead", "cacheWrite"]
+            .iter()
+            .map(|k| u(usage, k))
+            .sum(),
+        total => total,
+    };
+    (tokens > 0).then_some(tokens)
+}
+
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -550,6 +600,92 @@ mod tests {
         );
     }
     use crate::core::testing::{assert_fixture, fixtures_dir, replay};
+
+    fn told_fill(events: &[AgentEvent]) -> Vec<Option<u64>> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Context(c) => Some(c.used),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Each response says how full the context is, as pi counts it,
+    /// so the figure moves during a turn (#355); one that was aborted,
+    /// failed or counted nothing says nothing, as in pi.
+    #[test]
+    fn each_response_tells_the_fill() {
+        let end = |stop: &str, usage: &str| {
+            told_fill(&PiParser::new(None).feed(&format!(
+                r#"{{"type":"message_end","message":{{"role":"assistant","content":[],"usage":{usage},"stopReason":"{stop}"}}}}"#
+            )))
+        };
+        let usage = r#"{"input":17,"output":2,"cacheRead":1614,"cacheWrite":0,"totalTokens":1633}"#;
+        assert_eq!(end("toolUse", usage), [Some(1633)]);
+        assert_eq!(end("stop", usage), [Some(1633)]);
+        assert_eq!(end("length", usage), [Some(1633)]);
+        // Without `totalTokens` (or with it 0), the four counts.
+        assert_eq!(
+            end(
+                "stop",
+                r#"{"input":17,"output":2,"cacheRead":1614,"cacheWrite":3,"totalTokens":0}"#
+            ),
+            [Some(1636)]
+        );
+        assert_eq!(
+            end("stop", r#"{"input":17,"output":2,"cacheRead":1614}"#),
+            [Some(1633)]
+        );
+        assert!(end("aborted", usage).is_empty());
+        assert!(end("error", usage).is_empty());
+        assert!(end("stop", r#"{"input":0,"output":0,"totalTokens":0}"#).is_empty());
+        // A user message or a tool result is no response.
+        assert!(
+            told_fill(&PiParser::new(None).feed(
+                r#"{"type":"message_end","message":{"role":"toolResult","content":[],"usage":{"totalTokens":5}}}"#
+            ))
+            .is_empty()
+        );
+
+        let jsonl =
+            std::fs::read_to_string(fixtures_dir(file!()).join("compaction.jsonl")).unwrap();
+        let events = replay(&mut PiParser::new(None), &jsonl);
+        // The tool call's response, then the answer, before the turn ends.
+        let first_end = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::TurnCompleted { .. }))
+            .unwrap();
+        assert_eq!(
+            told_fill(&events[..first_end]),
+            [None, Some(1613), Some(1633)]
+        );
+    }
+
+    /// A compaction that succeeds tells pi's estimate of what is left
+    /// (whichever started it); one that failed or was cancelled leaves
+    /// the figure as it was (#355).
+    #[test]
+    fn a_compaction_tells_its_estimate() {
+        let end = |line: &str| PiParser::new(None).feed(line);
+        for reason in ["manual", "threshold", "overflow"] {
+            let ev = end(&format!(
+                r#"{{"type":"compaction_end","reason":"{reason}","result":{{"summary":"s","firstKeptEntryId":"e1","tokensBefore":252199,"estimatedTokensAfter":32000}},"aborted":false,"willRetry":false}}"#
+            ));
+            assert_eq!(told_fill(&ev), [Some(32000)], "{reason}");
+        }
+        let failed = end(
+            r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"errorMessage":"Auto-compaction failed: boom"}"#,
+        );
+        assert!(told_fill(&failed).is_empty());
+        let cancelled =
+            end(r#"{"type":"compaction_end","reason":"manual","aborted":true,"willRetry":false}"#);
+        assert!(told_fill(&cancelled).is_empty());
+        assert_eq!(
+            cancelled[0],
+            AgentEvent::Notice("compaction cancelled".into())
+        );
+    }
 
     /// pi reports usage at each `turn_end`, once per model call: a turn
     /// that runs a tool reports two (#312).

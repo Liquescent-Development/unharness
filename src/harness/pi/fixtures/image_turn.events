@@ -5,6 +5,7 @@ CapabilitiesChanged image_input=true
 CapabilitiesChanged efforts=off,minimal,low,medium,high,xhigh,max
 TurnStarted
 TextDelta "red"
+Context used=5115 window=-
 Usage in=5110 out=5 cache_read=0 cache_write=0 cost=0.0205 cumulative=false
 TurnCompleted Done
 Context used=5115 window=272000
