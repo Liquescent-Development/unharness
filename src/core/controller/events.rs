@@ -93,6 +93,7 @@ impl Controller {
                         AgentEvent::TextDelta(t) => log.append_assistant(&sender, &t),
                         AgentEvent::ThinkingDelta(t) => log.append_thought(&t),
                         AgentEvent::Notice(n) => log.push_notice(n),
+                        AgentEvent::Compacted(_) => log.push_notice("context compacted"),
                         AgentEvent::Error(e) => log.push_error(e),
                         AgentEvent::HookStarted { id, name } => log.hook_started(&id, &name),
                         AgentEvent::HookEnded {
@@ -244,6 +245,10 @@ impl Controller {
                 .hook_ended(&id, &name, outcome, &output),
             AgentEvent::RemoteControl(r) => self.on_remote_control(r),
             AgentEvent::RemotePrompt { text } => self.remote_prompt(text),
+            AgentEvent::Compacted(_) => self
+                .conversation
+                .transcript
+                .push_notice("context compacted"),
             AgentEvent::Notice(n) => self.conversation.transcript.push_notice(n),
             AgentEvent::Error(e) => self.conversation.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {

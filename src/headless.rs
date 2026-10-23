@@ -26,9 +26,10 @@ use crate::core::rate_limits::LimitWatch;
 use crate::core::sandbox::denials::{self, Blocked};
 use crate::core::sandbox::{Access, SandboxProfile};
 use crate::core::{
-    AgentEvent, CapsUpdate, HookOutcome, PermissionDecision, PermissionKind, PermissionPolicy,
-    PermissionRequest, PolicyResolution, PolicySupport, RateLimitInfo, RemoteControl, Rules,
-    SessionCommand, SessionHandle, StopReason, SubagentSupport, ToolAction, Usage, UsageScope,
+    AgentEvent, CapsUpdate, HookOutcome, Kept, PermissionDecision, PermissionKind,
+    PermissionPolicy, PermissionRequest, PolicyResolution, PolicySupport, RateLimitInfo,
+    RemoteControl, Rules, SessionCommand, SessionHandle, StopReason, SubagentSupport, ToolAction,
+    Usage, UsageScope,
 };
 use crate::harness::Harness;
 
@@ -480,6 +481,14 @@ impl<O: Write, E: Write> Headless<O, E> {
             }
             AgentEvent::Notice(n) if self.format != Format::StreamJson => {
                 let line = format!("{}: {n}", self.name);
+                self.note(&line);
+            }
+            AgentEvent::Compacted(c) if self.format != Format::StreamJson => {
+                let figures = c.figures();
+                let line = match figures.is_empty() {
+                    true => format!("{}: context compacted", self.name),
+                    false => format!("{}: context compacted ({})", self.name, figures.join(", ")),
+                };
                 self.note(&line);
             }
             // Said once near a limit, as in the TUI, not once per event
@@ -1121,6 +1130,22 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 json!({"type": "remote_control", "state": "failed", "detail": reason})
             }
         },
+        AgentEvent::Compacted(c) => json!({
+            "type": "compaction",
+            "trigger": c.trigger,
+            "tokens_before": c.tokens_before,
+            "tokens_after": c.tokens_after,
+            "summary": c.summary,
+            "kept": match &c.kept {
+                Kept::Unknown => "unknown",
+                Kept::Nothing => "nothing",
+                Kept::From(_) => "from",
+            },
+            "kept_from": match &c.kept {
+                Kept::From(id) => Some(id),
+                _ => None,
+            },
+        }),
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
         AgentEvent::SessionReplaced { reason } => {
             json!({"type": "session_replaced", "reason": reason})
@@ -1572,6 +1597,46 @@ mod tests {
                 ..Default::default()
             }))["scope"],
             "session"
+        );
+    }
+
+    /// A compaction is an event of its own in `stream-json`, with what the
+    /// harness reported of it, and a line on stderr otherwise.
+    #[test]
+    fn a_compaction_is_reported_with_its_summary_and_tokens() {
+        let compacted = AgentEvent::Compacted(crate::core::Compaction {
+            trigger: Some(crate::core::CompactTrigger::Auto),
+            tokens_before: Some(180_000),
+            tokens_after: Some(4_200),
+            summary: Some("## Goal".into()),
+            kept: Kept::From("u1".into()),
+        });
+        let (_dir, mut run) = headless(Format::StreamJson, false);
+        feed(
+            &mut run,
+            vec![AgentEvent::TurnStarted, compacted.clone(), done()],
+        );
+        let line = lines(&run)
+            .into_iter()
+            .find(|l| l["type"] == "compaction")
+            .unwrap();
+        assert_eq!(
+            line,
+            json!({"type": "compaction", "trigger": "auto", "tokens_before": 180000,
+                   "tokens_after": 4200, "summary": "## Goal", "kept": "from",
+                   "kept_from": "u1"})
+        );
+        let nothing = event_json(&AgentEvent::Compacted(crate::core::Compaction::default()));
+        assert_eq!(nothing["kept"], "unknown");
+        assert_eq!(nothing["kept_from"], Value::Null);
+        assert_eq!(nothing["summary"], Value::Null);
+
+        let (_dir, mut run) = headless(Format::Text, false);
+        feed(&mut run, vec![AgentEvent::TurnStarted, compacted, done()]);
+        let err = String::from_utf8_lossy(&run.err);
+        assert!(
+            err.contains("claude: context compacted (180k → 4.2k tokens, auto)"),
+            "{err}"
         );
     }
 
