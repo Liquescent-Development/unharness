@@ -44,6 +44,17 @@ it), so `/now` sends the prompt then (e2e
 an interrupt was not reproduced. `exec`'s interrupt kills the turn's
 process; the next turn resumes the thread.
 
+## Compaction
+
+`thread/compact/start` on 0.157.0 (`fixtures/app_server_steer_and_compact.jsonl`)
+runs as a turn whose `contextCompaction` item starts and completes with
+nothing but its id: no summary, no tokens, no trigger, and nothing of
+what was kept. The parser tells its completion as a compaction with none
+of those (`AgentEvent::Compacted`, #359), and `thread/compacted`, the
+other notification app-server has for it (in the 0.162.1 binary, not
+recorded), as the same, once per turn: the one it names, or else its
+thread's turn in progress.
+
 ## Token usage
 
 Codex counts cached input in its input: app-server's `inputTokens`

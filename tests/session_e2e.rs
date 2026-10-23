@@ -1574,11 +1574,7 @@ async fn codex_app_server_steers_the_running_turn_and_compacts() {
         .await
         .unwrap();
     let events = run_turn(&mut handle, |_| None).await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Notice(n) if n == "context compacted"))
-    );
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Compacted(_))));
     assert!(matches!(
         events.last(),
         Some(AgentEvent::TurnCompleted {
