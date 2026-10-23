@@ -71,6 +71,25 @@ fn a_resumed_conversation_tells_its_context_and_last_turn() {
     assert_eq!(fresh.controller.conversation.turn_usage.input, 50_000);
 }
 
+/// A fill the harness no longer knows (pi asked after a compaction it
+/// gave no estimate for, #319) is dropped, also from what is saved; the
+/// window stands, and a figure told after takes its place.
+#[test]
+fn a_fill_no_longer_known_is_dropped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_path_buf();
+    let mut app = test_app_in(cwd.clone(), HarnessId::CLAUDE, None, false);
+    turn(&mut app, "claude-1", 50_000, Some(200_000));
+    app.on_event(AgentEvent::ContextUnknown);
+    assert_eq!(context(&app), ctx(None, Some(200_000)));
+    app.quit();
+
+    let mut again = test_app_in(cwd, HarnessId::CLAUDE, Some(String::new()), false);
+    assert_eq!(context(&again), ctx(None, Some(200_000)));
+    again.on_event(AgentEvent::Context(ctx(Some(30_000), None)));
+    assert_eq!(context(&again), ctx(Some(30_000), Some(200_000)));
+}
+
 /// A run naming another model than the conversation ran: the fill was
 /// measured on the one before, the window is the named model's.
 #[test]

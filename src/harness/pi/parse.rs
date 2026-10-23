@@ -26,6 +26,14 @@ pub struct PiParser {
     fork_messages_seen: Option<usize>,
     /// The session was to be resumed, and has not been listed yet.
     resumed_unlisted: bool,
+    /// A context fill was told here that is of what pi holds now: one
+    /// since the session started in this process (a resume's figure is
+    /// the controller's, saved by an earlier run) and since the last
+    /// compaction, or that compaction's estimate. pi answers
+    /// `get_session_stats` with `tokens: null` after a compaction until
+    /// a response follows; then the figure told stands only if this is
+    /// set (#355).
+    fill_current: bool,
 }
 
 impl PiParser {
@@ -109,6 +117,7 @@ impl PiParser {
             // last response (#355).
             "message_end" => {
                 if let Some(used) = v.get("message").and_then(context_tokens) {
+                    self.fill_current = true;
                     out.push(AgentEvent::Context(ContextUsage {
                         used: Some(used),
                         window: None,
@@ -183,16 +192,20 @@ impl PiParser {
                     // pi's estimate of the context it rebuilt (1.1.0),
                     // told until a response gives the real figure, as
                     // Claude's `post_tokens` is (#310); `get_session_stats`
-                    // has none meanwhile (#355).
-                    if let Some(after) = v
+                    // has none meanwhile (#355). Without one (a pi that
+                    // gives none) what was told before is of the context
+                    // as it was.
+                    let after = v
                         .pointer("/result/estimatedTokensAfter")
-                        .and_then(Value::as_u64)
-                    {
-                        out.push(AgentEvent::Context(ContextUsage {
+                        .and_then(Value::as_u64);
+                    self.fill_current = after.is_some();
+                    out.push(match after {
+                        Some(after) => AgentEvent::Context(ContextUsage {
                             used: Some(after),
                             window: None,
-                        }));
-                    }
+                        }),
+                        None => AgentEvent::ContextUnknown,
+                    });
                 }
                 // A requested compaction is its own unit of work; automatic
                 // ones happen inside a turn that ends by itself.
@@ -443,14 +456,27 @@ impl PiParser {
                     });
                 } else {
                     self.fork_messages_seen = None;
+                    // The fork holds less than the session it left.
+                    self.fill_current = false;
                 }
             }
             "get_session_stats" => {
                 if let Some(c) = v.pointer("/data/contextUsage") {
+                    let used = c.get("tokens").and_then(Value::as_u64);
                     out.push(AgentEvent::Context(ContextUsage {
-                        used: c.get("tokens").and_then(Value::as_u64),
+                        used,
                         window: c.get("contextWindow").and_then(Value::as_u64),
                     }));
+                    // `null`: no response since the last compaction, so
+                    // pi does not know. A fill told since then (the
+                    // compaction's estimate) stands; one from before it
+                    // (a session resumed after a compaction) is no
+                    // longer of what pi holds, and is not kept (#319).
+                    if used.is_some() {
+                        self.fill_current = true;
+                    } else if c.get("tokens").is_some_and(Value::is_null) && !self.fill_current {
+                        out.push(AgentEvent::ContextUnknown);
+                    }
                 }
                 // Its own count, apart from the per-response usage
                 // unharness sums: it covers the whole session file.
@@ -685,6 +711,61 @@ mod tests {
             cancelled[0],
             AgentEvent::Notice("compaction cancelled".into())
         );
+    }
+
+    /// pi answers `tokens: null` after a compaction until a response
+    /// follows. The compaction's estimate, told since, stands; a figure
+    /// from before it is dropped (#319): a session resumed after a
+    /// compaction, a fork, a compaction without an estimate. A count
+    /// that is only missing drops nothing.
+    #[test]
+    fn a_null_fill_drops_only_what_is_from_before_the_compaction() {
+        let stats = |tokens: &str| {
+            format!(
+                r#"{{"id":"req-4","type":"response","command":"get_session_stats","success":true,"data":{{"contextUsage":{{{tokens}"contextWindow":262144,"percent":null}}}}}}"#
+            )
+        };
+        let null = stats(r#""tokens":null,"#);
+        let unknown = |events: Vec<AgentEvent>| events.contains(&AgentEvent::ContextUnknown);
+
+        // The recording: the stats asked once the `/compact` ended.
+        let jsonl =
+            std::fs::read_to_string(fixtures_dir(file!()).join("compaction.jsonl")).unwrap();
+        let events = replay(&mut PiParser::new(None), &jsonl);
+        assert!(!events.contains(&AgentEvent::ContextUnknown));
+        let compacted = events
+            .iter()
+            .position(|e| *e == AgentEvent::Notice("context compacted".into()))
+            .unwrap();
+        assert_eq!(
+            told_fill(&events[compacted..]),
+            [Some(1671), None, Some(1862), Some(1862)]
+        );
+
+        // Resumed: nothing told yet in this process.
+        let mut resumed = PiParser::new(Some("s".into()));
+        resumed.expect_fork_baseline();
+        assert!(unknown(resumed.feed(&null)));
+        // A count that is not there says nothing of what it would be.
+        assert!(!unknown(PiParser::new(None).feed(&stats(""))));
+
+        // A response, then a compaction pi gave no estimate for.
+        let mut p = PiParser::new(None);
+        p.feed(r#"{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"totalTokens":9000},"stopReason":"stop"}}"#);
+        assert!(!unknown(p.feed(&null)));
+        let ended = p.feed(r#"{"type":"compaction_end","reason":"threshold","result":{"summary":"s","tokensBefore":9000},"aborted":false,"willRetry":false}"#);
+        assert!(unknown(ended));
+        assert!(unknown(p.feed(&null)));
+        // A response after it is of the context pi holds now.
+        p.feed(r#"{"type":"message_end","message":{"role":"assistant","content":[],"usage":{"totalTokens":2000},"stopReason":"stop"}}"#);
+        assert!(!unknown(p.feed(&null)));
+
+        // A fork holds less than what was told of the session it left.
+        p.feed(r#"{"type":"response","command":"fork","success":true,"data":{}}"#);
+        assert!(unknown(p.feed(&null)));
+        // pi's own figure is of what it holds.
+        p.feed(&stats(r#""tokens":1500,"#));
+        assert!(!unknown(p.feed(&null)));
     }
 
     /// pi reports usage at each `turn_end`, once per model call: a turn

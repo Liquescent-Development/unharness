@@ -1053,6 +1053,7 @@ pub fn event_json(ev: &AgentEvent) -> Value {
             "output": output,
         }),
         AgentEvent::Context(c) => json!({"type": "context", "used": c.used, "window": c.window}),
+        AgentEvent::ContextUnknown => json!({"type": "context_unknown"}),
         AgentEvent::RateLimit(r) => json!({
             "type": "rate_limit",
             "status": r.status,

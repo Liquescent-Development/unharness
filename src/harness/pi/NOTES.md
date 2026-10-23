@@ -71,12 +71,24 @@ told from three places (#355):
 
 After a compaction pi answers `get_session_stats` with
 `contextUsage.tokens: null` until a response follows (recorded: the
-stats asked once the `/compact` ended). The parser makes that a report
-of the window alone, so the compaction's estimate stands. Where none
-was told (a session resumed after a compaction made before this run, a
-`compaction_end` without an estimate) the figure from before the
-compaction stays (`ContextUsage::merge` keeps a known half), not fixed
-here (#319).
+stats asked once the `/compact` ended; pi's `getContextUsage` gives
+`null` while no projected response follows its latest compaction). What
+the parser makes of it depends on what was told before (#319):
+
+- The compaction's estimate, or a response's figure since, was told in
+  this process: the answer is the window alone, and that figure stands
+  (`ContextUsage::merge` keeps a known half). This is the case after a
+  compaction unharness saw end, which is the one in the recording.
+- Nothing was told of what pi holds now: a session resumed after a
+  compaction an earlier run (or pi itself) made, a fork, a
+  `compaction_end` without `estimatedTokensAfter` (said at once, there).
+  Then the figure is of the context as it was before, and is dropped
+  (`AgentEvent::ContextUnknown`): `ctx` leaves the usage line and
+  `/status` says it is not known yet, until the next response. A resumed
+  conversation whose saved figure was that compaction's estimate loses
+  it too, since the parser of a new process cannot tell it from a stale
+  one; it comes back with the next response. Taken from 1.1.0's source
+  and the recording; the resumed and fork cases were not run live.
 
 Asking for `get_session_stats` after every `turn_end` as well was the
 other way to move the figure mid-turn. Not done: it changes what
