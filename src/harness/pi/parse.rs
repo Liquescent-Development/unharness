@@ -623,6 +623,17 @@ mod tests {
         );
     }
 
+    /// A `/compact` that succeeds (pi 1.1.0), between two turns and
+    /// before a third.
+    #[test]
+    fn fixture_compaction() {
+        assert_fixture(
+            &mut PiParser::new(Some("local-session".into())),
+            &fixtures_dir(file!()),
+            "compaction",
+        );
+    }
+
     #[test]
     fn fixture_image_turn() {
         assert_fixture(

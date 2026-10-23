@@ -51,6 +51,10 @@ def main() -> int:
     ap.add_argument("--image", help="attach this image to the first prompt")
     ap.add_argument("--steer", help="send this text while the first tool call runs")
     ap.add_argument("--compact", action="store_true", help="compact the context after the last prompt")
+    ap.add_argument("--after-compact", action="append", default=[], metavar="PROMPT",
+                    help="send this prompt once the compaction ended (repeatable; with --compact)")
+    ap.add_argument("--approve", action="store_true",
+                    help="trust the workspace's .pi for this run (its settings.json, e.g. a low keepRecentTokens)")
     ap.add_argument("--rewind", action="store_true",
                     help="after the second prompt, rewind to before it, then send the remaining prompts")
     ap.add_argument("--extension", action="append", default=[],
@@ -91,6 +95,8 @@ def main() -> int:
         cmd += ["--model", args.model]
     if args.thinking:
         cmd += ["--thinking", args.thinking]
+    if args.approve:
+        cmd += ["--approve"]
     if args.extension or args.no_extensions:
         cmd += ["--no-extensions"]
         for e in args.extension:
@@ -144,6 +150,7 @@ def main() -> int:
         send({"id": next_id(), "type": "get_available_thinking_levels"})
 
     prompts = list(args.prompts)
+    after_compact = list(args.after_compact)
     if args.resume:
         # The prompts follow the listing (below).
         send({"id": next_id(), "type": "get_fork_messages"})
@@ -166,6 +173,7 @@ def main() -> int:
     steered = False
     aborted = False
     compacting = False
+    compaction_ended = False
     rewound = False
     turns = 0
     last = time.time()
@@ -218,16 +226,27 @@ def main() -> int:
             elif args.compact and not compacting:
                 compacting = True
                 send({"id": next_id(), "type": "compact"})
+            elif compacting and after_compact:
+                send({"id": next_id(), "type": "prompt", "message": after_compact.pop(0)})
             else:
                 break
+        elif t == "compaction_end" and obj.get("reason") == "manual":
+            compaction_ended = True
+            # A requested compaction is a unit of work of its own: the
+            # driver asks what it asks after a turn once it ends.
+            send({"id": next_id(), "type": "get_session_stats"})
+            send({"id": next_id(), "type": "get_fork_messages"})
         elif t == "response" and obj.get("command") == "fork":
             # The fork is only in place once it answers (other commands sent
             # meanwhile still see the old session); then re-read the new
             # session's state and message list.
             send({"id": next_id(), "type": "get_state"})
             send({"id": next_id(), "type": "get_fork_messages"})
-        elif t == "response" and obj.get("command") == "compact":
-            break
+        elif t == "response" and obj.get("command") == "compact" and not obj.get("success", True):
+            sys.stderr.write(f"[error] compact: {obj.get('error')}\n")
+            # Refused before it started: nothing more will come.
+            if not compaction_ended:
+                break
         elif t == "response" and not obj.get("success", True):
             sys.stderr.write(f"[error] {obj.get('command')}: {obj.get('error')}\n")
             if obj.get("command") == "prompt":
