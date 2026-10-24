@@ -258,7 +258,9 @@ impl Parser for CodexAppServerParser {
                 ..
             }) => self.status_answer(&id, &result),
             Some(RpcMessage::Response { .. }) => vec![],
-            None => vec![AgentEvent::Notice(line.to_string())],
+            None => vec![AgentEvent::Notice(crate::core::process::unread_line(
+                "codex", line,
+            ))],
         }
     }
 

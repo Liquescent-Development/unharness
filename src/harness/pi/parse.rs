@@ -6,6 +6,8 @@ use serde_json::Value;
 
 use super::gate;
 
+use crate::core::process::{TRUNCATED, unread_line};
+
 use crate::core::{
     AgentEvent, CapsUpdate, CompactTrigger, Compaction, ContextUsage, HarnessCommand, Kept, Parser,
     PermissionKind, PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
@@ -111,7 +113,7 @@ impl Parser for PiParser {
             // The entries' answer cut at the line limit (`core::process`):
             // more than a turn's, and not to be shown.
             if self.compaction_cut.is_some()
-                && line.ends_with("…[truncated]")
+                && line.ends_with(TRUNCATED)
                 && line
                     .get(..200)
                     .is_some_and(|head| head.contains(r#""command":"get_entries""#))
@@ -119,7 +121,7 @@ impl Parser for PiParser {
                 self.compaction_cut = None;
                 return vec![];
             }
-            return vec![AgentEvent::Notice(line.to_string())];
+            return vec![AgentEvent::Notice(unread_line("pi", line))];
         };
         self.feed_value(&val)
     }
@@ -1435,9 +1437,29 @@ mod tests {
             "u3",
         );
         let mut cut = long[..crate::core::process::MAX_LINE_BYTES].to_string();
-        cut.push_str("…[truncated]");
+        cut.push_str(TRUNCATED);
         assert_eq!(p.feed(&cut), vec![]);
         assert!(p.compaction_cut.is_none() && p.entries_request().is_none());
+    }
+
+    /// A line no parser can read is shown by its start, and one cut at the
+    /// line limit only as too long: it may be the user's session.
+    #[test]
+    fn a_line_too_long_to_read_is_not_shown() {
+        let mut p = PiParser::new(None);
+        let mut cut = "y".repeat(crate::core::process::MAX_LINE_BYTES);
+        cut.push_str(TRUNCATED);
+        assert_eq!(
+            p.feed(&cut),
+            vec![AgentEvent::Notice(
+                "pi sent a line too long to read (more than 1 MiB)".into()
+            )]
+        );
+        let garbage = "z".repeat(500);
+        assert_eq!(
+            p.feed(&garbage),
+            vec![AgentEvent::Notice(format!("{}…", &garbage[..200]))]
+        );
     }
 
     /// A session saved after a `/compact`, resumed (pi 1.1.0): asked at

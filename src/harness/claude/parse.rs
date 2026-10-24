@@ -410,7 +410,9 @@ impl Parser for ClaudeParser {
     fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             // Claude never prints non-JSON on stdout in stream-json mode; surface it.
-            return vec![AgentEvent::Notice(line.to_string())];
+            return vec![AgentEvent::Notice(crate::core::process::unread_line(
+                "claude", line,
+            ))];
         };
         self.feed_value(&val)
     }

@@ -12,6 +12,32 @@ use super::sandbox::Sandbox;
 
 /// Maximum bytes accepted for a single stdout/stderr line before truncation.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
+
+/// What ends a line cut at [`MAX_LINE_BYTES`].
+pub const TRUNCATED: &str = "…[truncated]";
+
+/// A line of a CLI's that no parser could read (not its protocol, or cut
+/// at [`MAX_LINE_BYTES`]), as a notice says it: not a megabyte of what
+/// may be the user's session, but that it was too long, or its start.
+pub fn unread_line(who: &str, line: &str) -> String {
+    const SHOWN: usize = 200;
+    if line.ends_with(TRUNCATED) {
+        return format!("{who} sent a line too long to read (more than 1 MiB)");
+    }
+    match line.char_indices().nth(SHOWN) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_string(),
+    }
+}
+
+/// A line of a CLI's stderr as it is shown, after the CLI's name: whole,
+/// unless it was cut at [`MAX_LINE_BYTES`].
+pub fn stderr_line(line: &str) -> &str {
+    match line.ends_with(TRUNCATED) {
+        true => "a line too long to read (more than 1 MiB)",
+        false => line,
+    }
+}
 /// Capacity of the raw line channel; sends await so backpressure reaches the child.
 pub const LINE_CHANNEL_CAPACITY: usize = 1024;
 /// After the child exits, how long to wait for the pipes to drain. Grandchild
@@ -837,7 +863,7 @@ fn truncate(mut line: String) -> String {
             cut -= 1;
         }
         line.truncate(cut);
-        line.push_str("…[truncated]");
+        line.push_str(TRUNCATED);
     }
     line
 }
@@ -1324,7 +1350,17 @@ mod tests {
     fn truncate_respects_char_boundary() {
         let s = "é".repeat(MAX_LINE_BYTES);
         let t = truncate(s);
-        assert!(t.ends_with("…[truncated]"));
-        assert!(t.len() <= MAX_LINE_BYTES + "…[truncated]".len());
+        assert!(t.ends_with(TRUNCATED));
+        assert!(t.len() <= MAX_LINE_BYTES + TRUNCATED.len());
+        // Never shown as it is.
+        assert_eq!(
+            unread_line("pi", &t),
+            "pi sent a line too long to read (more than 1 MiB)"
+        );
+        assert_eq!(stderr_line(&t), "a line too long to read (more than 1 MiB)");
+        assert_eq!(stderr_line("boom"), "boom");
+        let long = "x".repeat(300);
+        assert_eq!(unread_line("pi", &long), format!("{}…", &long[..200]));
+        assert_eq!(unread_line("pi", "not json"), "not json");
     }
 }
