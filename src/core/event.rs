@@ -155,6 +155,10 @@ pub enum AgentEvent {
     /// place of the conversation before it. That one starts is a `Notice`;
     /// one that failed is an `Error`, one cancelled a `Notice`.
     Compacted(Compaction),
+    /// What the last compaction kept, told after it: pi says where in a
+    /// turn it cut only in its session's entries, asked for once the
+    /// compaction has ended.
+    CompactionKept(Kept),
     /// Informational line (retries, a compaction starting, degraded policy...).
     Notice(String),
     Error(String),
@@ -302,6 +306,23 @@ pub enum Kept {
     /// of a user turn is the one its `TurnAnchor` gave; a message inside
     /// a turn has one of its own.
     From(String),
+    /// The messages from one inside the turn of the latest of these user
+    /// messages that is a turn's own (not a steer): the ids of the user
+    /// messages up to the first kept one, latest first.
+    InTurnOf(Vec<String>),
+}
+
+impl Kept {
+    /// What it is, and the ids it names, as the `.events` summary and
+    /// `--print`'s JSON say it.
+    pub fn label(&self) -> (&'static str, Option<String>) {
+        match self {
+            Kept::Unknown => ("unknown", None),
+            Kept::Nothing => ("nothing", None),
+            Kept::From(id) => ("from", Some(id.clone())),
+            Kept::InTurnOf(ids) => ("in_turn_of", Some(ids.join(","))),
+        }
+    }
 }
 
 impl Compaction {
@@ -318,6 +339,14 @@ impl Compaction {
             .into_iter()
             .chain(self.trigger.map(|t| t.label().to_string()))
             .collect()
+    }
+}
+
+fn kept_summary(kept: &Kept) -> String {
+    match kept.label() {
+        ("unknown", _) => "-".to_string(),
+        (label, Some(ids)) => format!("{label}:{ids}"),
+        (label, None) => label.to_string(),
     }
 }
 
@@ -1145,15 +1174,14 @@ impl AgentEvent {
                     c.trigger.map_or("-", |t| t.label()),
                     n(c.tokens_before),
                     n(c.tokens_after),
-                    match &c.kept {
-                        Kept::Unknown => "-".to_string(),
-                        Kept::Nothing => "nothing".to_string(),
-                        Kept::From(id) => format!("from:{id}"),
-                    },
+                    kept_summary(&c.kept),
                     c.summary
                         .as_deref()
                         .map_or("-".to_string(), |s| format!("{:?}", short(s)))
                 )
+            }
+            AgentEvent::CompactionKept(kept) => {
+                format!("CompactionKept kept={}", kept_summary(kept))
             }
             AgentEvent::Notice(n) => format!("Notice {:?}", short(n)),
             AgentEvent::Error(e) => format!("Error {:?}", short(e)),
@@ -1342,6 +1370,14 @@ mod tests {
         assert_eq!(
             AgentEvent::Compacted(Compaction::default()).summary(),
             "Compacted trigger=- tokens=-->- kept=- summary=-"
+        );
+        assert_eq!(
+            AgentEvent::CompactionKept(Kept::InTurnOf(vec!["u2".into(), "u1".into()])).summary(),
+            "CompactionKept kept=in_turn_of:u2,u1"
+        );
+        assert_eq!(
+            AgentEvent::CompactionKept(Kept::Nothing).summary(),
+            "CompactionKept kept=nothing"
         );
         let counts: Vec<String> = [950, 1_655, 9_999, 10_400, 1_250_000]
             .map(short_tokens)

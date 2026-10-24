@@ -246,6 +246,7 @@ impl Controller {
             AgentEvent::RemoteControl(r) => self.on_remote_control(r),
             AgentEvent::RemotePrompt { text } => self.remote_prompt(text),
             AgentEvent::Compacted(c) => self.compacted(c),
+            AgentEvent::CompactionKept(kept) => self.compaction_kept(kept),
             AgentEvent::Notice(n) => self.conversation.transcript.push_notice(n),
             AgentEvent::Error(e) => self.conversation.transcript.push_error(e),
             AgentEvent::ProcessExited { code } => {

@@ -33,8 +33,12 @@ commands), which a compaction that keeps the turn keeps too, so the
 fold ends there. An anchor saved before #359 does not say, and a
 compaction keeping from its turn folds nothing. A turn whose anchor is
 still owed (pi lists one after its turn) is waited for: the fold is put
-on once it comes (`KeptAt::Pending`). Anything else, a message inside a
-turn or a turn unharness did not send, folds nothing. Nothing kept
+on once it comes (`KeptAt::Pending`). A harness that says which turn a
+message inside a turn is in (pi, from its entries: `Kept::InTurnOf`)
+names the user messages up to it, latest first: the first that is one
+of its anchors holds it (a steer is none). Anything else, a message
+inside a turn otherwise or a turn unharness did not send, folds
+nothing. Nothing kept
 during a turn folds all before the compaction but what was sent into
 that turn (steers, `Block::User::steer`), which the harness may not have
 taken yet; the turns a fold counts are not steers either.

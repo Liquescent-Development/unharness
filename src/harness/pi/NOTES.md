@@ -146,18 +146,42 @@ say which. In the recording it is neither of the two prompts' entries
 (`get_fork_messages`): with `keepRecentTokens` 1, pi cut inside the
 second turn or kept nothing, which the recording does not show.
 
-The TUI folds the turns before what pi kept only where `firstKeptEntryId`
-is a prompt's entry id that `get_fork_messages` gave as its anchor
-(`Controller::kept_at`, [rewind and fork](../../../docs/dev/rewind-and-fork.md#a-compactions-fold)).
-pi lists a turn's entry after the turn, so a compaction during a turn
-that keeps that turn (a threshold one after a tool call) is folded once
-the listing names it. An entry inside a turn, or pi's own (kept
-nothing), is no prompt's: which turn holds it cannot be told from what
-pi says, and nothing is folded; the recording is that case, so it shows
-the divider and the summary only. `get_entries` (1.1.0's RPC) lists
-every entry with its parent and would tell which turn holds one;
-unharness does not ask it, and using it needs a recording of a
-compaction that cuts inside a turn.
+Which turn holds that entry is in pi's session entries: once a
+compaction has ended, the driver asks for them (`get_entries`, pi
+0.80.3 on) from the last user message pi listed (`since`, which pi
+1.1.0 takes: the entries after that one), not for the whole session: a
+long session's are megabytes, and a line over 1 MiB reaches the parser
+cut (`core::process`), which it then drops without a word. The parser
+walks the branch in use from `leafId` back by `parentId` to the cut,
+and tells the user messages from it back to the one asked from, latest
+first (`AgentEvent::CompactionKept`, `Kept::InTurnOf`). A cut not among
+them is asked for again from the message listed before, at most four
+times in all (`ENTRY_TRIES`), then nothing folds. The cut is in the turn
+of the latest of the messages that is a turn's own: the controller takes
+the first that is one of pi's anchors (a steer is a user message but no
+turn's anchor), and folds what came before what that turn's message told
+pi (`Controller::kept_at`,
+[rewind and fork](../../../docs/dev/rewind-and-fork.md#a-compactions-fold)).
+A cut on the compaction's own entry kept nothing: all before it folds,
+but for a prompt pi took after it (it compacts before a new prompt too),
+which is the first user message after the compaction and is kept. pi
+lists a turn's entry after the turn, so a compaction during a turn that
+keeps from inside that turn (a threshold one after a tool call) is
+folded once the listing names it. A pi without `get_entries` (its error
+is not shown), or nothing listed yet, folds nothing.
+
+Recorded on pi 1.1.0 with a local model (`fixtures/compaction_split.jsonl`):
+`keepRecentTokens` 1 and a `sessionDir` in the workspace's
+`.pi/settings.json`, a second turn of two commands, then `/compact`.
+`firstKeptEntryId` is that turn's last response; the entries asked from
+the second prompt on are that turn's five messages and the compaction,
+which put the cut in the second turn, so the first turn folds. pi
+answered the entries after the next prompt was sent. Each entry carries
+its whole message, the system prompt included (as a `message` entry,
+and on the compaction as `systemMessage`): `scripts/record-pi.py` leaves
+the system prompt out of what it records. Threshold and overflow
+compactions ask the same, during their turn; not recorded. An e2e test
+drives the request (`pi_asks_for_its_entries_once_a_compaction_ends`).
 
 ## The default model
 

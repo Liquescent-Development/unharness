@@ -17,7 +17,7 @@ use crate::core::conversations::{
     CheckpointRecord, ContextRecord, Conversation, ConversationStore, TurnAnchorRecord,
     now_rfc3339, truncate_title,
 };
-use crate::core::transcript::{Block, KeptAt, Transcript};
+use crate::core::transcript::{Block, KeptAt, Transcript, current_compaction};
 use crate::core::{Compaction, ContextUsage, HarnessId, Kept, PlanEntry, Usage};
 
 /// Where a run keeps its conversations, checkpoints the workspace's
@@ -320,14 +320,12 @@ impl Controller {
 
     /// The turn `harness`'s oldest prompt still owed one was is `id` to it;
     /// an empty id means the turn never reached the harness. A compaction
-    /// that kept the messages from that turn on, told before it, folds
-    /// what came before what the turn's message told of.
+    /// that waited for that anchor is put on the transcript now.
     pub fn turn_anchor(&mut self, harness: HarnessId, id: String) {
         let c = &mut self.conversation;
         if let Some((block, told_from)) = c.anchor_pending.pop_front()
             && !id.is_empty()
         {
-            c.transcript.kept_named(&id, told_from);
             c.anchors
                 .retain(|a| !(a.block == block && a.harness == harness));
             c.anchors.push(TurnAnchorRecord {
@@ -337,33 +335,88 @@ impl Controller {
                 told_from: Some(told_from),
             });
         }
+        let waiting: Vec<(usize, Vec<String>)> = self
+            .conversation
+            .transcript
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(at, b)| match b {
+                Block::Compaction {
+                    harness: h,
+                    kept: KeptAt::Pending(ids),
+                    ..
+                } if *h == harness => Some((at, ids.clone())),
+                _ => None,
+            })
+            .collect();
+        for (at, ids) in waiting {
+            let kept = self.turn_kept(&ids);
+            self.set_kept(at, kept);
+        }
     }
 
     /// The active harness compacted its context: a block for it, which
     /// folds the blocks before what it kept as it was, where that can be
     /// told for certain ([`Self::kept_at`]).
     pub fn compacted(&mut self, c: Compaction) {
-        let kept = self.kept_at(&c.kept);
+        let kept = self.kept_at(&c.kept, self.conversation.transcript.blocks.len());
         let active = self.active;
         self.conversation
             .transcript
             .push_compaction(active, c, kept);
     }
 
-    /// Where in the transcript what a compaction of the active harness's
-    /// `kept` starts. Certain only where the harness names a user turn by
-    /// the id its anchor gave (`TurnAnchorRecord`), or keeps nothing: from
-    /// that turn on, or from the oldest block its message told of besides
-    /// it (what the harness had not seen, `!` commands), which the model
-    /// has in that message. A turn whose anchor is still owed is waited
-    /// for (pi lists it after the turn). Anything else (a message inside a
-    /// turn, a turn of a session unharness did not see, an anchor saved
-    /// before #359 that did not say what its message told) is not known.
-    /// Nothing kept is all before it, but for what was sent into the turn
-    /// running, which the harness may not have taken yet.
-    pub fn kept_at(&self, kept: &Kept) -> KeptAt {
-        let c = &self.conversation;
-        let blocks = &c.transcript.blocks;
+    /// The harness said after its last compaction what that kept
+    /// (`AgentEvent::CompactionKept`, pi from its entries). Only the
+    /// active session's events come, and only while it runs; an answer
+    /// that would come after another harness's compaction is not taken
+    /// for it.
+    pub fn compaction_kept(&mut self, kept: Kept) {
+        let active = self.active;
+        let blocks = &self.conversation.transcript.blocks;
+        let Some(at) = current_compaction(blocks, active) else {
+            return;
+        };
+        if blocks
+            .iter()
+            .rposition(|b| matches!(b, Block::Compaction { .. }))
+            != Some(at)
+        {
+            return;
+        }
+        let kept = self.kept_at(&kept, at);
+        self.set_kept(at, kept);
+    }
+
+    /// What the compaction at block `at` kept starts at `to`: never after
+    /// it (a prompt pi took after a compaction that kept nothing, whose
+    /// block is after the compaction's).
+    fn set_kept(&mut self, at: usize, to: KeptAt) {
+        if let Some(Block::Compaction { kept, .. }) =
+            self.conversation.transcript.blocks.get_mut(at)
+        {
+            *kept = match to {
+                KeptAt::Block(b) => KeptAt::Block(b.min(at)),
+                to => to,
+            };
+        }
+    }
+
+    /// Where in the transcript what a compaction at block `at` of the
+    /// active harness's `kept` starts. Certain only where the harness
+    /// names a user turn by the id its anchor gave (`TurnAnchorRecord`),
+    /// or keeps nothing: from that turn on, or from the oldest block its
+    /// message told of besides it (what the harness had not seen, `!`
+    /// commands), which the model has in that message. A turn whose
+    /// anchor is still owed is waited for (pi lists it after the turn).
+    /// Anything else (a message inside a turn the harness does not place,
+    /// a turn of a session unharness did not see, an anchor saved before
+    /// #359 that did not say what its message told) is not known. Nothing
+    /// kept is all before it, but for what was sent into the turn running,
+    /// which the harness may not have taken yet.
+    pub fn kept_at(&self, kept: &Kept, at: usize) -> KeptAt {
+        let blocks = &self.conversation.transcript.blocks[..at];
         match kept {
             Kept::Unknown => KeptAt::Unknown,
             Kept::Nothing if self.is_generating => {
@@ -375,20 +428,35 @@ impl Controller {
                     blocks[prompt..]
                         .iter()
                         .position(|b| matches!(b, Block::User { steer: true, .. }))
-                        .map_or(blocks.len(), |s| prompt + s),
+                        .map_or(at, |s| prompt + s),
                 )
             }
-            Kept::Nothing => KeptAt::Block(blocks.len()),
-            Kept::From(id) => match c
+            Kept::Nothing => KeptAt::Block(at),
+            Kept::From(id) => self.turn_kept(std::slice::from_ref(id)),
+            Kept::InTurnOf(ids) => self.turn_kept(ids),
+        }
+    }
+
+    /// The turn of the latest of `ids` (latest first) that is one of the
+    /// active harness's anchors: from the oldest block its message told
+    /// of. One not known while an anchor is owed may be that one's: it is
+    /// waited for.
+    fn turn_kept(&self, ids: &[String]) -> KeptAt {
+        let c = &self.conversation;
+        for (n, id) in ids.iter().enumerate() {
+            match c
                 .anchors
                 .iter()
                 .find(|a| a.harness == self.active && a.id == *id)
             {
-                Some(a) => a.told_from.map_or(KeptAt::Unknown, KeptAt::Block),
-                None if !c.anchor_pending.is_empty() => KeptAt::Pending(id.clone()),
-                None => KeptAt::Unknown,
-            },
+                Some(a) => return a.told_from.map_or(KeptAt::Unknown, KeptAt::Block),
+                None if !c.anchor_pending.is_empty() => {
+                    return KeptAt::Pending(ids[n..].to_vec());
+                }
+                None => {}
+            }
         }
+        KeptAt::Unknown
     }
 
     /// Record the working tree as it is before the turn at `block` runs.

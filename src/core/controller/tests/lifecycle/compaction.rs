@@ -115,7 +115,7 @@ fn a_kept_turn_whose_anchor_is_owed_is_waited_for() {
     turn(&mut app, "one", "e1");
     app.submit_prompt("two".into());
     app.on_event(compacted(Kept::From("e2".into())));
-    assert_eq!(kept(&app), KeptAt::Pending("e2".into()));
+    assert_eq!(kept(&app), KeptAt::Pending(vec!["e2".into()]));
     assert!(shown_folds(&app).is_empty());
     app.on_event(done());
     app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
@@ -419,4 +419,107 @@ fn nothing_kept_does_not_fold_a_steer() {
     assert_eq!(kept(&app), KeptAt::Block(steer));
     // The turns before it: one, and the one the steer went into.
     assert_eq!(shown_folds(&app)[0].turns, 2);
+}
+
+/// pi's cut inside a turn is put on that turn once its entries say which
+/// it is (`fixtures/compaction_split.jsonl`): the turns before it fold.
+#[test]
+fn a_cut_inside_a_turn_folds_the_turns_before_it() {
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "af09e822");
+    turn(&mut app, "two", "3898c93b");
+    app.on_event(compacted(Kept::From("470f84f8".into())));
+    assert_eq!(kept(&app), KeptAt::Unknown);
+    app.on_event(AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+        "3898c93b".into(),
+        "af09e822".into(),
+    ])));
+    assert_eq!(kept(&app), KeptAt::Block(user_block(&app, "two")));
+    assert_eq!(shown_folds(&app)[0].turns, 1);
+
+    // The turn's steer is no turn's anchor: the turn it went into holds it.
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "e1");
+    turn(&mut app, "two", "e2");
+    app.on_event(compacted(Kept::From("a2".into())));
+    app.on_event(AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+        "s2".into(),
+        "e2".into(),
+        "e1".into(),
+    ])));
+    assert_eq!(kept(&app), KeptAt::Block(user_block(&app, "two")));
+
+    // During a turn whose anchor is owed: waited for, then put on it.
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "e1");
+    app.submit_prompt("two".into());
+    app.on_event(compacted(Kept::From("a2".into())));
+    app.on_event(AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+        "e2".into(),
+        "e1".into(),
+    ])));
+    assert_eq!(kept(&app), KeptAt::Pending(vec!["e2".into(), "e1".into()]));
+    app.on_event(done());
+    app.on_event(AgentEvent::TurnAnchor { id: "e2".into() });
+    assert_eq!(kept(&app), KeptAt::Block(user_block(&app, "two")));
+
+    // Kept nothing: all before the compaction, also told after it.
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "e1");
+    app.on_event(compacted(Kept::From("c1".into())));
+    let at = compaction_at(&app);
+    app.on_event(AgentEvent::Notice("later".into()));
+    app.on_event(AgentEvent::CompactionKept(Kept::Nothing));
+    assert_eq!(kept(&app), KeptAt::Block(at));
+}
+
+/// A compaction that kept nothing, before a prompt pi then took: the
+/// prompt is in its context, and is not folded, also when its anchor and
+/// the entries come after it.
+#[test]
+fn a_prompt_taken_after_a_compaction_that_kept_nothing_stays() {
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "e1");
+    turn(&mut app, "two", "e2");
+    app.on_event(compacted(Kept::From("c".into())));
+    app.submit_prompt("three".into());
+    app.on_event(AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+        "e3".into(),
+        "e2".into(),
+        "e1".into(),
+    ])));
+    assert!(matches!(kept(&app), KeptAt::Pending(_)));
+    app.on_event(done());
+    app.on_event(AgentEvent::TurnAnchor { id: "e3".into() });
+    // Its block is after the compaction's: all before the compaction folds.
+    assert!(compaction_at(&app) < user_block(&app, "three"));
+    assert_eq!(kept(&app), KeptAt::Block(compaction_at(&app)));
+    assert_eq!(shown_folds(&app)[0].turns, 2);
+}
+
+/// What a harness says of its compaction's kept messages is not taken for
+/// a later compaction of another harness's.
+#[test]
+fn what_a_compaction_kept_is_not_taken_for_another_harnesss() {
+    let mut app = test_app(HarnessId::PI);
+    turn(&mut app, "one", "e1");
+    turn(&mut app, "two", "e2");
+    app.on_event(compacted(Kept::Unknown));
+    let pi = compaction_at(&app);
+    app.take_actions();
+    app.switch_harness(HarnessId::CLAUDE);
+    turn(&mut app, "three", "u3");
+    app.on_event(compacted(Kept::Unknown));
+    app.take_actions();
+    app.switch_harness(HarnessId::PI);
+    app.on_event(AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+        "e2".into(),
+    ])));
+    assert!(matches!(
+        &app.controller.conversation.transcript.blocks[pi],
+        Block::Compaction {
+            kept: KeptAt::Unknown,
+            ..
+        }
+    ));
 }

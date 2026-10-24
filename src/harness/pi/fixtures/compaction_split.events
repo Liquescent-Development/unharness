@@ -39,6 +39,7 @@ Context used=1694 window=-
 TurnCompleted Done
 Context used=- window=262144
 SessionStats user=2 assistant=5 tools=3 tokens=9302 cost=0.0000
+CompactionKept kept=in_turn_of:69886c8b
 TurnStarted
 TextDelta "three"
 Context used=1887 window=-

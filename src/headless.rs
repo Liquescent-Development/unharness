@@ -831,6 +831,18 @@ impl Interrupts {
     }
 }
 
+/// `kept` and `kept_from` of a compaction's line: the id kept from, or
+/// the user messages up to it, latest first.
+fn kept_json(kept: &Kept) -> (&'static str, Value) {
+    match kept {
+        Kept::InTurnOf(ids) => ("in_turn_of", json!(ids)),
+        kept => {
+            let (label, id) = kept.label();
+            (label, json!(id))
+        }
+    }
+}
+
 fn usage_json(u: &Usage) -> Value {
     json!({
         "input": u.input,
@@ -1130,22 +1142,22 @@ pub fn event_json(ev: &AgentEvent) -> Value {
                 json!({"type": "remote_control", "state": "failed", "detail": reason})
             }
         },
-        AgentEvent::Compacted(c) => json!({
-            "type": "compaction",
-            "trigger": c.trigger,
-            "tokens_before": c.tokens_before,
-            "tokens_after": c.tokens_after,
-            "summary": c.summary,
-            "kept": match &c.kept {
-                Kept::Unknown => "unknown",
-                Kept::Nothing => "nothing",
-                Kept::From(_) => "from",
-            },
-            "kept_from": match &c.kept {
-                Kept::From(id) => Some(id),
-                _ => None,
-            },
-        }),
+        AgentEvent::Compacted(c) => {
+            let (kept, kept_from) = kept_json(&c.kept);
+            json!({
+                "type": "compaction",
+                "trigger": c.trigger,
+                "tokens_before": c.tokens_before,
+                "tokens_after": c.tokens_after,
+                "summary": c.summary,
+                "kept": kept,
+                "kept_from": kept_from,
+            })
+        }
+        AgentEvent::CompactionKept(kept) => {
+            let (kept, kept_from) = kept_json(kept);
+            json!({"type": "compaction_kept", "kept": kept, "kept_from": kept_from})
+        }
         AgentEvent::Notice(n) => json!({"type": "notice", "message": n}),
         AgentEvent::SessionReplaced { reason } => {
             json!({"type": "session_replaced", "reason": reason})
@@ -1625,6 +1637,13 @@ mod tests {
             json!({"type": "compaction", "trigger": "auto", "tokens_before": 180000,
                    "tokens_after": 4200, "summary": "## Goal", "kept": "from",
                    "kept_from": "u1"})
+        );
+        assert_eq!(
+            event_json(&AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+                "u2".into(),
+                "u1".into()
+            ]))),
+            json!({"type": "compaction_kept", "kept": "in_turn_of", "kept_from": ["u2", "u1"]})
         );
         let nothing = event_json(&AgentEvent::Compacted(crate::core::Compaction::default()));
         assert_eq!(nothing["kept"], "unknown");

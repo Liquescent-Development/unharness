@@ -160,10 +160,11 @@ pub enum Block {
 pub enum KeptAt {
     /// At this block: the ones before it are what the model no longer has.
     Block(usize),
-    /// At the turn the harness names by this id, whose anchor has not
-    /// come yet (pi lists a turn's after the turn): nothing is folded
-    /// until it does ([`Transcript::kept_named`]).
-    Pending(String),
+    /// In the turn of the latest of these ids (latest first) that is a
+    /// turn's anchor, one of which has not come yet (pi lists a turn's
+    /// after the turn): nothing is folded until it does
+    /// (`Controller::turn_anchor`).
+    Pending(Vec<String>),
     /// Not known for certain: nothing is folded.
     Unknown,
 }
@@ -766,18 +767,6 @@ impl Transcript {
                 && *h == harness
             {
                 *retired = true;
-            }
-        }
-    }
-
-    /// The turn the harness names `id` has come to be known: what a
-    /// compaction kept from it on starts at block `at`.
-    pub fn kept_named(&mut self, id: &str, at: usize) {
-        for b in &mut self.blocks {
-            if let Block::Compaction { kept, .. } = b
-                && *kept == KeptAt::Pending(id.to_string())
-            {
-                *kept = KeptAt::Block(at);
             }
         }
     }
@@ -1760,7 +1749,7 @@ mod tests {
             ..Default::default()
         };
         t.push_compaction(pi, c.clone(), KeptAt::Block(2));
-        t.push_compaction(pi, c.clone(), KeptAt::Pending("e9".into()));
+        t.push_compaction(pi, c.clone(), KeptAt::Pending(vec!["e9".into()]));
         t.push_compaction(HarnessId::CODEX, c, KeptAt::Unknown);
         let Block::Compaction {
             summary, folded, ..
@@ -1813,17 +1802,8 @@ mod tests {
                 ..
             }
         ));
-        // The turn a pending one waited for is named.
         let mut t = back;
-        t.push_compaction(pi, Compaction::default(), KeptAt::Pending("e9".into()));
-        t.kept_named("e9", 2);
-        assert!(matches!(
-            t.blocks.last(),
-            Some(Block::Compaction {
-                kept: KeptAt::Block(2),
-                ..
-            })
-        ));
+        t.push_compaction(pi, Compaction::default(), KeptAt::Block(2));
         // Retired, it folds nothing, and comes back so.
         t.retire_compactions(pi);
         assert!(folds(&t.blocks, pi).is_empty());

@@ -470,7 +470,8 @@ and below it the summary the model now has in place of the turns before:
 
 | Harness | Shown |
 |---|---|
-| Claude Code, pi | divider, summary, and the fold where the turns kept start at a prompt you sent, or nothing was kept |
+| pi | divider, summary, and the fold before the turn its kept messages start in, also inside a turn |
+| Claude Code | divider, summary, and the fold where the turns kept start at a prompt you sent, or nothing was kept |
 | Codex (`app-server`) | the divider: it reports no summary, tokens or what it kept |
 | others | nothing: they report no compaction |
 
