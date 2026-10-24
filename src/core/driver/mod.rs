@@ -329,9 +329,11 @@ pub trait StreamProtocol: Send + 'static {
         async move { self.on_stdout(answer.line, io).await }
     }
 
-    /// What the TUI is told of a line on the CLI's stderr.
+    /// What the TUI is told of a line on the CLI's stderr: not one cut
+    /// at the line limit, but that it was too long.
     fn on_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
-        self.parser().feed_stderr(line)
+        self.parser()
+            .feed_stderr(crate::core::process::stderr_line(line))
     }
 
     /// What the TUI is told when the CLI has exited, before

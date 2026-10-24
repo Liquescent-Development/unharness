@@ -358,7 +358,7 @@ fn a_native_rewind_drops_the_fill() {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, Block::User { text } if text == "two"))
+        .position(|b| matches!(b, Block::User { text, .. } if text == "two"))
         .unwrap();
     app.rewind_to(two, false);
     assert!(

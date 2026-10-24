@@ -441,6 +441,13 @@ impl StreamProtocol for Pi {
             }
             io.forward(ev).await?;
         }
+        // Which turn holds the entry a compaction kept from is only in the
+        // session's entries, asked from a message pi listed on.
+        if let Some(since) = self.parser.entries_request() {
+            let id = self.next_id();
+            let ask = json!({"id": id, "type": "get_entries", "since": since});
+            let _ = io.write(&ask.to_string()).await;
+        }
         if baseline_answer {
             self.baseline = false;
             match self.held_turn.take() {

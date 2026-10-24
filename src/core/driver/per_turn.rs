@@ -271,7 +271,9 @@ async fn drive(
                 let Some(parser_ref) = parser.as_mut() else { continue };
                 let evs = match &raw {
                     RawLine::Stdout(l) => parser_ref.feed(l),
-                    RawLine::Stderr(l) => parser_ref.feed_stderr(l),
+                    RawLine::Stderr(l) => {
+                        parser_ref.feed_stderr(crate::core::process::stderr_line(l))
+                    }
                     RawLine::Exited(code) => {
                         current = None;
                         let mut evs = Vec::new();

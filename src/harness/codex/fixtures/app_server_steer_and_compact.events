@@ -31,5 +31,5 @@ Usage in=0 out=0 cache_read=0 cache_write=0 cost=- cumulative=false
 Usage in=2536 out=73 cache_read=26496 cache_write=0 cost=- cumulative=true
 Context used=5570 window=258400
 RateLimit status=allowed limit=codex 7d=1%@1791589030
-Notice "context compacted"
+Compacted trigger=- tokens=-->- kept=- summary=-
 TurnCompleted Done

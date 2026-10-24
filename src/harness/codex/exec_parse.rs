@@ -18,7 +18,9 @@ impl CodexExecParser {
 impl Parser for CodexExecParser {
     fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return vec![AgentEvent::Notice(line.to_string())];
+            return vec![AgentEvent::Notice(crate::core::process::unread_line(
+                "codex", line,
+            ))];
         };
         self.feed_value(&v)
     }

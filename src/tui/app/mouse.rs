@@ -49,19 +49,24 @@ impl App {
     }
 
     /// A right click on a block copies all of it, also what is not shown
-    /// ([`super::transcript::block_text`]).
+    /// ([`super::transcript::block_text`]); on a fold's row, the blocks it
+    /// holds.
     fn copy_block_at(&mut self, column: u16, row: u16) {
         let Some(point) = self.transcript_point(column, row, false) else {
             return;
         };
-        let Some(i) = self
-            .transcript_view
-            .blocks
-            .iter()
-            .position(|b| b.top <= point.line && point.line < b.end)
-        else {
+        let Some((i, at)) = self.block_row(point.line) else {
             return;
         };
+        if let Some(fold) = self.fold_row(i, at) {
+            let text: Vec<String> = self.shown_blocks()[..fold.end]
+                .iter()
+                .filter_map(super::transcript::block_text)
+                .collect();
+            self.selection = None;
+            self.copy_request = Some(text.join("\n\n"));
+            return;
+        }
         let block = self.shown_blocks().get(i);
         let code = self
             .transcript_view
@@ -232,18 +237,64 @@ impl App {
         }
     }
 
-    /// Expand or collapse the tool call whose first row is rendered line
-    /// `line` (a click on it).
-    fn toggle_tool_at(&mut self, line: usize) -> bool {
-        let Some(i) = self
+    /// The block rendered line `line` is in, and which of its rows it is.
+    fn block_row(&self, line: usize) -> Option<(usize, usize)> {
+        let i = self
             .transcript_view
             .blocks
             .iter()
-            .position(|b| b.top == line && b.top < b.end)
-        else {
+            .position(|b| b.top <= line && line < b.end)?;
+        Some((i, line - self.transcript_view.blocks[i].top))
+    }
+
+    /// The fold whose row is row `row` of block `i`: the first block draws
+    /// them above its own.
+    fn fold_row(&self, i: usize, row: usize) -> Option<super::transcript::Fold> {
+        if i != 0 {
+            return None;
+        }
+        super::transcript::Folding::of(self.shown_blocks(), self.controller.active)
+            .rows
+            .get(row)
+            .copied()
+    }
+
+    /// Expand or collapse what a click on rendered line `line` is on: a
+    /// fold's row, a tool call's first row, a compaction's divider or the
+    /// row of its summary under it.
+    fn toggle_tool_at(&mut self, line: usize) -> bool {
+        let Some((i, mut row)) = self.block_row(line) else {
             return false;
         };
+        if i == 0 {
+            let folds =
+                super::transcript::Folding::of(self.shown_blocks(), self.controller.active).rows;
+            if let Some(fold) = folds.get(row) {
+                if let Some(super::transcript::Block::Compaction { folded, .. }) =
+                    self.shown_transcript_mut().blocks.get_mut(fold.compaction)
+                {
+                    *folded = !*folded;
+                }
+                return true;
+            }
+            // Its own rows start below the folds' and a blank row.
+            if !folds.is_empty() {
+                let Some(own) = row.checked_sub(folds.len() + 1) else {
+                    return false;
+                };
+                row = own;
+            }
+        }
         match self.shown_transcript_mut().blocks.get_mut(i) {
+            Some(super::transcript::Block::Compaction {
+                summary: Some(_),
+                collapsed,
+                ..
+            }) if row <= 1 => {
+                *collapsed = !*collapsed;
+                true
+            }
+            _ if row > 0 => false,
             // A call that spawned a subagent opens that subagent's transcript.
             Some(super::transcript::Block::Tool {
                 id, agent: Some(_), ..
@@ -288,6 +339,18 @@ impl App {
 
     pub fn take_copy_request(&mut self) -> Option<String> {
         self.copy_request.take()
+    }
+
+    /// Fold or unfold the outermost fold (`Ctrl+F`, `/fold`). Unless the
+    /// view follows the end, it goes to the fold's row, where what
+    /// changed is: what is below it moves.
+    pub fn toggle_fold(&mut self) {
+        let active = self.controller.active;
+        if !self.shown_transcript_mut().toggle_fold(active) {
+            self.flash("Nothing is folded here");
+        } else if !self.auto_scroll {
+            self.scroll = 0;
+        }
     }
 
     /// Show `message` in the status rule for a moment.

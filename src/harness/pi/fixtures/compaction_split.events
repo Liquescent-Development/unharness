@@ -1,0 +1,50 @@
+SessionStarted id=01a16b9c-80f3-7222-97f6-c5a88a884960 model=qwen3.8-q8kxl
+Context used=- window=262144
+CapabilitiesChanged image_input=false
+CapabilitiesChanged commands=0
+TurnStarted
+ToolCallStarted id=gImpoSaQihU9ZAsKUugvhGYxV3KS9v8H name=bash input={"command":"echo alpha"}
+Context used=1613 window=-
+ToolCallDelta id=gImpoSaQihU9ZAsKUugvhGYxV3KS9v8H name=bash "alpha\\n"
+ToolCallResult id=gImpoSaQihU9ZAsKUugvhGYxV3KS9v8H error=false "alpha\\n"
+Usage in=194 out=27 cache_read=1392 cache_write=0 cost=0.0000 cumulative=false
+TextDelta "one"
+Context used=1633 window=-
+Usage in=17 out=2 cache_read=1614 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1633 window=262144
+SessionStats user=1 assistant=2 tools=1 tokens=3246 cost=0.0000
+TurnAnchor id=4f308f77
+TurnStarted
+ToolCallStarted id=dZVlDYjZZBR4VtxwDEL4k0TX71a3Jf5Q name=bash input={"command":"echo beta"}
+Context used=1696 window=-
+ToolCallDelta id=dZVlDYjZZBR4VtxwDEL4k0TX71a3Jf5Q name=bash "beta\\n"
+ToolCallResult id=dZVlDYjZZBR4VtxwDEL4k0TX71a3Jf5Q error=false "beta\\n"
+Usage in=42 out=27 cache_read=1627 cache_write=0 cost=0.0000 cumulative=false
+ToolCallStarted id=uslQwzftFc0t5tG4zc1WX6Q82EBb89b3 name=bash input={"command":"echo gamma"}
+Context used=1741 window=-
+ToolCallDelta id=uslQwzftFc0t5tG4zc1WX6Q82EBb89b3 name=bash "gamma\\n"
+ToolCallResult id=uslQwzftFc0t5tG4zc1WX6Q82EBb89b3 error=false "gamma\\n"
+Usage in=17 out=27 cache_read=1697 cache_write=0 cost=0.0000 cumulative=false
+TextDelta "two"
+Context used=1761 window=-
+Usage in=17 out=2 cache_read=1742 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1761 window=262144
+SessionStats user=2 assistant=5 tools=3 tokens=8444 cost=0.0000
+TurnAnchor id=69886c8b
+Notice "compacting context…"
+Compacted trigger=manual tokens=1761->1694 kept=from:9a7cbc9e summary="## Goal\\nExecute a specific shell command and return a pr..."
+Context used=1694 window=-
+TurnCompleted Done
+Context used=- window=262144
+SessionStats user=2 assistant=5 tools=3 tokens=9302 cost=0.0000
+CompactionKept kept=in_turn_of:69886c8b
+TurnStarted
+TextDelta "three"
+Context used=1887 window=-
+Usage in=815 out=2 cache_read=1070 cache_write=0 cost=0.0000 cumulative=false
+TurnCompleted Done
+Context used=1887 window=262144
+SessionStats user=3 assistant=6 tools=3 tokens=11189 cost=0.0000
+TurnAnchor id=5b079ef5

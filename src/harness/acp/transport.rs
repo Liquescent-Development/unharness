@@ -1474,7 +1474,7 @@ impl StreamProtocol for Driver {
     /// report.
     fn on_stderr(&mut self, line: &str) -> Vec<AgentEvent> {
         if !line.trim().is_empty() {
-            self.last_stderr = Some(line.trim().to_string());
+            self.last_stderr = Some(crate::core::process::stderr_line(line.trim()).to_string());
         }
         self.owed_anchor().into_iter().collect()
     }

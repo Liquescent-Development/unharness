@@ -125,6 +125,64 @@ walks the session's entries to answer each; the responses' own usage
 gives the same figure without either. Read in 1.1.0's source (#313):
 the RPC loop answers `get_session_stats` mid-run, so it would work.
 
+## Compaction
+
+A `compaction_end` that succeeded is `AgentEvent::Compacted` (#359):
+`result.summary` (the text pi rebuilt the context from),
+`result.firstKeptEntryId` (where the messages it kept as they were
+start), `result.tokensBefore` and `result.estimatedTokensAfter`, and
+`reason` (`manual`; `threshold` is told as `auto`, `overflow` as
+itself). Recorded for a manual `/compact` on pi 1.1.0
+(`fixtures/compaction.jsonl`); threshold and overflow are read from the
+same event, built by the same code in 1.1.0's source. One that failed
+(`errorMessage`) or was cancelled (`aborted`) stays an error or a
+notice.
+
+`firstKeptEntryId` is a user message's entry where pi cut between turns,
+the entry of a message inside a turn where that turn alone was over
+`keepRecentTokens` (pi's "split user-message span", `docs/compaction.md`),
+and the compaction's own entry where it kept nothing; the event does not
+say which. In the recording it is neither of the two prompts' entries
+(`get_fork_messages`): with `keepRecentTokens` 1, pi cut inside the
+second turn or kept nothing, which the recording does not show.
+
+Which turn holds that entry is in pi's session entries: once a
+compaction has ended, the driver asks for them (`get_entries`, pi
+0.80.3 on) from the last user message pi listed (`since`, which pi
+1.1.0 takes: the entries after that one), not for the whole session: a
+long session's are megabytes, and a line over 1 MiB reaches the parser
+cut (`core::process`), which it then drops without a word. The parser
+walks the branch in use from `leafId` back by `parentId` to the cut,
+and tells the user messages from it back to the one asked from, latest
+first (`AgentEvent::CompactionKept`, `Kept::InTurnOf`). A cut not among
+them is asked for again from the message listed before, at most four
+times in all (`ENTRY_TRIES`), then nothing folds. The cut is in the turn
+of the latest of the messages that is a turn's own: the controller takes
+the first that is one of pi's anchors (a steer is a user message but no
+turn's anchor), and folds what came before what that turn's message told
+pi (`Controller::kept_at`,
+[rewind and fork](../../../docs/dev/rewind-and-fork.md#a-compactions-fold)).
+A cut on the compaction's own entry kept nothing: all before it folds,
+but for a prompt pi took after it (it compacts before a new prompt too),
+which is the first user message after the compaction and is kept. pi
+lists a turn's entry after the turn, so a compaction during a turn that
+keeps from inside that turn (a threshold one after a tool call) is
+folded once the listing names it. A pi without `get_entries` (its error
+is not shown), or nothing listed yet, folds nothing.
+
+Recorded on pi 1.1.0 with a local model (`fixtures/compaction_split.jsonl`):
+`keepRecentTokens` 1 and a `sessionDir` in the workspace's
+`.pi/settings.json`, a second turn of two commands, then `/compact`.
+`firstKeptEntryId` is that turn's last response; the entries asked from
+the second prompt on are that turn's five messages and the compaction,
+which put the cut in the second turn, so the first turn folds. pi
+answered the entries after the next prompt was sent. Each entry carries
+its whole message, the system prompt included (as a `message` entry,
+and on the compaction as `systemMessage`): `scripts/record-pi.py` leaves
+the system prompt out of what it records. Threshold and overflow
+compactions ask the same, during their turn; not recorded. An e2e test
+drives the request (`pi_asks_for_its_entries_once_a_compaction_ends`).
+
 ## The default model
 
 With no model chosen (#329), `get_state` at session start, before the

@@ -24,7 +24,9 @@ fn a_rewind_dropped_at_quit_forgets_the_session_it_was_for() {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, crate::core::transcript::Block::User { text } if text == "two"))
+        .position(
+            |b| matches!(b, crate::core::transcript::Block::User { text, .. } if text == "two"),
+        )
         .unwrap();
     app.rewind_to(two, false);
     let held = app.take_actions();
@@ -86,7 +88,9 @@ fn rewind_drops_sessions_that_saw_the_removed_turns() {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, crate::core::transcript::Block::User { text } if text == "two"))
+        .position(
+            |b| matches!(b, crate::core::transcript::Block::User { text, .. } if text == "two"),
+        )
         .unwrap();
     assert!(two >= after_one);
     app.rewind_to(two, false);
@@ -307,7 +311,7 @@ fn a_rewound_session_is_the_conversation_s() {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, Block::User { text } if text == "two"))
+        .position(|b| matches!(b, Block::User { text, .. } if text == "two"))
         .unwrap();
     app.rewind_to(two, false);
     assert_eq!(

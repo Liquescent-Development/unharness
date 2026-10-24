@@ -151,7 +151,7 @@ fn an_interrupt_the_turn_ignores_ends_the_process() {
         .transcript
         .blocks
         .iter()
-        .rposition(|b| matches!(b, Block::User { text } if text == "go on"));
+        .rposition(|b| matches!(b, Block::User { text, .. } if text == "go on"));
     assert_eq!(
         app.controller.conversation.anchors.last().map(|a| a.block),
         go_on

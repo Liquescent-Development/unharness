@@ -56,10 +56,10 @@ impl Controller {
             });
             return;
         }
-        let outgoing = self.outgoing(&text);
+        let (outgoing, told_from) = self.outgoing(&text);
         let mut shown = text.clone();
         let attachments = self.take_attachments(&mut shown, front);
-        self.begin_prompted_turn(&text, shown, front);
+        self.begin_prompted_turn(&text, shown, told_from, front);
 
         self.ensure_session();
         self.mark_prompted();
@@ -72,7 +72,8 @@ impl Controller {
     /// What goes to the harness for the prompt `text`: in front of it, what
     /// the live session has not seen of the conversation, and the `!`
     /// commands no agent was told of yet, which count as told from here.
-    pub(super) fn outgoing(&mut self, text: &str) -> String {
+    /// With it, the oldest block it tells of besides the prompt.
+    pub(super) fn outgoing(&mut self, text: &str) -> (String, Option<usize>) {
         // A command the harness runs has to start the message, so it goes
         // alone: what would have gone in front of it waits for the next
         // prompt.
@@ -108,14 +109,16 @@ impl Controller {
             ));
         }
         let bridge = bridge.filter(|_| !alone);
+        let mut told_from = bridge.as_ref().map(|_| from);
         // `!` commands no agent has been told about yet (the bridge has
         // only those one has).
         let mut shells = Vec::new();
-        for b in self
+        for (at, b) in self
             .conversation
             .transcript
             .blocks
             .iter_mut()
+            .enumerate()
             .filter(|_| !alone)
         {
             if let Block::Shell {
@@ -135,6 +138,7 @@ impl Controller {
                     shell::CONTEXT_MAX_CHARS,
                 ));
                 *sent = true;
+                told_from = Some(told_from.map_or(at, |f| f.min(at)));
             }
         }
 
@@ -147,7 +151,7 @@ impl Controller {
             .into_iter()
             .chain(shell::context(&shells))
             .collect();
-        if context.is_empty() {
+        let text = if context.is_empty() {
             text.to_string()
         } else {
             format!(
@@ -155,27 +159,37 @@ impl Controller {
                 context.join("\n\n"),
                 self.short_name()
             )
-        }
+        };
+        (text, told_from)
     }
 
     /// The turn of the prompt `text` begins, shown as `shown`: it is the
     /// conversation's first prompt if none was, the transcript shows it,
     /// its anchor is owed, and the files are checkpointed before it runs.
-    pub(super) fn begin_prompted_turn(&mut self, text: &str, shown: String, front: &mut dyn Front) {
-        self.prompt_shown(text, shown);
+    /// `told_from`: the oldest block its message told of besides it.
+    pub(super) fn begin_prompted_turn(
+        &mut self,
+        text: &str,
+        shown: String,
+        told_from: Option<usize>,
+        front: &mut dyn Front,
+    ) {
+        self.prompt_shown(text, shown, told_from);
         self.start_generation(front);
     }
 
     /// The prompt `text`, shown as `shown`, is in the transcript as the
     /// user's, with its anchor owed and the files checkpointed.
-    fn prompt_shown(&mut self, text: &str, shown: String) {
+    fn prompt_shown(&mut self, text: &str, shown: String, told_from: Option<usize>) {
         if self.conversation.first_prompt.is_none() {
             self.conversation.first_prompt = Some(text.to_string());
         }
         self.conversation.transcript.push_user(shown);
         let block = self.conversation.transcript.blocks.len() - 1;
         if self.caps().rewind.conversation {
-            self.conversation.anchor_pending.push_back(block);
+            self.conversation
+                .anchor_pending
+                .push_back((block, told_from.unwrap_or(block)));
         }
         self.checkpoint_files(block);
     }
@@ -262,7 +276,7 @@ impl Controller {
         }
         let mut shown = text.clone();
         let attachments = self.take_attachments(&mut shown, front);
-        self.conversation.transcript.push_user(shown);
+        self.conversation.transcript.push_steer(shown);
         self.actions
             .push_back(Action::Command(SessionCommand::Steer { text, attachments }));
     }
@@ -342,7 +356,7 @@ impl Controller {
             && !typed_elsewhere
             && !self.start_held)
             .then(|| {
-                let outgoing = self.outgoing(&prompt.text);
+                let (outgoing, told_from) = self.outgoing(&prompt.text);
                 let mut shown = prompt.text.clone();
                 let attachments = self.accepted(&mut shown, prompt.attachments.clone());
                 self.mark_prompted();
@@ -351,7 +365,7 @@ impl Controller {
                         text: outgoing,
                         attachments,
                     }));
-                shown
+                (shown, told_from)
             });
         match &with_cli {
             Some(_) => self.conversation.transcript.push_system("Sending now…"),
@@ -408,7 +422,9 @@ impl Controller {
         front: &mut dyn Front,
     ) {
         match p.with_cli {
-            Some(shown) => self.begin_prompted_turn(&p.prompt.text, shown, front),
+            Some((shown, told_from)) => {
+                self.begin_prompted_turn(&p.prompt.text, shown, told_from, front)
+            }
             None if !interrupted => {
                 self.give_back(p, front);
                 self.say_held();
@@ -472,8 +488,8 @@ impl Controller {
     /// moved what the turn waited on to the background): it is shown
     /// there, as a steer is, and the turn goes on, to be interrupted anew.
     pub(super) fn sent_now_taken_in(&mut self, p: SendingNow) {
-        if let Some(shown) = p.with_cli {
-            self.prompt_shown(&p.prompt.text, shown);
+        if let Some((shown, told_from)) = p.with_cli {
+            self.prompt_shown(&p.prompt.text, shown, told_from);
         }
         self.interrupted = None;
     }

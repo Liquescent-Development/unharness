@@ -99,7 +99,10 @@ fn resuming_in_the_tui_takes_the_conversations_policy() {
     let mut plain = Conversation::new(HarnessId::CLAUDE);
     plain
         .blocks
-        .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
+        .push(crate::core::conversations::BlockRecord::User {
+            text: "x".into(),
+            steer: false,
+        });
     plain
         .last_policies
         .insert(HarnessId::CLAUDE, PermissionPolicy::AcceptEdits);
@@ -160,7 +163,10 @@ fn a_resumed_choice_that_is_not_offered_says_so() {
     let store = ConversationStore::open(Some(tmp.path()), tmp.path());
     let mut conv = Conversation::new(HarnessId::AGY);
     conv.blocks
-        .push(crate::core::conversations::BlockRecord::User { text: "hi".into() });
+        .push(crate::core::conversations::BlockRecord::User {
+            text: "hi".into(),
+            steer: false,
+        });
     conv.policy_choices
         .insert(HarnessId::AGY, PermissionPolicy::Ask);
     conv.last_policies
@@ -250,7 +256,10 @@ fn resuming_in_the_tui_does_not_carry_one_conversations_model_into_another() {
     let mut plain = Conversation::new(HarnessId::CODEX);
     plain
         .blocks
-        .push(crate::core::conversations::BlockRecord::User { text: "x".into() });
+        .push(crate::core::conversations::BlockRecord::User {
+            text: "x".into(),
+            steer: false,
+        });
     store.save(&plain).unwrap();
 
     let mut app = resume_codex_with(tmp.path(), None, None, "openai");

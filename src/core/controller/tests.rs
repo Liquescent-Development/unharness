@@ -555,6 +555,7 @@ fn saved_conversation() -> Conversation {
     c.blocks = vec![
         BlockRecord::User {
             text: "the task".into(),
+            steer: false,
         },
         BlockRecord::Assistant {
             text: "done".into(),
@@ -563,6 +564,7 @@ fn saved_conversation() -> Conversation {
         },
         BlockRecord::User {
             text: "and then".into(),
+            steer: false,
         },
     ];
     c.usage.insert(
@@ -596,6 +598,7 @@ fn saved_conversation() -> Conversation {
         block: 0,
         harness: CLAUDE,
         id: "u1".into(),
+        told_from: Some(0),
     });
     c.checkpoints.push(CheckpointRecord {
         block: 2,

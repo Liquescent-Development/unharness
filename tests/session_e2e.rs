@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 use unharness::core::{
-    AgentEvent, CapsUpdate, HarnessId, McpServer, McpTransport, ModelRef, PermissionDecision,
+    AgentEvent, CapsUpdate, HarnessId, Kept, McpServer, McpTransport, ModelRef, PermissionDecision,
     PermissionKind, PermissionPolicy, PermissionRequest, RemoteControl, SessionCommand,
     SessionConfig, SessionHandle, StopReason, ToolAction,
 };
@@ -768,6 +768,61 @@ fn pi_harness(fake: &Fake) -> unharness::harness::pi::PiHarness {
     unharness::harness::pi::PiHarness {
         gate_dir: Some(fake._tmp.path().join("pi-gate")),
     }
+}
+
+/// Once a compaction has ended, pi is asked for its session's entries
+/// from the last prompt it listed on, which say which turn the entry it
+/// kept from is in (`fixtures/compaction_split.jsonl`, pi 1.1.0: a cut
+/// inside the second turn).
+#[tokio::test]
+async fn pi_asks_for_its_entries_once_a_compaction_ends() {
+    if !python_available() {
+        return;
+    }
+    let fake = Fake::new();
+    let fixture = repo().join("src/harness/pi/fixtures/compaction_split.jsonl");
+    let mut cfg = fake.config(&fixture, PermissionPolicy::Ask, true);
+    cfg.model = None;
+    let mut handle = pi_harness(&fake).start_session(cfg).unwrap();
+    let mut anchors = Vec::new();
+    for prompt in ["one", "two"] {
+        handle.send(SessionCommand::turn(prompt)).await.unwrap();
+        run_turn(&mut handle, |_| None).await;
+        loop {
+            if let AgentEvent::TurnAnchor { id } = next_event(&mut handle).await {
+                anchors.push(id);
+                break;
+            }
+        }
+    }
+    handle
+        .send(SessionCommand::Compact { instructions: None })
+        .await
+        .unwrap();
+    let events = run_turn(&mut handle, |_| None).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AgentEvent::Compacted(c) if c.kept == Kept::From("9a7cbc9e".into()))
+        )
+    );
+    // pi answers with the entries once the next prompt went (recorded so).
+    handle.send(SessionCommand::turn("three")).await.unwrap();
+    let kept = loop {
+        if let AgentEvent::CompactionKept(kept) = next_event(&mut handle).await {
+            break kept;
+        }
+    };
+    assert_eq!(kept, Kept::InTurnOf(vec![anchors[1].clone()]));
+
+    let sent = fake.sent_lines();
+    let pos = |kind: &str| sent.iter().position(|v| v["type"] == kind).unwrap();
+    assert!(pos("compact") < pos("get_entries"));
+    assert_eq!(sent[pos("get_entries")]["since"], anchors[1].as_str());
+    assert_eq!(
+        sent.iter().filter(|v| v["type"] == "get_entries").count(),
+        1
+    );
+    handle.send(SessionCommand::Shutdown).await.unwrap();
 }
 
 /// A resumed pi is asked how full its context is before any turn ends
@@ -1574,11 +1629,7 @@ async fn codex_app_server_steers_the_running_turn_and_compacts() {
         .await
         .unwrap();
     let events = run_turn(&mut handle, |_| None).await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, AgentEvent::Notice(n) if n == "context compacted"))
-    );
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::Compacted(_))));
     assert!(matches!(
         events.last(),
         Some(AgentEvent::TurnCompleted {

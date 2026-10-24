@@ -45,7 +45,7 @@ fn users(app: &TestApp) -> Vec<String> {
         .blocks
         .iter()
         .filter_map(|b| match b {
-            Block::User { text } => Some(text.clone()),
+            Block::User { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect()
@@ -585,6 +585,6 @@ fn users_block(app: &TestApp, text: &str) -> usize {
         .transcript
         .blocks
         .iter()
-        .position(|b| matches!(b, Block::User { text: t } if t == text))
+        .position(|b| matches!(b, Block::User { text: t, .. } if t == text))
         .unwrap()
 }

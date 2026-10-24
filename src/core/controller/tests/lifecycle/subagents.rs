@@ -16,6 +16,7 @@ fn kinds(blocks: &[crate::core::transcript::Block]) -> Vec<String> {
             Block::Error(_) => "error".to_string(),
             Block::Shell { command, .. } => format!("shell:{command}"),
             Block::Hook { name, .. } => format!("hook:{name}"),
+            Block::Compaction { .. } => "compaction".to_string(),
         })
         .collect()
 }

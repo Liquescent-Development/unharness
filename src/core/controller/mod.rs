@@ -230,8 +230,9 @@ pub(crate) struct SendingNow {
     /// goes back there; otherwise it goes back to the prompt box.
     pub(crate) from_queue: bool,
     /// The CLI has it already (`SendNow::Native`) and starts on it by
-    /// itself: what the transcript shows of it, once it does.
-    pub(crate) with_cli: Option<String>,
+    /// itself: what the transcript shows of it, once it does, and the
+    /// oldest block its message told of besides it.
+    pub(crate) with_cli: Option<(String, Option<usize>)>,
 }
 
 /// The active harness's session on the vendor's remote control.
@@ -536,6 +537,15 @@ impl Controller {
         self.registry
             .get(harness)
             .map_or("the harness", |h| h.descriptor().short_name)
+    }
+
+    /// What `harness` is called in the transcript: its short name, or its
+    /// id where this run has no such harness (a conversation run with one
+    /// configured then).
+    pub fn name_of(&self, harness: HarnessId) -> &'static str {
+        self.registry
+            .get(harness)
+            .map_or(harness.as_str(), |h| h.descriptor().short_name)
     }
 
     /// The active harness.

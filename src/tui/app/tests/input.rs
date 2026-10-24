@@ -23,7 +23,7 @@ fn attachments_go_out_with_the_next_prompt() {
     assert_eq!(sent.unwrap()[0].label(), "my shot.png");
     assert!(matches!(
         app.controller.conversation.transcript.blocks.last(),
-        Some(super::super::transcript::Block::User { text }) if text.ends_with("[image: my shot.png]")
+        Some(super::super::transcript::Block::User { text, .. }) if text.ends_with("[image: my shot.png]")
     ));
 
     // A harness that takes no images refuses the attachment.
@@ -47,7 +47,7 @@ fn files_are_attached_where_the_harness_takes_them() {
     assert_eq!(sent.unwrap()[0].mime(), "text/plain");
     assert!(matches!(
         app.controller.conversation.transcript.blocks.last(),
-        Some(super::super::transcript::Block::User { text }) if text.ends_with("[file: notes.txt]")
+        Some(super::super::transcript::Block::User { text, .. }) if text.ends_with("[file: notes.txt]")
     ));
 
     // Codex takes images only.

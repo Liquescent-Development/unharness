@@ -16,6 +16,7 @@ fn kinds(blocks: &[super::super::transcript::Block]) -> Vec<String> {
             Block::Error(_) => "error".to_string(),
             Block::Shell { command, .. } => format!("shell:{command}"),
             Block::Hook { name, .. } => format!("hook:{name}"),
+            Block::Compaction { .. } => "compaction".to_string(),
         })
         .collect()
 }
@@ -111,7 +112,7 @@ fn a_subagents_transcript_is_opened_read_and_left() {
     assert_eq!(app.viewing.as_deref(), Some("deep"));
 
     // Expanding is done to the transcript in view.
-    app.shown_transcript_mut().toggle_last_tool();
+    app.shown_transcript_mut().toggle_last();
     assert!(matches!(
         spawn_block(&app, "deep").log.blocks[0],
         super::super::transcript::Block::Tool {

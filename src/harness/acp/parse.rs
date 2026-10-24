@@ -398,7 +398,10 @@ impl Parser for AcpParser {
             // Agents must keep stdout to protocol messages; show what is not.
             None => match line.trim() {
                 "" => vec![],
-                text => vec![AgentEvent::Notice(text.to_string())],
+                text => vec![AgentEvent::Notice(crate::core::process::unread_line(
+                    "the agent",
+                    text,
+                ))],
             },
         }
     }

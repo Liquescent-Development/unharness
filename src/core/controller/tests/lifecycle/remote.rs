@@ -192,7 +192,7 @@ fn a_remote_prompt_is_shown_and_makes_the_session_the_conversations() {
     );
     assert!(matches!(
         app.controller.conversation.transcript.blocks.last(),
-        Some(Block::User { text }) if text == "Reply with the single word: pong"
+        Some(Block::User { text, .. }) if text == "Reply with the single word: pong"
     ));
 }
 

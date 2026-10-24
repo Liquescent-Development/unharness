@@ -6,9 +6,11 @@ use serde_json::Value;
 
 use super::gate;
 
+use crate::core::process::{TRUNCATED, unread_line};
+
 use crate::core::{
-    AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, Parser, PermissionKind,
-    PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
+    AgentEvent, CapsUpdate, CompactTrigger, Compaction, ContextUsage, HarnessCommand, Kept, Parser,
+    PermissionKind, PermissionRequest, SessionStats, StopReason, Usage, UsageScope,
 };
 
 #[derive(Debug, Default)]
@@ -31,7 +33,32 @@ pub struct PiParser {
     /// response it can count follows; then the figure told stands only
     /// if it is of what pi holds now (#355).
     fill: Fill,
+    /// The user messages pi last listed (`get_fork_messages`), oldest
+    /// first: where the session's entries are asked from.
+    listed: Vec<String>,
+    /// The entry the last compaction's kept messages start at, until the
+    /// session's entries say which turn holds it ([`Entries`]).
+    compaction_cut: Option<Entries>,
 }
+
+/// The session's entries asked for after a compaction, to tell which turn
+/// holds `cut`: from a listed user message on (`get_entries` with `since`),
+/// so that the answer is that message's turn and later, not the whole
+/// session (a long one is megabytes, more than a line is read whole). If
+/// `cut` is not among them, from the message listed before, at most
+/// [`ENTRY_TRIES`] times.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Entries {
+    cut: String,
+    /// Index into `PiParser::listed` of the message they are asked from.
+    since: usize,
+    tries: usize,
+    /// To be asked for (`PiParser::entries_request`).
+    wanted: bool,
+}
+
+/// How many times the entries are asked for after a compaction.
+const ENTRY_TRIES: usize = 4;
 
 /// What the context fill a [`PiParser`] told is of (#319, #355).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +92,15 @@ impl PiParser {
     /// it has no session for, pi 1.1.0 creates an empty one under that id
     /// (with a warning on stderr), so it is reported as a new session in
     /// place of the one to resume (`SessionReplaced`).
+    /// The message to ask the session's entries from (`get_entries` with
+    /// `since`), when a compaction wants them: once per ask.
+    pub fn entries_request(&mut self) -> Option<String> {
+        let asked = self.compaction_cut.as_mut().filter(|a| a.wanted)?;
+        asked.wanted = false;
+        asked.tries += 1;
+        self.listed.get(asked.since).cloned()
+    }
+
     pub fn expect_fork_baseline(&mut self) {
         self.fork_messages_seen = None;
         self.resumed_unlisted = true;
@@ -74,7 +110,18 @@ impl PiParser {
 impl Parser for PiParser {
     fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
-            return vec![AgentEvent::Notice(line.to_string())];
+            // The entries' answer cut at the line limit (`core::process`):
+            // more than a turn's, and not to be shown.
+            if self.compaction_cut.is_some()
+                && line.ends_with(TRUNCATED)
+                && line
+                    .get(..200)
+                    .is_some_and(|head| head.contains(r#""command":"get_entries""#))
+            {
+                self.compaction_cut = None;
+                return vec![];
+            }
+            return vec![AgentEvent::Notice(unread_line("pi", line))];
         };
         self.feed_value(&val)
     }
@@ -212,7 +259,17 @@ impl PiParser {
                     // Cancelled: no `result`, and no message to say why.
                     out.push(AgentEvent::Notice("compaction cancelled".into()));
                 } else {
-                    out.push(AgentEvent::Notice("context compacted".into()));
+                    let c = compaction(v);
+                    self.compaction_cut = match &c.kept {
+                        Kept::From(cut) if !self.listed.is_empty() => Some(Entries {
+                            cut: cut.clone(),
+                            since: self.listed.len() - 1,
+                            tries: 0,
+                            wanted: true,
+                        }),
+                        _ => None,
+                    };
+                    out.push(AgentEvent::Compacted(c));
                     // pi's estimate of the context it rebuilt (1.1.0),
                     // told until a response gives the real figure, as
                     // Claude's `post_tokens` is (#310); `get_session_stats`
@@ -411,6 +468,12 @@ impl PiParser {
             if command == "compact" {
                 out.pop();
             }
+            // A pi before 0.80.3 has no `get_entries`: the cut stays where
+            // the compaction put it.
+            if command == "get_entries" {
+                out.pop();
+                self.compaction_cut = None;
+            }
             if command == "prompt" {
                 self.turn_started = false;
                 out.push(AgentEvent::TurnCompleted {
@@ -454,12 +517,34 @@ impl PiParser {
             }
             // The first user message that is new since the last listing is the
             // turn that just ran (steering messages come after it).
+            "get_entries" => {
+                let Some(mut asked) = self.compaction_cut.take() else {
+                    return;
+                };
+                let since = self.listed.get(asked.since).map(String::as_str);
+                match v.get("data").and_then(|d| kept_in(d, &asked.cut, since)) {
+                    Some(kept) => out.push(AgentEvent::CompactionKept(kept)),
+                    // From further back, while there is a message to ask
+                    // from and tries left.
+                    None if asked.since > 0 && asked.tries < ENTRY_TRIES => {
+                        asked.since -= 1;
+                        asked.wanted = true;
+                        self.compaction_cut = Some(asked);
+                    }
+                    None => {}
+                }
+            }
             "get_fork_messages" => {
                 let messages = v
                     .pointer("/data/messages")
                     .and_then(Value::as_array)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
+                self.listed = messages
+                    .iter()
+                    .filter_map(|m| m.get("entryId").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect();
                 if let Some(seen) = self.fork_messages_seen
                     && let Some(id) = messages
                         .get(seen)
@@ -613,6 +698,86 @@ fn context_tokens(message: &Value) -> Option<u64> {
     (tokens > 0).then_some(tokens)
 }
 
+/// A `compaction_end` that succeeded, as pi tells it (1.1.0): the summary
+/// pi rebuilt the context from, and the entry the messages it kept start
+/// at (`firstKeptEntryId`: a user message, or a message inside a turn when
+/// one turn was over pi's budget; a compaction that kept nothing names
+/// its own entry).
+fn compaction(v: &Value) -> Compaction {
+    let count = |key: &str| {
+        v.pointer(&format!("/result/{key}"))
+            .and_then(Value::as_u64)
+            .filter(|&n| n > 0)
+    };
+    let text = |key: &str| {
+        v.pointer(&format!("/result/{key}"))
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+            .map(str::to_string)
+    };
+    Compaction {
+        trigger: match s(v, "reason") {
+            "manual" => Some(CompactTrigger::Manual),
+            "threshold" => Some(CompactTrigger::Auto),
+            "overflow" => Some(CompactTrigger::Overflow),
+            _ => None,
+        },
+        tokens_before: count("tokensBefore"),
+        tokens_after: count("estimatedTokensAfter"),
+        summary: text("summary"),
+        kept: text("firstKeptEntryId").map_or(Kept::Unknown, Kept::From),
+    }
+}
+
+/// What a compaction that kept the messages from entry `cut` on kept,
+/// from the session's entries (`get_entries`, pi 0.80.3 on): the user
+/// messages up to it on the branch in use (from `leafId` back by
+/// `parentId`), latest first, of which the latest that is a turn's own
+/// holds it. Asked from the user message `since` on, the entries end at
+/// it, which is then the last. A compaction that kept nothing names its
+/// own entry: what it kept is what pi took after it (a prompt it compacted
+/// before), from the first user message after it, else nothing. `None`
+/// when `cut` is not among the entries on the branch.
+fn kept_in(data: &Value, cut: &str, since: Option<&str>) -> Option<Kept> {
+    let entries = data.get("entries")?.as_array()?;
+    let by_id: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| Some((e.get("id")?.as_str()?, e)))
+        .collect();
+    let mut at = data.get("leafId").and_then(Value::as_str);
+    let mut branch = Vec::new();
+    while let Some(entry) = at.and_then(|id| by_id.get(id))
+        && branch.len() < entries.len()
+    {
+        branch.push(*entry);
+        at = entry.get("parentId").and_then(Value::as_str);
+    }
+    let from = branch.iter().position(|e| s(e, "id") == cut)?;
+    let user = |e: &Value| {
+        s(e, "type") == "message" && e.pointer("/message/role") == Some(&Value::from("user"))
+    };
+    let mut users: Vec<String> = branch[from..]
+        .iter()
+        .filter(|e| user(e))
+        .map(|e| s(e, "id").to_string())
+        .collect();
+    // The entries stop at the one they were asked from.
+    if let Some(since) = since.filter(|&since| at == Some(since)) {
+        users.push(since.to_string());
+    }
+    if s(branch[from], "type") == "compaction" {
+        return Some(match branch[..from].iter().rev().find(|e| user(e)) {
+            Some(first) => Kept::InTurnOf(
+                std::iter::once(s(first, "id").to_string())
+                    .chain(users)
+                    .collect(),
+            ),
+            None => Kept::Nothing,
+        });
+    }
+    Some(Kept::InTurnOf(users))
+}
+
 fn s<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
 }
@@ -752,6 +917,54 @@ mod tests {
         );
     }
 
+    /// A compaction that succeeds is told with pi's summary, the entry
+    /// its kept messages start at, its token counts and its reason.
+    #[test]
+    fn a_compaction_tells_what_pi_reported() {
+        let end = |line: &str| PiParser::new(None).feed(line);
+        for (reason, trigger) in [
+            ("manual", CompactTrigger::Manual),
+            ("threshold", CompactTrigger::Auto),
+            ("overflow", CompactTrigger::Overflow),
+        ] {
+            let ev = end(&format!(
+                r#"{{"type":"compaction_end","reason":"{reason}","result":{{"summary":"s","firstKeptEntryId":"e1","tokensBefore":252199,"estimatedTokensAfter":32000}},"aborted":false,"willRetry":false}}"#
+            ));
+            assert_eq!(
+                ev[0],
+                AgentEvent::Compacted(Compaction {
+                    trigger: Some(trigger),
+                    tokens_before: Some(252199),
+                    tokens_after: Some(32000),
+                    summary: Some("s".into()),
+                    kept: Kept::From("e1".into()),
+                })
+            );
+        }
+        // What is missing (a pi before 0.79.8 gives no estimate) is not told.
+        let bare = end(
+            r#"{"type":"compaction_end","reason":"manual","result":{"summary":"","tokensBefore":0},"aborted":false,"willRetry":false}"#,
+        );
+        assert_eq!(
+            bare[0],
+            AgentEvent::Compacted(Compaction {
+                trigger: Some(CompactTrigger::Manual),
+                ..Default::default()
+            })
+        );
+        // One that failed or was cancelled is no compaction.
+        for line in [
+            r#"{"type":"compaction_end","reason":"threshold","aborted":false,"willRetry":false,"errorMessage":"boom"}"#,
+            r#"{"type":"compaction_end","reason":"manual","aborted":true,"willRetry":false}"#,
+        ] {
+            assert!(
+                !end(line)
+                    .iter()
+                    .any(|e| matches!(e, AgentEvent::Compacted(_)))
+            );
+        }
+    }
+
     /// pi answers `tokens: null` after a compaction until a response
     /// follows. The compaction's estimate, told since, stands; a figure
     /// from before it is dropped (#319): a session resumed after a
@@ -774,7 +987,7 @@ mod tests {
         assert!(!events.contains(&AgentEvent::ContextUnknown));
         let compacted = events
             .iter()
-            .position(|e| *e == AgentEvent::Notice("context compacted".into()))
+            .position(|e| matches!(e, AgentEvent::Compacted(_)))
             .unwrap();
         assert_eq!(
             told_fill(&events[compacted..]),
@@ -1068,6 +1281,185 @@ mod tests {
         rewound.feed(&listing(1));
         rewound.feed(r#"{"type":"response","command":"fork","success":true,"data":{}}"#);
         assert!(!replaced(&rewound.feed(&listing(0))));
+    }
+
+    /// A `/compact` that cut inside a turn (pi 1.1.0, `keepRecentTokens`
+    /// 1 and a second turn of two commands): `firstKeptEntryId` is that
+    /// turn's last response, and the session's entries, asked for from the
+    /// second prompt on once the compaction ended, put it in that turn.
+    #[test]
+    fn fixture_compaction_split() {
+        let mut p = PiParser::new(None);
+        let dir = fixtures_dir(file!());
+        assert_fixture(&mut p, &dir, "compaction_split");
+        let jsonl = std::fs::read_to_string(dir.join("compaction_split.jsonl")).unwrap();
+        let events = replay(&mut PiParser::new(None), &jsonl);
+        let anchors: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TurnAnchor { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let kept = events.iter().find_map(|e| match e {
+            AgentEvent::CompactionKept(Kept::InTurnOf(ids)) => Some(ids.clone()),
+            _ => None,
+        });
+        // The second turn's prompt, which they were asked from.
+        assert_eq!(kept.unwrap(), [anchors[1]]);
+    }
+
+    /// The entries say which turn a cut is in: the user messages from it
+    /// back, ending at the one they were asked from. A cut on the
+    /// compaction's own entry kept nothing, but for what pi took after it.
+    /// A cut not on the branch in use is not known.
+    #[test]
+    fn the_entries_tell_which_turn_a_cut_is_in() {
+        let entries =
+            |list: Vec<Value>, leaf: &str| serde_json::json!({"entries": list, "leafId": leaf});
+        let all = || {
+            vec![
+                entry("u1", None, "message", Some("user")),
+                entry("a1", Some("u1"), "message", Some("assistant")),
+                entry("u2", Some("a1"), "message", Some("user")),
+                entry("s2", Some("u2"), "message", Some("user")),
+                entry("a2", Some("s2"), "message", Some("assistant")),
+                entry("x", Some("u1"), "message", Some("user")),
+                entry("c", Some("a2"), "compaction", None),
+            ]
+        };
+        let whole = entries(all(), "c");
+        let ids = |ids: &[&str]| Some(Kept::InTurnOf(ids.iter().map(|i| i.to_string()).collect()));
+        assert_eq!(kept_in(&whole, "a2", None), ids(&["s2", "u2", "u1"]));
+        assert_eq!(kept_in(&whole, "u2", None), ids(&["u2", "u1"]));
+        assert_eq!(kept_in(&whole, "c", None), Some(Kept::Nothing));
+        // On another branch, or not there at all.
+        assert_eq!(kept_in(&whole, "x", None), None);
+        assert_eq!(kept_in(&whole, "zz", None), None);
+        // Asked from `u2` on: what comes after it, then it.
+        let after_u2 = entries(all()[3..].to_vec(), "c");
+        assert_eq!(kept_in(&after_u2, "a2", Some("u2")), ids(&["s2", "u2"]));
+        assert_eq!(kept_in(&after_u2, "a1", Some("u2")), None);
+        // Kept nothing, then a prompt pi compacted before: it is kept.
+        let mut later = all();
+        later.push(entry("u3", Some("c"), "message", Some("user")));
+        later.push(entry("a3", Some("u3"), "message", Some("assistant")));
+        assert_eq!(
+            kept_in(&entries(later, "a3"), "c", None),
+            ids(&["u3", "s2", "u2", "u1"])
+        );
+    }
+
+    fn entry(id: &str, parent: Option<&str>, kind: &str, role: Option<&str>) -> Value {
+        let mut e = serde_json::json!({"type": kind, "id": id, "parentId": parent});
+        if let Some(role) = role {
+            e["message"] = serde_json::json!({"role": role, "content": []});
+        }
+        e
+    }
+
+    /// The entries are asked from the last message pi listed, then from the
+    /// one before while the cut is not among them, a few times at most.
+    /// Neither an error (a pi without `get_entries`) nor an answer too long
+    /// to be read whole is shown.
+    #[test]
+    fn the_entries_are_asked_from_the_last_message_listed_back() {
+        let listing = r#"{"id":"r1","type":"response","command":"get_fork_messages","success":true,"data":{"messages":[{"entryId":"u1","text":"one"},{"entryId":"u2","text":"two"},{"entryId":"u3","text":"three"}]}}"#;
+        let ended = r#"{"type":"compaction_end","reason":"manual","result":{"summary":"s","firstKeptEntryId":"a1","tokensBefore":9},"aborted":false,"willRetry":false}"#;
+        let answer = |list: Vec<Value>, leaf: &str| {
+            serde_json::json!({"id": "r", "type": "response", "command": "get_entries",
+                "success": true, "data": {"entries": list, "leafId": leaf}})
+            .to_string()
+        };
+        let compacting = || {
+            let mut p = PiParser::new(None);
+            p.feed(listing);
+            p.feed(ended);
+            p
+        };
+        let mut p = compacting();
+        assert_eq!(p.entries_request().as_deref(), Some("u3"));
+        assert_eq!(p.entries_request(), None);
+        // Not from u3 on: from u2, then u1, where it is.
+        let after_u3 = vec![entry("c", Some("u3"), "compaction", None)];
+        assert_eq!(p.feed(&answer(after_u3, "c")), vec![]);
+        assert_eq!(p.entries_request().as_deref(), Some("u2"));
+        p.feed(&answer(
+            vec![entry("c", Some("x"), "compaction", None)],
+            "c",
+        ));
+        assert_eq!(p.entries_request().as_deref(), Some("u1"));
+        let after_u1 = vec![
+            entry("a1", Some("u1"), "message", Some("assistant")),
+            entry("c", Some("a1"), "compaction", None),
+        ];
+        assert_eq!(
+            p.feed(&answer(after_u1, "c")),
+            vec![AgentEvent::CompactionKept(Kept::InTurnOf(vec![
+                "u1".into()
+            ]))]
+        );
+        assert_eq!(p.entries_request(), None);
+
+        // Not further back than the first listed, nor more often than
+        // ENTRY_TRIES.
+        let mut p = compacting();
+        let miss = || answer(vec![entry("c", Some("x"), "compaction", None)], "c");
+        let mut asked = Vec::new();
+        while let Some(since) = p.entries_request() {
+            asked.push(since);
+            p.feed(&miss());
+        }
+        assert_eq!(asked, ["u3", "u2", "u1"]);
+        assert!(p.compaction_cut.is_none());
+
+        // Nothing listed yet: not asked.
+        let mut p = PiParser::new(None);
+        p.feed(ended);
+        assert_eq!(p.entries_request(), None);
+
+        // A pi without `get_entries`.
+        let mut p = compacting();
+        p.entries_request();
+        let old = p.feed(r#"{"id":"r","type":"response","command":"get_entries","success":false,"error":"Unknown command: get_entries"}"#);
+        assert_eq!(old, vec![]);
+        assert_eq!(p.entries_request(), None);
+
+        // An answer over the line limit reaches the parser cut
+        // (`core::process`): dropped, and not asked again.
+        let mut p = compacting();
+        p.entries_request();
+        let big = "x".repeat(2 * crate::core::process::MAX_LINE_BYTES);
+        let long = answer(
+            vec![
+                serde_json::json!({"type": "message", "id": "u3", "message": {"role": "user", "content": big}}),
+            ],
+            "u3",
+        );
+        let mut cut = long[..crate::core::process::MAX_LINE_BYTES].to_string();
+        cut.push_str(TRUNCATED);
+        assert_eq!(p.feed(&cut), vec![]);
+        assert!(p.compaction_cut.is_none() && p.entries_request().is_none());
+    }
+
+    /// A line no parser can read is shown by its start, and one cut at the
+    /// line limit only as too long: it may be the user's session.
+    #[test]
+    fn a_line_too_long_to_read_is_not_shown() {
+        let mut p = PiParser::new(None);
+        let mut cut = "y".repeat(crate::core::process::MAX_LINE_BYTES);
+        cut.push_str(TRUNCATED);
+        assert_eq!(
+            p.feed(&cut),
+            vec![AgentEvent::Notice(
+                "pi sent a line too long to read (more than 1 MiB)".into()
+            )]
+        );
+        let garbage = "z".repeat(500);
+        assert_eq!(
+            p.feed(&garbage),
+            vec![AgentEvent::Notice(format!("{}…", &garbage[..200]))]
+        );
     }
 
     /// A session saved after a `/compact`, resumed (pi 1.1.0): asked at

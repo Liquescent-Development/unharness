@@ -10,9 +10,9 @@ use serde_json::{Value, json};
 use crate::core::jsonrpc::RpcMessage;
 use crate::core::rules::unwrap_shell;
 use crate::core::{
-    AccountInfo, AgentEvent, ContextUsage, Credits, HookOutcome, Parser, PermissionKind,
-    PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption, RateLimitInfo,
-    RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
+    AccountInfo, AgentEvent, Compaction, ContextUsage, Credits, HookOutcome, Parser,
+    PermissionKind, PermissionRequest, PlanEntry, PlanStatus, Question, QuestionOption,
+    RateLimitInfo, RateLimitWindow, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
 };
 
 /// Title prefix marking an MCP elicitation prompt (answered with `{action, content}`).
@@ -52,6 +52,12 @@ pub struct CodexAppServerParser {
     file_changes: HashMap<String, Value>,
     /// MCP servers already reported as failed; Codex retries and says so again.
     failed_mcp_servers: HashSet<String>,
+    /// Turns whose compaction was told, by id: Codex has two ways to say
+    /// it (`thread/compacted`, a `contextCompaction` item).
+    compacted_turns: HashSet<String>,
+    /// Each thread's turn in progress (`turn/started`), for a compaction
+    /// told without its turn's id.
+    current_turns: HashMap<String, String>,
 }
 
 /// What a request to approve a command says, as recorded. One that says
@@ -201,24 +207,38 @@ impl CodexAppServerParser {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// A notification, the main thread's or a sub-agent's.
+    fn on_rpc_notification(&mut self, method: String, params: Value) -> Vec<AgentEvent> {
+        match self.child_parent(&params) {
+            // A sub-agent's turns are its life, not the main agent's.
+            Some(parent) if method == "turn/started" => self.on_child_turn_started(parent, &params),
+            Some(parent) if method == "turn/completed" => {
+                self.on_child_turn_completed(parent, &params)
+            }
+            // Its token accounting is its own.
+            Some(_) if method == "thread/tokenUsage/updated" => vec![],
+            Some(parent) => wrap_sub(&parent, self.on_notification(&method, &params)),
+            None => self.on_notification(&method, &params),
+        }
+    }
 }
 
 impl Parser for CodexAppServerParser {
     fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         match RpcMessage::parse(line) {
-            Some(RpcMessage::Notification { method, params }) => match self.child_parent(&params) {
-                // A sub-agent's turns are its life, not the main agent's.
-                Some(parent) if method == "turn/started" => {
-                    self.on_child_turn_started(parent, &params)
+            Some(RpcMessage::Notification { method, params }) => {
+                if method == "turn/started"
+                    && let (Some(thread), Some(turn)) = (
+                        params.get("threadId").and_then(Value::as_str),
+                        params.pointer("/turn/id").and_then(Value::as_str),
+                    )
+                {
+                    self.current_turns
+                        .insert(thread.to_string(), turn.to_string());
                 }
-                Some(parent) if method == "turn/completed" => {
-                    self.on_child_turn_completed(parent, &params)
-                }
-                // Its token accounting is its own.
-                Some(_) if method == "thread/tokenUsage/updated" => vec![],
-                Some(parent) => wrap_sub(&parent, self.on_notification(&method, &params)),
-                None => self.on_notification(&method, &params),
-            },
+                self.on_rpc_notification(method, params)
+            }
             Some(RpcMessage::Request { id, method, params }) => {
                 let events = self.on_server_request(&id, &method, &params);
                 match self.child_parent(&params) {
@@ -238,7 +258,9 @@ impl Parser for CodexAppServerParser {
                 ..
             }) => self.status_answer(&id, &result),
             Some(RpcMessage::Response { .. }) => vec![],
-            None => vec![AgentEvent::Notice(line.to_string())],
+            None => vec![AgentEvent::Notice(crate::core::process::unread_line(
+                "codex", line,
+            ))],
         }
     }
 
@@ -366,6 +388,9 @@ impl CodexAppServerParser {
             }
             "item/completed" => {
                 if let Some(item) = p.get("item") {
+                    if s(item.get("type").unwrap_or(&Value::Null)) == "contextCompaction" {
+                        self.compacted(p, &mut out);
+                    }
                     if mcp_call(item).is_some() {
                         let thread = s(p.get("threadId").unwrap_or(&Value::Null));
                         self.mcp_calls.remove(thread);
@@ -521,7 +546,7 @@ impl CodexAppServerParser {
                     out.push(AgentEvent::Error(msg.to_string()));
                 }
             }
-            "thread/compacted" => out.push(AgentEvent::Notice("context compacted".into())),
+            "thread/compacted" => self.compacted(p, &mut out),
             "warning" | "deprecationNotice" | "configWarning" => {
                 // `deprecationNotice` carries `summary` instead of `message`.
                 let msg = p
@@ -562,6 +587,24 @@ impl CodexAppServerParser {
             _ => {}
         }
         out
+    }
+
+    /// The context was compacted, once per turn. Codex says nothing of
+    /// what it kept, its summary or the tokens (0.157.0): the fill comes
+    /// with the next `thread/tokenUsage/updated`.
+    fn compacted(&mut self, p: &Value, out: &mut Vec<AgentEvent>) {
+        let turn = p
+            .get("turnId")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                let thread = p.get("threadId").and_then(Value::as_str)?;
+                self.current_turns.get(thread).map(String::as_str)
+            })
+            .unwrap_or_default()
+            .to_string();
+        if turn.is_empty() || self.compacted_turns.insert(turn) {
+            out.push(AgentEvent::Compacted(Compaction::default()));
+        }
     }
 
     fn on_item_started(&mut self, item: &Value, out: &mut Vec<AgentEvent>) {
@@ -720,7 +763,7 @@ impl CodexAppServerParser {
                 output: String::new(),
                 is_error: false,
             }),
-            "contextCompaction" => out.push(AgentEvent::Notice("context compacted".into())),
+            // Not here: `compacted`, which the notification's turn id is for.
             // Spawning returns at once; the sub-agent works on.
             "subAgentActivity" if s(item.get("kind").unwrap_or(&Value::Null)) == "started" => out
                 .push(AgentEvent::ToolCallResult {
@@ -1237,6 +1280,38 @@ mod tests {
             &fixtures_dir(file!()),
             "app_server_steer_and_compact",
         );
+    }
+
+    /// A compaction is told once per turn, however Codex says it, and
+    /// with nothing but that it happened.
+    #[test]
+    fn a_compaction_is_told_once_per_turn() {
+        let mut p = CodexAppServerParser::new();
+        let item = |turn: &str| {
+            json!({"method": "item/completed", "params": {"threadId": "t", "turnId": turn,
+                "item": {"type": "contextCompaction", "id": "c"}}})
+            .to_string()
+        };
+        let notified = |turn: &str| {
+            json!({"method": "thread/compacted", "params": {"threadId": "t", "turnId": turn}})
+                .to_string()
+        };
+        let told = vec![AgentEvent::Compacted(Compaction::default())];
+        assert_eq!(p.feed(&item("1")), told);
+        assert_eq!(p.feed(&notified("1")), vec![]);
+        assert_eq!(p.feed(&notified("2")), told);
+        assert_eq!(p.feed(&item("2")), vec![]);
+        // Without its turn's id, it is the thread's turn in progress.
+        let started = json!({"method": "turn/started", "params": {"threadId": "t",
+            "turn": {"id": "3", "items": [], "status": "inProgress"}}})
+        .to_string();
+        p.feed(&started);
+        let bare = json!({"method": "thread/compacted", "params": {"threadId": "t"}}).to_string();
+        assert_eq!(p.feed(&item("3")), told);
+        assert_eq!(p.feed(&bare), vec![]);
+        // Nor does a thread whose turn is not known lose it.
+        let other = json!({"method": "thread/compacted", "params": {"threadId": "u"}}).to_string();
+        assert_eq!(p.feed(&other), told);
     }
 
     #[test]

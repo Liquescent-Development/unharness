@@ -18,7 +18,7 @@ impl Controller {
         if self.is_generating || self.refused_while_settling() || !self.require_policy(front) {
             return;
         }
-        let Some(Block::User { text }) = self.conversation.transcript.blocks.get(block) else {
+        let Some(Block::User { text, .. }) = self.conversation.transcript.blocks.get(block) else {
             return;
         };
         // The attachment markers are display only.

@@ -151,7 +151,15 @@ pub enum AgentEvent {
     RemotePrompt {
         text: String,
     },
-    /// Informational line (retries, compaction, degraded policy...).
+    /// The harness compacted its context: what the model holds now in
+    /// place of the conversation before it. That one starts is a `Notice`;
+    /// one that failed is an `Error`, one cancelled a `Notice`.
+    Compacted(Compaction),
+    /// What the last compaction kept, told after it: pi says where in a
+    /// turn it cut only in its session's entries, asked for once the
+    /// compaction has ended.
+    CompactionKept(Kept),
+    /// Informational line (retries, a compaction starting, degraded policy...).
     Notice(String),
     Error(String),
     ProcessExited {
@@ -248,6 +256,108 @@ impl PlanStatus {
 pub struct PlanEntry {
     pub text: String,
     pub status: PlanStatus,
+}
+
+/// A compaction of the context, as far as the harness says.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Compaction {
+    pub trigger: Option<CompactTrigger>,
+    /// What the context held before and after, in tokens.
+    pub tokens_before: Option<u64>,
+    pub tokens_after: Option<u64>,
+    /// The text the model has now in place of what was compacted.
+    pub summary: Option<String>,
+    /// What of the conversation before it the model still has as it was.
+    pub kept: Kept,
+}
+
+/// What started a compaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    /// Asked for (`/compact`).
+    Manual,
+    /// The context neared its window (Claude's `auto`, pi's `threshold`).
+    Auto,
+    /// A request did not fit (pi's `overflow`).
+    Overflow,
+}
+
+impl CompactTrigger {
+    pub fn label(&self) -> &'static str {
+        match self {
+            CompactTrigger::Manual => "manual",
+            CompactTrigger::Auto => "auto",
+            CompactTrigger::Overflow => "overflow",
+        }
+    }
+}
+
+/// What a compaction kept of the messages before it, as they were.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Kept {
+    /// The harness does not say (Codex).
+    #[default]
+    Unknown,
+    /// Nothing: the summary stands for all of it.
+    Nothing,
+    /// The messages from the one the harness knows by this id on (pi's
+    /// `firstKeptEntryId`, Claude's `preserved_segment.head_uuid`). The id
+    /// of a user turn is the one its `TurnAnchor` gave; a message inside
+    /// a turn has one of its own.
+    From(String),
+    /// The messages from one inside the turn of the latest of these user
+    /// messages that is a turn's own (not a steer): the ids of the user
+    /// messages up to the first kept one, latest first.
+    InTurnOf(Vec<String>),
+}
+
+impl Kept {
+    /// What it is, and the ids it names, as the `.events` summary and
+    /// `--print`'s JSON say it.
+    pub fn label(&self) -> (&'static str, Option<String>) {
+        match self {
+            Kept::Unknown => ("unknown", None),
+            Kept::Nothing => ("nothing", None),
+            Kept::From(id) => ("from", Some(id.clone())),
+            Kept::InTurnOf(ids) => ("in_turn_of", Some(ids.join(","))),
+        }
+    }
+}
+
+impl Compaction {
+    /// What it is told by: tokens before and after where reported, and
+    /// its trigger (`252k → 52k tokens`, `manual`).
+    pub fn figures(&self) -> Vec<String> {
+        let tokens = match (self.tokens_before, self.tokens_after) {
+            (Some(b), Some(a)) => Some(format!("{} → {} tokens", short_tokens(b), short_tokens(a))),
+            (Some(b), None) => Some(format!("{} tokens before", short_tokens(b))),
+            (None, Some(a)) => Some(format!("{} tokens after", short_tokens(a))),
+            (None, None) => None,
+        };
+        tokens
+            .into_iter()
+            .chain(self.trigger.map(|t| t.label().to_string()))
+            .collect()
+    }
+}
+
+fn kept_summary(kept: &Kept) -> String {
+    match kept.label() {
+        ("unknown", _) => "-".to_string(),
+        (label, Some(ids)) => format!("{label}:{ids}"),
+        (label, None) => label.to_string(),
+    }
+}
+
+/// A token count in few characters: `950`, `1.7k`, `252k`, `1.2M`.
+pub fn short_tokens(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..9_950 => format!("{:.1}k", n as f64 / 1_000.0),
+        9_950..999_500 => format!("{}k", (n + 500) / 1_000),
+        _ => format!("{:.1}M", n as f64 / 1_000_000.0),
+    }
 }
 
 /// How full the model's context window is. Either side may be unknown.
@@ -1057,6 +1167,22 @@ impl AgentEvent {
                 }
             },
             AgentEvent::RemotePrompt { text } => format!("RemotePrompt {:?}", short(text)),
+            AgentEvent::Compacted(c) => {
+                let n = |v: Option<u64>| v.map_or("-".to_string(), |n| n.to_string());
+                format!(
+                    "Compacted trigger={} tokens={}->{} kept={} summary={}",
+                    c.trigger.map_or("-", |t| t.label()),
+                    n(c.tokens_before),
+                    n(c.tokens_after),
+                    kept_summary(&c.kept),
+                    c.summary
+                        .as_deref()
+                        .map_or("-".to_string(), |s| format!("{:?}", short(s)))
+                )
+            }
+            AgentEvent::CompactionKept(kept) => {
+                format!("CompactionKept kept={}", kept_summary(kept))
+            }
             AgentEvent::Notice(n) => format!("Notice {:?}", short(n)),
             AgentEvent::Error(e) => format!("Error {:?}", short(e)),
             AgentEvent::ProcessExited { code } => {
@@ -1218,6 +1344,45 @@ mod tests {
             AgentEvent::CapabilitiesChanged(CapsUpdate::efforts(vec!["low".into()])).summary(),
             "CapabilitiesChanged efforts=low"
         );
+    }
+
+    #[test]
+    fn a_compaction_is_told_by_its_figures() {
+        let c = Compaction {
+            trigger: Some(CompactTrigger::Manual),
+            tokens_before: Some(252_199),
+            tokens_after: Some(52_000),
+            summary: Some("Goal:\nship".into()),
+            kept: Kept::From("e1".into()),
+        };
+        assert_eq!(c.figures(), ["252k → 52k tokens", "manual"]);
+        assert_eq!(
+            AgentEvent::Compacted(c.clone()).summary(),
+            r#"Compacted trigger=manual tokens=252199->52000 kept=from:e1 summary="Goal:\\nship""#
+        );
+        let before = Compaction {
+            tokens_after: None,
+            trigger: None,
+            ..c
+        };
+        assert_eq!(before.figures(), ["252k tokens before"]);
+        assert!(Compaction::default().figures().is_empty());
+        assert_eq!(
+            AgentEvent::Compacted(Compaction::default()).summary(),
+            "Compacted trigger=- tokens=-->- kept=- summary=-"
+        );
+        assert_eq!(
+            AgentEvent::CompactionKept(Kept::InTurnOf(vec!["u2".into(), "u1".into()])).summary(),
+            "CompactionKept kept=in_turn_of:u2,u1"
+        );
+        assert_eq!(
+            AgentEvent::CompactionKept(Kept::Nothing).summary(),
+            "CompactionKept kept=nothing"
+        );
+        let counts: Vec<String> = [950, 1_655, 9_999, 10_400, 1_250_000]
+            .map(short_tokens)
+            .into();
+        assert_eq!(counts, ["950", "1.7k", "10k", "10k", "1.2M"]);
     }
 
     #[test]

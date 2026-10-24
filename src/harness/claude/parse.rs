@@ -11,10 +11,11 @@ use crate::core::rate_limits::iso8601_to_unix;
 use crate::core::text::sanitize;
 use crate::core::transcript::truncate_chars;
 use crate::core::{
-    AccountInfo, AgentEvent, CapsUpdate, ContextUsage, HarnessCommand, HarnessId, HookOutcome,
-    ModelInfo, ModelRef, Overage, Parser, PermissionKind, PermissionPolicy, PermissionRequest,
-    PlanEntry, PlanStatus, ProviderId, Question, QuestionOption, RateLimitInfo, RateLimitWindow,
-    RemoteControl, StopReason, SubagentStatus, ToolAction, Usage, UsageScope,
+    AccountInfo, AgentEvent, CapsUpdate, CompactTrigger, Compaction, ContextUsage, HarnessCommand,
+    HarnessId, HookOutcome, Kept, ModelInfo, ModelRef, Overage, Parser, PermissionKind,
+    PermissionPolicy, PermissionRequest, PlanEntry, PlanStatus, ProviderId, Question,
+    QuestionOption, RateLimitInfo, RateLimitWindow, RemoteControl, StopReason, SubagentStatus,
+    ToolAction, Usage, UsageScope,
 };
 
 /// The policy of one of Claude's permission modes, as `system` `status`
@@ -214,6 +215,82 @@ pub struct ClaudeParser {
     /// What the CLI advertised it can do (`capabilities` of `system/init`),
     /// as of the last `init`.
     advertised: HashSet<String>,
+    /// A `compact_boundary`, held for the summary message that follows it.
+    compaction: Option<HeldCompaction>,
+}
+
+/// A compaction told by its `compact_boundary`, waiting for its summary.
+#[derive(Debug)]
+struct HeldCompaction {
+    compaction: Compaction,
+    /// The summary message's uuid, where the boundary names it (the
+    /// `anchor_uuid` the kept messages hang from).
+    summary_uuid: Option<String>,
+}
+
+impl HeldCompaction {
+    /// A `compact_boundary`'s `compact_metadata`: `trigger`, `pre_tokens`,
+    /// `post_tokens`, and the messages kept as they were, from
+    /// `preserved_segment.head_uuid` (or the first of
+    /// `preserved_messages.uuids`) on. A boundary with neither kept none:
+    /// Claude Code drops everything before such a one when it loads the
+    /// session.
+    fn of(meta: Option<&Value>) -> Self {
+        let meta = meta.unwrap_or(&Value::Null);
+        let tokens = |key: &str| meta.get(key).and_then(Value::as_u64).filter(|&n| n > 0);
+        let segment = meta.get("preserved_segment").filter(|v| v.is_object());
+        let messages = meta.get("preserved_messages").filter(|v| v.is_object());
+        let head = segment
+            .and_then(|s| opt_str(s, "head_uuid"))
+            .or_else(|| {
+                messages
+                    .and_then(|m| m.pointer("/uuids/0"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|h| !h.is_empty());
+        let kept = match head {
+            Some(head) => Kept::From(head),
+            None if segment.is_none() && messages.is_none() => Kept::Nothing,
+            None => Kept::Unknown,
+        };
+        HeldCompaction {
+            compaction: Compaction {
+                trigger: match str_at(meta, "trigger") {
+                    "manual" => Some(CompactTrigger::Manual),
+                    "auto" => Some(CompactTrigger::Auto),
+                    _ => None,
+                },
+                tokens_before: tokens("pre_tokens"),
+                tokens_after: tokens("post_tokens"),
+                summary: None,
+                kept,
+            },
+            summary_uuid: segment.or(messages).and_then(|s| opt_str(s, "anchor_uuid")),
+        }
+    }
+
+    /// Whether `val` is the summary: the synthetic user message of the
+    /// main agent's that comes right after the boundary, all text (one
+    /// carrying a tool result is read as such).
+    fn summarised_by(&self, val: &Value) -> bool {
+        let text = match val.pointer("/message/content") {
+            Some(Value::String(_)) => true,
+            Some(Value::Array(items)) => {
+                !items.is_empty() && items.iter().all(|i| str_at(i, "type") == "text")
+            }
+            _ => false,
+        };
+        str_at(val, "type") == "user"
+            && text
+            && val.get("isSynthetic").and_then(Value::as_bool) == Some(true)
+            && val.get("isReplay").and_then(Value::as_bool) != Some(true)
+            && val.get("parent_tool_use_id").is_none_or(Value::is_null)
+            && self
+                .summary_uuid
+                .as_deref()
+                .is_none_or(|uuid| str_at(val, "uuid") == uuid)
+    }
 }
 
 /// The most permission requests kept for their hooks. One is dropped
@@ -333,7 +410,9 @@ impl Parser for ClaudeParser {
     fn feed(&mut self, line: &str) -> Vec<AgentEvent> {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             // Claude never prints non-JSON on stdout in stream-json mode; surface it.
-            return vec![AgentEvent::Notice(line.to_string())];
+            return vec![AgentEvent::Notice(crate::core::process::unread_line(
+                "claude", line,
+            ))];
         };
         self.feed_value(&val)
     }
@@ -349,6 +428,26 @@ impl Parser for ClaudeParser {
 
 impl ClaudeParser {
     pub fn feed_value(&mut self, val: &Value) -> Vec<AgentEvent> {
+        // A compaction is told with its summary, which follows its
+        // boundary, past the main agent's `system` lines; whatever else
+        // comes first tells it without one.
+        if let Some(held) = self.compaction.take() {
+            if held.summarised_by(val) {
+                let mut c = held.compaction;
+                c.summary = Some(flatten_content(val.pointer("/message/content")))
+                    .filter(|t| !t.trim().is_empty());
+                return vec![AgentEvent::Compacted(c)];
+            }
+            let waits = str_at(val, "type") == "system"
+                && val.get("parent_tool_use_id").is_none_or(Value::is_null);
+            if waits {
+                self.compaction = Some(held);
+            } else {
+                let mut out = vec![AgentEvent::Compacted(held.compaction)];
+                out.extend(self.feed_value(val));
+                return out;
+            }
+        }
         // A held API error is the result's to show; anything else that
         // says something, or a newer one, sends it out first.
         if str_at(val, "type") == "result" {
@@ -366,13 +465,16 @@ impl ClaudeParser {
         out
     }
 
-    /// What is still held when the CLI has exited: an API error whose
-    /// result never came.
+    /// What is still held when the CLI has exited: a compaction whose
+    /// summary never came, an API error whose result never came.
     pub fn flush(&mut self) -> Vec<AgentEvent> {
-        self.api_error
+        let compaction = self
+            .compaction
             .take()
-            .map(AgentEvent::TextDelta)
+            .map(|held| AgentEvent::Compacted(held.compaction));
+        compaction
             .into_iter()
+            .chain(self.api_error.take().map(AgentEvent::TextDelta))
             .collect()
     }
 
@@ -624,7 +726,11 @@ impl ClaudeParser {
             // Optional in its schema: a boundary without it leaves the
             // last size standing (NOTES.md).
             "compact_boundary" => {
-                out.push(AgentEvent::Notice("context compacted".into()));
+                // Told once its summary has come (`feed_value`).
+                if let Some(held) = self.compaction.take() {
+                    out.push(AgentEvent::Compacted(held.compaction));
+                }
+                self.compaction = Some(HeldCompaction::of(val.get("compact_metadata")));
                 let post = val
                     .pointer("/compact_metadata/post_tokens")
                     .and_then(Value::as_u64)
@@ -2499,19 +2605,110 @@ mod tests {
                 r#"{{"type":"system","subtype":"compact_boundary","compact_metadata":{{"trigger":"auto","pre_tokens":180000{post}}}}}"#
             ))
         };
-        let notice = AgentEvent::Notice("context compacted".into());
         assert_eq!(
             compacted(r#","post_tokens":4200"#),
-            vec![
-                notice.clone(),
-                AgentEvent::Context(ContextUsage {
-                    used: Some(4200),
-                    window: None,
-                }),
-            ]
+            vec![AgentEvent::Context(ContextUsage {
+                used: Some(4200),
+                window: None,
+            })]
         );
-        assert_eq!(compacted(""), vec![notice.clone()]);
-        assert_eq!(compacted(r#","post_tokens":0"#), vec![notice]);
+        assert_eq!(compacted(""), vec![]);
+        assert_eq!(compacted(r#","post_tokens":0"#), vec![]);
+    }
+
+    /// A compaction is told once the summary message after its boundary
+    /// has come, with the summary (`fixtures/steer_and_compact.jsonl`:
+    /// the synthetic user message whose uuid is the segment's
+    /// `anchor_uuid`), and from where the messages kept as they were
+    /// start. Without a summary it is told by what comes next, or when
+    /// the CLI exits.
+    #[test]
+    fn a_compaction_is_told_with_the_summary_after_its_boundary() {
+        let boundary = |meta: &str| {
+            format!(
+                r#"{{"type":"system","subtype":"compact_boundary","session_id":"s","uuid":"b","compact_metadata":{{"trigger":"manual","pre_tokens":22975,"post_tokens":1988{meta}}}}}"#
+            )
+        };
+        let kept = r#","preserved_segment":{"head_uuid":"h","anchor_uuid":"a","tail_uuid":"t"},"preserved_messages":{"anchor_uuid":"a","uuids":["h","t"]}"#;
+        let summary = |uuid: &str| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":"This session is being continued."}},"session_id":"s","parent_tool_use_id":null,"uuid":"{uuid}","isReplay":false,"isSynthetic":true}}"#
+            )
+        };
+        let told = |kept: Kept, summary: Option<&str>| {
+            AgentEvent::Compacted(Compaction {
+                trigger: Some(CompactTrigger::Manual),
+                tokens_before: Some(22975),
+                tokens_after: Some(1988),
+                summary: summary.map(str::to_string),
+                kept,
+            })
+        };
+        let status = r#"{"type":"system","subtype":"status","status":null,"session_id":"s"}"#;
+
+        let mut p = ClaudeParser::new();
+        assert!(
+            !p.feed(&boundary(kept))
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Compacted(_)))
+        );
+        // The main agent's `system` lines in between keep it waiting.
+        assert_eq!(p.feed(status), vec![]);
+        assert_eq!(
+            p.feed(&summary("a")),
+            vec![told(
+                Kept::From("h".into()),
+                Some("This session is being continued.")
+            )]
+        );
+        assert_eq!(p.flush(), vec![]);
+
+        // Another synthetic message is not it: told without one, and that
+        // message is read as it would be.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(kept));
+        assert_eq!(
+            p.feed(&summary("other")),
+            vec![told(Kept::From("h".into()), None)]
+        );
+
+        // A boundary that keeps nothing names no summary's uuid.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(""));
+        assert_eq!(
+            p.feed(&summary("any")),
+            vec![told(
+                Kept::Nothing,
+                Some("This session is being continued.")
+            )]
+        );
+
+        // The CLI exits first.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(kept));
+        assert_eq!(p.flush(), vec![told(Kept::From("h".into()), None)]);
+
+        // A synthetic message with a tool result is not it, and its result
+        // is told.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(""));
+        let result = r#"{"type":"user","isSynthetic":true,"parent_tool_use_id":null,"uuid":"x","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}"#;
+        let out = p.feed(result);
+        assert_eq!(out[0], told(Kept::Nothing, None));
+        assert!(
+            matches!(&out[1], AgentEvent::ToolCallResult { id, output, .. } if id == "t1" && output == "ok"),
+            "{out:?}"
+        );
+        // Text in blocks is a summary as a string is.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(""));
+        let blocks = r#"{"type":"user","isSynthetic":true,"parent_tool_use_id":null,"uuid":"x","message":{"role":"user","content":[{"type":"text","text":"Summary."}]}}"#;
+        assert_eq!(p.feed(blocks), vec![told(Kept::Nothing, Some("Summary."))]);
+
+        // Kept messages named in neither shape Claude Code writes.
+        let mut p = ClaudeParser::new();
+        p.feed(&boundary(r#","preserved_segment":{"anchor_uuid":"a"}"#));
+        assert_eq!(p.flush(), vec![told(Kept::Unknown, None)]);
     }
 
     #[test]
