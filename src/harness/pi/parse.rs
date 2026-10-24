@@ -1148,6 +1148,15 @@ mod tests {
         assert!(!replaced(&rewound.feed(&listing(0))));
     }
 
+    /// A `/compact` that cut inside a turn (pi 1.1.0, `keepRecentTokens`
+    /// 1 and a second turn of two commands): `firstKeptEntryId` is that
+    /// turn's last response.
+    #[test]
+    fn fixture_compaction_split() {
+        let mut p = PiParser::new(None);
+        assert_fixture(&mut p, &fixtures_dir(file!()), "compaction_split");
+    }
+
     /// A session saved after a `/compact`, resumed (pi 1.1.0): asked at
     /// once, pi answers `null`, and what was saved before is dropped
     /// until the response (#355).

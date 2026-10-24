@@ -16,6 +16,12 @@ gate's dialogs are answered in that order (the last answer repeats);
 `--no-extensions`, `--no-context-files`, `--no-skills`, `--no-prompt-templates`,
 `--skill F` and `--prompt-template F` keep the user's own resources (and
 their text) out of the recording.
+
+What is recorded leaves out the system prompt: the system message's
+`message_start`/`message_end` lines and `agent_end` lines are not
+written, and `get_entries` answers have their system messages (and a
+compaction's `systemMessage`) emptied. `--redact OLD=NEW` replaces text
+in every line (a provider's name, a host).
 """
 import argparse
 import json
@@ -27,7 +33,34 @@ import threading
 import time
 
 
-def redact(line: str, cwd: str) -> str:
+def without_system_prompt(line: str):
+    """The line as it is recorded, `None` to leave it out (see above)."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+    if not isinstance(obj, dict):
+        return line
+    t = obj.get("type")
+    if t == "agent_end":
+        return None
+    if t in ("message_start", "message_end") and (obj.get("message") or {}).get("role") == "system":
+        return None
+    if obj.get("command") == "get_entries" and obj.get("success"):
+        omitted = lambda m: {"role": "system", "content": "[system prompt omitted]",
+                             "timestamp": (m or {}).get("timestamp")}
+        for e in (obj.get("data") or {}).get("entries") or []:
+            if (e.get("message") or {}).get("role") == "system":
+                e["message"] = omitted(e["message"])
+            if e.get("systemMessage"):
+                e["systemMessage"] = omitted(e["systemMessage"])
+        return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+    return line
+
+
+def redact(line: str, cwd: str, pairs=()) -> str:
+    for old, new in pairs:
+        line = line.replace(old, new)
     home = os.path.expanduser("~")
     line = line.replace(cwd, "/WORKSPACE")
     if home:
@@ -76,6 +109,8 @@ def main() -> int:
                     help="pass --session-id as unharness does (a pi before 0.76.0 refuses it)")
     ap.add_argument("--resume", metavar="ID",
                     help="resume this stored session as the driver does (see above)")
+    ap.add_argument("--redact", action="append", default=[], metavar="OLD=NEW",
+                    help="replace OLD with NEW in every line recorded (repeatable)")
     ap.add_argument("--keep-session", action="store_true",
                     help="save the session (to resume it later; a sessionDir in the workspace's "
                          ".pi/settings.json keeps it there)")
@@ -120,9 +155,16 @@ def main() -> int:
     out = open(args.out, "w")
     lock = threading.Lock()
 
+    pairs = [r.split("=", 1) for r in args.redact]
+
     def record(prefix, line):
+        line = line.rstrip("\n")
+        if prefix == "":
+            line = without_system_prompt(line)
+            if line is None:
+                return
         with lock:
-            out.write(prefix + redact(line.rstrip("\n"), cwd) + "\n")
+            out.write(prefix + redact(line, cwd, pairs) + "\n")
             out.flush()
 
     def send(obj):
@@ -175,6 +217,21 @@ def main() -> int:
     if first:
         send(first)
 
+    # The user messages pi last listed (`get_fork_messages`), and what a
+    # compaction kept from, until its entries say which turn holds it: as
+    # the driver does, asked from the last listed message on, then from the
+    # one before, at most ENTRY_TRIES times.
+    listed = []
+    cut = None
+    cursor = 0
+    tries = 0
+    ENTRY_TRIES = 4
+
+    def ask_entries():
+        nonlocal tries
+        tries += 1
+        send({"id": next_id(), "type": "get_entries", "since": listed[cursor]})
+
     steered = False
     aborted = False
     compacting = False
@@ -220,8 +277,17 @@ def main() -> int:
             turns += 1
             send({"id": next_id(), "type": "get_session_stats"})
             send({"id": next_id(), "type": "get_fork_messages"})
+        elif t == "response" and obj.get("command") == "get_entries":
+            entries = ((obj.get("data") or {}).get("entries") or []) if obj.get("success") else None
+            if cut and entries is not None and not any(e.get("id") == cut for e in entries) \
+                    and cursor > 0 and tries < ENTRY_TRIES:
+                cursor -= 1
+                ask_entries()
+            else:
+                cut = None
         elif t == "response" and obj.get("command") == "get_fork_messages" and obj.get("success", True):
             messages = (obj.get("data") or {}).get("messages") or []
+            listed = [m.get("entryId") for m in messages if m.get("entryId")]
             if args.rewind and not rewound and turns == 2 and len(messages) >= 2:
                 # Rewind = fork a new session from before the second message.
                 rewound = True
@@ -235,12 +301,20 @@ def main() -> int:
                 send({"id": next_id(), "type": "prompt", "message": after_compact.pop(0)})
             else:
                 break
-        elif t == "compaction_end" and obj.get("reason") == "manual":
-            compaction_ended = True
-            # A requested compaction is a unit of work of its own: the
-            # driver asks what it asks after a turn once it ends.
-            send({"id": next_id(), "type": "get_session_stats"})
-            send({"id": next_id(), "type": "get_fork_messages"})
+        elif t == "compaction_end":
+            if obj.get("reason") == "manual":
+                compaction_ended = True
+                # A requested compaction is a unit of work of its own: the
+                # driver asks what it asks after a turn once it ends.
+                send({"id": next_id(), "type": "get_session_stats"})
+                send({"id": next_id(), "type": "get_fork_messages"})
+            # One that succeeded: the driver asks for the session's entries
+            # from the last message pi listed, to tell which turn holds the
+            # entry the kept messages start at.
+            kept = (obj.get("result") or {}).get("firstKeptEntryId")
+            if kept and listed:
+                cut, cursor, tries = kept, len(listed) - 1, 0
+                ask_entries()
         elif t == "response" and obj.get("command") == "fork":
             # The fork is only in place once it answers (other commands sent
             # meanwhile still see the old session); then re-read the new
